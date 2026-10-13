@@ -1,5 +1,6 @@
 //! Durable job queue on SQLite. Delivery is at-least-once: every handler must be idempotent.
 
+pub mod automation_jobs;
 pub mod handlers;
 pub mod matching_jobs;
 pub mod worker;
@@ -23,6 +24,8 @@ pub mod kind {
     pub const LEARN_FROM_DRAFT: &str = "learn_from_draft";
     pub const EXTRACT_RECORD: &str = "extract_record";
     pub const MATCH_RECORD: &str = "match_record";
+    pub const RUN_AUTOMATIONS: &str = "run_automations";
+    pub const REMIND_NO_REPLY: &str = "remind_no_reply";
     pub const ANALYZE_MESSAGE: &str = "analyze_message";
 }
 
@@ -74,10 +77,23 @@ pub async fn enqueue_with_attempts(
     payload: &Value,
     max_attempts: i64,
 ) -> sqlx::Result<bool> {
+    enqueue_at(conn, kind, dedupe_key, workspace_id, payload, max_attempts, now_ms()).await
+}
+
+/// Like `enqueue_with_attempts`, but the job is not claimable before `run_at` (unix ms).
+pub async fn enqueue_at(
+    conn: &mut SqliteConnection,
+    kind: &str,
+    dedupe_key: &str,
+    workspace_id: Option<&str>,
+    payload: &Value,
+    max_attempts: i64,
+    run_at: i64,
+) -> sqlx::Result<bool> {
     let now = now_ms();
     let res = sqlx::query(
         "INSERT INTO jobs (id, workspace_id, kind, dedupe_key, payload_json, status, max_attempts, run_at, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, 'pending', ?7, ?6, ?6, ?6)
+         VALUES (?1, ?2, ?3, ?4, ?5, 'pending', ?7, ?8, ?6, ?6)
          ON CONFLICT(dedupe_key) DO UPDATE SET
            status = 'pending', attempts = 0, run_at = excluded.run_at, last_error = NULL,
            locked_by = NULL, locked_until = NULL, updated_at = excluded.updated_at
@@ -90,6 +106,7 @@ pub async fn enqueue_with_attempts(
     .bind(payload.to_string())
     .bind(now)
     .bind(max_attempts)
+    .bind(run_at)
     .execute(conn)
     .await?;
     Ok(res.rows_affected() > 0)

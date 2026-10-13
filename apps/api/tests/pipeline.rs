@@ -211,7 +211,7 @@ async fn timesheet_vertical_slice_end_to_end() {
     let actions: Vec<&str> = detail["audit"].as_array().unwrap().iter().map(|a| a["action"].as_str().unwrap()).collect();
     assert_eq!(
         actions,
-        ["message.received", "message.classified", "workflow.started", "review.created", "draft.generated", "workflow.completed"]
+        ["message.received", "message.classified", "workflow.started", "review.created", "draft.generated", "automation.ran", "workflow.completed"]
     );
 
     // Operator edits + approves the draft; "sent" cannot be set by clients.

@@ -67,6 +67,8 @@ pub async fn handle(state: &AppState, job: &Job) -> Result<(), JobError> {
         kind::ANALYZE_MESSAGE => analyze_message(state, &payload).await.map(|_| ()),
         kind::EXTRACT_RECORD => super::matching_jobs::extract_record(state, &payload).await,
         kind::MATCH_RECORD => super::matching_jobs::match_record(state, &payload).await,
+        kind::RUN_AUTOMATIONS => super::automation_jobs::run_automations(state, &payload).await,
+        kind::REMIND_NO_REPLY => super::automation_jobs::remind_no_reply(state, &payload).await,
         kind::REGISTER_NANGO_CONNECTION => crate::sources::nango::register_from_webhook(state, &payload).await,
         other => Err(JobError::Permanent(format!("unknown job kind {other}"))),
     }
@@ -360,6 +362,8 @@ pub async fn persist_classification(
     // Understand what the email asks (shown to people, used by the drafter).
     jobs::enqueue(&mut tx, kind::ANALYZE_MESSAGE, &format!("analyze:{message_id}"), Some(&workspace_id), &json!({ "message_id": message_id }))
         .await?;
+    jobs::enqueue(&mut tx, kind::RUN_AUTOMATIONS, &format!("automations:{message_id}"), Some(&workspace_id), &json!({ "message_id": message_id }))
+        .await?;
     // Requirement / referral emails also become structured records for matching.
     if super::matching_jobs::is_extractable(&out.category) {
         jobs::enqueue(
@@ -522,77 +526,68 @@ async fn generate_draft(state: &AppState, job: &Job, payload: &Value) -> Result<
     let message_id = str_field(payload, "message_id")?;
     let run_id = payload.get("workflow_run_id").and_then(Value::as_str).map(str::to_string);
     let msg = load_message(state, &message_id).await?;
-    let category: Option<String> = sqlx::query_scalar("SELECT category FROM classifications WHERE message_id = ?1")
-        .bind(&message_id)
-        .fetch_optional(&state.db)
-        .await?;
-    let category = category.unwrap_or_else(|| OTHER_LABEL.to_string());
     let insight = analyze_message(state, &json!({ "message_id": message_id })).await?;
     // Workflows don't draft replies to email that needs none (newsletters, notifications).
     if run_id.is_some() && !insight.needs_reply {
         return finish_without_draft(state, &msg.workspace_id, &message_id, run_id.as_deref(), "no reply needed").await;
     }
-    let category_name = labels::active(&state.db, &msg.workspace_id)
-        .await?
-        .into_iter()
-        .find(|l| l.key == category)
-        .map(|l| l.name)
-        .unwrap_or_else(|| category.clone());
-
-    // Trusted memory (staff notes + learned sender profile), retrieved by sender and topic.
-    let ctx = memory::context_for(&state.db, &msg.workspace_id, &msg.sender_address, &msg.subject).await?;
-    let out = state
-        .drafter
-        .draft(&DraftInput {
-            category,
-            category_name,
-            subject: msg.subject,
-            sender: msg.sender_address,
-            body_text: msg.body_text,
-            memory_notes: ctx.lines(),
-            sender_history: ctx.sender_history.clone(),
-            insight: Some(insight),
-        })
-        .await?;
-    if out.body_text.trim().is_empty() {
+    // An automation may already have drafted this email (and saved it to the mailbox): keep that one.
+    let automation_draft: Option<String> = match run_id {
+        Some(_) => {
+            sqlx::query_scalar("SELECT id FROM drafts WHERE message_id = ?1 AND origin_key LIKE 'automation-draft:%' LIMIT 1")
+                .bind(&message_id)
+                .fetch_optional(&state.db)
+                .await?
+        }
+        None => None,
+    };
+    let generated = match automation_draft {
+        Some(_) => None,
+        None => Some(compose_draft(state, &message_id, &msg, insight, None).await?),
+    };
+    if let Some((out, _)) = &generated
+        && out.body_text.trim().is_empty()
+    {
         return finish_without_draft(state, &msg.workspace_id, &message_id, run_id.as_deref(), "model judged no reply needed").await;
     }
 
     let now = now_ms();
     let draft_id = new_id("drf");
     let mut tx = state.db.begin().await?;
-    let inserted = sqlx::query(
-        "INSERT OR IGNORE INTO drafts (id, workspace_id, message_id, body_text, original_body_text, status, model_id,
-                                       origin_key, memory_ids_json, unanswered_json, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?4, 'suggested', ?5, ?6, ?8, ?9, ?7, ?7)",
-    )
-    .bind(&draft_id)
-    .bind(&msg.workspace_id)
-    .bind(&message_id)
-    .bind(&out.body_text)
-    .bind(&out.model_id)
-    .bind(&job.dedupe_key)
-    .bind(now)
-    .bind(json!(ctx.ids()).to_string())
-    .bind(json!(out.unanswered).to_string())
-    .execute(&mut *tx)
-    .await?
-    .rows_affected()
-        == 1;
-    if inserted {
-        audit::record(
-            &mut tx,
-            Entry {
-                workspace_id: &msg.workspace_id,
-                actor: Actor::System,
-                action: "draft.generated",
-                entity_type: "draft",
-                entity_id: &draft_id,
-                message_id: Some(&message_id),
-                metadata: json!({ "model_id": out.model_id, "prompt_version": ai::DRAFT_PROMPT_VERSION, "memories_used": ctx.ids().len() }),
-            },
+    if let Some((out, ctx)) = &generated {
+        let inserted = sqlx::query(
+            "INSERT OR IGNORE INTO drafts (id, workspace_id, message_id, body_text, original_body_text, status, model_id,
+                                           origin_key, memory_ids_json, unanswered_json, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?4, 'suggested', ?5, ?6, ?8, ?9, ?7, ?7)",
         )
-        .await?;
+        .bind(&draft_id)
+        .bind(&msg.workspace_id)
+        .bind(&message_id)
+        .bind(&out.body_text)
+        .bind(&out.model_id)
+        .bind(&job.dedupe_key)
+        .bind(now)
+        .bind(json!(ctx.ids()).to_string())
+        .bind(json!(out.unanswered).to_string())
+        .execute(&mut *tx)
+        .await?
+        .rows_affected()
+            == 1;
+        if inserted {
+            audit::record(
+                &mut tx,
+                Entry {
+                    workspace_id: &msg.workspace_id,
+                    actor: Actor::System,
+                    action: "draft.generated",
+                    entity_type: "draft",
+                    entity_id: &draft_id,
+                    message_id: Some(&message_id),
+                    metadata: json!({ "model_id": out.model_id, "prompt_version": ai::DRAFT_PROMPT_VERSION, "memories_used": ctx.ids().len() }),
+                },
+            )
+            .await?;
+        }
     }
     if let Some(run_id) = &run_id {
         let completed = sqlx::query("UPDATE workflow_runs SET status = 'completed', error = NULL WHERE id = ?1 AND status != 'completed'")
@@ -623,6 +618,118 @@ async fn generate_draft(state: &AppState, job: &Job, payload: &Value) -> Result<
     }
     tx.commit().await?;
     Ok(())
+}
+
+/// Runs the drafter with the workspace's labels, trusted memory and the email's insight.
+/// `extra_instructions` (from an automation) is passed to the drafter as one more memory note.
+async fn compose_draft(
+    state: &AppState,
+    message_id: &str,
+    msg: &MessageForAi,
+    insight: ai::Insight,
+    extra_instructions: Option<&str>,
+) -> Result<(ai::DraftOutput, memory::MemoryContext), JobError> {
+    let category: Option<String> = sqlx::query_scalar("SELECT category FROM classifications WHERE message_id = ?1")
+        .bind(message_id)
+        .fetch_optional(&state.db)
+        .await?;
+    let category = category.unwrap_or_else(|| OTHER_LABEL.to_string());
+    let category_name = labels::active(&state.db, &msg.workspace_id)
+        .await?
+        .into_iter()
+        .find(|l| l.key == category)
+        .map(|l| l.name)
+        .unwrap_or_else(|| category.clone());
+
+    // Trusted memory (staff notes + learned sender profile), retrieved by sender and topic.
+    let ctx = memory::context_for(&state.db, &msg.workspace_id, &msg.sender_address, &msg.subject).await?;
+    let mut memory_notes = ctx.lines();
+    if let Some(extra) = extra_instructions.map(str::trim).filter(|e| !e.is_empty()) {
+        memory_notes.push(format!("Instruction for this reply: {extra}"));
+    }
+    let out = state
+        .drafter
+        .draft(&DraftInput {
+            category,
+            category_name,
+            subject: msg.subject.clone(),
+            sender: msg.sender_address.clone(),
+            body_text: msg.body_text.clone(),
+            memory_notes,
+            sender_history: ctx.sender_history.clone(),
+            insight: Some(insight),
+        })
+        .await?;
+    Ok((out, ctx))
+}
+
+/// Drafts a reply for automations. Reuses the message's existing draft if there is one.
+/// `Ok(None)` means the email needs no reply (or the model declined to write one).
+pub async fn create_draft_for_message(
+    state: &AppState,
+    message_id: &str,
+    extra_instructions: Option<&str>,
+) -> Result<Option<String>, JobError> {
+    let existing: Option<String> =
+        sqlx::query_scalar("SELECT id FROM drafts WHERE message_id = ?1 ORDER BY created_at DESC, id DESC LIMIT 1")
+            .bind(message_id)
+            .fetch_optional(&state.db)
+            .await?;
+    if existing.is_some() {
+        return Ok(existing);
+    }
+    let msg = load_message(state, message_id).await?;
+    let insight = analyze_message(state, &json!({ "message_id": message_id })).await?;
+    if !insight.needs_reply {
+        return Ok(None);
+    }
+    let (out, ctx) = compose_draft(state, message_id, &msg, insight, extra_instructions).await?;
+    if out.body_text.trim().is_empty() {
+        return Ok(None);
+    }
+    let origin_key = format!("automation-draft:{message_id}");
+    let draft_id = new_id("drf");
+    let now = now_ms();
+    let mut tx = state.db.begin().await?;
+    let inserted = sqlx::query(
+        "INSERT OR IGNORE INTO drafts (id, workspace_id, message_id, body_text, original_body_text, status, model_id,
+                                       origin_key, memory_ids_json, unanswered_json, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?4, 'suggested', ?5, ?6, ?8, ?9, ?7, ?7)",
+    )
+    .bind(&draft_id)
+    .bind(&msg.workspace_id)
+    .bind(message_id)
+    .bind(&out.body_text)
+    .bind(&out.model_id)
+    .bind(&origin_key)
+    .bind(now)
+    .bind(json!(ctx.ids()).to_string())
+    .bind(json!(out.unanswered).to_string())
+    .execute(&mut *tx)
+    .await?
+    .rows_affected()
+        == 1;
+    if inserted {
+        audit::record(
+            &mut tx,
+            Entry {
+                workspace_id: &msg.workspace_id,
+                actor: Actor::System,
+                action: "draft.generated",
+                entity_type: "draft",
+                entity_id: &draft_id,
+                message_id: Some(message_id),
+                metadata: json!({ "model_id": out.model_id, "prompt_version": ai::DRAFT_PROMPT_VERSION, "memories_used": ctx.ids().len(), "by": "automation" }),
+            },
+        )
+        .await?;
+    }
+    tx.commit().await?;
+    if inserted {
+        return Ok(Some(draft_id));
+    }
+    // A concurrent run (same origin key) won the insert; use its draft.
+    Ok(sqlx::query_scalar("SELECT id FROM drafts WHERE origin_key = ?1").bind(&origin_key).fetch_optional(&state.db).await?)
 }
 
 // ---------------------------------------------------------------- understanding

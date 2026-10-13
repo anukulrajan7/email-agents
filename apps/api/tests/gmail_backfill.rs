@@ -166,6 +166,11 @@ async fn backfills_full_messages_once_with_retry() {
     assert_eq!((detail["source"]["can_create_provider_draft"].as_bool(), detail["source"]["can_send"].as_bool()), (Some(true), Some(true)));
     let draft_id = detail["draft"]["id"].as_str().unwrap().to_string();
 
+    // The default "reply to questions" automation already saved each reply into Gmail Drafts.
+    assert_eq!(calls.lock().unwrap().iter().filter(|(k, _)| k == "create_draft").count(), 3);
+    calls.lock().unwrap().clear();
+    sqlx::query("UPDATE drafts SET provider_draft_id = NULL").execute(&state.db).await.unwrap();
+
     let (s, saved) = call(&app, "POST", &format!("/api/v1/workspaces/{ws}/drafts/{draft_id}/provider-draft"), None).await;
     assert_eq!((s, saved["provider_draft_id"].as_str()), (StatusCode::OK, Some("gdraft1")));
     {
