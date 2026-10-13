@@ -6,6 +6,7 @@ import { useWorkspace } from '../../app/useWorkspace';
 import { riseStyle } from '../../lib/motion';
 import { markLabelsVisited } from '../onboarding/storage';
 import { LabelForm } from './LabelForm';
+import { SuggestLabels } from './SuggestLabels';
 import { useCreateLabel, useLabels, useUpdateLabel } from './hooks';
 
 function LabelRow({
@@ -151,6 +152,7 @@ export function LabelsPage() {
             </ul>
           </Card>
         ))}
+      {isAdmin && <SuggestLabels ws={ws} />}
       {isAdmin ? (
         <Card className="rise max-w-xl bg-raised" style={riseStyle(2)}>
           <CardTitle className="mb-3">Add a label</CardTitle>

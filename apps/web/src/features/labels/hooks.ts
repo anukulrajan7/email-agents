@@ -46,6 +46,21 @@ export function useUpdateLabel(ws: string) {
   });
 }
 
+export type LabelSuggestion = {
+  key: string;
+  name: string;
+  description: string;
+  color: string;
+  example_subjects: string[];
+  estimated_count: number;
+};
+
+export function useSuggestLabels(ws: string) {
+  return useMutation({
+    mutationFn: () => api<Items<LabelSuggestion>>(`/workspaces/${ws}/labels/suggest`, { method: 'POST' }),
+  });
+}
+
 export function useLabelTemplates() {
   return useQuery({
     queryKey: ['label-templates'],

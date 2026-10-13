@@ -6,6 +6,7 @@ import { cn } from '../../lib/cn';
 import { riseStyle } from '../../lib/motion';
 import { useMessages } from '../inbox/hooks';
 import { useSendTestEmailEnsuringSource, useSources } from '../sources/hooks';
+import { ReplySetup } from './ReplySetup';
 import { dismiss, hasVisitedLabels, isDismissed } from './storage';
 
 type Step = { title: string; why: string; done: boolean; to: string; cta: string; action?: 'test-email' };
@@ -16,8 +17,11 @@ export function GettingStarted({ ws }: { ws: string }) {
   const sources = useSources(ws);
   const testEmail = useSendTestEmailEnsuringSource(ws);
 
-  if (hidden || !messages.data) return null;
-  if (messages.data.pages.some((p) => p.items.length > 0)) return null;
+  const gmailConnected = sources.data?.items.some((s) => s.kind === 'nango_gmail' && s.status === 'connected') ?? false;
+  const replySetup = gmailConnected ? <ReplySetup ws={ws} /> : null;
+
+  if (hidden || !messages.data) return replySetup;
+  if (messages.data.pages.some((p) => p.items.length > 0)) return replySetup;
 
   const steps: Step[] = [
     {
@@ -52,6 +56,8 @@ export function GettingStarted({ ws }: { ws: string }) {
   ];
 
   return (
+    <>
+    {replySetup}
     <Card className="rise m-6 max-w-2xl bg-raised" style={riseStyle(0)} role="region" aria-labelledby="getting-started-heading">
       <div className="flex items-start justify-between gap-4">
         <div>
@@ -109,5 +115,6 @@ export function GettingStarted({ ws }: { ws: string }) {
         ))}
       </ol>
     </Card>
+    </>
   );
 }

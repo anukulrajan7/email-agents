@@ -37,6 +37,7 @@ export function AppShell() {
     { to: 'reviews', label: 'Reviews' },
     { to: 'alerts', label: 'Alerts' },
     { to: 'memory', label: 'Memory' },
+    { to: 'automations', label: 'Automations' },
     { to: 'workflows', label: 'Workflows' },
     { to: 'integrations', label: 'Integrations' },
     ...(isAdmin ? [{ to: 'jobs', label: 'Jobs' }] : []),

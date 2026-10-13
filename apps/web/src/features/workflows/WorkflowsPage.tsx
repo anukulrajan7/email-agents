@@ -48,7 +48,16 @@ export function WorkflowsPage() {
 
   return (
     <Page>
-      <PageHeader kicker="Automation" title="Workflows" description="Automations that run when an email gets a certain label — for example, creating a review task." />
+      <PageHeader
+        kicker="Automation"
+        title="Workflows"
+        description="Built-in workflows that run when an email gets a certain label, for example creating a review task."
+        actions={
+          <Link to={`/w/${ws}/automations`} className="text-sm font-semibold text-accent underline underline-offset-2 hover:text-accent-hover">
+            Build your own in Automations
+          </Link>
+        }
+      />
       {workflows.isLoading && <Spinner />}
       <ErrorNote error={workflows.error ?? toggle.error ?? reprocess.error ?? setup.error} />
       <div className="grid gap-4 md:grid-cols-3 2xl:grid-cols-4">

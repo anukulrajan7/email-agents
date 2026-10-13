@@ -12,6 +12,7 @@ import { MatchingPage } from '../features/matching/MatchingPage';
 import { MemoryPage } from '../features/memory/MemoryPage';
 import { ContactPage } from '../features/memory/ContactPage';
 import { AlertsPage } from '../features/alerts/AlertsPage';
+import { AutomationsPage } from '../features/automations/AutomationsPage';
 import { AppShell } from './AppShell';
 
 export function AppRoutes() {
@@ -31,6 +32,7 @@ export function AppRoutes() {
           <Route path="alerts" element={<AlertsPage />} />
           <Route path="memory" element={<MemoryPage />} />
           <Route path="memory/contacts/:email" element={<ContactPage />} />
+          <Route path="automations" element={<AutomationsPage />} />
           <Route path="workflows" element={<WorkflowsPage />} />
           <Route path="integrations" element={<IntegrationsPage />} />
           <Route path="jobs" element={<JobsPage />} />
