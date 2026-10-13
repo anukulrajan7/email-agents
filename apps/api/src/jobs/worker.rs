@@ -1,0 +1,123 @@
+use std::{sync::Arc, time::Duration};
+
+use serde_json::json;
+use tokio::sync::{Semaphore, watch};
+use tracing::Instrument;
+
+use super::{Job, handlers, kind};
+use crate::{db::now_ms, http::AppState, jobs};
+
+const IDLE_POLL: Duration = Duration::from_millis(1_000);
+const MAINTENANCE_EVERY: Duration = Duration::from_secs(30);
+
+/// Single worker loop with bounded concurrency (`JOB_WORKER_CONCURRENCY`).
+pub async fn run(state: AppState, mut shutdown: watch::Receiver<bool>) {
+    let worker_id = format!("worker-{}", uuid::Uuid::now_v7().simple());
+    let concurrency = state.config.job_worker_concurrency.max(1);
+    let permits = Arc::new(Semaphore::new(concurrency));
+    let mut last_maintenance = tokio::time::Instant::now() - MAINTENANCE_EVERY;
+    tracing::info!(%worker_id, concurrency, "job worker started");
+
+    loop {
+        if *shutdown.borrow() {
+            break;
+        }
+        if last_maintenance.elapsed() >= MAINTENANCE_EVERY {
+            maintenance(&state).await;
+            last_maintenance = tokio::time::Instant::now();
+        }
+
+        let permit = tokio::select! {
+            p = permits.clone().acquire_owned() => p.expect("semaphore never closed"),
+            _ = shutdown.changed() => break,
+        };
+
+        match jobs::claim(&state.db, &worker_id).await {
+            Ok(Some(job)) => {
+                let state = state.clone();
+                let worker_id = worker_id.clone();
+                tokio::spawn(async move {
+                    process(&state, &worker_id, job).await;
+                    drop(permit);
+                });
+            }
+            Ok(None) => {
+                drop(permit);
+                tokio::select! {
+                    _ = state.jobs_notify.notified() => {}
+                    _ = tokio::time::sleep(IDLE_POLL) => {}
+                    _ = shutdown.changed() => break,
+                }
+            }
+            Err(e) => {
+                drop(permit);
+                tracing::warn!(error = %e, "job claim failed");
+                tokio::time::sleep(IDLE_POLL).await;
+            }
+        }
+    }
+
+    // Let in-flight jobs finish; anything cut off is recovered via lease expiry.
+    let _ = tokio::time::timeout(Duration::from_secs(30), permits.acquire_many(concurrency as u32)).await;
+    tracing::info!(%worker_id, "job worker stopped");
+}
+
+pub async fn process(state: &AppState, worker_id: &str, job: Job) {
+    let span = tracing::info_span!("job", job_id = %job.id, kind = %job.kind, attempt = job.attempts);
+    process_inner(state, worker_id, job).instrument(span).await
+}
+
+async fn process_inner(state: &AppState, worker_id: &str, job: Job) {
+    let started = std::time::Instant::now();
+    match handlers::handle(state, &job).await {
+        Ok(()) => {
+            if let Err(e) = jobs::complete(&state.db, &job, worker_id).await {
+                tracing::warn!(job_id = %job.id, error = %e, "failed to mark job succeeded");
+            }
+            tracing::info!(job_id = %job.id, kind = %job.kind, ms = started.elapsed().as_millis() as u64, "job succeeded");
+            state.jobs_notify.notify_one();
+        }
+        Err(err) => {
+            let permanent = err.is_permanent();
+            match jobs::fail(&state.db, &job, worker_id, &err.to_string(), permanent).await {
+                Ok(true) => {
+                    tracing::error!(job_id = %job.id, kind = %job.kind, error = %err, "job dead-lettered");
+                    handlers::on_dead(state, &job, &err.to_string()).await;
+                }
+                Ok(false) => tracing::warn!(job_id = %job.id, kind = %job.kind, error = %err, "job failed, will retry"),
+                Err(e) => tracing::error!(job_id = %job.id, error = %e, "failed to record job failure"),
+            }
+        }
+    }
+}
+
+/// Test/CLI helper: process due jobs sequentially until none are claimable.
+pub async fn drain(state: &AppState) -> usize {
+    let mut n = 0;
+    while let Ok(Some(job)) = jobs::claim(&state.db, "drain").await {
+        process(state, "drain", job).await;
+        n += 1;
+    }
+    n
+}
+
+async fn maintenance(state: &AppState) {
+    match jobs::sweep_exhausted(&state.db).await {
+        Ok(dead) => {
+            for job in dead {
+                tracing::error!(job_id = %job.id, kind = %job.kind, "lease expired with no attempts left");
+                handlers::on_dead(state, &job, "lease expired").await;
+            }
+        }
+        Err(e) => tracing::warn!(error = %e, "lease sweep failed"),
+    }
+    let hour_bucket = now_ms() / 3_600_000;
+    let enqueued = async {
+        let mut conn = state.db.acquire().await?;
+        jobs::enqueue(&mut conn, kind::PURGE_EXPIRED_EVENTS, &format!("purge:{hour_bucket}"), None, &json!({})).await
+    }
+    .await;
+    if let Err(e) = enqueued {
+        tracing::warn!(error = %e, "failed to schedule purge");
+    }
+}

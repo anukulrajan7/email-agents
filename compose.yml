@@ -1,0 +1,13 @@
+# Production on a single host. The API binds to loopback only; the host's reverse
+# proxy (Caddy) terminates TLS and fronts it. SQLite lives on a local volume.
+services:
+  app:
+    build: .
+    image: email-agents:latest
+    network_mode: host
+    env_file: .env
+    environment:
+      API_BIND_ADDR: 127.0.0.1:18090
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
