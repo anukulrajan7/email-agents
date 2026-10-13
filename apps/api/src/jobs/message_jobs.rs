@@ -24,8 +24,8 @@ const FETCH_CONCURRENCY: usize = 8;
 
 /// Re-cleans stored text bodies that predate text cleaning (`text_clean_v = 0`).
 pub async fn clean_stored_text(state: &AppState) -> Result<(), JobError> {
-    let rows: Vec<(String, String, Option<String>)> = sqlx::query_as(
-        "SELECT id, body_text, body_html FROM email_messages WHERE text_clean_v = 0 ORDER BY id LIMIT ?1",
+    let rows: Vec<(String, String, String, Option<String>)> = sqlx::query_as(
+        "SELECT id, workspace_id, body_text, body_html FROM email_messages WHERE text_clean_v = 0 ORDER BY id LIMIT ?1",
     )
     .bind(BATCH)
     .fetch_all(&state.db)
@@ -33,12 +33,17 @@ pub async fn clean_stored_text(state: &AppState) -> Result<(), JobError> {
     let full_batch = rows.len() as i64 == BATCH;
     let last_id = rows.last().map(|r| r.0.clone());
     let mut tx = state.db.begin().await?;
-    for (id, text, html) in rows {
+    for (id, workspace_id, text, html) in rows {
+        let cleaned = text_clean::clean_body(&text, html.as_deref());
         sqlx::query("UPDATE email_messages SET body_text = ?1, text_clean_v = 1 WHERE id = ?2")
-            .bind(text_clean::clean_body(&text, html.as_deref()))
-            .bind(id)
+            .bind(&cleaned)
+            .bind(&id)
             .execute(&mut *tx)
             .await?;
+        // Search must see the cleaned text, not the junk.
+        if cleaned != text {
+            super::knowledge_jobs::enqueue_reindex_message(&mut tx, &workspace_id, &id, "clean_v1").await?;
+        }
     }
     if let (true, Some(last)) = (full_batch, last_id) {
         jobs::enqueue(&mut tx, kind::CLEAN_STORED_TEXT, &format!("clean_stored_text:v1:after:{last}"), None, &json!({})).await?;
@@ -169,6 +174,9 @@ pub async fn refetch_gmail_html(state: &AppState, payload: &Value) -> Result<(),
         .bind(REFETCH_DONE)
         .execute(&state.db)
         .await?;
+        if email.body_html.is_some() && !email.outbound {
+            refresh_understanding(state, &workspace_id, &message_id).await?;
+        }
         filled += usize::from(email.body_html.is_some());
     }
     tracing::info!(%source_id, filled, failed, "gmail html refetch finished");
@@ -249,4 +257,18 @@ pub async fn is_outbound(state: &AppState, message_id: &str) -> sqlx::Result<boo
     let direction: Option<String> =
         sqlx::query_scalar("SELECT direction FROM email_messages WHERE id = ?1").bind(message_id).fetch_optional(&state.db).await?;
     Ok(direction.as_deref() == Some("outbound"))
+}
+
+/// The full body replaced a stored snippet: re-index it and re-read what the sender asks
+/// (the old insight may have been built from the snippet alone).
+async fn refresh_understanding(state: &AppState, workspace_id: &str, message_id: &str) -> Result<(), JobError> {
+    let mut tx = state.db.begin().await?;
+    super::knowledge_jobs::enqueue_reindex_message(&mut tx, workspace_id, message_id, "html_refetch").await?;
+    let had_insight = sqlx::query("DELETE FROM message_insights WHERE message_id = ?1").bind(message_id).execute(&mut *tx).await?.rows_affected() > 0;
+    if had_insight {
+        jobs::enqueue(&mut tx, kind::ANALYZE_MESSAGE, &format!("analyze:{message_id}:refetch"), Some(workspace_id), &json!({ "message_id": message_id }))
+            .await?;
+    }
+    tx.commit().await?;
+    Ok(())
 }
