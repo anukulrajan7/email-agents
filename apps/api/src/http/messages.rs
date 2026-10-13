@@ -363,7 +363,7 @@ pub async fn approve_classification(
     ensure_message(&state, &ws, &id).await?;
     let mut tx = state.db.begin().await?;
     let row: ClassificationRow = sqlx::query_as(
-        "UPDATE classifications SET needs_review = 0, updated_at = ?1 WHERE message_id = ?2
+        "UPDATE classifications SET needs_review = 0, confirmed = 1, updated_at = ?1 WHERE message_id = ?2
          RETURNING category, priority, requires_reply, confidence, needs_review, source, model_id, updated_at",
     )
     .bind(now_ms())

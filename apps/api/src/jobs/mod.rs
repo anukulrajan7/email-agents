@@ -27,6 +27,7 @@ pub mod kind {
     pub const INDEX_MESSAGE: &str = "index_message";
     pub const INDEX_REPLY: &str = "index_reply";
     pub const BACKFILL_KNOWLEDGE: &str = "backfill_knowledge";
+    pub const RECLASSIFY_OTHER: &str = "reclassify_other";
 }
 
 #[derive(Debug, Clone, FromRow)]

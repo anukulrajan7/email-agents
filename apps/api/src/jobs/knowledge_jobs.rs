@@ -13,6 +13,9 @@ use crate::{
 
 /// Items enqueued per backfill run; the job re-enqueues itself with a cursor until done.
 pub const BACKFILL_BATCH: i64 = 50;
+/// When a label is added, recent model-labelled `other` mail is re-checked against it.
+pub const RECLASSIFY_MAX: i64 = 100;
+pub const RECLASSIFY_DAYS: i64 = 30;
 
 impl From<IndexError> for JobError {
     fn from(e: IndexError) -> Self {
@@ -28,6 +31,7 @@ pub async fn handle(state: &AppState, job: &Job, payload: &Value) -> Result<(), 
         kind::INDEX_MESSAGE => index_message(state, payload).await,
         kind::INDEX_REPLY => index_reply(state, payload).await,
         kind::BACKFILL_KNOWLEDGE => backfill(state, payload).await,
+        kind::RECLASSIFY_OTHER => reclassify_other(state, job, payload).await,
         other => Err(JobError::Permanent(format!("not a knowledge job: {other}"))),
     }
 }
@@ -76,6 +80,51 @@ pub async fn enqueue_backfill(db: &SqlitePool) -> sqlx::Result<bool> {
     let mut conn = db.acquire().await?;
     jobs::enqueue(&mut conn, kind::BACKFILL_KNOWLEDGE, "backfill:knowledge:v1", None, &json!({ "phase": "messages", "after": "" }))
         .await
+}
+
+/// Called when a label is created: the new label may fit mail that landed in `other`.
+pub async fn enqueue_reclassify_other(conn: &mut SqliteConnection, workspace_id: &str, label_key: &str) -> sqlx::Result<bool> {
+    jobs::enqueue(
+        conn,
+        kind::RECLASSIFY_OTHER,
+        &format!("reclassify:{workspace_id}:{label_key}:{}", crate::db::now_ms()),
+        Some(workspace_id),
+        &json!({ "label_key": label_key }),
+    )
+    .await
+}
+
+/// Re-runs classification for recent `other` mail a model labelled (never human labels).
+async fn reclassify_other(state: &AppState, job: &Job, payload: &Value) -> Result<(), JobError> {
+    let workspace_id = job.workspace_id.clone().ok_or_else(|| JobError::Permanent("job has no workspace".into()))?;
+    let label_key = str_field(payload, "label_key")?;
+    let since = crate::db::now_ms() - RECLASSIFY_DAYS * 86_400_000;
+    let ids: Vec<String> = sqlx::query_scalar(
+        "SELECT m.id FROM email_messages m JOIN classifications c ON c.message_id = m.id
+         WHERE m.workspace_id = ?1 AND c.category = 'other' AND c.source != 'manual' AND c.confirmed = 0
+           AND m.received_at >= ?2
+         ORDER BY m.received_at DESC LIMIT ?3",
+    )
+    .bind(&workspace_id)
+    .bind(since)
+    .bind(RECLASSIFY_MAX)
+    .fetch_all(&state.db)
+    .await?;
+    let mut tx = state.db.begin().await?;
+    for id in &ids {
+        jobs::enqueue(
+            &mut tx,
+            kind::CLASSIFY_EMAIL,
+            &format!("classify:{id}:label:{label_key}:{}", job.id),
+            Some(&workspace_id),
+            &json!({ "message_id": id }),
+        )
+        .await?;
+    }
+    tx.commit().await?;
+    tracing::info!(%workspace_id, %label_key, requeued = ids.len(), "re-checking other mail against a new label");
+    state.jobs_notify.notify_one();
+    Ok(())
 }
 
 fn str_field(payload: &Value, key: &str) -> Result<String, JobError> {

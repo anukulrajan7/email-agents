@@ -288,3 +288,34 @@ async fn backfill_indexes_existing_mail_and_replies_in_bounded_steps() {
     assert_eq!(h.count("SELECT COUNT(*) FROM jobs WHERE kind = 'backfill_knowledge' AND status = 'succeeded'").await, 2);
     assert!(!knowledge_jobs::enqueue_backfill(&h.state.db).await.unwrap(), "a finished backfill is not repeated");
 }
+
+#[tokio::test]
+async fn new_label_rechecks_other_mail_and_approval_confirms() {
+    let h = harness().await;
+    let (ws, src) = h.workspace(ADMIN).await;
+    let base = format!("/api/v1/workspaces/{ws}");
+    let invoice = h.email(ADMIN, &ws, &src, "Invoice 4411 from Globex", "Amount due: 1,200. Bank transfer details inside.").await;
+    sqlx::query("UPDATE classifications SET category = 'other', source = 'llm', confidence = 0.6 WHERE message_id = ?1")
+        .bind(&invoice)
+        .execute(&h.state.db)
+        .await
+        .unwrap();
+    let before = h.seen.classify.lock().unwrap().len();
+
+    let (s, _) = h
+        .call("POST", &format!("{base}/labels"), ADMIN, Some(json!({"name":"Invoices","description":"Vendor invoices and payment requests"})))
+        .await;
+    assert_eq!(s, StatusCode::CREATED);
+    worker::drain(&h.state).await;
+    {
+        let seen = h.seen.classify.lock().unwrap();
+        assert_eq!(seen.len(), before + 1, "the other email was re-checked once");
+        let last = seen.last().unwrap();
+        assert_eq!(last.subject, "Invoice 4411 from Globex");
+        assert!(last.labels.iter().any(|l| l.key == "invoices"));
+    }
+
+    let (s, _) = h.call("POST", &format!("{base}/messages/{invoice}/classification/approve"), ADMIN, None).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(h.count("SELECT confirmed FROM classifications").await, 1);
+}

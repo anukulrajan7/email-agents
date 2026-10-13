@@ -149,7 +149,9 @@ pub async fn create(
     )
     .await?;
     let row: Label = sqlx::query_as(&format!("{LABEL_SELECT} WHERE l.id = ?1")).bind(&id).fetch_one(&mut *tx).await?;
+    crate::jobs::knowledge_jobs::enqueue_reclassify_other(&mut tx, &ws, &key).await?;
     tx.commit().await?;
+    state.jobs_notify.notify_one();
     Ok((StatusCode::CREATED, Json(row)))
 }
 

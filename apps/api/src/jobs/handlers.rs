@@ -67,7 +67,7 @@ pub async fn handle(state: &AppState, job: &Job) -> Result<(), JobError> {
         kind::EXTRACT_RECORD => super::matching_jobs::extract_record(state, &payload).await,
         kind::MATCH_RECORD => super::matching_jobs::match_record(state, &payload).await,
         kind::REGISTER_NANGO_CONNECTION => crate::sources::nango::register_from_webhook(state, &payload).await,
-        kind::INDEX_MESSAGE | kind::INDEX_REPLY | kind::BACKFILL_KNOWLEDGE => super::knowledge_jobs::handle(state, job, &payload).await,
+        kind::INDEX_MESSAGE | kind::INDEX_REPLY | kind::BACKFILL_KNOWLEDGE | kind::RECLASSIFY_OTHER => super::knowledge_jobs::handle(state, job, &payload).await,
         other => Err(JobError::Permanent(format!("unknown job kind {other}"))),
     }
 }
