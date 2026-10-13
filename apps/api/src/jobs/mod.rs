@@ -104,6 +104,7 @@ pub async fn enqueue_at(
     run_at: i64,
 ) -> sqlx::Result<bool> {
     let now = now_ms();
+    let priority = priority_for(&mut *conn, kind, dedupe_key, payload, now).await?;
     let res = sqlx::query(
         "INSERT INTO jobs (id, workspace_id, kind, dedupe_key, payload_json, status, max_attempts, run_at, created_at, updated_at, priority)
          VALUES (?1, ?2, ?3, ?4, ?5, 'pending', ?7, ?8, ?6, ?6, ?9)
@@ -120,10 +121,30 @@ pub async fn enqueue_at(
     .bind(now)
     .bind(max_attempts)
     .bind(run_at)
-    .bind(priority_of(kind, dedupe_key))
+    .bind(priority)
     .execute(conn)
     .await?;
     Ok(res.rows_affected() > 0)
+}
+
+/// Mail from the last 48 h counts as new: its stages run before anything for older mail.
+const RECENT_MAIL_MS: i64 = 48 * 3_600_000;
+
+/// Kind-based priority, then per-message stages are ranked by how fresh the email is, so a
+/// backlog of work on old mail never delays the summary or matching of an email that just arrived.
+async fn priority_for(conn: &mut SqliteConnection, kind: &str, dedupe_key: &str, payload: &Value, now: i64) -> sqlx::Result<i64> {
+    let base = priority_of(kind, dedupe_key);
+    if base != 0 {
+        return Ok(base);
+    }
+    let Some(message_id) = payload.get("message_id").and_then(Value::as_str) else { return Ok(0) };
+    let received: Option<i64> =
+        sqlx::query_scalar("SELECT received_at FROM email_messages WHERE id = ?1").bind(message_id).fetch_optional(&mut *conn).await?;
+    Ok(match received {
+        Some(at) if at >= now - RECENT_MAIL_MS => 3,
+        Some(_) => -3,
+        None => 0,
+    })
 }
 
 /// Fetching and labelling new mail goes first; bulk re-checks and backfills go last, so a

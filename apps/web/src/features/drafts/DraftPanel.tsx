@@ -54,7 +54,7 @@ function HighlightedTextarea({ text, onChange, readOnly }: { text: string; onCha
       <div
         aria-hidden="true"
         data-testid="draft-highlights"
-        className="pointer-events-none absolute inset-0 overflow-hidden px-4 py-0 text-[15px] leading-[28px] break-words whitespace-pre-wrap text-transparent"
+        className="pointer-events-none absolute inset-0 overflow-hidden select-none px-4 py-0 text-[15px] leading-[28px] break-words whitespace-pre-wrap text-transparent"
       >
         {parts.map((p, i) =>
           p.needs ? (

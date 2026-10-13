@@ -45,6 +45,18 @@ export function useUpdateClassification(ws: string, id: string) {
   });
 }
 
+/** Reads an email right away when its summary isn't ready (older mail is read only when opened). */
+export function useUnderstandNow(ws: string, id: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => api<{ insight: unknown }>(`/workspaces/${ws}/messages/${id}/insight`, { method: 'POST' }),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: messageKey(ws, id) });
+      void qc.invalidateQueries({ queryKey: messagesKey(ws) });
+    },
+  });
+}
+
 export function useReprocess(ws: string) {
   const qc = useQueryClient();
   return useMutation({

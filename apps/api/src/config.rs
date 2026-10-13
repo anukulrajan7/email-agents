@@ -30,6 +30,9 @@ pub struct Config {
     pub nango_gmail_model: String,
     pub nango_backfill_days: i64,
     pub nango_backfill_max: usize,
+    /// AI runs automatically only on mail received within this many hours; older mail is
+    /// read by AI when someone opens it (keeps token cost low).
+    pub ai_auto_hours: i64,
     pub typesafe_api_key: String,
     pub jev_api_url: String,
     pub jev_model_id: String,
@@ -86,6 +89,7 @@ impl Config {
             nango_gmail_model: var("NANGO_GMAIL_MODEL", "GmailEmail"),
             nango_backfill_days: var("NANGO_BACKFILL_DAYS", "14").parse().context("NANGO_BACKFILL_DAYS")?,
             nango_backfill_max: var("NANGO_BACKFILL_MAX", "100").parse().context("NANGO_BACKFILL_MAX")?,
+            ai_auto_hours: var("AI_AUTO_HOURS", "48").parse().context("AI_AUTO_HOURS")?,
             typesafe_api_key: var("TYPESAFE_API_KEY", ""),
             jev_api_url: var("JEV_API_URL", "https://api.typesafe.ai/v1/systemone"),
             jev_model_id: var("JEV_MODEL_ID", "jev-latest"),
@@ -150,6 +154,7 @@ impl Config {
             nango_gmail_model: "GmailEmail".into(),
             nango_backfill_days: 14,
             nango_backfill_max: 500,
+            ai_auto_hours: 48,
             typesafe_api_key: String::new(),
             jev_api_url: String::new(),
             jev_model_id: "jev-latest".into(),

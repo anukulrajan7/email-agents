@@ -243,6 +243,9 @@ async fn sent_mail_is_stored_but_never_triaged_and_marks_threads_answered() {
     assert!(thread_has_reply_after(&h.state.db, &h.ws, "thread1", received).await.unwrap());
     assert!(!thread_has_reply_after(&h.state.db, &h.ws, "thread1", db::now_ms()).await.unwrap(), "reply must be after the given time");
     assert!(!thread_has_reply_after(&h.state.db, &h.ws, "no-such-thread", 0).await.unwrap());
+    // Answered from Gmail directly: the inbox shows it as replied.
+    let (_, detail) = h.call("GET", &format!("/api/v1/workspaces/{}/messages/{in_id}", h.ws)).await;
+    assert_eq!(detail["replied"], true);
 
     let (_, detail) = h.call("GET", &format!("/api/v1/workspaces/{}/messages/{in_id}", h.ws)).await;
     assert_eq!(detail["from_name"], "Priya Sharma");

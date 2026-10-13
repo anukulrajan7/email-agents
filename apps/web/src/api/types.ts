@@ -109,6 +109,8 @@ export type MessageSummary = {
   needs_reply?: boolean;
   summary?: string | null;
   unread?: boolean;
+  /** We already replied (sent from here, or answered in Gmail in the same thread). */
+  replied?: boolean;
 };
 
 export type Classification = {
@@ -209,6 +211,7 @@ export type MessageDetail = {
   contact: Contact | null;
   contact_memories: Memory[];
   insight?: Insight | null;
+  replied?: boolean;
 };
 
 export type ReviewItem = {

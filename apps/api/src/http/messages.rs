@@ -53,6 +53,8 @@ pub struct MessageSummary {
     direction: String,
     needs_reply: Option<bool>,
     summary: Option<String>,
+    /// We replied (sent from here, or a later message from the mailbox in the same thread).
+    replied: bool,
 }
 
 #[derive(FromRow)]
@@ -70,6 +72,16 @@ struct SummaryRow {
     direction: String,
     needs_reply: Option<bool>,
     insight_summary: Option<String>,
+    replied: bool,
+}
+
+/// True once we answered: a draft for this email was sent, or the mailbox wrote later in the thread.
+macro_rules! replied_sql {
+    () => {
+        "(EXISTS (SELECT 1 FROM drafts d WHERE d.message_id = m.id AND d.status = 'sent')
+          OR EXISTS (SELECT 1 FROM email_messages o WHERE o.thread_id = m.thread_id AND o.direction = 'outbound'
+                     AND o.received_at > m.received_at))"
+    };
 }
 
 const SUMMARY_MAX_CHARS: usize = 140;
@@ -92,13 +104,17 @@ fn decode_offset_cursor(cursor: &str) -> AppResult<i64> {
     raw.strip_prefix("offset:").and_then(|n| n.parse::<i64>().ok()).filter(|n| *n >= 0).ok_or_else(bad)
 }
 
-const SUMMARY_SELECT: &str = "SELECT m.id, m.subject, m.sender_address, m.original_sender_address, m.received_at, m.processing_status,
+const SUMMARY_SELECT: &str = concat!(
+    "SELECT m.id, m.subject, m.sender_address, m.original_sender_address, m.received_at, m.processing_status,
                 c.category, c.priority, c.needs_review, m.direction,
                 COALESCE(i.needs_reply, c.requires_reply) AS needs_reply, i.summary AS insight_summary,
-                (SELECT COUNT(*) FROM attachments a WHERE a.message_id = m.id) AS attachment_count
+                (SELECT COUNT(*) FROM attachments a WHERE a.message_id = m.id) AS attachment_count, ",
+    replied_sql!(),
+    " AS replied
          FROM email_messages m
          LEFT JOIN classifications c ON c.message_id = m.id
-         LEFT JOIN message_insights i ON i.message_id = m.id";
+         LEFT JOIN message_insights i ON i.message_id = m.id"
+);
 
 fn encode_cursor(received_at: i64, id: &str) -> String {
     URL_SAFE_NO_PAD.encode(format!("{received_at}:{id}"))
@@ -147,17 +163,17 @@ pub async fn list(
                 OR m.original_sender_address LIKE ?3 ESCAPE '\\')
            AND (?4 = 'all' OR m.direction = ?4)";
     let (rows, next_cursor): (Vec<SummaryRow>, Option<String>) = if by_importance {
-        // Offset pagination: the importance order has no stable keyset. Needs-reply first, then
-        // priority (high > normal > low), then newest.
+        // Offset pagination: the importance order has no stable keyset. Needs a reply and not yet
+        // replied first, then priority (high > normal > low), then newest.
         let offset = cursor.map(decode_offset_cursor).transpose()?.unwrap_or(0);
         let mut rows: Vec<SummaryRow> = sqlx::query_as(&format!(
             "{SUMMARY_SELECT}
              {filters}
-             ORDER BY COALESCE(i.needs_reply, c.requires_reply, 0) DESC,
+             ORDER BY (COALESCE(i.needs_reply, c.requires_reply, 0) = 1 AND NOT {replied}) DESC,
                       CASE c.priority WHEN 'high' THEN 2 WHEN 'low' THEN 0 ELSE 1 END DESC,
                       m.received_at DESC, m.id DESC
              LIMIT ?5 OFFSET ?6"
-        ))
+        , replied = replied_sql!()))
         .bind(&ws)
         .bind(category)
         .bind(search)
@@ -215,6 +231,7 @@ pub async fn list(
             direction: r.direction,
             needs_reply: r.needs_reply,
             summary: r.insight_summary.map(short_summary),
+            replied: r.replied,
         })
         .collect();
     Ok(Json(json!({ "items": items, "next_cursor": next_cursor })))
@@ -295,6 +312,10 @@ pub async fn detail(
     .bind(&id)
     .fetch_optional(&state.db)
     .await?;
+    let replied: bool = sqlx::query_scalar(concat!("SELECT ", replied_sql!(), " FROM email_messages m WHERE m.id = ?1"))
+        .bind(&id)
+        .fetch_one(&state.db)
+        .await?;
     let insight: Option<InsightRow> = sqlx::query_as(
         "SELECT summary, asks_json, deadline, needs_reply, missing_json FROM message_insights WHERE message_id = ?1",
     )
@@ -363,6 +384,7 @@ pub async fn detail(
         "to": to,
         "cc": cc,
         "direction": m.direction,
+        "replied": replied,
         "subject": m.subject,
         "body_text": m.body_text,
         // Sanitised server-side; the UI renders it only inside a sandboxed iframe.
@@ -522,6 +544,37 @@ pub async fn request_draft(
     ensure_message(&state, &ws, &id).await?;
     let key = format!("draft:{id}:manual:{}", new_id("req"));
     enqueue_for_message(&state, &ws, &id, &user, kind::GENERATE_DRAFT, key, "draft.requested").await
+}
+
+/// Reads the email right now (fast model) when its insight isn't ready yet, so the
+/// "What they're asking" card never waits for the background queue. Idempotent.
+pub async fn understand_now(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Path((ws, id)): Path<(String, String)>,
+) -> AppResult<Json<Value>> {
+    require_role(&state.db, &ws, &user, Role::Operator).await?;
+    ensure_message(&state, &ws, &id).await?;
+    let insight = handlers::analyze_message(&state, &json!({ "message_id": id })).await.map_err(|e| {
+        tracing::warn!(message_id = %id, error = %e, "on-demand analysis failed");
+        AppError::AiUnavailable
+    })?;
+    // Older mail skipped its AI stages; opening it runs them now, for this email only.
+    let category: Option<String> = sqlx::query_scalar("SELECT category FROM classifications WHERE message_id = ?1")
+        .bind(&id)
+        .fetch_optional(&state.db)
+        .await?;
+    let payload = json!({ "message_id": id });
+    let mut tx = state.db.begin().await?;
+    jobs::enqueue(&mut tx, kind::INDEX_MESSAGE, &format!("index:{id}:open"), Some(&ws), &payload).await?;
+    jobs::enqueue(&mut tx, kind::LEARN_FROM_MESSAGE, &format!("learn:{id}:open"), Some(&ws), &payload).await?;
+    if let Some(label) = category.filter(|c| crate::jobs::matching_jobs::is_extractable(c)) {
+        jobs::enqueue(&mut tx, kind::EXTRACT_RECORD, &format!("extract:{id}:{label}:open"), Some(&ws), &json!({ "message_id": id, "label": label }))
+            .await?;
+    }
+    tx.commit().await?;
+    state.jobs_notify.notify_one();
+    Ok(Json(json!({ "insight": insight })))
 }
 
 pub async fn reprocess(

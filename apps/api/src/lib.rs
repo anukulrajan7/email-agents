@@ -110,9 +110,11 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
         _ => Arc::new(ai::RulesExtractor),
     };
 
-    // Understanding uses the stronger model: misreading an email is costlier than tokens.
+    // Understanding must feel instant (it's the first thing people see): use the fast model,
+    // falling back to the drafting model when no fast model is configured.
+    let analyst_model = if config.openrouter_classifier_model_id.is_empty() { &config.openrouter_model_id } else { &config.openrouter_classifier_model_id };
     let analyst: Arc<dyn ai::Analyst> = match &openrouter {
-        Some(client) if !config.openrouter_model_id.is_empty() => Arc::new(OpenRouterAnalyst::new(client.clone(), &config.openrouter_model_id)),
+        Some(client) if !analyst_model.is_empty() => Arc::new(OpenRouterAnalyst::new(client.clone(), analyst_model)),
         _ => Arc::new(ai::RulesAnalyst),
     };
 

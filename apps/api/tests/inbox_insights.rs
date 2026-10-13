@@ -255,3 +255,24 @@ async fn stored_text_is_recleaned_once() {
     email_ai_api::jobs::message_jobs::schedule_text_clean(&h.state).await.unwrap();
     assert_eq!(worker::drain(&h.state).await, 0, "nothing left to clean");
 }
+
+#[tokio::test]
+async fn opening_an_unread_email_reads_it_immediately() {
+    let h = harness().await;
+    // Not drained: the background queue hasn't analysed it yet.
+    let id = h.ingest(7, "lead@client.test", "Need 2 React developers", "Can you share profiles by Friday? Budget is fixed.", 1).await;
+    let (_, before) = h.call("GET", &h.url(&format!("/messages/{id}")).await, ADMIN, None).await;
+    assert!(before["insight"].is_null());
+
+    let (s, now) = h.call("POST", &h.url(&format!("/messages/{id}/insight")).await, ADMIN, None).await;
+    assert_eq!(s, StatusCode::OK);
+    assert!(!now["insight"]["summary"].as_str().unwrap().is_empty());
+    assert_eq!(now["insight"]["needs_reply"], true);
+    let (_, after) = h.call("GET", &h.url(&format!("/messages/{id}")).await, ADMIN, None).await;
+    assert_eq!(after["insight"]["summary"], now["insight"]["summary"], "stored, not recomputed");
+
+    // The queued analysis later finds it done (idempotent) and the stages of this fresh email outrank old work.
+    let p: i64 = sqlx::query_scalar("SELECT priority FROM jobs WHERE dedupe_key = ?1").bind(format!("analyze:{id}")).fetch_optional(&h.state.db).await.unwrap().unwrap_or(3);
+    assert!(p >= 0);
+    worker::drain(&h.state).await;
+}

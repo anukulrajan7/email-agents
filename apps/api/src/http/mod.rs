@@ -95,6 +95,7 @@ pub fn router(state: AppState) -> Router {
         .route("/workspaces/{ws}/messages/{id}/classification/approve", post(messages::approve_classification))
         .route("/workspaces/{ws}/messages/{id}/draft", post(messages::request_draft))
         .route("/workspaces/{ws}/messages/{id}/reprocess", post(messages::reprocess))
+        .route("/workspaces/{ws}/messages/{id}/insight", post(messages::understand_now))
         .route("/workspaces/{ws}/drafts/{id}", patch(messages::update_draft))
         .route("/workspaces/{ws}/drafts/{id}/provider-draft", post(crate::replies::save_to_provider))
         .route("/workspaces/{ws}/drafts/{id}/send", post(crate::replies::send))

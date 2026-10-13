@@ -1,7 +1,26 @@
+import { useEffect } from 'react';
 import type { Insight, ProcessingStatus } from '../../api/types';
 import { Badge } from '../../components/ui';
+import { useUnderstandNow } from './hooks';
 
-function Skeleton() {
+function Skeleton({ ws, messageId }: { ws: string; messageId: string }) {
+  // Not read yet (older mail is read only when opened): ask for it now, once.
+  const understand = useUnderstandNow(ws, messageId);
+  const { mutate, isIdle } = understand;
+  useEffect(() => {
+    if (isIdle) mutate();
+  }, [isIdle, mutate]);
+  if (understand.isError) {
+    return (
+      <section aria-label="What they're asking" className="flex items-center justify-between gap-3 border border-rule bg-surface px-4 py-3">
+        <p className="text-sm text-ink-muted">Couldn&apos;t read this email just now.</p>
+        <button type="button" onClick={() => understand.mutate()} className="text-sm font-semibold text-accent underline underline-offset-2">
+          Try again
+        </button>
+      </section>
+    );
+  }
+
   return (
     <section aria-label="What they're asking" aria-busy="true" className="flex flex-col gap-2 border border-rule bg-surface px-4 py-3">
       <h3 className="kicker">What they&apos;re asking</h3>
@@ -16,9 +35,21 @@ function Skeleton() {
   );
 }
 
-export function InsightCard({ insight, status }: { insight: Insight | null | undefined; status: ProcessingStatus }) {
+export function InsightCard({
+  ws,
+  messageId,
+  insight,
+  status,
+  replied = false,
+}: {
+  ws: string;
+  messageId: string;
+  insight: Insight | null | undefined;
+  status: ProcessingStatus;
+  replied?: boolean;
+}) {
   if (insight === undefined) return null;
-  if (insight === null) return status === 'failed' ? null : <Skeleton />;
+  if (insight === null) return status === 'failed' ? null : <Skeleton ws={ws} messageId={messageId} />;
 
   return (
     <section aria-label="What they're asking" className="flex flex-col gap-3 border border-rule bg-surface px-4 py-3">
@@ -26,7 +57,13 @@ export function InsightCard({ insight, status }: { insight: Insight | null | und
         <h3 className="kicker">What they&apos;re asking</h3>
         <div className="flex flex-wrap items-center gap-1.5">
           {insight.deadline && <Badge tone="warning">Deadline: {insight.deadline}</Badge>}
-          {insight.needs_reply ? <Badge tone="danger">Needs reply</Badge> : <Badge>No reply needed</Badge>}
+          {replied ? (
+            <Badge tone="success">Replied</Badge>
+          ) : insight.needs_reply ? (
+            <Badge tone="danger">Needs reply</Badge>
+          ) : (
+            <Badge>No reply needed</Badge>
+          )}
         </div>
       </div>
       <p className="text-[15px] leading-snug font-semibold">{insight.summary}</p>

@@ -46,6 +46,26 @@ impl From<AiError> for JobError {
     }
 }
 
+/// AI stages run automatically only for new mail. For older mail they are skipped (no model
+/// call, no tokens) and run when a person opens the email (`:open:` jobs) or asks (`:manual:`).
+/// Plain labelling of newly imported mail still runs: it's one cheap call and fills the inbox.
+async fn deferred_until_opened(state: &AppState, job: &Job, payload: &Value) -> Result<bool, JobError> {
+    let deferrable = match job.kind.as_str() {
+        kind::ANALYZE_MESSAGE | kind::LEARN_FROM_MESSAGE | kind::INDEX_MESSAGE | kind::RUN_AUTOMATIONS | kind::EXTRACT_RECORD
+        | kind::EXECUTE_WORKFLOW => true,
+        // Bulk re-labelling (after new labels) is deferred too; first-time labelling is not.
+        kind::CLASSIFY_EMAIL => job.dedupe_key.contains(":recheck:") || job.dedupe_key.contains(":label:"),
+        _ => false,
+    };
+    if !deferrable || job.dedupe_key.contains(":open:") || job.dedupe_key.contains(":manual:") {
+        return Ok(false);
+    }
+    let Some(message_id) = payload.get("message_id").and_then(Value::as_str) else { return Ok(false) };
+    let received: Option<i64> =
+        sqlx::query_scalar("SELECT received_at FROM email_messages WHERE id = ?1").bind(message_id).fetch_optional(&state.db).await?;
+    Ok(received.is_some_and(|at| at < now_ms() - state.config.ai_auto_hours * 3_600_000))
+}
+
 fn str_field(payload: &Value, key: &str) -> Result<String, JobError> {
     payload
         .get(key)
@@ -56,6 +76,10 @@ fn str_field(payload: &Value, key: &str) -> Result<String, JobError> {
 
 pub async fn handle(state: &AppState, job: &Job) -> Result<(), JobError> {
     let payload = job.payload();
+    if deferred_until_opened(state, job, &payload).await? {
+        tracing::debug!(kind = %job.kind, key = %job.dedupe_key, "old mail: AI deferred until someone opens it");
+        return Ok(());
+    }
     match job.kind.as_str() {
         kind::FETCH_FORWARDED_EMAIL => fetch_forwarded_email(state, &payload).await,
         kind::CLASSIFY_EMAIL => classify_email(state, job, &payload).await,

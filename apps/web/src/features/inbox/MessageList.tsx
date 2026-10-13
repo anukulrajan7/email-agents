@@ -86,7 +86,7 @@ function Row({ ws, m }: { ws: string; m: MessageSummary }) {
       </p>
       <div className="mt-1 flex flex-wrap items-center gap-1">
         {m.category && <LabelStamp ws={ws} category={m.category} />}
-        {m.needs_reply && <Badge tone="danger">Needs reply</Badge>}
+        {m.replied ? <Badge tone="success">Replied</Badge> : m.needs_reply && <Badge tone="danger">Needs reply</Badge>}
         {m.processing_status === 'failed' && <Badge tone="danger">Failed</Badge>}
         {m.attachment_count > 0 && (
           <Badge>
