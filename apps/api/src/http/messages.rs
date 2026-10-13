@@ -158,6 +158,7 @@ struct DetailRow {
     recipients_json: String,
     subject: String,
     body_text: String,
+    body_html: Option<String>,
     received_at: i64,
     processing_status: String,
 }
@@ -190,7 +191,7 @@ pub async fn detail(
     require_role(&state.db, &ws, &user, Role::Operator).await?;
     let m: DetailRow = sqlx::query_as(
         "SELECT m.id, m.source_id, s.kind AS source_kind, s.capabilities_json, m.sender_address, m.original_sender_address,
-                m.recipients_json, m.subject, m.body_text, m.received_at, m.processing_status
+                m.recipients_json, m.subject, m.body_text, m.body_html, m.received_at, m.processing_status
          FROM email_messages m JOIN email_sources s ON s.id = m.source_id
          WHERE m.id = ?1 AND m.workspace_id = ?2",
     )
@@ -271,6 +272,8 @@ pub async fn detail(
         "to": to,
         "subject": m.subject,
         "body_text": m.body_text,
+        // Sanitised server-side; the UI renders it only inside a sandboxed iframe.
+        "body_html_safe": m.body_html.as_deref().map(crate::sources::normalize::safe_email_html),
         "received_at": iso(m.received_at),
         "processing_status": m.processing_status,
         "attachments": attachments,

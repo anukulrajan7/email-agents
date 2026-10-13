@@ -24,6 +24,7 @@ const message = (over: Partial<MessageDetail> = {}): MessageDetail => ({
   to: [],
   subject: 'Re: Lunch',
   body_text: 'hi',
+  body_html_safe: null,
   received_at: 't0',
   processing_status: 'workflow_completed',
   attachments: [],

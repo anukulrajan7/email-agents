@@ -10,7 +10,23 @@ use uuid::Uuid;
 
 /// Opens the pool. Pragmas are applied per connection; WAL is set here,
 /// outside any migration transaction.
+/// Registers the sqlite-vec extension for every connection opened afterwards
+/// (SQLx's bundled SQLite). Idempotent.
+pub fn register_vector_extension() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| unsafe {
+        type Init = unsafe extern "C" fn(
+            *mut libsqlite3_sys::sqlite3,
+            *mut *mut std::os::raw::c_char,
+            *const libsqlite3_sys::sqlite3_api_routines,
+        ) -> std::os::raw::c_int;
+        let init: Init = std::mem::transmute::<*const (), Init>(sqlite_vec::sqlite3_vec_init as *const ());
+        libsqlite3_sys::sqlite3_auto_extension(Some(init));
+    });
+}
+
 pub async fn connect(database_url: &str) -> anyhow::Result<SqlitePool> {
+    register_vector_extension();
     let options = SqliteConnectOptions::from_str(database_url)
         .with_context(|| format!("invalid DATABASE_URL {database_url}"))?
         .create_if_missing(true)

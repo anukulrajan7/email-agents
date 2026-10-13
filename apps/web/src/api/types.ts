@@ -177,6 +177,7 @@ export type MessageDetail = {
   to: string[];
   subject: string;
   body_text: string;
+  body_html_safe: string | null;
   received_at: string;
   processing_status: ProcessingStatus;
   attachments: Attachment[];

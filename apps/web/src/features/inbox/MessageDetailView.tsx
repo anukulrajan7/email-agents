@@ -7,7 +7,7 @@ import { DraftPanel } from '../drafts/DraftPanel';
 import { formatBytes, fullDate, humanize, relativeTime } from '../../lib/format';
 import { ClassificationPanel } from './ClassificationPanel';
 import { useMessage } from './hooks';
-import { PlainTextBody } from './PlainTextBody';
+import { EmailBody } from './EmailBody';
 import { Postmark } from './Postmark';
 import { RouteTracker } from './RouteTracker';
 import { riseStyle } from '../../lib/motion';
@@ -71,7 +71,7 @@ export function MessageDetailView({ ws, messageId }: { ws: string; messageId: st
             <RouteTracker status={m.processing_status} hasClassification={m.classification !== null} />
           </header>
           <div className="border-t border-rule-strong pt-6">
-            <PlainTextBody text={m.body_text} />
+            <EmailBody text={m.body_text} html={m.body_html_safe} />
           </div>
         </article>
 

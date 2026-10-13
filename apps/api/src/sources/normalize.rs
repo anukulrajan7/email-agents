@@ -10,6 +10,24 @@ pub fn address(raw: &str) -> String {
     inner.trim().trim_matches('"').to_lowercase()
 }
 
+/// Email HTML made safe to display: no scripts, forms, frames, event handlers or
+/// `javascript:` URLs; links open in a new tab without referrer; only http(s)/mailto
+/// links and https images survive. The UI still renders it in a sandboxed iframe.
+pub fn safe_email_html(html: &str) -> String {
+    use std::collections::HashSet;
+    let mut builder = ammonia::Builder::default();
+    builder
+        .add_generic_attributes(["style", "align", "valign", "width", "height", "bgcolor", "border", "cellpadding", "cellspacing"])
+        .add_tags(["center", "font"])
+        .add_tag_attributes("font", ["color", "face", "size"])
+        .url_schemes(HashSet::from(["http", "https", "mailto"]))
+        .link_rel(Some("noopener noreferrer nofollow"))
+        .set_tag_attribute_value("a", "target", "_blank");
+    let cleaned = builder.clean(html).to_string();
+    // Plain-http images leak the reader's IP over cleartext and break mixed content: upgrade them.
+    cleaned.replace("src=\"http://", "src=\"https://")
+}
+
 /// `"Jane Doe" <jane@acme.com>` → `Some("Jane Doe")`; bare addresses → `None`.
 pub fn display_name(raw: &str) -> Option<String> {
     let name = raw.split_once('<')?.0.trim().trim_matches('"').trim();
@@ -85,6 +103,18 @@ pub fn forwarded_original_sender(body: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sanitises_email_html() {
+        let dirty = r#"<p onclick="x()">Hi <a href="javascript:alert(1)">bad</a> <a href="https://acme.com">ok</a></p>
+<script>alert(1)</script><img src="http://img.example/a.png"><img src="cid:logo"><form><input></form><iframe src="https://x"></iframe>"#;
+        let clean = safe_email_html(dirty);
+        assert!(!clean.contains("script") && !clean.contains("onclick") && !clean.contains("javascript:"));
+        assert!(!clean.contains("<form") && !clean.contains("<iframe") && !clean.contains("cid:"));
+        assert!(clean.contains(r#"href="https://acme.com""#) && clean.contains(r#"target="_blank""#));
+        assert!(clean.contains("noopener"));
+        assert!(clean.contains(r#"src="https://img.example/a.png""#));
+    }
 
     #[test]
     fn parses_display_names() {
