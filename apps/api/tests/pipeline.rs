@@ -204,7 +204,7 @@ async fn timesheet_vertical_slice_end_to_end() {
     assert_eq!(detail["from"], "lead@acme.com");
     assert_eq!(detail["source"]["can_create_provider_draft"], false);
     assert_eq!(detail["classification"]["source"], "fallback");
-    assert_eq!(detail["classification"]["needs_review"], true);
+    assert_eq!(detail["classification"]["needs_review"], false, "labels are applied automatically");
     assert_eq!(detail["review"]["status"], "open");
     assert_eq!(detail["workflow_run"]["status"], "completed");
     assert_eq!(detail["draft"]["status"], "suggested");

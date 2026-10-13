@@ -49,6 +49,7 @@ pub struct AppState {
     /// Proposes memory suggestions from operator draft edits; `None` disables learning.
     pub learner: Option<Arc<dyn Learner>>,
     pub extractor: Arc<dyn crate::ai::Extractor>,
+    pub analyst: Arc<dyn crate::ai::Analyst>,
     pub login_limiter: Arc<crate::sessions::LoginLimiter>,
     /// Sends verification codes; `None` = verification disabled.
     pub mailer: Option<Arc<dyn crate::mailer::Mailer>>,

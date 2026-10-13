@@ -50,12 +50,59 @@ pub struct DraftInput {
     /// Staff-written or staff-accepted memories, already rendered one per line.
     pub memory_notes: Vec<String>,
     pub sender_history: Option<String>,
+    /// What the sender asks, from the analysis step. The draft must address each one.
+    pub insight: Option<Insight>,
+}
+
+/// The AI's reading of an email, produced before any reply is drafted.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Insight {
+    pub summary: String,
+    pub asks: Vec<String>,
+    pub deadline: Option<String>,
+    pub needs_reply: bool,
+    pub missing_info: Vec<String>,
+}
+
+#[async_trait]
+pub trait Analyst: Send + Sync {
+    async fn analyze(&self, subject: &str, sender: &str, body: &str) -> Result<(Insight, String), AiError>;
+}
+
+/// No-AI fallback: questions are sentences ending in '?'.
+pub struct RulesAnalyst;
+
+#[async_trait]
+impl Analyst for RulesAnalyst {
+    async fn analyze(&self, subject: &str, _sender: &str, body: &str) -> Result<(Insight, String), AiError> {
+        let asks: Vec<String> = body
+            .split(['\n', '.', '!'])
+            .map(str::trim)
+            .filter(|s| s.ends_with('?') && s.len() > 3)
+            .take(5)
+            .map(str::to_string)
+            .collect();
+        let first: String = body.split_whitespace().take(40).collect::<Vec<_>>().join(" ");
+        Ok((
+            Insight {
+                summary: if first.is_empty() { subject.to_string() } else { first },
+                // Rules can't tell "no reply needed" safely; only the model may skip a reply.
+                needs_reply: true,
+                asks,
+                deadline: None,
+                missing_info: vec![],
+            },
+            "rules-v1".into(),
+        ))
+    }
 }
 
 #[derive(Debug, Clone)]
 pub struct DraftOutput {
     pub body_text: String,
     pub model_id: String,
+    /// Asks the draft could not answer; each also appears as `[NEEDS: …]` in the body.
+    pub unanswered: Vec<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
