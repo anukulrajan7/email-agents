@@ -52,7 +52,10 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
         }
         (Some(client), true) if !config.openrouter_classifier_model_id.is_empty() => {
             tracing::info!(model = %config.openrouter_classifier_model_id, "classifying with OpenRouter");
-            Arc::new(OpenRouterClassifier::new(client.clone(), &config.openrouter_classifier_model_id))
+            Arc::new(
+                OpenRouterClassifier::new(client.clone(), &config.openrouter_classifier_model_id)
+                    .with_escalation(&config.openrouter_model_id),
+            )
         }
         _ => {
             tracing::warn!("no classifier model configured: using rules-based fallback classifier");

@@ -12,6 +12,7 @@ name = "email-ai-api"
 path = "src/main.rs"
 
 [dependencies]
+ammonia = "4"
 anyhow = "1"
 argon2 = { version = "0.5", features = ["std"] }
 async-trait = "0.1"

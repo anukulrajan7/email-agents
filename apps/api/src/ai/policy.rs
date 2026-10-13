@@ -2,19 +2,20 @@
 
 use crate::{
     ai::ClassifyOutput,
-    domain::{ClassificationSource, OTHER_LABEL},
+    domain::ClassificationSource,
 };
 
-/// Uncalibrated placeholder; recalibrate on held-out labelled examples before relying on it.
-pub const AUTO_TRUST_CONFIDENCE: f64 = 0.9;
+/// Labels at or above this confidence are auto-approved. Recalibrate on labelled examples.
+pub const AUTO_TRUST_CONFIDENCE: f64 = 0.8;
 
 pub fn needs_review(c: &ClassifyOutput) -> bool {
     match c.source {
         ClassificationSource::Manual => false,
         ClassificationSource::Fallback => true,
+        // A confident "Other" (newsletters, notifications) needs no human; low confidence
+        // or money-related labels do. Error fallbacks never come through here.
         ClassificationSource::Jev | ClassificationSource::Llm => {
-            c.category == OTHER_LABEL || c.category == "payroll"
-                || c.confidence.is_none_or(|conf| conf < AUTO_TRUST_CONFIDENCE)
+            c.category == "payroll" || c.confidence.is_none_or(|conf| conf < AUTO_TRUST_CONFIDENCE)
         }
     }
 }

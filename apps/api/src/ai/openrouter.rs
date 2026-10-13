@@ -163,11 +163,44 @@ impl Drafter for OpenRouterDrafter {
 pub struct OpenRouterClassifier {
     client: OpenRouterClient,
     model: String,
+    /// Stronger model consulted when the fast one errors or is unsure.
+    escalation_model: Option<String>,
 }
+
+/// Below this, the fast model's answer is checked by the stronger model.
+pub const ESCALATE_BELOW: f64 = 0.75;
 
 impl OpenRouterClassifier {
     pub fn new(client: OpenRouterClient, model: &str) -> Self {
-        Self { client, model: model.into() }
+        Self { client, model: model.into(), escalation_model: None }
+    }
+
+    pub fn with_escalation(mut self, model: &str) -> Self {
+        self.escalation_model = Some(model.to_string()).filter(|m| !m.is_empty() && m != &self.model);
+        self
+    }
+
+    async fn ask(&self, model: &str, input: &ClassifyInput) -> Result<ClassifyOutput, AiError> {
+        let definitions: String =
+            input.labels.iter().map(|l| format!("- {} ({}): {}\n", l.key, l.name, l.description)).collect();
+        let history = input.sender_history.as_deref().map(|h| format!("Sender history: {h}\n")).unwrap_or_default();
+        let user = format!(
+            "Labels:\n{definitions}\n{history}Attachments: {}\n{}",
+            input.attachment_names.join(", "),
+            email_block(&input.subject, &input.body_text)
+        );
+        let (content, model_id) =
+            self.client.chat_json(model, CLASSIFY_SYSTEM_PROMPT, user, "email_label", classify_schema(&input.labels), 120).await?;
+        let (category, priority, requires_reply, confidence) = parse_classification(&content, &input.labels)?;
+        Ok(ClassifyOutput {
+            category,
+            priority,
+            requires_reply,
+            confidence,
+            source: ClassificationSource::Llm,
+            model_id: Some(model_id),
+            model_version: None,
+        })
     }
 }
 
@@ -199,29 +232,24 @@ pub fn parse_classification(raw: &str, labels: &[Label]) -> Result<(String, Prio
 
 #[async_trait]
 impl Classifier for OpenRouterClassifier {
+    /// Fast model first; escalate to the stronger model on error or low confidence.
     async fn classify(&self, input: &ClassifyInput) -> Result<ClassifyOutput, AiError> {
-        let definitions: String =
-            input.labels.iter().map(|l| format!("- {} ({}): {}\n", l.key, l.name, l.description)).collect();
-        let history = input.sender_history.as_deref().map(|h| format!("Sender history: {h}\n")).unwrap_or_default();
-        let user = format!(
-            "Labels:\n{definitions}\n{history}Attachments: {}\n{}",
-            input.attachment_names.join(", "),
-            email_block(&input.subject, &input.body_text)
-        );
-        let (content, model_id) = self
-            .client
-            .chat_json(&self.model, CLASSIFY_SYSTEM_PROMPT, user, "email_label", classify_schema(&input.labels), 120)
-            .await?;
-        let (category, priority, requires_reply, confidence) = parse_classification(&content, &input.labels)?;
-        Ok(ClassifyOutput {
-            category,
-            priority,
-            requires_reply,
-            confidence,
-            source: ClassificationSource::Llm,
-            model_id: Some(model_id),
-            model_version: None,
-        })
+        let first = self.ask(&self.model, input).await;
+        let Some(strong) = &self.escalation_model else { return first };
+        match first {
+            Ok(out) if out.confidence.is_some_and(|c| c >= ESCALATE_BELOW) => Ok(out),
+            Ok(weak) => match self.ask(strong, input).await {
+                Ok(better) => Ok(better),
+                Err(e) => {
+                    tracing::warn!(error = %e, "escalation model failed; keeping fast model's label");
+                    Ok(weak)
+                }
+            },
+            Err(e) => {
+                tracing::warn!(error = %e, "fast model failed; escalating");
+                self.ask(strong, input).await
+            }
+        }
     }
 }
 
