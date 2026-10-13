@@ -8,7 +8,7 @@ import { AppShell } from './AppShell';
 
 const json = (body: unknown) => new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } });
 
-function renderShell(role: 'admin' | 'member') {
+function renderShell(role: 'admin' | 'member', packs?: string[]) {
   vi.stubGlobal(
     'fetch',
     vi.fn((url: string) =>
@@ -16,7 +16,7 @@ function renderShell(role: 'admin' | 'member') {
         url.endsWith('/me')
           ? json({
               user: { id: 'u1', email: 'priya@acme.test', name: 'Priya Sharma' },
-              workspaces: [{ id: 'w1', name: 'Acme Talent', role, created_at: '' }],
+              workspaces: [{ id: 'w1', name: 'Acme Talent', role, created_at: '', ...(packs ? { packs } : {}) }],
               auth_mode: 'password',
             })
           : json({ items: [], pending_count: 0, open_count: 0 }),
@@ -51,11 +51,29 @@ describe('AppShell navigation', () => {
   it('groups the sidebar into Work, Teach and Settings without admin-only items for members', async () => {
     renderShell('member');
     const nav = await screen.findByRole('navigation', { name: 'Main' });
-    expect(itemsOf(nav, 'Work')).toEqual(['Inbox', 'Agents', 'Matching', 'Alerts']);
+    expect(itemsOf(nav, 'Work')).toEqual(['Inbox', 'Agents', 'Alerts']);
+    expect(itemsOf(nav, 'HRMS')).toEqual(['People', 'Performance', 'Timesheets', 'Portal reconciliation', 'Escalations', 'Matching']);
     expect(itemsOf(nav, 'Teach')).toEqual(['Labels', 'Memory', 'Automations']);
     expect(itemsOf(nav, 'Settings')).toEqual(['Integrations', 'Workflows', 'Reviews']);
     expect(within(nav).getByRole('link', { name: 'Inbox' })).toHaveAttribute('aria-current', 'page');
     expect(within(nav).getByRole('link', { name: 'Labels' })).toHaveAttribute('href', '/w/w1/labels');
+  });
+
+  it('shows a generic Team group, with no HR modules, when the HR & recruiting pack is off', async () => {
+    renderShell('member', ['general']);
+    const nav = await screen.findByRole('navigation', { name: 'Main' });
+    expect(itemsOf(nav, 'Team')).toEqual(['People', 'Performance', 'Escalations']);
+    expect(within(nav).queryByRole('list', { name: 'HRMS' })).toBeNull();
+    expect(within(nav).queryByRole('link', { name: 'Matching' })).toBeNull();
+    expect(within(nav).queryByRole('link', { name: 'Timesheets' })).toBeNull();
+  });
+
+  it('puts every HRMS module in one group, with Matching moved under it, when the pack is on', async () => {
+    renderShell('member', ['general', 'staffing']);
+    const nav = await screen.findByRole('navigation', { name: 'Main' });
+    expect(itemsOf(nav, 'HRMS')).toEqual(['People', 'Performance', 'Timesheets', 'Portal reconciliation', 'Escalations', 'Matching']);
+    expect(within(nav).getByRole('link', { name: 'Portal reconciliation' })).toHaveAttribute('href', '/w/w1/portal');
+    expect(within(nav).queryByRole('list', { name: 'Team' })).toBeNull();
   });
 
   it('adds Jobs and AI usage to Settings for admins', async () => {

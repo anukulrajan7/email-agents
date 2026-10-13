@@ -14,10 +14,15 @@ import { AlertsPage } from '../features/alerts/AlertsPage';
 import { AgentsPage } from '../features/agents/AgentsPage';
 import { PacksPage } from '../features/packs/PacksPage';
 import { UsagePage } from '../features/usage/UsagePage';
+import { PeoplePage } from '../features/team/PeoplePage';
+import { PerformancePage } from '../features/team/PerformancePage';
+import { EscalationsPage } from '../features/team/EscalationsPage';
 import { AppShell } from './AppShell';
 
 const IntegrationsPage = lazy(() => import('../features/sources/IntegrationsPage').then((m) => ({ default: m.IntegrationsPage })));
 const MatchingPage = lazy(() => import('../features/matching/MatchingPage').then((m) => ({ default: m.MatchingPage })));
+const TimesheetsPage = lazy(() => import('../features/hrms/TimesheetsPage').then((m) => ({ default: m.TimesheetsPage })));
+const PortalPage = lazy(() => import('../features/hrms/PortalPage').then((m) => ({ default: m.PortalPage })));
 const AutomationsPage = lazy(() => import('../features/automations/AutomationsPage').then((m) => ({ default: m.AutomationsPage })));
 const CaseDetailPage = lazy(() => import('../features/agents/CaseDetailPage').then((m) => ({ default: m.CaseDetailPage })));
 
@@ -35,6 +40,11 @@ export function AppRoutes() {
           <Route path="agents" element={<AgentsPage />} />
           <Route path="agents/:caseId" element={<CaseDetailPage />} />
           <Route path="matching" element={<MatchingPage />} />
+          <Route path="people" element={<PeoplePage />} />
+          <Route path="performance" element={<PerformancePage />} />
+          <Route path="escalations" element={<EscalationsPage />} />
+          <Route path="timesheets" element={<TimesheetsPage />} />
+          <Route path="portal" element={<PortalPage />} />
           <Route path="labels" element={<LabelsPage />} />
           <Route path="reviews" element={<ReviewsPage />} />
           <Route path="alerts" element={<AlertsPage />} />
