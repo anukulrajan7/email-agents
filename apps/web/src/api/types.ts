@@ -370,3 +370,113 @@ export type Match = {
   created_at: string;
   updated_at: string;
 };
+
+// ---------------------------------------------------------------- agent registry (WP-B)
+
+export type Autonomy = 0 | 1 | 2 | 3;
+export type AgentKind = 'lead' | 'system' | 'custom';
+export type AgentScope = 'workspace' | 'personal';
+export type AgentStatus = 'draft' | 'active' | 'paused' | 'archived';
+export type AgentCategory = 'general' | 'support' | 'sales' | 'finance' | 'personal' | 'hrms' | 'custom';
+
+export type SpecMatch = {
+  labels: string[];
+  from_domains: string[];
+  from_addresses: string[];
+  subject_keywords: string[];
+  needs_reply: boolean | null;
+  priority: 'low' | 'normal' | 'high' | null;
+  attachment_types: string[];
+};
+export type SpecTrigger =
+  | { type: 'email_received'; match: SpecMatch }
+  | { type: 'schedule'; every_hours: number }
+  | { type: 'manual' };
+export type SpecStep =
+  | { type: 'extract'; fields: { name: string; type: 'string' | 'number' | 'date' | 'boolean'; description: string }[] }
+  | { type: 'draft_reply'; quality: 'fast' | 'balanced' | 'best' }
+  | { type: 'create_review'; title: string }
+  | { type: 'remind_if_no_reply'; hours: number }
+  | { type: 'save_to_gmail_drafts' }
+  | { type: 'label'; value: string }
+  | { type: 'start_case' }
+  | { type: 'notify'; to: 'owner' | 'team' };
+export type AgentSpec = {
+  name: string;
+  key: string;
+  category: AgentCategory;
+  description: string;
+  goal: string;
+  mode: 'workflow' | 'agent';
+  triggers: SpecTrigger[];
+  steps: SpecStep[];
+  tools: string[];
+  permissions: { draft: boolean; send: 'never' | 'ask' | 'earned'; max_autonomy: Autonomy; daily_send_cap: number };
+  memory: { scope: 'own+shared' | 'own' | 'shared'; learn_from: ('edits' | 'approvals' | 'labels' | 'routes')[] };
+  drafting: { rules: string[]; never_do: string[]; quality_tier: 'fast' | 'balanced' | 'best' };
+  budget: { max_steps: number; usd_per_case: number };
+  questions_for_user: string[];
+  assumptions: string[];
+};
+export type SpecIssue = { path: string; code: string; message: string };
+
+export type AgentSummary = {
+  id: string;
+  key: string;
+  kind: AgentKind;
+  scope: AgentScope;
+  owner_user_id: string | null;
+  category: AgentCategory;
+  name: string;
+  avatar: string;
+  color: string;
+  description: string;
+  status: AgentStatus;
+  paused_reason: string | null;
+  template_key: string | null;
+  tuned: boolean;
+  update_available: boolean;
+  active_version: number | null;
+  autonomy: { earned: Autonomy; cap: Autonomy; effective: Autonomy; limited_by: 'earned' | 'admin_cap' | 'spec' | 'workspace' | 'profile' | 'paused' };
+  today: { routed: number; cases: number; approvals_pending: number; cost_usd: number };
+};
+export type AgentVersionInfo = {
+  version: number;
+  source: 'template' | 'tuned' | 'designer' | 'manual' | 'rollback' | 'backfill';
+  gate_status: 'pending' | 'passed' | 'failed' | 'overridden';
+  note: string | null;
+  spec_hash: string;
+  active: boolean;
+  created_at: string;
+};
+export type AgentDetail = AgentSummary & { spec: AgentSpec; versions: AgentVersionInfo[] };
+export type AgentList = {
+  paused_all: boolean;
+  me: AgentSummary | null;
+  categories: { key: AgentCategory; name: string; agents: AgentSummary[] }[];
+};
+export type AgentTemplateInfo = {
+  key: string;
+  category: AgentCategory;
+  pack: string;
+  version: number;
+  scope: AgentScope;
+  name: string;
+  avatar: string;
+  description: string;
+  mode: 'workflow' | 'agent';
+  max_autonomy: Autonomy;
+  installed: boolean;
+  pack_enabled: boolean;
+  spec: AgentSpec;
+};
+export type VersionDiffEntry = { path: string; before: unknown; after: unknown };
+export type MessageRoute = {
+  agent_id: string;
+  agent_name: string;
+  agent_version: number;
+  source: 'manual' | 'thread' | 'rule' | 'label' | 'personal' | 'generic' | 'fallback';
+  shadow: boolean;
+  created_at: string;
+};
+export type OutgoingItem = { draft_id: string; message_id: string; subject: string; to: string; send_at: string; body_preview: string };

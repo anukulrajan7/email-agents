@@ -748,3 +748,92 @@ async fn judge(&self, context: &str, questions: &[Question]) -> Result<Answers, 
 ```
 Used for: the pre-send review (above); the `important_unanswered` alert gate (non-high-priority candidates only, cached,
 fails open); needs-reply tie-break when the analyst and classifier disagree. Agent critics can call the same API.
+
+## Agents: registry, system agents, routing, autonomy (WP-B)
+
+Many agents per workspace. Contract types live in `src/agent_registry/spec.rs` (`AgentSpec`, `validate_basic`);
+migration `0033_agent_registry.sql` adds `agents`, `agent_versions`, `automation_versions`, `message_routes` and the
+`agent_id` columns on cases, approvals, automations and drafts. Nothing existing is rebuilt.
+
+**Kinds and scopes.** `kind` is `lead` (one per workspace, Meera: routes and is the fallback), `system` (seeded from the
+enabled packs or one per member) or `custom` (created or cloned by an admin). `scope` is `workspace` or `personal`.
+**Every member has exactly one personal agent** (`scope: "personal"`, `owner_user_id`), seeded when they join and
+backfilled for existing members. It works on that member's own mailbox: their profile, preferences and per-user memory.
+A personal agent, its versions, outgoing mail, cases and approvals are **never visible to any other member, admins
+included** (404). Workspace agents (lead, pack desks, HRMS desks) handle workspace-level processes.
+
+**Seeding.** Enabling a pack seeds its desks (idempotent per `(workspace_id, key)`); disabling pauses them with
+`paused_reason: "pack_off"` and re-enabling restores them. Nothing is deleted. Template agents start `active` at level 0
+(observe) except the lead, the Inbox Assistant and personal agents (level 1).
+
+| Pack | Agents (template key) |
+|---|---|
+| general (always) | Lead `general.lead`, Inbox Assistant `general.inbox` |
+| support | Ticket Resolver `support.resolver`, Escalations `support.escalation` |
+| sales | Lead Qualifier `sales.qualifier`, Follow-ups `sales.followups` |
+| finance | Invoices & Payments `finance.invoices` |
+| personal | Scheduling `personal.scheduling` |
+| staffing (category `hrms`) | Leave `hrms.leave`, Timesheets `hrms.timesheets`, Onboarding `hrms.onboarding`, Candidates & Requirements `hrms.requirements`, Payroll queries `hrms.payroll` |
+| every member | Personal agent `personal.mailbox` |
+
+**Routing** (no AI call), `agent_registry::routing::route`, after a message is understood. Precedence:
+1. `manual` (a person reassigned the message with `POST …/route`)
+2. `thread` (an open case or an earlier route in the conversation)
+3. `rule` (a trigger with domains, addresses, keywords, attachment types or priority; ties go to the most specific match, then the oldest agent)
+4. `label` (a trigger with `labels`)
+5. `personal` (mail in a member's own mailbox goes to their personal agent)
+6. `generic` (a trigger with only `needs_reply`, e.g. the Inbox Assistant)
+7. `fallback` (the lead)
+
+Only `active` agents are routed to. An agent at effective level 0 does not take real work: the route is recorded with
+`shadow: true`, an observing (shadow) case runs beside the real handler, and the next candidate at level 1 or more handles the mail.
+
+**Autonomy levels.** Effective level = min(earned `autonomy_level`, admin `autonomy_cap`, spec `max_autonomy`, env
+`AGENT_MAX_AUTONOMY` (default 3), the mailbox owner's profile: `always_ask` means at most 1).
+
+| Level | Name | Behaviour |
+|---|---|---|
+| 0 | Observe | Shadow cases: no `drafts` row is written (the body stays in the step output) and send, submit and task actions are simulated |
+| 1 | Draft | Real drafts. Every send and submission asks a person |
+| 2 | Routine send | `send_email` goes without a person when the fixed rules pass (original sender, same conversation, known contact, no money or decision words, no `[NEEDS]`), the send-safety judge passes and the daily cap allows it |
+| 3 | Autonomous | Level 2 plus replies to any current participant of the conversation and first replies to an inbound sender |
+
+Fixed floor at every level (always asks a person): new recipients, forwards, outgoing attachments, `submit_candidate`,
+`create_automation`, money or decision words, `[NEEDS]`, any `drafting.never_do` hit, and the **injection gate**: inbound
+text in the conversation that contains a tool name (`send_email`, `submit_candidate` …) or an override phrase (`ignore
+previous`, `system:`, `bcc`, `without approval` …) forces approval. Every automatic send at level 2 or more is held for
+`AGENT_AUTO_SEND_DELAY_SECS` (default 600) using the draft's `send_at`; it shows in `GET …/agents/:id/outgoing` and
+**Stop** is `POST …/drafts/:id/undo-send`. The lead keeps today's settings: `PUT …/agent` with `send: "auto"` lifts the
+lead and the personal agents to level 2, any other value caps them at 1.
+
+All routes below need membership of the workspace; reading is `operator`, writing is `admin` unless noted.
+
+| Method | Path | Notes |
+|---|---|---|
+| GET | `/api/v1/workspaces/:ws/agents` | `{ paused_all, me: AgentSummary \| null, categories: [{key, name, agents: AgentSummary[]}] }`. Other members' personal agents are never listed |
+| GET | `/api/v1/workspaces/:ws/agent-templates` | `{ items: [{key, category, pack, version, scope, name, avatar, description, mode, max_autonomy, installed, pack_enabled, spec}] }` |
+| GET | `/api/v1/workspaces/:ws/agents/:id` | `AgentDetail` (summary + `spec` + `versions`). 404 for another workspace's agent or someone else's personal agent |
+| PATCH | `/api/v1/workspaces/:ws/agents/:id` | `{status?: "active"\|"paused"\|"archived", name?, avatar?, color?, autonomy_cap?: 0..3}`. A personal agent's owner may edit it (cap at most the template ceiling); admins cannot. The lead cannot be paused or archived here; 409 for `active` while the agent's pack is off |
+| DELETE | `/api/v1/workspaces/:ws/agents/:id` | `{deleted: true}` for custom agents only; **409** for `lead` and `system` agents (pause or tune them instead) |
+| POST | `/api/v1/workspaces/:ws/agents` | `{spec: AgentSpec, avatar?, color?}` creates a `custom` agent as `draft` at level 0 (version 1, source `manual`). 422 `{issues}` when the spec is invalid; 409 if the key is taken |
+| POST | `/api/v1/workspaces/:ws/agents/:id/clone` | `{name?}` copies the spec into a new `custom` agent (`cloned_from` set) |
+| PUT | `/api/v1/workspaces/:ws/agents/:id/spec` | `{spec, note?}` adds a version (source `tuned` for template agents, else `manual`), activates it and sets `tuned`. A change to tools, permissions, steps or drafting caps the agent at level 1 until it passes the gate |
+| GET | `/api/v1/workspaces/:ws/agents/:id/versions` | `{ items: [{version, source, gate_status, note, spec_hash, active, created_at}] }` |
+| GET | `/api/v1/workspaces/:ws/agents/:id/versions/:v` | `{version, source, gate_status, note, spec, active, created_at}`; `?diff=prev` adds `diff: [{path, before, after}]` against the previous version |
+| POST | `/api/v1/workspaces/:ws/agents/:id/versions/:v/activate` | Rollback or roll forward: copies version `v` as a new version (source `rollback`), activates it and restores its automation pins |
+| POST | `/api/v1/workspaces/:ws/agents/pause-all` | `{paused: boolean}` pauses (reason `pause_all`) or restores every agent of the workspace; running cases wait |
+| GET | `/api/v1/workspaces/:ws/messages/:id/route` | `{message_id, route: {agent_id, agent_name, agent_version, source, shadow, created_at} \| null}` |
+| POST | `/api/v1/workspaces/:ws/messages/:id/route` | operator. `{agent_id}` reassigns the message (source `manual`); audited as `message.route_corrected` |
+| GET | `/api/v1/workspaces/:ws/agents/:id/outgoing` | `{ items: [{draft_id, message_id, subject, to, send_at, body_preview}] }`: automatic sends held for the delay |
+| GET | `/api/v1/workspaces/:ws/cases?agent_id=` | the existing case list, filtered by agent. Cases have `agent_id`, `agent` (badge) and `shadow` |
+
+```ts
+interface AgentSummary { id; key; kind: 'lead'|'system'|'custom'; scope: 'workspace'|'personal'; owner_user_id: string|null; category;
+  name; avatar; color; description; status: 'draft'|'active'|'paused'|'archived'; paused_reason: string|null;
+  template_key: string|null; tuned: boolean; update_available: boolean; active_version: number|null;
+  autonomy: { earned: Autonomy; cap: Autonomy; effective: Autonomy; limited_by: 'earned'|'admin_cap'|'spec'|'workspace'|'profile'|'paused' };
+  today: { routed: number; cases: number; approvals_pending: number; cost_usd: number } }
+```
+
+Tenancy: `agents::case::get_in` is the only case lookup and always takes the workspace; job payloads carry it too.
+Another workspace's case, approval, agent, version or route id is a 404 on every route above and on the existing case and approval routes.
