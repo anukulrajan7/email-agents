@@ -152,8 +152,12 @@ pub async fn create(
         },
     )
     .await?;
+    let rechecked = recheck_other_mail(&mut tx, &ws, &id).await?;
     let row: Label = sqlx::query_as(&format!("{LABEL_SELECT} WHERE l.id = ?1")).bind(&id).fetch_one(&mut *tx).await?;
     tx.commit().await?;
+    if rechecked > 0 {
+        state.jobs_notify.notify_one();
+    }
     Ok((StatusCode::CREATED, Json(row)))
 }
 
@@ -298,4 +302,36 @@ pub async fn suggest(State(state): State<AppState>, user: AuthUser, Path(ws): Pa
         AppError::AiUnavailable
     })?;
     Ok(Json(json!({ "items": finalize(proposals, &taken, samples.len()) })))
+}
+
+/// How many recent "other" emails a new label re-checks (each one is a model call).
+const RECHECK_LIMIT: i64 = 100;
+
+/// A new label may fit mail that was filed under "other" before it existed: re-classify the
+/// most recent inbound ones (last 30 days). People's own label choices are never touched.
+async fn recheck_other_mail(conn: &mut sqlx::SqliteConnection, ws: &str, label_id: &str) -> sqlx::Result<usize> {
+    let since = now_ms() - 30 * 24 * 3_600_000;
+    let ids: Vec<String> = sqlx::query_scalar(
+        "SELECT m.id FROM email_messages m JOIN classifications c ON c.message_id = m.id
+         WHERE m.workspace_id = ?1 AND m.direction = 'inbound' AND m.received_at >= ?2
+           AND c.category = ?3 AND c.source != 'manual'
+         ORDER BY m.received_at DESC LIMIT ?4",
+    )
+    .bind(ws)
+    .bind(since)
+    .bind(OTHER_LABEL)
+    .bind(RECHECK_LIMIT)
+    .fetch_all(&mut *conn)
+    .await?;
+    for id in &ids {
+        crate::jobs::enqueue(
+            &mut *conn,
+            crate::jobs::kind::CLASSIFY_EMAIL,
+            &format!("classify:{id}:{}:label:{label_id}", crate::domain::TAXONOMY_VERSION),
+            Some(ws),
+            &json!({ "message_id": id }),
+        )
+        .await?;
+    }
+    Ok(ids.len())
 }

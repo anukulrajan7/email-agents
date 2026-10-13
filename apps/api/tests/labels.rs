@@ -138,3 +138,31 @@ async fn workflow_setup_adds_label_and_approve_clears_review() {
     let (_, runs) = call(&app, "GET", &format!("{base}/workflow-runs"), ADMIN, None).await;
     assert_eq!(runs["items"].as_array().unwrap().len(), 1);
 }
+
+#[tokio::test]
+async fn new_label_rechecks_recent_other_mail_but_not_manual_choices() {
+    let (state, app, _d) = setup().await;
+    let (_, ws) = call(&app, "POST", "/api/v1/workspaces", ADMIN, Some(json!({"name":"Ops","template":"general"}))).await;
+    let base = format!("/api/v1/workspaces/{}", ws["id"].as_str().unwrap());
+    let (_, src) = call(&app, "POST", &format!("{base}/sources/forwarding"), ADMIN, None).await;
+    let test_email = format!("{base}/sources/{}/test-email", src["id"].as_str().unwrap());
+    for subject in ["Sponsor our tech meetup", "Conference booth for TechConf"] {
+        call(&app, "POST", &test_email, ADMIN, Some(json!({"from":"events@meetup.test","subject":subject,"body_text":"We would love to see your team there."}))).await;
+    }
+    worker::drain(&state).await;
+    let (_, msgs) = call(&app, "GET", &format!("{base}/messages"), ADMIN, None).await;
+    let items = msgs["items"].as_array().unwrap();
+    assert!(items.iter().all(|m| m["category"] == "other"), "no events label yet: {:?}", items.iter().map(|m| (m["subject"].clone(), m["category"].clone())).collect::<Vec<_>>());
+    // A person files one of them by hand: that choice must survive.
+    let manual = items[0]["id"].as_str().unwrap();
+    sqlx::query("UPDATE classifications SET source = 'manual' WHERE message_id = ?1").bind(manual).execute(&state.db).await.unwrap();
+
+    let (s, _) = call(&app, "POST", &format!("{base}/labels"), ADMIN,
+        Some(json!({"name":"Events","description":"Meetups, conferences and sponsorship requests"}))).await;
+    assert_eq!(s, StatusCode::CREATED);
+    let queued: Vec<String> = sqlx::query_scalar("SELECT dedupe_key FROM jobs WHERE dedupe_key LIKE 'classify:%:label:%'")
+        .fetch_all(&state.db).await.unwrap();
+    assert_eq!(queued.len(), 1, "only the non-manual 'other' email is re-checked: {queued:?}");
+    assert!(!queued[0].contains(manual));
+    worker::drain(&state).await;
+}
