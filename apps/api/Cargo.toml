@@ -16,7 +16,7 @@ ammonia = "4"
 anyhow = "1"
 argon2 = { version = "0.5", features = ["std"] }
 async-trait = "0.1"
-axum = { version = "0.8", features = ["macros"] }
+axum = { version = "0.8", features = ["macros", "multipart"] }
 base64 = "0.22"
 dotenvy = "0.15"
 hmac = "0.12"
@@ -26,7 +26,7 @@ libsqlite3-sys = "0.30"
 pdf-extract = "0.9"
 rand = "0.8"
 regex = "1"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"

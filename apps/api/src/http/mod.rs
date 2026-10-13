@@ -2,6 +2,7 @@ mod agent_profiles_api;
 mod ai_usage_api;
 mod agents_api;
 mod alerts_api;
+mod assistant_api;
 mod auth_api;
 mod automations_api;
 mod dto;
@@ -74,6 +75,10 @@ pub struct AppState {
     pub critic: Arc<dyn crate::agents::critic::Critic>,
     /// Cheap typed decisions (yes/no, choice, score); see `ai::judge`.
     pub judge: Arc<dyn crate::ai::judge::Judge>,
+    /// Answers voice/chat commands with a bounded tool loop; actions wait for confirmation.
+    pub assistant_planner: Arc<dyn crate::assistant::CommandPlanner>,
+    /// Speech to text for the assistant's push-to-talk.
+    pub transcriber: Arc<dyn crate::assistant::transcribe::Transcriber>,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -145,6 +150,7 @@ pub fn router(state: AppState) -> Router {
         .merge(automations_api::routes())
         .merge(agents_api::routes())
         .merge(agent_profiles_api::routes())
+        .merge(assistant_api::routes())
         .fallback(|| async { AppError::NotFound })
         .layer(middleware::from_fn(crate::ai_ledger::attach_context))
         .layer(DefaultBodyLimit::max(256 * 1024));

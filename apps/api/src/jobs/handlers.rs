@@ -644,7 +644,7 @@ async fn generate_draft(state: &AppState, job: &Job, payload: &Value) -> Result<
     let by_person = job.dedupe_key.contains(":manual:");
     let generated = match automation_draft {
         Some(_) => None,
-        None => Some(compose_draft(state, &message_id, &msg, insight, None, requested, !by_person).await?),
+        None => Some(compose_draft(state, &message_id, &msg, insight, payload.get("instructions").and_then(Value::as_str), requested, !by_person).await?),
     };
     if let Some((out, _, _)) = &generated
         && out.body_text.trim().is_empty()

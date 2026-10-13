@@ -251,6 +251,7 @@ pub fn task_label(task: &str) -> &'static str {
         "embed" => "Search",
         "suggest_labels" => "Label suggestions",
         t if t.starts_with("agent_") => "Agents",
+        t if t.starts_with("assistant_") => "Assistant",
         _ => "Other",
     }
 }

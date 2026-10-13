@@ -3,6 +3,7 @@ pub mod agents;
 pub mod ai;
 pub mod ai_ledger;
 pub mod alerts;
+pub mod assistant;
 pub mod audit;
 pub mod automations;
 pub mod auth;
@@ -194,6 +195,30 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
         }
     };
 
+    // The command assistant: the planner model with its own tool set, plus speech to text.
+    let assistant_planner: Arc<dyn assistant::CommandPlanner> = match &openrouter {
+        Some(client) if !config.openrouter_planner_model_id.is_empty() => Arc::new(assistant::OpenRouterCommandPlanner::new(
+            client.with_task("assistant_plan"),
+            &config.openrouter_planner_model_id,
+        )),
+        _ => Arc::new(assistant::DisabledCommandPlanner),
+    };
+    let transcriber: Arc<dyn assistant::transcribe::Transcriber> =
+        if openrouter.is_some() && !config.openrouter_audio_model_id.is_empty() {
+            Arc::new(
+                assistant::transcribe::OpenRouterTranscriber::new(
+                    http.clone(),
+                    &config.openrouter_api_url,
+                    &config.openrouter_api_key,
+                    &config.openrouter_audio_model_id,
+                )
+                .with_ledger(db.clone()),
+            )
+        } else {
+            tracing::warn!("no speech model configured: voice input is off");
+            Arc::new(assistant::transcribe::UnavailableTranscriber)
+        };
+
     // Typed decisions: Jev if configured, else the efficient OpenRouter model, else none (callers fail open).
     let judge: Arc<dyn ai::judge::Judge> = match &openrouter {
         _ if !config.typesafe_api_key.is_empty() => Arc::new(ai::judge::JevJudge::new(
@@ -210,6 +235,8 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
     };
 
     Ok(AppState {
+        assistant_planner,
+        transcriber,
         planner,
         critic,
         judge,

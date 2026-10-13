@@ -4,6 +4,7 @@ import { useLogout, useMe } from '../features/auth/hooks';
 import { AlertsBadge } from '../features/alerts/AlertsBadge';
 import { AgentsBadge } from '../features/agents/AgentsBadge';
 import { OnboardingPrompt } from '../features/agents/OnboardingPrompt';
+import { AskMeera } from '../features/assistant/AskMeera';
 import { Button, Dialog, EmptyState, Skeleton, SkeletonList, Spinner } from '../components/ui';
 import { cn } from '../lib/cn';
 import { riseStyle } from '../lib/motion';
@@ -186,6 +187,7 @@ export function AppShell() {
         </main>
       </div>
       <OnboardingPrompt ws={ws} />
+      <AskMeera ws={ws} />
       {menuOpen && (
         <Dialog title="Menu" variant="drawer" side="left" onClose={() => setMenuOpen(false)} className="gap-6 bg-paper">
           <Button variant="ghost" size="sm" className="self-start" onClick={() => setMenuOpen(false)}>

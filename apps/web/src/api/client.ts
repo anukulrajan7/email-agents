@@ -61,12 +61,13 @@ export async function api<T>(path: string, opts: RequestOptions = {}): Promise<T
   const token = getToken();
   // Not `Authorization`: a reverse-proxy password gate may own that header.
   if (token) headers['X-Auth-Token'] = token;
-  if (opts.body !== undefined) headers['Content-Type'] = 'application/json';
+  const isForm = opts.body instanceof FormData;
+  if (opts.body !== undefined && !isForm) headers['Content-Type'] = 'application/json';
 
   const res = await fetch(buildUrl(path, opts.query), {
     method: opts.method ?? 'GET',
     headers,
-    body: opts.body === undefined ? undefined : JSON.stringify(opts.body),
+    body: opts.body === undefined ? undefined : isForm ? (opts.body as FormData) : JSON.stringify(opts.body),
   });
 
   if (!res.ok) {
