@@ -33,7 +33,7 @@ str_enum!(Priority { Low => "low", Normal => "normal", High => "high" });
 
 str_enum!(Role { Admin => "admin", Operator => "operator" });
 
-str_enum!(ClassificationSource { Jev => "jev", Manual => "manual", Fallback => "fallback" });
+str_enum!(ClassificationSource { Jev => "jev", Llm => "llm", Manual => "manual", Fallback => "fallback" });
 
 impl Category {
     /// Plain-language definition, also used as the Jev choice criteria.

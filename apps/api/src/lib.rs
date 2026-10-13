@@ -15,7 +15,11 @@ use std::{sync::Arc, time::Duration};
 use tokio::sync::Notify;
 
 use crate::{
-    ai::{Classifier, Drafter, fallback, jev::JevClassifier, openrouter::OpenRouterDrafter},
+    ai::{
+        Classifier, Drafter, fallback,
+        jev::JevClassifier,
+        openrouter::{OpenRouterClassifier, OpenRouterClient, OpenRouterDrafter},
+    },
     auth::Authenticator,
     config::Config,
     http::AppState,
@@ -32,22 +36,32 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
         .user_agent("email-ai-api/0.1")
         .build()?;
 
-    let classifier: Arc<dyn Classifier> = if config.typesafe_api_key.is_empty() {
-        tracing::warn!("TYPESAFE_API_KEY not set: using rules-based fallback classifier");
-        Arc::new(fallback::RulesClassifier)
-    } else {
-        Arc::new(JevClassifier::new(http.clone(), &config.jev_api_url, &config.typesafe_api_key, &config.jev_model_id))
+    let openrouter = (!config.openrouter_api_key.is_empty())
+        .then(|| OpenRouterClient::new(http.clone(), &config.openrouter_api_url, &config.openrouter_api_key));
+
+    // Jev if configured, else an efficient OpenRouter model, else keyword rules.
+    let classifier: Arc<dyn Classifier> = match (&openrouter, config.typesafe_api_key.is_empty()) {
+        (_, false) => {
+            Arc::new(JevClassifier::new(http.clone(), &config.jev_api_url, &config.typesafe_api_key, &config.jev_model_id))
+        }
+        (Some(client), true) if !config.openrouter_classifier_model_id.is_empty() => {
+            tracing::info!(model = %config.openrouter_classifier_model_id, "classifying with OpenRouter");
+            Arc::new(OpenRouterClassifier::new(client.clone(), &config.openrouter_classifier_model_id))
+        }
+        _ => {
+            tracing::warn!("no classifier model configured: using rules-based fallback classifier");
+            Arc::new(fallback::RulesClassifier)
+        }
     };
-    let drafter: Arc<dyn Drafter> = if config.openrouter_api_key.is_empty() || config.openrouter_model_id.is_empty() {
-        tracing::warn!("OPENROUTER_API_KEY/OPENROUTER_MODEL_ID not set: using template drafts");
-        Arc::new(fallback::TemplateDrafter)
-    } else {
-        Arc::new(OpenRouterDrafter::new(
-            http.clone(),
-            &config.openrouter_api_url,
-            &config.openrouter_api_key,
-            &config.openrouter_model_id,
-        ))
+    let drafter: Arc<dyn Drafter> = match &openrouter {
+        Some(client) if !config.openrouter_model_id.is_empty() => {
+            tracing::info!(model = %config.openrouter_model_id, "drafting with OpenRouter");
+            Arc::new(OpenRouterDrafter::new(client.clone(), &config.openrouter_model_id))
+        }
+        _ => {
+            tracing::warn!("OPENROUTER_API_KEY/OPENROUTER_MODEL_ID not set: using template drafts");
+            Arc::new(fallback::TemplateDrafter)
+        }
     };
 
     Ok(AppState {

@@ -12,7 +12,7 @@ pub fn needs_review(c: &ClassifyOutput) -> bool {
     match c.source {
         ClassificationSource::Manual => false,
         ClassificationSource::Fallback => true,
-        ClassificationSource::Jev => {
+        ClassificationSource::Jev | ClassificationSource::Llm => {
             matches!(c.category, Category::Other | Category::Payroll)
                 || c.confidence.is_none_or(|conf| conf < AUTO_TRUST_CONFIDENCE)
         }

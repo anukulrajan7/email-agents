@@ -11,7 +11,7 @@ export type Category =
   | 'general'
   | 'other';
 export type Priority = 'low' | 'normal' | 'high';
-export type ClassSource = 'jev' | 'manual' | 'fallback';
+export type ClassSource = 'jev' | 'llm' | 'manual' | 'fallback';
 export type DraftStatus = 'suggested' | 'edited' | 'approved' | 'sent';
 export type ReviewStatus = 'open' | 'closed';
 export type RunStatus = 'running' | 'completed' | 'failed' | 'skipped';

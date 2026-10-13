@@ -306,7 +306,7 @@ pub async fn persist_classification(
     .bind(&out.model_id)
     .bind(&out.model_version)
     .bind(TAXONOMY_VERSION)
-    .bind(matches!(out.source, ClassificationSource::Jev).then_some(ai::PROMPT_VERSION))
+    .bind(matches!(out.source, ClassificationSource::Jev | ClassificationSource::Llm).then_some(ai::PROMPT_VERSION))
     .bind(now)
     .execute(&mut *tx)
     .await?
