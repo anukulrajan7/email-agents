@@ -19,35 +19,85 @@ macro_rules! str_enum {
     };
 }
 
-str_enum!(Category {
-    Timesheet => "timesheet",
-    Leave => "leave",
-    CandidateReferral => "candidate_referral",
-    Approval => "approval",
-    Payroll => "payroll",
-    General => "general",
-    Other => "other",
-});
-
 str_enum!(Priority { Low => "low", Normal => "normal", High => "high" });
 
 str_enum!(Role { Admin => "admin", Operator => "operator" });
 
 str_enum!(ClassificationSource { Jev => "jev", Llm => "llm", Manual => "manual", Fallback => "fallback" });
 
-impl Category {
-    /// Plain-language definition, also used as the Jev choice criteria.
-    pub fn description(self) -> &'static str {
-        match self {
-            Category::Timesheet => "An employee or contractor submits, corrects or asks about a timesheet or hours worked.",
-            Category::Leave => "A request, approval or question about leave, vacation, sick days or time off.",
-            Category::CandidateReferral => "Someone refers or recommends a job candidate, or sends a CV for a referral.",
-            Category::Approval => "A request for a manager or HR approval that is not leave or timesheet related.",
-            Category::Payroll => "Salary, payslips, reimbursements, tax forms or payment issues.",
-            Category::General => "A legitimate HR question or notice that fits no specific category above.",
-            Category::Other => "Spam, newsletters, automated notifications or anything not HR related.",
-        }
-    }
+/// The always-present fallback label. It cannot be archived.
+pub const OTHER_LABEL: &str = "other";
+
+/// A workspace label as the AI and the UI see it. `description` is both help text for
+/// people and the instruction given to the classifier.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Label {
+    pub key: String,
+    pub name: String,
+    pub description: String,
+}
+
+pub struct LabelSeed {
+    pub key: &'static str,
+    pub name: &'static str,
+    pub description: &'static str,
+    pub color: &'static str,
+}
+
+pub struct LabelTemplate {
+    pub key: &'static str,
+    pub name: &'static str,
+    pub description: &'static str,
+    pub labels: &'static [LabelSeed],
+}
+
+const OTHER_SEED: LabelSeed = LabelSeed {
+    key: OTHER_LABEL,
+    name: "Other",
+    description: "Spam, newsletters, automated notifications, or anything that fits no other label.",
+    color: "rule",
+};
+
+pub const LABEL_TEMPLATES: &[LabelTemplate] = &[
+    LabelTemplate {
+        key: "hr",
+        name: "HR operations",
+        description: "Timesheets, leave, referrals, approvals and payroll for an HR team inbox.",
+        labels: &[
+            LabelSeed { key: "timesheet", name: "Timesheet", description: "An employee or contractor submits, corrects or asks about a timesheet or hours worked.", color: "slate" },
+            LabelSeed { key: "leave", name: "Leave", description: "A request, approval or question about leave, vacation, sick days or time off.", color: "sage" },
+            LabelSeed { key: "candidate_referral", name: "Candidate referral", description: "Someone refers or recommends a job candidate, or sends a CV for a referral.", color: "plum" },
+            LabelSeed { key: "approval", name: "Approval", description: "A request for a manager or HR approval that is not leave or timesheet related.", color: "ochre" },
+            LabelSeed { key: "payroll", name: "Payroll", description: "Salary, payslips, reimbursements, tax forms or payment issues.", color: "teal" },
+            LabelSeed { key: "general", name: "General HR", description: "A legitimate HR question or notice that fits no specific label above.", color: "ink" },
+            OTHER_SEED,
+        ],
+    },
+    LabelTemplate {
+        key: "general",
+        name: "General inbox",
+        description: "A business inbox: things to act on, questions, customers, leads, billing and noise.",
+        labels: &[
+            LabelSeed { key: "action_required", name: "Action required", description: "The sender is waiting for us to do something specific: approve, sign, send, decide or fix.", color: "postmark" },
+            LabelSeed { key: "question", name: "Question", description: "Someone asks a question that needs an answer but no other action.", color: "slate" },
+            LabelSeed { key: "customer_support", name: "Customer support", description: "A customer reports a problem, complaint or needs help with our product or service.", color: "plum" },
+            LabelSeed { key: "sales_lead", name: "Sales lead", description: "A potential customer asks about pricing, a demo, a quote or buying from us.", color: "sage" },
+            LabelSeed { key: "billing", name: "Billing", description: "Invoices, receipts, payment reminders, refunds or subscription changes.", color: "teal" },
+            LabelSeed { key: "scheduling", name: "Scheduling", description: "Meeting requests, calendar invites, reschedules or availability questions.", color: "ochre" },
+            LabelSeed { key: "fyi", name: "FYI", description: "Updates or announcements worth reading that need no reply.", color: "ink" },
+            OTHER_SEED,
+        ],
+    },
+    LabelTemplate {
+        key: "blank",
+        name: "Start blank",
+        description: "Only the Other label. Add your own labels with descriptions.",
+        labels: &[OTHER_SEED],
+    },
+];
+
+pub fn label_template(key: &str) -> Option<&'static LabelTemplate> {
+    LABEL_TEMPLATES.iter().find(|t| t.key == key)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -93,10 +143,11 @@ pub struct WorkflowTemplate {
     pub key: &'static str,
     pub name: &'static str,
     pub description: &'static str,
-    pub category: Category,
+    /// Label key this workflow runs on.
+    pub label_key: &'static str,
     pub review_kind: &'static str,
     pub review_title: &'static str,
-    /// P0 ships only the timesheet template; others are visible but cannot be enabled yet.
+    /// Whether the template is implemented. It also needs its label to be active.
     pub available: bool,
 }
 
@@ -104,8 +155,8 @@ pub const WORKFLOW_TEMPLATES: &[WorkflowTemplate] = &[
     WorkflowTemplate {
         key: "timesheet_review",
         name: "Timesheet review",
-        description: "When an email is classified as a timesheet, create a review item and an acknowledgement draft. Nothing is sent.",
-        category: Category::Timesheet,
+        description: "When an email is labelled Timesheet, create a review item and an acknowledgement draft. Nothing is sent.",
+        label_key: "timesheet",
         review_kind: "check_timesheet",
         review_title: "Check submitted timesheet",
         available: true,
@@ -113,20 +164,20 @@ pub const WORKFLOW_TEMPLATES: &[WorkflowTemplate] = &[
     WorkflowTemplate {
         key: "leave_request",
         name: "Leave request",
-        description: "Create a leave review item and an acknowledgement draft.",
-        category: Category::Leave,
+        description: "When an email is labelled Leave, create a review item and an acknowledgement draft. Nothing is sent.",
+        label_key: "leave",
         review_kind: "check_leave_request",
         review_title: "Review leave request",
-        available: false,
+        available: true,
     },
     WorkflowTemplate {
         key: "candidate_referral",
         name: "Candidate referral",
-        description: "Create a referral review item and a thank-you draft.",
-        category: Category::CandidateReferral,
+        description: "When an email is labelled Candidate referral, create a review item and a thank-you draft. Nothing is sent.",
+        label_key: "candidate_referral",
         review_kind: "check_referral",
         review_title: "Review candidate referral",
-        available: false,
+        available: true,
     },
 ];
 

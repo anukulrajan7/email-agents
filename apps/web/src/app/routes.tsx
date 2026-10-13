@@ -7,6 +7,7 @@ import { IntegrationsPage } from '../features/sources/IntegrationsPage';
 import { ReviewsPage } from '../features/reviews/ReviewsPage';
 import { WorkflowsPage } from '../features/workflows/WorkflowsPage';
 import { JobsPage } from '../features/jobs/JobsPage';
+import { LabelsPage } from '../features/labels/LabelsPage';
 import { MemoryPage } from '../features/memory/MemoryPage';
 import { ContactPage } from '../features/memory/ContactPage';
 import { AppShell } from './AppShell';
@@ -14,13 +15,15 @@ import { AppShell } from './AppShell';
 export function AppRoutes() {
   return (
     <Routes>
-      <Route path="/sign-in" element={<SignInPage />} />
+      <Route path="/sign-in" element={<SignInPage mode="sign-in" />} />
+      <Route path="/sign-up" element={<SignInPage mode="sign-up" />} />
       <Route element={<RequireAuth />}>
         <Route path="/workspaces" element={<WorkspacesPage />} />
         <Route path="/w/:ws" element={<AppShell />}>
           <Route index element={<Navigate to="inbox" replace />} />
           <Route path="inbox" element={<InboxPage />} />
           <Route path="inbox/:messageId" element={<InboxPage />} />
+          <Route path="labels" element={<LabelsPage />} />
           <Route path="reviews" element={<ReviewsPage />} />
           <Route path="memory" element={<MemoryPage />} />
           <Route path="memory/contacts/:email" element={<ContactPage />} />

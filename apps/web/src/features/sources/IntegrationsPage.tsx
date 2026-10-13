@@ -1,7 +1,7 @@
 import { useState, type CSSProperties, type ReactNode } from 'react';
 import { ApiError } from '../../api/client';
 import type { Source } from '../../api/types';
-import { Badge, Button, Card, CardTitle, Mono, PageHeader, Spinner } from '../../components/ui';
+import { Badge, Button, Card, CardTitle, Mono, PageHeader, Spinner, Page } from '../../components/ui';
 import { riseStyle } from '../../lib/motion';
 import { ErrorNote } from '../../components/ErrorNote';
 import { StatusBadge } from '../../components/StatusBadges';
@@ -293,18 +293,18 @@ export function IntegrationsPage() {
   const gmail = gmailSources.find((s) => s.status !== 'disconnected') ?? gmailSources.at(-1);
 
   return (
-    <div className="mx-auto flex max-w-5xl flex-col gap-8 px-10 py-10">
-      <PageHeader kicker="Postal services" title="Integrations" description="Choose how emails reach this workspace." />
+    <Page>
+      <PageHeader kicker="Postal services" title="Integrations" description="Where your email comes from. Connect a mailbox or forward mail to a private address." />
       {sources.isLoading && <Spinner />}
       <ErrorNote error={sources.error} />
       {sources.data && (
-        <div className="grid items-start gap-6 md:grid-cols-2">
+        <div className="grid items-start gap-6 md:grid-cols-2 2xl:grid-cols-3">
           <ForwardingCard ws={ws} source={forwarding} isAdmin={isAdmin} style={riseStyle(1)} />
           <GmailCard ws={ws} source={gmail} isAdmin={isAdmin} style={riseStyle(2)} />
           <MicrosoftCard style={riseStyle(3)} />
           <MoreSourcesCard style={riseStyle(4)} />
         </div>
       )}
-    </div>
+    </Page>
   );
 }

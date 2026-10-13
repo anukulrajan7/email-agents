@@ -1,26 +1,30 @@
 import { useState } from 'react';
-import type { Category, Classification, Priority } from '../../api/types';
-import { Badge, Button, Label, Select, Stamp } from '../../components/ui';
+import type { Classification, Priority } from '../../api/types';
+import { Badge, Button, Label, Select } from '../../components/ui';
 import { ErrorNote } from '../../components/ErrorNote';
 import { humanize } from '../../lib/format';
+import { LabelStamp } from '../labels/LabelStamp';
+import { useLabelMap, useLabels } from '../labels/hooks';
 import { useUpdateClassification } from './hooks';
-import { categories } from './MessageList';
 
 const priorities: Priority[] = ['low', 'normal', 'high'];
 
 function Editor({ ws, messageId, classification }: { ws: string; messageId: string; classification: Classification | null }) {
-  const [category, setCategory] = useState<Category>(classification?.category ?? 'general');
+  const labels = useLabels(ws, { includeArchived: false });
+  const [category, setCategory] = useState<string>(classification?.category ?? 'other');
   const [priority, setPriority] = useState<Priority>(classification?.priority ?? 'normal');
   const update = useUpdateClassification(ws, messageId);
+  const items = labels.data?.items ?? [];
 
   return (
     <div className="mt-4 flex flex-wrap items-end gap-3">
       <div className="flex flex-col gap-1">
-        <Label htmlFor="cls-category">Category</Label>
-        <Select id="cls-category" value={category} onChange={(e) => setCategory(e.target.value as Category)} className="w-48">
-          {categories.map((c) => (
-            <option key={c} value={c}>
-              {humanize(c)}
+        <Label htmlFor="cls-category">Label</Label>
+        <Select id="cls-category" value={category} onChange={(e) => setCategory(e.target.value)} className="w-48">
+          {items.length > 0 && !items.some((l) => l.key === category) && <option value={category}>{category}</option>}
+          {items.map((l) => (
+            <option key={l.id} value={l.key}>
+              {l.name}
             </option>
           ))}
         </Select>
@@ -46,23 +50,54 @@ function Editor({ ws, messageId, classification }: { ws: string; messageId: stri
   );
 }
 
+function Explanation({ classification, labelName }: { classification: Classification; labelName: string }) {
+  const pct = classification.confidence === null ? undefined : Math.round(classification.confidence * 100);
+  const strong = <strong>{labelName}</strong>;
+  if (classification.source === 'manual') {
+    return <p>Labelled {strong} by you.</p>;
+  }
+  if (classification.source === 'llm' || classification.source === 'jev') {
+    const detail = [classification.model_id, pct === undefined ? undefined : `${pct}% sure`].filter(Boolean).join(', ');
+    return (
+      <p>
+        Labelled {strong} by AI{detail ? ` (${detail})` : ''}.
+        {classification.needs_review && " Needs review because the AI wasn't confident enough."}
+      </p>
+    );
+  }
+  if (classification.model_id === 'error-fallback') {
+    return <p>The AI couldn&apos;t label this email after several tries, so it was put in {strong} for a person to check.</p>;
+  }
+  return (
+    <p>
+      Labelled {strong} by keyword rules (no AI configured) — please check.
+      {classification.needs_review && ' Needs review.'}
+    </p>
+  );
+}
+
 export function ClassificationPanel({ ws, messageId, classification }: { ws: string; messageId: string; classification: Classification | null }) {
+  const label = useLabelMap(ws).get(classification?.category ?? '');
   return (
     <section aria-labelledby="cls-heading">
       <h3 id="cls-heading" className="kicker">
-        Classification
+        Label
       </h3>
       {classification ? (
-        <div className="mt-3 flex flex-wrap items-center gap-2 text-sm">
-          <Stamp category={classification.category} />
-          <Badge>Source: {classification.source}</Badge>
-          <Badge>
-            Confidence: {classification.confidence === null ? 'n/a' : `${Math.round(classification.confidence * 100)}%`}
-          </Badge>
-          {classification.needs_review && <Badge tone="warning">Needs review</Badge>}
+        <div className="mt-3 flex flex-col gap-2 text-sm">
+          <div className="flex flex-wrap items-center gap-2">
+            <LabelStamp ws={ws} category={classification.category} />
+            {classification.needs_review && <Badge tone="warning">Needs review</Badge>}
+          </div>
+          <Explanation classification={classification} labelName={label?.name ?? classification.category} />
+          {label && (
+            <p className="text-ink-muted">
+              <span className="font-semibold text-ink">What this label means:</span> {label.description}
+            </p>
+          )}
         </div>
       ) : (
-        <p className="mt-2 text-sm text-ink-muted">Not classified yet. You can set a category manually.</p>
+        <p className="mt-2 text-sm text-ink-muted">Not labelled yet. The AI labels each email shortly after it arrives, or you can pick a label yourself.</p>
       )}
       <Editor key={classification?.updated_at ?? 'none'} ws={ws} messageId={messageId} classification={classification} />
     </section>

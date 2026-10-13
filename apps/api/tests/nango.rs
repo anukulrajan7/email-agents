@@ -220,12 +220,13 @@ async fn gmail_connect_backfill_and_incremental_sync() {
     let (_, list) = h.call("GET", &format!("/api/v1/workspaces/{ws}/messages?category=leave"), ADMIN, None).await;
     assert_eq!(list["items"].as_array().unwrap().len(), 2);
 
-    // Manual sync resumes from the cursor: only m4 is new; it is a timesheet → workflow runs.
+    // Manual sync resumes from the cursor: only m4 is new; it is a timesheet → its workflow runs too.
     let (s, _) = h.call("POST", &format!("{base}/{src_id}/sync"), ADMIN, None).await;
     assert_eq!(s, StatusCode::ACCEPTED);
     worker::drain(&h.state).await;
     assert_eq!(h.count("SELECT COUNT(*) FROM email_messages").await, 3);
-    assert_eq!(h.count("SELECT COUNT(*) FROM review_items").await, 1);
+    // Two leave emails + one timesheet: each label's workflow creates one review.
+    assert_eq!(h.count("SELECT COUNT(*) FROM review_items").await, 3);
 
     // Signed sync webhook enqueues another (no-op) sync; replay is deduped; bad signature rejected.
     let event = json!({"type":"sync","connectionId":"conn_ok","providerConfigKey":"google-mail","syncName":"emails",

@@ -2,7 +2,7 @@
 
 use crate::{
     ai::ClassifyOutput,
-    domain::{Category, ClassificationSource},
+    domain::{ClassificationSource, OTHER_LABEL},
 };
 
 /// Uncalibrated placeholder; recalibrate on held-out labelled examples before relying on it.
@@ -13,7 +13,7 @@ pub fn needs_review(c: &ClassifyOutput) -> bool {
         ClassificationSource::Manual => false,
         ClassificationSource::Fallback => true,
         ClassificationSource::Jev | ClassificationSource::Llm => {
-            matches!(c.category, Category::Other | Category::Payroll)
+            c.category == OTHER_LABEL || c.category == "payroll"
                 || c.confidence.is_none_or(|conf| conf < AUTO_TRUST_CONFIDENCE)
         }
     }

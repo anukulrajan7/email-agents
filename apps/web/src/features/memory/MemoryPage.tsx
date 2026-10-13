@@ -1,12 +1,13 @@
 import { useState } from 'react';
 import { Link, useNavigate } from 'react-router';
-import { Button, Card, CardTitle, EmptyState, Input, Label, Mono, PageHeader, Spinner, Stamp, Table, Td, Th } from '../../components/ui';
+import { Button, Card, CardTitle, EmptyState, Input, Label, Mono, PageHeader, Spinner, Table, Td, Th, Page } from '../../components/ui';
 import { ErrorNote } from '../../components/ErrorNote';
 import { useWorkspace } from '../../app/useWorkspace';
 import { useDebounced } from '../../lib/useDebounced';
 import { relativeTime } from '../../lib/format';
 import { riseStyle } from '../../lib/motion';
 import { useContacts, useMemories, useUpdateMemory } from './hooks';
+import { LabelStamp } from '../labels/LabelStamp';
 import { KindBadge, MemoryForm, MemoryItem } from './MemoryParts';
 
 function Suggestions({ ws }: { ws: string }) {
@@ -99,7 +100,7 @@ function TeamNotes({ ws }: { ws: string }) {
       <ErrorNote error={notes.error} />
       {notes.data &&
         (notes.data.items.length === 0 ? (
-          <p className="text-sm text-ink-muted">No team notes yet.</p>
+          <p className="text-sm text-ink-muted">No team notes yet. Add one above, such as how you sign off or which leave policy applies.</p>
         ) : (
           <ul className="divide-y divide-rule border-y border-rule">
             {notes.data.items.map((m) => (
@@ -134,7 +135,7 @@ function Contacts({ ws }: { ws: string }) {
       {contacts.data &&
         (contacts.data.items.length === 0 ? (
           <Card>
-            <EmptyState title="No contacts yet" description="Senders appear here as emails are ingested." />
+            <EmptyState title="No contacts yet" description="Every sender who emails this workspace appears here, with the labels their mail usually gets." />
           </Card>
         ) : (
           <Table>
@@ -142,7 +143,7 @@ function Contacts({ ws }: { ws: string }) {
               <tr>
                 <Th>Contact</Th>
                 <Th>Messages</Th>
-                <Th>Usual categories</Th>
+                <Th>Usual labels</Th>
                 <Th>Last seen</Th>
               </tr>
             </thead>
@@ -165,7 +166,7 @@ function Contacts({ ws }: { ws: string }) {
                   <Td>
                     <span className="flex flex-wrap gap-1">
                       {c.top_categories.map((t) => (
-                        <Stamp key={t.category} category={t.category} />
+                        <LabelStamp key={t.category} ws={ws} category={t.category} />
                       ))}
                     </span>
                   </Td>
@@ -187,11 +188,11 @@ export function MemoryPage() {
   const q = useDebounced(search.trim());
 
   return (
-    <div className="mx-auto flex max-w-5xl flex-col gap-8 px-10 py-10">
+    <Page>
       <PageHeader
         kicker="The ledger of what we know"
         title="Memory"
-        description="Notes the agent uses when classifying and drafting."
+        description="Notes the AI reads before it labels and drafts. Add team rules and sender details here."
         actions={
           <div className="flex flex-col gap-1">
             <Label htmlFor="memory-search">Search memories</Label>
@@ -203,6 +204,6 @@ export function MemoryPage() {
       <Suggestions ws={ws} />
       <TeamNotes ws={ws} />
       <Contacts ws={ws} />
-    </div>
+    </Page>
   );
 }

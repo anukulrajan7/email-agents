@@ -13,7 +13,7 @@ The TypeScript mirror lives in `apps/web/src/api/types.ts` — change both toget
 - Timestamps: RFC 3339 strings (UTC). IDs: opaque strings.
 - Errors: `{ "error": { "code": string, "message": string, "request_id": string } }`.
   Codes: `unauthorized` (401), `forbidden` (403), `not_found` (404), `bad_request` (400), `conflict` (409),
-  `not_implemented` (501), `internal` (500).
+  `not_implemented` (501), `email_not_verified` (403), `rate_limited` (429), `internal` (500).
 
 ## Enums
 
@@ -171,3 +171,69 @@ type Contact = {
 - `contact_memories: Memory[]` — active memories for that sender
 
 `Draft` gains `memories_used: { id: string; content: string }[]` — what the drafter was given.
+
+## Auth: email + password (v1)
+
+`AUTH_MODE=password` (production). `AUTH_MODE=dev` (local only) keeps the `dev:<email>` token. The client always
+sends its token as `X-Auth-Token`. Sessions are opaque random tokens (only a SHA-256 hash is stored), 30-day expiry.
+
+| Method | Path | Auth | Body | Response |
+|---|---|---|---|---|
+| GET | `/api/v1/auth/config` | – | – | `{mode: "password"\|"dev"\|"oidc", signup_enabled: boolean}` |
+| POST | `/api/v1/auth/signup` | – | `{email, password, name?}` | 201 `{token, expires_at, user: {id, email, name}}` |
+| POST | `/api/v1/auth/login` | – | `{email, password}` | `{token, expires_at, user: {id, email, name}}` |
+| POST | `/api/v1/auth/logout` | token | – | 204 (revokes this session) |
+
+Rules and errors:
+- Password 10–128 characters. Email normalized to lowercase. `name` optional, ≤ 100 characters.
+- Signup: 409 `conflict` if the email already has an account; 403 `forbidden` if signup is disabled or the
+  email domain is not in `SIGNUP_ALLOWED_DOMAINS` (when set).
+- Login: always the same 401 `unauthorized` "invalid email or password" (no account enumeration);
+  429 `rate_limited` after too many failed attempts for that email (15-minute window).
+- `GET /api/v1/me` returns `user.name` too, and `auth_mode`.
+
+## Email verification (OTP)
+
+Enabled when SMTP is configured (`SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD`, `SMTP_FROM`).
+Codes are 6 digits, valid 10 minutes, max 5 attempts, stored only as a hash.
+
+| Method | Path | Body | Response |
+|---|---|---|---|
+| POST | `/api/v1/auth/signup` | as before | **202** `{verification_required: true, email}` when verification is on (no token yet); 201 session otherwise |
+| POST | `/api/v1/auth/verify` | `{email, code}` | `{token, expires_at, user}` (signs the user in); 400 `bad_request` "invalid or expired code"; 429 `rate_limited` |
+| POST | `/api/v1/auth/resend-code` | `{email}` | 202 `{status:"sent"}` always (no account enumeration; at most one code per 60 s) |
+| POST | `/api/v1/auth/login` | as before | **403 `email_not_verified`** if the password is right but the email is unverified (a fresh code is sent) |
+
+`GET /api/v1/auth/config` gains `email_verification: boolean`.
+
+## Labels (workspace-defined categories)
+
+Every workspace has its own labels. The AI classifies each email into exactly one active label. A label's
+`description` is both the help text shown to people and the instruction given to the AI, so it should read like
+a brief to a new teammate ("Invoices, receipts and payment reminders from vendors"). The system label `other`
+always exists and cannot be archived.
+
+`Category` in all earlier shapes is now a **label key** (`string`), e.g. `"timesheet"`, `"sales_lead"`, `"other"`.
+
+```ts
+type Label = {
+  id: string; key: string; name: string; description: string;
+  color: "slate" | "sage" | "plum" | "ochre" | "teal" | "postmark" | "ink" | "rule";
+  position: number; system: boolean; archived: boolean;
+  message_count: number;              // messages currently classified with this label
+};
+type LabelTemplate = "hr" | "general" | "blank";
+```
+
+| Method | Path | Role | Body | Response |
+|---|---|---|---|---|
+| GET | `/api/v1/label-templates` | any | – | `{items: {key: LabelTemplate, name, description, labels: {key,name,description}[]}[]}` |
+| POST | `/api/v1/workspaces` | any | `{name, template?: LabelTemplate}` (default `"hr"`) | `Workspace` |
+| GET | `/api/v1/workspaces/:ws/labels?include_archived=` | member | – | `{items: Label[]}` ordered by `position` |
+| POST | `/api/v1/workspaces/:ws/labels` | admin | `{name, description, color?}` | `Label` (key = slug of name; 409 if taken) |
+| PATCH | `/api/v1/workspaces/:ws/labels/:id` | admin | `{name?, description?, color?, archived?, position?}` | `Label` (409 when archiving `other` or a label used by an enabled workflow) |
+
+Rules: `name` 1–40 chars, `description` 10–300 chars, max 30 active labels per workspace.
+`PATCH .../messages/:id/classification` and `GET .../messages?category=` validate against the workspace's active labels.
+Workflow templates attach to a label key (`timesheet_review` → `timesheet`); `Workflow` gains `label_key: string`
+and `available` is false when the workspace has no such active label.

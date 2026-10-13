@@ -1,7 +1,5 @@
 import type { ReactNode } from 'react';
 import { cn } from '../../lib/cn';
-import type { Category } from '../../api/types';
-import { humanize } from '../../lib/format';
 
 export type Tone = 'neutral' | 'info' | 'success' | 'warning' | 'danger';
 
@@ -27,23 +25,28 @@ export function Badge({ tone = 'neutral', children, className }: { tone?: Tone; 
   );
 }
 
-const inks: Record<Category, string> = {
-  timesheet: 'border-info text-info',
-  leave: 'border-success text-success',
-  candidate_referral: 'border-plum text-plum',
-  approval: 'border-review text-review-ink',
-  payroll: 'border-payroll text-payroll',
-  general: 'border-ink-muted text-ink-muted',
-  other: 'border-rule-strong text-ink-muted',
+export const labelColors: Record<string, { ink: string; swatch: string }> = {
+  slate: { ink: 'border-info text-info', swatch: 'bg-info' },
+  sage: { ink: 'border-success text-success', swatch: 'bg-success' },
+  plum: { ink: 'border-plum text-plum', swatch: 'bg-plum' },
+  ochre: { ink: 'border-review text-review-ink', swatch: 'bg-review' },
+  teal: { ink: 'border-payroll text-payroll', swatch: 'bg-payroll' },
+  postmark: { ink: 'border-accent text-accent', swatch: 'bg-accent' },
+  ink: { ink: 'border-ink text-ink', swatch: 'bg-ink' },
+  rule: { ink: 'border-rule-strong text-ink-muted', swatch: 'bg-rule-strong' },
 };
 
+const mutedInk = 'border-rule-strong text-ink-muted';
+
 export function Stamp({
-  category,
+  name,
+  color,
   tilted = false,
   size = 'sm',
   className,
 }: {
-  category: Category;
+  name: string;
+  color?: string;
   tilted?: boolean;
   size?: 'sm' | 'lg';
   className?: string;
@@ -54,11 +57,11 @@ export function Stamp({
         'inline-flex items-center rounded-xs border-[1.5px] font-mono font-semibold tracking-[0.14em] whitespace-nowrap uppercase',
         size === 'lg' ? 'px-3 py-1 text-[13px]' : 'px-1.5 py-px text-[10px] leading-4',
         tilted && '-rotate-[1.5deg]',
-        inks[category],
+        (color && labelColors[color]?.ink) || mutedInk,
         className,
       )}
     >
-      {humanize(category)}
+      {name}
     </span>
   );
 }

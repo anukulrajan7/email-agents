@@ -17,7 +17,8 @@ use crate::{
     audit::{self, Actor, Entry},
     auth::{AuthUser, require_role},
     db::{iso, new_id, now_ms},
-    domain::{Capabilities, Category, ClassificationSource, Priority, Role, TAXONOMY_VERSION},
+    domain::{Capabilities, ClassificationSource, Priority, Role, TAXONOMY_VERSION},
+    labels,
     error::{AppError, AppResult},
     jobs::{self, handlers, kind},
     memory,
@@ -86,7 +87,8 @@ pub async fn list(
     require_role(&state.db, &ws, &user, Role::Operator).await?;
     let limit = query.limit.unwrap_or(50).clamp(1, 100);
     let category = match query.category.as_deref().filter(|c| !c.is_empty()) {
-        Some(c) => Some(Category::parse(c).ok_or_else(|| AppError::BadRequest("unknown category".into()))?.as_str()),
+        Some(c) if labels::is_active(&state.db, &ws, c).await? => Some(c.to_string()),
+        Some(_) => return Err(AppError::BadRequest("unknown label".into())),
         None => None,
     };
     let search = query.q.as_deref().map(str::trim).filter(|q| !q.is_empty()).map(like_pattern);
@@ -310,7 +312,10 @@ pub async fn override_classification(
 ) -> AppResult<Json<Classification>> {
     require_role(&state.db, &ws, &user, Role::Operator).await?;
     ensure_message(&state, &ws, &id).await?;
-    let category = Category::parse(&body.category).ok_or_else(|| AppError::BadRequest("unknown category".into()))?;
+    if !labels::is_active(&state.db, &ws, &body.category).await? {
+        return Err(AppError::BadRequest("unknown label".into()));
+    }
+    let category = body.category.clone();
     let existing: Option<(String, bool)> =
         sqlx::query_as("SELECT priority, requires_reply FROM classifications WHERE message_id = ?1")
             .bind(&id)

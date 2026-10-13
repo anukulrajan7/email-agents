@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use axum::{
     Json,
     extract::{Path, State},
@@ -13,12 +15,14 @@ use crate::{
     db::iso,
     domain::{Role, template},
     error::{AppError, AppResult},
+    labels,
 };
 
 #[derive(Serialize)]
 pub struct Workflow {
     id: String,
     template_key: String,
+    label_key: String,
     name: String,
     description: String,
     enabled: bool,
@@ -40,12 +44,14 @@ const WORKFLOW_SELECT: &str = "SELECT w.id, w.template_key, w.enabled,
         (SELECT r.created_at FROM workflow_runs r WHERE r.workflow_id = w.id ORDER BY r.created_at DESC LIMIT 1) AS last_created_at
  FROM workflows w";
 
-fn to_dto(r: WorkflowRow) -> Workflow {
+fn to_dto(r: WorkflowRow, active_labels: &HashSet<String>) -> Workflow {
     let t = template(&r.template_key);
+    let label_key = t.map(|t| t.label_key).unwrap_or_default().to_string();
     Workflow {
         name: t.map(|t| t.name).unwrap_or(&r.template_key).to_string(),
         description: t.map(|t| t.description).unwrap_or_default().to_string(),
-        available: t.is_some_and(|t| t.available),
+        available: t.is_some_and(|t| t.available) && active_labels.contains(&label_key),
+        label_key,
         enabled: r.enabled,
         last_run: match (r.last_status, r.last_created_at) {
             (Some(status), Some(at)) => Some(json!({ "status": status, "created_at": iso(at) })),
@@ -56,13 +62,18 @@ fn to_dto(r: WorkflowRow) -> Workflow {
     }
 }
 
+async fn active_label_keys(state: &AppState, ws: &str) -> sqlx::Result<HashSet<String>> {
+    Ok(labels::active(&state.db, ws).await?.into_iter().map(|l| l.key).collect())
+}
+
 pub async fn list(State(state): State<AppState>, user: AuthUser, Path(ws): Path<String>) -> AppResult<Json<Items<Workflow>>> {
     require_role(&state.db, &ws, &user, Role::Operator).await?;
     let rows: Vec<WorkflowRow> = sqlx::query_as(&format!("{WORKFLOW_SELECT} WHERE w.workspace_id = ?1 ORDER BY w.created_at, w.template_key"))
         .bind(&ws)
         .fetch_all(&state.db)
         .await?;
-    Ok(Json(Items { items: rows.into_iter().map(to_dto).collect() }))
+    let active = active_label_keys(&state, &ws).await?;
+    Ok(Json(Items { items: rows.into_iter().map(|r| to_dto(r, &active)).collect() }))
 }
 
 #[derive(Deserialize)]
@@ -83,8 +94,9 @@ pub async fn update(
         .fetch_optional(&state.db)
         .await?
         .ok_or(AppError::NotFound)?;
-    if body.enabled && !template(&key).is_some_and(|t| t.available) {
-        return Err(AppError::Conflict("this workflow template is not available yet".into()));
+    let active = active_label_keys(&state, &ws).await?;
+    if body.enabled && !template(&key).is_some_and(|t| t.available && active.contains(t.label_key)) {
+        return Err(AppError::Conflict("add and activate this workflow's label before enabling it".into()));
     }
     let mut tx = state.db.begin().await?;
     sqlx::query("UPDATE workflows SET enabled = ?1 WHERE id = ?2 AND workspace_id = ?3")
@@ -111,7 +123,7 @@ pub async fn update(
         .fetch_one(&mut *tx)
         .await?;
     tx.commit().await?;
-    Ok(Json(to_dto(row)))
+    Ok(Json(to_dto(row, &active)))
 }
 
 #[derive(FromRow, Serialize)]

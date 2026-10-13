@@ -2,14 +2,7 @@ export type Role = 'admin' | 'operator';
 export type SourceKind = 'forwarding' | 'nango_gmail' | 'nango_microsoft' | 'future';
 export type SourceStatus = 'pending' | 'connected' | 'degraded' | 'disconnected';
 export type ProcessingStatus = 'pending' | 'normalized' | 'classified' | 'workflow_completed' | 'failed';
-export type Category =
-  | 'timesheet'
-  | 'leave'
-  | 'candidate_referral'
-  | 'approval'
-  | 'payroll'
-  | 'general'
-  | 'other';
+export type Category = string;
 export type Priority = 'low' | 'normal' | 'high';
 export type ClassSource = 'jev' | 'llm' | 'manual' | 'fallback';
 export type DraftStatus = 'suggested' | 'edited' | 'approved' | 'sent';
@@ -23,18 +16,54 @@ export type ErrorCode =
   | 'not_found'
   | 'bad_request'
   | 'conflict'
+  | 'rate_limited'
+  | 'email_not_verified'
   | 'not_implemented'
   | 'internal';
 
 export type ApiErrorBody = { error: { code: string; message: string; request_id: string } };
 
+export type LabelColor = 'slate' | 'sage' | 'plum' | 'ochre' | 'teal' | 'postmark' | 'ink' | 'rule';
+export type Label = {
+  id: string;
+  key: string;
+  name: string;
+  description: string;
+  color: LabelColor;
+  position: number;
+  system: boolean;
+  archived: boolean;
+  message_count: number;
+};
+export type LabelTemplate = 'hr' | 'general' | 'blank';
+export type LabelTemplateInfo = {
+  key: LabelTemplate;
+  name: string;
+  description: string;
+  labels: { key: string; name: string; description: string }[];
+};
+export type LabelCreateBody = { name: string; description: string; color?: LabelColor };
+export type LabelPatch = Partial<{ name: string; description: string; color: LabelColor; archived: boolean; position: number }>;
+
 export type Workspace = { id: string; name: string; role: Role; created_at: string };
 
 export type MeResponse = {
-  user: { id: string; email: string };
+  user: { id: string; email: string; name: string | null };
   workspaces: Workspace[];
-  auth_mode: 'dev' | 'oidc';
+  auth_mode: 'dev' | 'oidc' | 'password';
 };
+
+export type AuthConfig = { mode: 'password' | 'dev' | 'oidc'; signup_enabled: boolean; email_verification?: boolean };
+export type AuthSession = {
+  token: string;
+  expires_at: string;
+  user: { id: string; email: string; name: string | null };
+};
+export type SignupBody = { email: string; password: string; name?: string };
+export type VerificationRequired = { verification_required: true; email: string };
+export type SignupResponse = AuthSession | VerificationRequired;
+export type VerifyBody = { email: string; code: string };
+export type LoginBody = { email: string; password: string };
 
 export type Source = {
   id: string;
@@ -174,6 +203,7 @@ export type ReviewItem = {
 export type Workflow = {
   id: string;
   template_key: 'timesheet_review' | 'leave_request' | 'candidate_referral';
+  label_key: string;
   name: string;
   description: string;
   enabled: boolean;

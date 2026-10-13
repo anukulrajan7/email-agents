@@ -1,12 +1,13 @@
 import { Link } from 'react-router';
 import type { Workflow } from '../../api/types';
-import { Badge, Button, Card, CardTitle, EmptyState, Mono, PageHeader, Spinner, Table, Td, Th } from '../../components/ui';
+import { Badge, Button, Card, CardTitle, EmptyState, Mono, PageHeader, Spinner, Table, Td, Th, Page } from '../../components/ui';
 import { riseStyle } from '../../lib/motion';
 import { ErrorNote } from '../../components/ErrorNote';
 import { StatusBadge } from '../../components/StatusBadges';
 import { useWorkspace } from '../../app/useWorkspace';
 import { relativeTime } from '../../lib/format';
 import { cn } from '../../lib/cn';
+import { useLabelMap } from '../labels/hooks';
 import { useReprocess } from '../inbox/hooks';
 import { useToggleWorkflow, useWorkflowRuns, useWorkflows } from './hooks';
 
@@ -34,23 +35,34 @@ function Toggle({ workflow, canEdit, onChange, busy }: { workflow: Workflow; can
 export function WorkflowsPage() {
   const { ws, isAdmin } = useWorkspace();
   const workflows = useWorkflows(ws);
+  const labelMap = useLabelMap(ws);
   const runs = useWorkflowRuns(ws);
   const toggle = useToggleWorkflow(ws);
   const reprocess = useReprocess(ws);
 
   return (
-    <div className="mx-auto flex max-w-5xl flex-col gap-8 px-10 py-10">
-      <PageHeader kicker="Automation" title="Workflows" description="Templates that act on classified emails." />
+    <Page>
+      <PageHeader kicker="Automation" title="Workflows" description="Automations that run when an email gets a certain label — for example, creating a review task." />
       {workflows.isLoading && <Spinner />}
       <ErrorNote error={workflows.error ?? toggle.error ?? reprocess.error} />
-      <div className="grid gap-4 md:grid-cols-3">
+      <div className="grid gap-4 md:grid-cols-3 2xl:grid-cols-4">
         {workflows.data?.items.map((w, i) => (
           <Card key={w.id} className="rise flex flex-col gap-3" style={riseStyle(i + 1)}>
             <div className="flex items-start justify-between gap-2">
               <CardTitle>{w.name}</CardTitle>
-              {!w.available && <Badge>P1</Badge>}
+              {!w.available && <Badge>Needs label</Badge>}
             </div>
-            <p className="flex-1 text-sm text-ink-muted">{w.description}</p>
+            <p className="text-sm text-ink-muted">{w.description}</p>
+            <div className="flex-1 text-sm">
+              <p>
+                <span className="font-semibold">Runs on label:</span> {labelMap.get(w.label_key)?.name ?? w.label_key}
+              </p>
+              {!w.available && (
+                <p className="mt-1 text-ink-muted">
+                  Add a label with key <code className="font-mono">{w.label_key}</code> to enable this workflow.
+                </p>
+              )}
+            </div>
             <div className="flex items-center justify-between gap-2 border-t border-rule pt-3">
               <div className="flex items-center gap-2 text-sm">
                 <Toggle
@@ -82,7 +94,7 @@ export function WorkflowsPage() {
         {runs.data &&
           (runs.data.items.length === 0 ? (
             <Card>
-              <EmptyState title="No runs yet" description="Runs appear after an email is classified." />
+              <EmptyState title="No runs yet" description="Each time an enabled workflow handles an email, the run is listed here. Turn a workflow on above, then wait for a matching email." />
             </Card>
           ) : (
             <Table>
@@ -136,6 +148,6 @@ export function WorkflowsPage() {
             </Table>
           ))}
       </section>
-    </div>
+    </Page>
   );
 }

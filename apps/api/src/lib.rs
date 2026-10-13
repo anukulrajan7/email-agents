@@ -8,7 +8,10 @@ pub mod error;
 pub mod http;
 pub mod ingest;
 pub mod jobs;
+pub mod labels;
+pub mod mailer;
 pub mod memory;
+pub mod sessions;
 pub mod sources;
 
 use std::{sync::Arc, time::Duration};
@@ -73,8 +76,25 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
         _ => None,
     };
 
+    // Verification emails are on only when SMTP is fully configured.
+    let mailer: Option<Arc<dyn mailer::Mailer>> = if config.smtp_host.is_empty() || config.smtp_username.is_empty() {
+        tracing::warn!("SMTP not configured: email verification disabled");
+        None
+    } else {
+        let from = if config.smtp_from.is_empty() { format!("Post Room <{}>", config.smtp_username) } else { config.smtp_from.clone() };
+        Some(Arc::new(mailer::SmtpMailer::new(
+            &config.smtp_host,
+            config.smtp_port,
+            &config.smtp_username,
+            &config.smtp_password,
+            &from,
+        )?))
+    };
+
     Ok(AppState {
+        mailer,
         learner,
+        login_limiter: Arc::new(sessions::LoginLimiter::default()),
         auth: Arc::new(Authenticator::new(&config, http.clone())),
         nango: Arc::new(NangoClient::new(http.clone(), &config.nango_api_url, &config.nango_api_key)),
         resend: Arc::new(ResendClient::new(http, &config.resend_api_url, &config.resend_api_key)),

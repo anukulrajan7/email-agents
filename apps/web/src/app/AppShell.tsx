@@ -1,7 +1,5 @@
 import { NavLink, Outlet, useNavigate } from 'react-router';
-import { useQueryClient } from '@tanstack/react-query';
-import { clearToken } from '../api/client';
-import { useMe } from '../features/auth/hooks';
+import { useLogout, useMe } from '../features/auth/hooks';
 import { Button, EmptyState, Label, Select, Spinner } from '../components/ui';
 import { cn } from '../lib/cn';
 import { riseStyle } from '../lib/motion';
@@ -11,7 +9,7 @@ export function AppShell() {
   const { ws, workspace, isAdmin } = useWorkspace();
   const me = useMe();
   const navigate = useNavigate();
-  const qc = useQueryClient();
+  const logout = useLogout();
 
   if (me.isLoading) {
     return (
@@ -33,6 +31,7 @@ export function AppShell() {
 
   const items = [
     { to: 'inbox', label: 'Inbox' },
+    { to: 'labels', label: 'Labels' },
     { to: 'reviews', label: 'Reviews' },
     { to: 'memory', label: 'Memory' },
     { to: 'workflows', label: 'Workflows' },
@@ -40,19 +39,13 @@ export function AppShell() {
     ...(isAdmin ? [{ to: 'jobs', label: 'Jobs' }] : []),
   ];
 
-  const signOut = () => {
-    clearToken();
-    qc.clear();
-    navigate('/sign-in');
-  };
-
   return (
-    <div className="flex h-screen flex-col">
+    <div className="flex h-dvh flex-col overflow-hidden">
       <div aria-hidden="true" className="airmail h-1.5 shrink-0" />
-      <div className="flex min-h-0 flex-1">
-        <aside className="flex w-60 shrink-0 flex-col border-r border-rule-strong px-5 py-6">
+      <div className="flex min-h-0 flex-1 overflow-hidden">
+        <aside className="flex w-60 shrink-0 flex-col border-r border-rule-strong px-5 pt-5 pb-6">
           <div className="rise" style={riseStyle(0)}>
-            <p className="kicker">HR Inbox</p>
+            <p className="kicker">AI Inbox</p>
             <p className="type-display text-3xl tracking-[-0.02em] text-ink">Post Room</p>
           </div>
           <div className="mt-6 flex flex-col gap-1">
@@ -94,15 +87,15 @@ export function AppShell() {
             <div>
               <p className="kicker">Signed in as</p>
               <p className="truncate font-mono text-xs text-ink" title={me.data?.user.email}>
-                {me.data?.user.email}
+                {me.data?.user.name ?? me.data?.user.email}
               </p>
             </div>
-            <Button variant="secondary" size="sm" onClick={signOut}>
+            <Button variant="secondary" size="sm" onClick={() => logout.mutate()}>
               Sign out
             </Button>
           </div>
         </aside>
-        <main className="min-w-0 flex-1 overflow-auto">
+        <main className="min-h-0 min-w-0 flex-1 overflow-hidden">
           <Outlet />
         </main>
       </div>

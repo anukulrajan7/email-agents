@@ -70,7 +70,7 @@ export async function api<T>(path: string, opts: RequestOptions = {}): Promise<T
   });
 
   if (!res.ok) {
-    if (res.status === 401) {
+    if (res.status === 401 && !path.startsWith('/auth/')) {
       clearToken();
       if (window.location.pathname !== '/sign-in') window.location.assign('/sign-in');
     }

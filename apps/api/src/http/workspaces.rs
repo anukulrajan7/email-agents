@@ -35,10 +35,15 @@ pub async fn me(State(state): State<AppState>, user: AuthUser) -> AppResult<Json
     let workspaces = workspaces_for(&state, &user).await?;
     let auth_mode = match state.auth.mode() {
         AuthMode::Dev => "dev",
+        AuthMode::Password => "password",
         AuthMode::Oidc => "oidc",
     };
+    let name: Option<String> = sqlx::query_scalar("SELECT name FROM users WHERE id = ?1")
+        .bind(&user.id)
+        .fetch_one(&state.db)
+        .await?;
     Ok(Json(json!({
-        "user": { "id": user.id, "email": user.email },
+        "user": { "id": user.id, "email": user.email, "name": name },
         "workspaces": workspaces,
         "auth_mode": auth_mode,
     })))
@@ -51,6 +56,8 @@ pub async fn list(State(state): State<AppState>, user: AuthUser) -> AppResult<Js
 #[derive(Deserialize)]
 pub struct CreateWorkspace {
     name: String,
+    /// Starting label set: "hr" (default), "general" or "blank".
+    template: Option<String>,
 }
 
 pub async fn create(
@@ -62,6 +69,8 @@ pub async fn create(
     if name.is_empty() || name.chars().count() > 100 {
         return Err(AppError::BadRequest("name must be 1-100 characters".into()));
     }
+    let template = crate::domain::label_template(body.template.as_deref().unwrap_or("hr"))
+        .ok_or_else(|| AppError::BadRequest("template must be hr, general or blank".into()))?;
     let id = new_id("ws");
     let now = now_ms();
     let mut tx = state.db.begin().await?;
@@ -76,12 +85,15 @@ pub async fn create(
         .bind(&user.id)
         .execute(&mut *tx)
         .await?;
+    crate::labels::seed(&mut tx, &id, template).await?;
     for t in WORKFLOW_TEMPLATES {
+        // Enable a workflow only when its label exists in the chosen template.
+        let has_label = template.labels.iter().any(|l| l.key == t.label_key);
         sqlx::query("INSERT INTO workflows (id, workspace_id, template_key, enabled, created_at) VALUES (?1, ?2, ?3, ?4, ?5)")
             .bind(new_id("wf"))
             .bind(&id)
             .bind(t.key)
-            .bind(t.available)
+            .bind(t.available && has_label)
             .bind(now)
             .execute(&mut *tx)
             .await?;
@@ -95,7 +107,7 @@ pub async fn create(
             entity_type: "workspace",
             entity_id: &id,
             message_id: None,
-            metadata: json!({}),
+            metadata: json!({ "template": template.key }),
         },
     )
     .await?;

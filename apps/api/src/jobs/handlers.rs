@@ -10,7 +10,8 @@ use crate::{
     audit::{self, Actor, Entry},
     db::{new_id, now_ms},
     ingest, memory,
-    domain::{self, Category, ClassificationSource, Priority, TAXONOMY_VERSION},
+    domain::{self, ClassificationSource, OTHER_LABEL, Priority, TAXONOMY_VERSION},
+    labels,
     http::AppState,
     jobs,
     sources::resend::{FetchError, ReceivedEmail},
@@ -77,7 +78,7 @@ pub async fn on_dead(state: &AppState, job: &Job, error: &str) {
                 // Route to `other` + needs_review so a human sees it.
                 let message_id = str_field(&payload, "message_id")?;
                 let fallback = ClassifyOutput {
-                    category: Category::Other,
+                    category: OTHER_LABEL.to_string(),
                     priority: Priority::Normal,
                     requires_reply: true,
                     confidence: None,
@@ -250,6 +251,7 @@ async fn classify_email(state: &AppState, job: &Job, payload: &Value) -> Result<
         body_text: msg.body_text,
         attachment_names,
         sender_history,
+        labels: labels::active(&state.db, &msg.workspace_id).await?,
     };
     let out = state.classifier.classify(&input).await?;
     persist_classification(state, &message_id, &out, Actor::System, Some(&job.id), WriteMode::Upsert).await?;
@@ -300,7 +302,7 @@ pub async fn persist_classification(
          {conflict}"
     ))
     .bind(message_id)
-    .bind(out.category.as_str())
+    .bind(&out.category)
     .bind(out.priority.as_str())
     .bind(out.requires_reply)
     .bind(out.confidence)
@@ -343,14 +345,14 @@ pub async fn persist_classification(
             entity_id: message_id,
             message_id: Some(message_id),
             metadata: json!({
-                "category": out.category.as_str(), "priority": out.priority.as_str(),
+                "category": out.category, "priority": out.priority.as_str(),
                 "source": out.source.as_str(), "needs_review": needs_review, "by": actor_meta,
                 "model_id": out.model_id, "taxonomy_version": TAXONOMY_VERSION,
             }),
         },
     )
     .await?;
-    let trigger = trigger.map(str::to_string).unwrap_or_else(|| format!("{}:{}", out.category.as_str(), now));
+    let trigger = trigger.map(str::to_string).unwrap_or_else(|| format!("{}:{}", out.category, now));
     enqueue_workflow(&mut tx, &workspace_id, message_id, &trigger).await?;
     tx.commit().await?;
     Ok(Some(needs_review))
@@ -392,7 +394,7 @@ async fn execute_workflow(state: &AppState, payload: &Value) -> Result<(), JobEr
     if source_status == "disconnected" {
         return Ok(());
     }
-    let Some(template) = domain::WORKFLOW_TEMPLATES.iter().find(|t| t.category.as_str() == category && t.available)
+    let Some(template) = domain::WORKFLOW_TEMPLATES.iter().find(|t| t.label_key == category && t.available)
     else {
         // No automation for this category: stays in the inbox for a human.
         return Ok(());
@@ -507,7 +509,13 @@ async fn generate_draft(state: &AppState, job: &Job, payload: &Value) -> Result<
         .bind(&message_id)
         .fetch_optional(&state.db)
         .await?;
-    let category = category.as_deref().and_then(Category::parse).unwrap_or(Category::General);
+    let category = category.unwrap_or_else(|| OTHER_LABEL.to_string());
+    let category_name = labels::active(&state.db, &msg.workspace_id)
+        .await?
+        .into_iter()
+        .find(|l| l.key == category)
+        .map(|l| l.name)
+        .unwrap_or_else(|| category.clone());
 
     // Trusted memory (staff notes + learned sender profile), retrieved by sender and topic.
     let ctx = memory::context_for(&state.db, &msg.workspace_id, &msg.sender_address, &msg.subject).await?;
@@ -515,6 +523,7 @@ async fn generate_draft(state: &AppState, job: &Job, payload: &Value) -> Result<
         .drafter
         .draft(&DraftInput {
             category,
+            category_name,
             subject: msg.subject,
             sender: msg.sender_address,
             body_text: msg.body_text,

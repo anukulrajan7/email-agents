@@ -92,13 +92,23 @@ jobs:
           TYPESAFE_API_KEY: ${{ secrets.TYPESAFE_API_KEY }}
           OPENROUTER_MODEL_ID: ${{ vars.OPENROUTER_MODEL_ID }}
           OPENROUTER_CLASSIFIER_MODEL_ID: ${{ vars.OPENROUTER_CLASSIFIER_MODEL_ID }}
+          SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          SIGNUP_ALLOWED_DOMAINS: ${{ vars.SIGNUP_ALLOWED_DOMAINS }}
         run: |
           umask 077
           cat > deploy.env <<ENV
           IMAGE=${IMAGE}
           IMAGE_TAG=${GITHUB_SHA}
           RUST_LOG=info,tower_http=info
-          AUTH_MODE=dev
+          AUTH_MODE=password
+          SIGNUP_ENABLED=true
+          SIGNUP_ALLOWED_DOMAINS=${SIGNUP_ALLOWED_DOMAINS}
+          SMTP_HOST=smtp.hostinger.com
+          SMTP_PORT=465
+          SMTP_USERNAME=${SMTP_USERNAME}
+          SMTP_PASSWORD=${SMTP_PASSWORD}
+          SMTP_FROM=Post Room <${SMTP_USERNAME}>
           PUBLIC_WEB_URL=https://mail.anukulraj.tech
           API_PUBLIC_URL=https://mail.anukulraj.tech
           ALLOW_TEST_EMAILS=true

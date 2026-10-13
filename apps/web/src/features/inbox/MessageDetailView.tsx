@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { Link } from 'react-router';
-import { Badge, Card, Spinner, Stamp } from '../../components/ui';
+import { Badge, Card, Spinner } from '../../components/ui';
 import { ErrorNote } from '../../components/ErrorNote';
 import { StatusBadge } from '../../components/StatusBadges';
 import { DraftPanel } from '../drafts/DraftPanel';
@@ -11,6 +11,7 @@ import { PlainTextBody } from './PlainTextBody';
 import { Postmark } from './Postmark';
 import { RouteTracker } from './RouteTracker';
 import { riseStyle } from '../../lib/motion';
+import { LabelStamp } from '../labels/LabelStamp';
 import { MemoryForm, MemoryItem } from '../memory/MemoryParts';
 
 export function MessageDetailView({ ws, messageId }: { ws: string; messageId: string }) {
@@ -33,14 +34,14 @@ export function MessageDetailView({ ws, messageId }: { ws: string; messageId: st
   }
 
   return (
-    <div className="grid gap-x-12 gap-y-8 px-8 py-8 2xl:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
+    <div className="grid gap-x-12 gap-y-8 px-8 pt-6 pb-8 2xl:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
       <div className="flex min-w-0 flex-col gap-8 2xl:col-start-1">
         <article className="rise flex flex-col gap-6" style={riseStyle(0)}>
           <header className="flex flex-col gap-5">
             <div className="flex items-start justify-between gap-6">
               <div className="min-w-0">
                 <div className="flex flex-wrap items-center gap-3">
-                  {m.classification && <Stamp category={m.classification.category} size="lg" tilted />}
+                  {m.classification && <LabelStamp ws={ws} category={m.classification.category} size="lg" tilted />}
                   <StatusBadge status={m.processing_status} />
                 </div>
                 <h2 className="type-display mt-4 text-4xl leading-[1.1] tracking-[-0.02em] break-words">{m.subject || '(no subject)'}</h2>
@@ -131,7 +132,7 @@ export function MessageDetailView({ ws, messageId }: { ws: string; messageId: st
               <p className="flex flex-wrap items-center gap-2 text-ink-muted">
                 {m.contact.message_count} {m.contact.message_count === 1 ? 'email' : 'emails'}
                 {m.contact.top_categories.map((t) => (
-                  <Stamp key={t.category} category={t.category} />
+                  <LabelStamp key={t.category} ws={ws} category={t.category} />
                 ))}
               </p>
             </div>

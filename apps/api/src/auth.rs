@@ -56,6 +56,10 @@ impl Authenticator {
 
     pub async fn authenticate(&self, db: &SqlitePool, token: &str) -> AppResult<AuthUser> {
         let (subject, email) = match self.mode {
+            AuthMode::Password => {
+                let (id, email) = crate::sessions::lookup(db, token).await?.ok_or(AppError::Unauthorized)?;
+                return Ok(AuthUser { id, email });
+            }
             AuthMode::Dev => dev_identity(token)?,
             AuthMode::Oidc => self.verify_oidc(token).await?,
         };
@@ -160,24 +164,28 @@ fn dev_identity(token: &str) -> AppResult<(String, String)> {
     Ok((format!("dev|{email}"), email))
 }
 
+/// The client's session token: `X-Auth-Token` first (so a proxy Basic-auth gate can
+/// keep `Authorization`), then `Authorization: Bearer`.
+pub fn request_token(headers: &axum::http::HeaderMap) -> Option<&str> {
+    headers
+        .get("x-auth-token")
+        .and_then(|v| v.to_str().ok())
+        .or_else(|| {
+            headers
+                .get(axum::http::header::AUTHORIZATION)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.strip_prefix("Bearer "))
+        })
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+}
+
 impl FromRequestParts<AppState> for AuthUser {
     type Rejection = AppError;
 
     async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, Self::Rejection> {
-        // `X-Auth-Token` first so a proxy-level Basic-auth gate can keep `Authorization`.
-        let token = parts
-            .headers
-            .get("x-auth-token")
-            .and_then(|v| v.to_str().ok())
-            .or_else(|| {
-                parts
-                    .headers
-                    .get(axum::http::header::AUTHORIZATION)
-                    .and_then(|v| v.to_str().ok())
-                    .and_then(|v| v.strip_prefix("Bearer "))
-            })
-            .ok_or(AppError::Unauthorized)?;
-        state.auth.authenticate(&state.db, token.trim()).await
+        let token = request_token(&parts.headers).ok_or(AppError::Unauthorized)?;
+        state.auth.authenticate(&state.db, token).await
     }
 }
 

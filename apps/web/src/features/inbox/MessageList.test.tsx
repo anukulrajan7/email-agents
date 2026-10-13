@@ -25,10 +25,14 @@ describe('MessageList', () => {
   afterEach(() => vi.unstubAllGlobals());
 
   it('loads the next page using next_cursor', async () => {
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValueOnce(page({ items: [msg('1', 'First mail')], next_cursor: 'c1' }))
-      .mockResolvedValue(page({ items: [msg('2', 'Second mail')], next_cursor: null }));
+    const messagePages = [
+      page({ items: [msg('1', 'First mail')], next_cursor: 'c1' }),
+      page({ items: [msg('2', 'Second mail')], next_cursor: null }),
+    ];
+    const fetchMock = vi.fn((url: string) => {
+      if (url.includes('/labels')) return Promise.resolve(page({ items: [] }));
+      return Promise.resolve((url.includes('cursor=c1') ? messagePages[1] : messagePages[0])!.clone());
+    });
     vi.stubGlobal('fetch', fetchMock);
 
     render(

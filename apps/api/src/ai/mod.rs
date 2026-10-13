@@ -8,7 +8,7 @@ pub mod policy;
 
 use async_trait::async_trait;
 
-use crate::domain::{Category, ClassificationSource, Priority};
+use crate::domain::{ClassificationSource, Label, Priority};
 
 pub const PROMPT_VERSION: &str = "classify-v1";
 pub const DRAFT_PROMPT_VERSION: &str = "ack-draft-v1";
@@ -23,11 +23,14 @@ pub struct ClassifyInput {
     pub attachment_names: Vec<String>,
     /// Learned profile line for the sender (trusted, from our own data).
     pub sender_history: Option<String>,
+    /// The workspace taxonomy. Output must be one of these keys (else coerced to `other`).
+    pub labels: Vec<Label>,
 }
 
 #[derive(Debug, Clone)]
 pub struct ClassifyOutput {
-    pub category: Category,
+    /// Label key.
+    pub category: String,
     pub priority: Priority,
     pub requires_reply: bool,
     pub confidence: Option<f64>,
@@ -38,7 +41,9 @@ pub struct ClassifyOutput {
 
 #[derive(Debug, Clone)]
 pub struct DraftInput {
-    pub category: Category,
+    /// Label key and its human name.
+    pub category: String,
+    pub category_name: String,
     pub subject: String,
     pub sender: String,
     pub body_text: String,

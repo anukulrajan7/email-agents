@@ -1,5 +1,7 @@
+mod auth_api;
 mod dto;
 mod jobs_api;
+mod labels_api;
 mod memories;
 mod messages;
 mod reviews;
@@ -45,13 +47,25 @@ pub struct AppState {
     pub drafter: Arc<dyn Drafter>,
     /// Proposes memory suggestions from operator draft edits; `None` disables learning.
     pub learner: Option<Arc<dyn Learner>>,
+    pub login_limiter: Arc<crate::sessions::LoginLimiter>,
+    /// Sends verification codes; `None` = verification disabled.
+    pub mailer: Option<Arc<dyn crate::mailer::Mailer>>,
     pub jobs_notify: Arc<Notify>,
 }
 
 pub fn router(state: AppState) -> Router {
     let api = Router::new()
         .route("/me", get(workspaces::me))
+        .route("/auth/config", get(auth_api::config))
+        .route("/auth/signup", post(auth_api::signup))
+        .route("/auth/login", post(auth_api::login))
+        .route("/auth/logout", post(auth_api::logout))
+        .route("/auth/verify", post(auth_api::verify))
+        .route("/auth/resend-code", post(auth_api::resend_code))
         .route("/workspaces", get(workspaces::list).post(workspaces::create))
+        .route("/label-templates", get(labels_api::templates))
+        .route("/workspaces/{ws}/labels", get(labels_api::list).post(labels_api::create))
+        .route("/workspaces/{ws}/labels/{id}", patch(labels_api::update))
         .route("/workspaces/{ws}/members", post(workspaces::add_member))
         .route("/workspaces/{ws}/sources", get(sources::list))
         .route("/workspaces/{ws}/sources/forwarding", post(sources::create_forwarding))

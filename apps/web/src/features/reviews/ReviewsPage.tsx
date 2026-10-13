@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { Link } from 'react-router';
-import { Button, Card, EmptyState, Label, Mono, PageHeader, Select, Spinner, Table, Td, Th } from '../../components/ui';
+import { Button, Card, EmptyState, Label, Mono, PageHeader, Select, Spinner, Table, Td, Th, Page } from '../../components/ui';
 import { riseStyle } from '../../lib/motion';
 import { ErrorNote } from '../../components/ErrorNote';
 import { StatusBadge } from '../../components/StatusBadges';
@@ -15,11 +15,11 @@ export function ReviewsPage() {
   const setStatus = useSetReviewStatus(ws);
 
   return (
-    <div className="mx-auto flex max-w-5xl flex-col gap-6 px-10 py-10">
+    <Page className="gap-6">
       <PageHeader
         kicker="Human decisions"
         title="Reviews"
-        description="Items that need a human decision."
+        description="Tasks created by workflows that need a person to check."
         actions={
           <div className="flex flex-col gap-1">
             <Label htmlFor="review-status">Status</Label>
@@ -36,7 +36,7 @@ export function ReviewsPage() {
       {reviews.data &&
         (reviews.data.items.length === 0 ? (
           <Card className="rise" style={riseStyle(1)}>
-            <EmptyState title="Nothing to review" description="New review items appear here when workflows flag a message." />
+            <EmptyState title="Nothing to review" description="When a workflow flags an email for a person to check, the task appears here. Turn workflows on from the Workflows page." />
           </Card>
         ) : (
           <div className="rise" style={riseStyle(1)}>
@@ -87,6 +87,6 @@ export function ReviewsPage() {
             </Table>
           </div>
         ))}
-    </div>
+    </Page>
   );
 }

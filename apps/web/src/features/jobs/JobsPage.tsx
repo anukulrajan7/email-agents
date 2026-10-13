@@ -1,5 +1,5 @@
 import { Navigate } from 'react-router';
-import { Badge, Button, Card, EmptyState, Mono, PageHeader, Spinner, Table, Td, Th } from '../../components/ui';
+import { Badge, Button, Card, EmptyState, Mono, PageHeader, Spinner, Table, Td, Th, Page } from '../../components/ui';
 import { riseStyle } from '../../lib/motion';
 import { ErrorNote } from '../../components/ErrorNote';
 import { useWorkspace } from '../../app/useWorkspace';
@@ -14,14 +14,14 @@ export function JobsPage() {
   if (workspace && !isAdmin) return <Navigate to={`/w/${ws}/inbox`} replace />;
 
   return (
-    <div className="mx-auto flex max-w-5xl flex-col gap-6 px-10 py-10">
-      <PageHeader kicker="Admin" title="Dead jobs" description="Background jobs that exhausted their retries." />
+    <Page className="gap-6">
+      <PageHeader kicker="Admin" title="Dead jobs" description="Background work that failed and needs a retry." />
       {jobs.isLoading && <Spinner />}
       <ErrorNote error={jobs.error ?? retry.error} />
       {jobs.data &&
         (jobs.data.items.length === 0 ? (
           <Card className="rise" style={riseStyle(1)}>
-            <EmptyState title="No dead jobs" description="Everything is running smoothly." />
+            <EmptyState title="No dead jobs" description="Failed background work would appear here with a Retry button. Nothing has failed." />
           </Card>
         ) : (
           <div className="rise" style={riseStyle(1)}>
@@ -70,6 +70,6 @@ export function JobsPage() {
             </Table>
           </div>
         ))}
-    </div>
+    </Page>
   );
 }

@@ -4,8 +4,10 @@ use anyhow::{Context, bail};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthMode {
-    /// Local development only: `Bearer dev:<email>`.
+    /// Local development only: `dev:<email>` tokens.
     Dev,
+    /// Email + password accounts with server-side sessions.
+    Password,
     Oidc,
 }
 
@@ -41,6 +43,14 @@ pub struct Config {
     pub max_body_chars: usize,
     /// Built web app to serve (SPA fallback to index.html). Unset in dev: Vite serves it.
     pub web_dist_dir: String,
+    pub signup_enabled: bool,
+    pub smtp_host: String,
+    pub smtp_port: u16,
+    pub smtp_username: String,
+    pub smtp_password: String,
+    pub smtp_from: String,
+    /// Lower-case email domains allowed to sign up; empty = any domain.
+    pub signup_allowed_domains: Vec<String>,
 }
 
 fn var(name: &str, default: &str) -> String {
@@ -51,8 +61,9 @@ impl Config {
     pub fn from_env() -> anyhow::Result<Self> {
         let auth_mode = match var("AUTH_MODE", "oidc").as_str() {
             "dev" => AuthMode::Dev,
+            "password" => AuthMode::Password,
             "oidc" => AuthMode::Oidc,
-            other => bail!("AUTH_MODE must be 'dev' or 'oidc', got '{other}'"),
+            other => bail!("AUTH_MODE must be 'dev', 'password' or 'oidc', got '{other}'"),
         };
         let config = Self {
             database_url: var("DATABASE_URL", "sqlite://data/email_ai.db"),
@@ -84,6 +95,17 @@ impl Config {
             allow_test_emails: var("ALLOW_TEST_EMAILS", "false") == "true",
             max_body_chars: var("MAX_BODY_CHARS", "200000").parse().context("MAX_BODY_CHARS")?,
             web_dist_dir: var("WEB_DIST_DIR", ""),
+            signup_enabled: var("SIGNUP_ENABLED", "true") == "true",
+            smtp_host: var("SMTP_HOST", ""),
+            smtp_port: var("SMTP_PORT", "465").parse().context("SMTP_PORT")?,
+            smtp_username: var("SMTP_USERNAME", ""),
+            smtp_password: var("SMTP_PASSWORD", ""),
+            smtp_from: var("SMTP_FROM", ""),
+            signup_allowed_domains: var("SIGNUP_ALLOWED_DOMAINS", "")
+                .split(',')
+                .map(|d| d.trim().trim_start_matches('@').to_lowercase())
+                .filter(|d| !d.is_empty())
+                .collect(),
         };
         if config.auth_mode == AuthMode::Oidc
             && (config.oidc_issuer_url.is_empty() || config.oidc_audience.is_empty())
@@ -135,6 +157,13 @@ impl Config {
             allow_test_emails: true,
             max_body_chars: 200_000,
             web_dist_dir: String::new(),
+            signup_enabled: true,
+            signup_allowed_domains: vec![],
+            smtp_host: String::new(),
+            smtp_port: 465,
+            smtp_username: String::new(),
+            smtp_password: String::new(),
+            smtp_from: String::new(),
         }
     }
 }
