@@ -168,7 +168,8 @@ pub async fn test(State(state): State<AppState>, user: AuthUser, Path(ws): Path<
     let (subject, text, html) = alerts::render_email(&name, &base, &ws, &[line], None);
     let mut sent_to = vec![];
     for to in &settings.recipients {
-        match mailer.send(to, &subject, &text, &html).await {
+        let email = crate::mailer::OutgoingEmail { kind: crate::mailer::kind::ALERT_TEST, to, subject: &subject, text: &text, html: &html };
+        match crate::mailer::deliver(&state.db, mailer.as_ref(), email).await {
             Ok(()) => sent_to.push(to.clone()),
             Err(e) => tracing::warn!(error = %e, "test alert email failed"),
         }

@@ -58,6 +58,11 @@ pub enum AppError {
     RateLimited,
     #[error("verify your email first; we sent you a new code")]
     EmailNotVerified,
+    /// The send safety check found blocking issues. `details` = `{ blocking: Issue[], warnings: Issue[] }`.
+    #[error("{0}")]
+    SendBlocked(String, serde_json::Value),
+    #[error("we couldn't send the email to {0}; check the address and try again in a minute")]
+    EmailNotSent(String),
     #[error(transparent)]
     Internal(#[from] anyhow::Error),
 }
@@ -85,6 +90,8 @@ impl IntoResponse for AppError {
             AppError::AiUnavailable => (StatusCode::SERVICE_UNAVAILABLE, "ai_unavailable"),
             AppError::RateLimited => (StatusCode::TOO_MANY_REQUESTS, "rate_limited"),
             AppError::EmailNotVerified => (StatusCode::FORBIDDEN, "email_not_verified"),
+            AppError::SendBlocked(..) => (StatusCode::CONFLICT, "send_blocked"),
+            AppError::EmailNotSent(_) => (StatusCode::SERVICE_UNAVAILABLE, "email_not_sent"),
             AppError::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal"),
         };
         let message = match &self {
@@ -94,7 +101,12 @@ impl IntoResponse for AppError {
             }
             other => other.to_string(),
         };
-        let body = json!({ "error": { "code": code, "message": message, "request_id": current_request_id() } });
+        let mut body = json!({ "error": { "code": code, "message": message, "request_id": current_request_id() } });
+        if let AppError::SendBlocked(_, details) = &self
+            && let (Some(err), Some(extra)) = (body["error"].as_object_mut(), details.as_object())
+        {
+            err.extend(extra.clone());
+        }
         (status, Json(body)).into_response()
     }
 }

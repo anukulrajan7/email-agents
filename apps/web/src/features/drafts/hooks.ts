@@ -1,6 +1,6 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '../../api/client';
-import type { Draft, DraftPatch } from '../../api/types';
+import type { Draft, DraftPatch, SafetyReport, ScheduledSend } from '../../api/types';
 import { messageKey, messagesKey } from '../inbox/hooks';
 
 export function useGenerateDraft(ws: string, messageId: string) {
@@ -42,7 +42,7 @@ export function useSendDraft(ws: string, messageId: string, draftId: string) {
       if (body_text !== undefined) {
         await api<Draft>(`/workspaces/${ws}/drafts/${draftId}`, { method: 'PATCH', body: { body_text, status: 'edited' } });
       }
-      return api<{ status: 'sent'; provider_message_id: string }>(`/workspaces/${ws}/drafts/${draftId}/send`, {
+      return api<ScheduledSend>(`/workspaces/${ws}/drafts/${draftId}/send`, {
         method: 'POST',
         body: { confirm: true },
       });
@@ -52,5 +52,20 @@ export function useSendDraft(ws: string, messageId: string, draftId: string) {
         qc.invalidateQueries({ queryKey: messageKey(ws, messageId) }),
         qc.invalidateQueries({ queryKey: messagesKey(ws) }),
       ]),
+  });
+}
+
+export function useCheckDraft(ws: string, draftId: string) {
+  return useMutation({
+    mutationFn: (body_text: string) =>
+      api<SafetyReport>(`/workspaces/${ws}/drafts/${draftId}/check`, { method: 'POST', body: { body_text } }),
+  });
+}
+
+export function useUndoSend(ws: string, messageId: string, draftId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => api<{ status: 'cancelled' }>(`/workspaces/${ws}/drafts/${draftId}/undo-send`, { method: 'POST' }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: messageKey(ws, messageId) }),
   });
 }

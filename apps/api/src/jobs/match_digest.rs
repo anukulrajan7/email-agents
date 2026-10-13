@@ -198,7 +198,8 @@ pub async fn send_match_digest(state: &AppState, workspace_id: &str, now: i64) -
     let (subject, text, html) = render_digest(&ws_name, &base, workspace_id, &groups);
     let mut sent = 0;
     for to in &settings.recipients {
-        match mailer.send(to, &subject, &text, &html).await {
+        let email = crate::mailer::OutgoingEmail { kind: crate::mailer::kind::MATCH_DIGEST, to, subject: &subject, text: &text, html: &html };
+        match crate::mailer::deliver(&state.db, mailer.as_ref(), email).await {
             Ok(()) => sent += 1,
             Err(e) => tracing::warn!(error = %e, "match digest email failed"),
         }

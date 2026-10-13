@@ -185,7 +185,11 @@ async fn backfills_full_messages_once_with_retry() {
     // Sending needs explicit confirmation, happens once, and is audited.
     assert_eq!(call(&app, "POST", &format!("/api/v1/workspaces/{ws}/drafts/{draft_id}/send"), Some(json!({"confirm": false}))).await.0, StatusCode::BAD_REQUEST);
     let (s, sent) = call(&app, "POST", &format!("/api/v1/workspaces/{ws}/drafts/{draft_id}/send"), Some(json!({"confirm": true}))).await;
-    assert_eq!((s, sent["status"].as_str()), (StatusCode::OK, Some("sent")));
+    assert_eq!((s, sent["status"].as_str()), (StatusCode::OK, Some("scheduled")), "{sent}");
+    assert!(sent["send_at"].is_string());
+    assert_eq!(call(&app, "POST", &format!("/api/v1/workspaces/{ws}/drafts/{draft_id}/send"), Some(json!({"confirm": true}))).await.0, StatusCode::CONFLICT);
+    // SEND_UNDO_SECONDS = 0 in tests: the next worker run sends it.
+    worker::drain(&state).await;
     assert_eq!(call(&app, "POST", &format!("/api/v1/workspaces/{ws}/drafts/{draft_id}/send"), Some(json!({"confirm": true}))).await.0, StatusCode::CONFLICT);
     let kinds: Vec<String> = calls.lock().unwrap().iter().map(|(k, _)| k.clone()).collect();
     assert_eq!(kinds, ["create_draft", "update_draft:gdraft1", "send_draft"]);

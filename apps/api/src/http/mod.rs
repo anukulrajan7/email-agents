@@ -71,6 +71,8 @@ pub struct AppState {
     pub planner: Arc<dyn crate::agents::planner::Planner>,
     /// Checks agent proposals before they run or go to a person.
     pub critic: Arc<dyn crate::agents::critic::Critic>,
+    /// Cheap typed decisions (yes/no, choice, score); see `ai::judge`.
+    pub judge: Arc<dyn crate::ai::judge::Judge>,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -106,6 +108,8 @@ pub fn router(state: AppState) -> Router {
         .route("/workspaces/{ws}/drafts/{id}", patch(messages::update_draft))
         .route("/workspaces/{ws}/drafts/{id}/provider-draft", post(crate::replies::save_to_provider))
         .route("/workspaces/{ws}/drafts/{id}/send", post(crate::replies::send))
+        .route("/workspaces/{ws}/drafts/{id}/check", post(crate::send_safety::check_draft))
+        .route("/workspaces/{ws}/drafts/{id}/undo-send", post(crate::replies::undo_send))
         .route("/workspaces/{ws}/reviews", get(reviews::list))
         .route("/workspaces/{ws}/reviews/{id}", patch(reviews::update))
         .route("/workspaces/{ws}/workflows", get(workflows::list))

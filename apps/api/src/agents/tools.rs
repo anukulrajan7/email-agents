@@ -763,10 +763,10 @@ impl Tool for SendEmail {
     async fn run(&self, ctx: &ToolCtx<'_>, args: &Value) -> Result<ToolOutput, ToolError> {
         let preview = draft_preview(ctx, str_arg(args, "draft_id")?).await?;
         let draft_id = preview.draft_id.clone().unwrap_or_default();
-        let provider_message_id = replies::send_draft(ctx.state, ctx.ws(), &draft_id, ctx.actor).await?;
+        let scheduled = replies::send_draft(ctx.state, ctx.ws(), &draft_id, ctx.actor).await?;
         Ok(ToolOutput {
-            summary: format!("Sent the reply to {}", preview.to.unwrap_or_default()),
-            value: json!({"sent": true, "draft_id": draft_id, "provider_message_id": provider_message_id}),
+            summary: format!("Reply to {} is sending (can be undone for a few seconds)", preview.to.unwrap_or_default()),
+            value: json!({"scheduled": true, "draft_id": draft_id, "send_at": scheduled.send_at}),
             state: Some(json!({"last_sent_draft_id": draft_id})),
             ..Default::default()
         })
@@ -834,7 +834,7 @@ impl Tool for SubmitCandidate {
             return failed("Only matched candidates of this requirement can be submitted.");
         }
         let draft_id = preview.draft_id.clone().unwrap_or_default();
-        let provider_message_id = replies::send_draft(ctx.state, ctx.ws(), &draft_id, ctx.actor).await?;
+        let scheduled = replies::send_draft(ctx.state, ctx.ws(), &draft_id, ctx.actor).await?;
         let ids: Vec<String> = preview.candidates.iter().map(|p| p.id.clone()).collect();
         let decided_by = match ctx.actor {
             Actor::User(u) => Some(u),
@@ -855,7 +855,7 @@ impl Tool for SubmitCandidate {
         .rows_affected();
         Ok(ToolOutput {
             summary: format!("Submitted {} candidate{} to {}", ids.len(), plural(ids.len()), preview.to.clone().unwrap_or_default()),
-            value: json!({"sent": true, "draft_id": draft_id, "provider_message_id": provider_message_id, "shortlisted": shortlisted}),
+            value: json!({"scheduled": true, "draft_id": draft_id, "send_at": scheduled.send_at, "shortlisted": shortlisted}),
             state: Some(json!({"submitted_candidate_ids": ids, "last_sent_draft_id": draft_id})),
             ..Default::default()
         })

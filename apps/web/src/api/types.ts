@@ -12,7 +12,7 @@ export type ProcessingStatus =
 export type Category = string;
 export type Priority = 'low' | 'normal' | 'high';
 export type ClassSource = 'jev' | 'llm' | 'manual' | 'fallback';
-export type DraftStatus = 'suggested' | 'edited' | 'approved' | 'sent';
+export type DraftStatus = 'suggested' | 'edited' | 'approved' | 'scheduled' | 'sent';
 export type ReviewStatus = 'open' | 'closed';
 export type RunStatus = 'running' | 'completed' | 'failed' | 'skipped';
 export type JobStatus = 'pending' | 'running' | 'succeeded' | 'dead';
@@ -25,6 +25,8 @@ export type ErrorCode =
   | 'conflict'
   | 'rate_limited'
   | 'email_not_verified'
+  | 'email_not_sent'
+  | 'send_blocked'
   | 'not_implemented'
   | 'internal';
 
@@ -162,7 +164,15 @@ export type Draft = {
   unanswered?: string[];
   created_at: string;
   updated_at: string;
+  /** While status is 'scheduled': when the reply goes out (undo until then). */
+  send_at?: string | null;
+  /** Why the last scheduled send didn't go out. */
+  send_error?: string | null;
 };
+
+export type SafetyIssue = { code: string; message: string; fix: string | null };
+export type SafetyReport = { blocking: SafetyIssue[]; warnings: SafetyIssue[] };
+export type ScheduledSend = { status: 'scheduled'; draft_id: string; send_at: string };
 
 export type Attachment = {
   id: string;

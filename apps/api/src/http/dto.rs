@@ -125,6 +125,10 @@ pub struct Draft {
     pub memories_used: Vec<serde_json::Value>,
     /// Asks the draft could not answer; each appears in the body as `[NEEDS: …]`.
     pub unanswered: Vec<String>,
+    /// While `status = 'scheduled'`: when the reply goes out (undo until then).
+    pub send_at: Option<String>,
+    /// Why the last scheduled send did not go out.
+    pub send_error: Option<String>,
 }
 
 #[derive(FromRow)]
@@ -138,14 +142,24 @@ pub struct DraftRow {
     pub unanswered_json: String,
     pub created_at: i64,
     pub updated_at: i64,
+    #[sqlx(default)]
+    pub send_at: Option<i64>,
+    #[sqlx(default)]
+    pub send_attempt_id: Option<String>,
+    #[sqlx(default)]
+    pub send_error: Option<String>,
 }
 
 impl From<DraftRow> for Draft {
     fn from(r: DraftRow) -> Self {
+        let sent = r.status == "sent";
+        let in_flight = !sent && (r.send_at.is_some() || r.send_attempt_id.is_some());
         Self {
             id: r.id,
             message_id: r.message_id,
-            status: r.status,
+            status: if in_flight { "scheduled".into() } else { r.status },
+            send_at: if sent { None } else { r.send_at.map(iso) },
+            send_error: if sent { None } else { r.send_error },
             body_text: r.body_text,
             model_id: r.model_id,
             created_at: iso(r.created_at),

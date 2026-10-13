@@ -252,7 +252,8 @@ async fn send_reply_is_skipped_when_the_draft_has_gaps() {
     let draft_id = detail["draft"]["id"].as_str().unwrap();
     assert!(detail["draft"]["body_text"].as_str().unwrap().contains("[NEEDS:"));
     let (s, err) = call(&env.app, "POST", &format!("{}/drafts/{draft_id}/send", env.base), ADMIN, Some(json!({"confirm": true}))).await;
-    assert_eq!((s, err["error"]["code"].as_str()), (StatusCode::CONFLICT, Some("draft_incomplete")));
+    assert_eq!((s, err["error"]["code"].as_str()), (StatusCode::CONFLICT, Some("send_blocked")));
+    assert_eq!(err["error"]["blocking"][0]["code"], "open_gaps", "{err}");
 }
 
 #[tokio::test]

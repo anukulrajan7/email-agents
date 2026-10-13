@@ -21,6 +21,7 @@ const tones: Record<string, Tone> = {
   suggested: 'info',
   edited: 'warning',
   approved: 'success',
+  scheduled: 'info',
   sent: 'success',
 };
 

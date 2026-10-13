@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
 import type { Draft, MessageDetail } from '../../api/types';
 import { Button, useToast } from '../../components/ui';
 import { ErrorNote } from '../../components/ErrorNote';
@@ -7,7 +8,8 @@ import { cn } from '../../lib/cn';
 import { fullDate } from '../../lib/format';
 import { extractNeeds, hasNeeds, isStillNeeded, splitNeeds } from './needs';
 import { SendDialog } from './SendDialog';
-import { useGenerateDraft, useSaveProviderDraft, useSendDraft, useUpdateDraft } from './hooks';
+import { useCheckDraft, useGenerateDraft, useSaveProviderDraft, useSendDraft, useUndoSend, useUpdateDraft } from './hooks';
+import { messageKey, messagesKey } from '../inbox/hooks';
 
 const POLL_LIMIT_MS = 60_000;
 
@@ -80,6 +82,63 @@ function HighlightedTextarea({ text, onChange, readOnly }: { text: string; onCha
   );
 }
 
+const secondsLeft = (sendAt: string | undefined, now: number) => {
+  const at = sendAt ? Date.parse(sendAt) : Number.NaN;
+  return Number.isNaN(at) ? 0 : Math.max(0, Math.ceil((at - now) / 1000));
+};
+
+/** "Sending in 30 s · Undo" while a send is scheduled; refreshes the email once the time is up. */
+export function UndoBar({
+  ws,
+  messageId,
+  draftId,
+  sendAt,
+  onUndone,
+}: {
+  ws: string;
+  messageId: string;
+  draftId: string;
+  sendAt: string | undefined;
+  onUndone: () => void;
+}) {
+  const qc = useQueryClient();
+  const undo = useUndoSend(ws, messageId, draftId);
+  const [now, setNow] = useState(() => Date.now());
+  const left = secondsLeft(sendAt, now);
+
+  useEffect(() => {
+    if (left === 0) return;
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [left]);
+
+  useEffect(() => {
+    if (left > 0) return;
+    const refresh = () =>
+      Promise.all([
+        qc.invalidateQueries({ queryKey: messageKey(ws, messageId) }),
+        qc.invalidateQueries({ queryKey: messagesKey(ws) }),
+      ]);
+    void refresh();
+    const id = setTimeout(refresh, 3000);
+    return () => clearTimeout(id);
+  }, [left, qc, ws, messageId]);
+
+  return (
+    <div role="status" className="flex flex-col gap-2 border-l-[3px] border-info bg-info-tint px-3 py-2 text-sm text-info">
+      <div className="flex items-center justify-between gap-3">
+        <span aria-live="polite">{left > 0 ? `Sending in ${left} s` : 'Sending…'}</span>
+        {left > 0 && (
+          <Button size="sm" variant="secondary" loading={undo.isPending} onClick={() => undo.mutate(undefined, { onSuccess: onUndone })}>
+            Undo
+          </Button>
+        )}
+      </div>
+      <ErrorNote error={undo.error} />
+    </div>
+  );
+}
+
 function DraftEditor({
   ws,
   message,
@@ -101,7 +160,11 @@ function DraftEditor({
   const saveProvider = useSaveProviderDraft(ws, messageId, draft.id);
   const send = useSendDraft(ws, messageId, draft.id);
   const notify = useToast();
+  const check = useCheckDraft(ws, draft.id);
   const sent = draft.status === 'sent';
+  const sendAt = draft.status === 'scheduled' ? (draft.send_at ?? undefined) : send.data?.send_at;
+  const scheduled = !sent && (draft.status === 'scheduled' || send.data !== undefined);
+  const locked = sent || scheduled;
   const dirty = text !== draft.body_text;
   const needsInput = hasNeeds(text);
   const checklist = Array.from(new Set(draft.unanswered ?? extractNeeds(draft.body_text)));
@@ -121,9 +184,15 @@ function DraftEditor({
       <label htmlFor="draft-body" className="sr-only">
         Draft reply
       </label>
-      {!sent && <NeedsChecklist items={checklist} text={text} />}
-      <HighlightedTextarea text={text} onChange={setText} readOnly={sent} />
-      {!sent && needsInput && (
+      {!locked && <NeedsChecklist items={checklist} text={text} />}
+      <HighlightedTextarea text={text} onChange={setText} readOnly={locked} />
+      {scheduled && <UndoBar ws={ws} messageId={messageId} draftId={draft.id} sendAt={sendAt} onUndone={() => send.reset()} />}
+      {!locked && draft.send_error && (
+        <p role="alert" className="border-l-[3px] border-review bg-review-tint px-3 py-2 text-sm text-review-ink">
+          {draft.send_error}
+        </p>
+      )}
+      {!locked && needsInput && (
         <p id="draft-needs-hint" className="text-sm text-review-ink">
           Fill every dashed [NEEDS: …] part to send. You can still save this to Gmail drafts.
         </p>
@@ -134,7 +203,7 @@ function DraftEditor({
         </p>
       )}
       <div className="flex flex-wrap gap-2">
-        {!sent && (
+        {!locked && (
           <>
             <Button
               variant="secondary"
@@ -165,7 +234,14 @@ function DraftEditor({
               </Button>
             )}
             {message.source.can_send && (
-              <Button disabled={needsInput} aria-describedby={needsInput ? 'draft-needs-hint' : undefined} onClick={() => setConfirming(true)}>
+              <Button
+                disabled={needsInput}
+                aria-describedby={needsInput ? 'draft-needs-hint' : undefined}
+                onClick={() => {
+                  setConfirming(true);
+                  check.mutate(text);
+                }}
+              >
                 Send reply…
               </Button>
             )}
@@ -175,7 +251,7 @@ function DraftEditor({
           {copied ? 'Copied' : 'Copy draft'}
         </Button>
       </div>
-      {savedToGmail && !sent && (
+      {savedToGmail && !locked && (
         <p className="text-sm text-ink-muted" role="status">
           Saved in your Gmail Drafts — you can finish it there too.
         </p>
@@ -188,8 +264,12 @@ function DraftEditor({
           body={text}
           sending={send.isPending}
           error={send.error}
+          report={check.data}
+          checking={check.isPending}
+          checkError={check.error}
           onCancel={() => {
             send.reset();
+            check.reset();
             setConfirming(false);
           }}
           onConfirm={() =>

@@ -4,6 +4,7 @@
 pub mod embeddings;
 pub mod fallback;
 pub mod jev;
+pub mod judge;
 pub mod label_suggest;
 pub mod memory_extractor;
 pub mod openrouter;

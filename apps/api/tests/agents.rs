@@ -226,6 +226,8 @@ async fn requirement_case_runs_to_an_interview() {
     assert_eq!(s, StatusCode::OK, "{decided}");
     assert_eq!((decided["status"].as_str(), decided["decided_by"].as_str(), decided["body"].as_str()), (Some("approved"), Some("op@acme.test"), Some(edited)));
     assert!(decided["decided_at"].is_string());
+    // Sends are scheduled (undo window; 0 s in tests) and go out when the worker runs.
+    worker::drain(&env.state).await;
     let sends = env.sends();
     assert_eq!(sends.len(), 1);
     assert_eq!(sends[0]["threadId"], "t-req", "reply stays in the client's thread");

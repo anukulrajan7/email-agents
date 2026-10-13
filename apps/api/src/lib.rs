@@ -17,6 +17,7 @@ pub mod labels;
 pub mod mailer;
 pub mod matching;
 pub mod replies;
+pub mod send_safety;
 pub mod reply_settings;
 pub mod memory;
 pub mod memory_learning;
@@ -190,9 +191,25 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
         }
     };
 
+    // Typed decisions: Jev if configured, else the efficient OpenRouter model, else none (callers fail open).
+    let judge: Arc<dyn ai::judge::Judge> = match &openrouter {
+        _ if !config.typesafe_api_key.is_empty() => Arc::new(ai::judge::JevJudge::new(
+            http.clone(),
+            &config.jev_api_url,
+            &config.typesafe_api_key,
+            &config.jev_model_id,
+        )),
+        Some(client) if !analyst_model.is_empty() => Arc::new(ai::judge::OpenRouterJudge::new(client.with_task("judge"), analyst_model)),
+        _ => {
+            tracing::warn!("no judge model configured: AI review of sends and alert gating are off");
+            Arc::new(ai::judge::UnavailableJudge)
+        }
+    };
+
     Ok(AppState {
         planner,
         critic,
+        judge,
         memory_extractor,
         alert_mailer: mailer.clone(),
         analyst,

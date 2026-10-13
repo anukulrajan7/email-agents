@@ -71,6 +71,8 @@ pub struct Config {
     pub signup_allowed_domains: Vec<String>,
     /// Public URL of the web app, used for deep links in alert emails.
     pub app_base_url: String,
+    /// Replies are sent this many seconds after "Send" so people can undo (0 = next worker run).
+    pub send_undo_seconds: i64,
 }
 
 fn var(name: &str, default: &str) -> String {
@@ -137,6 +139,7 @@ impl Config {
                 .filter(|d| !d.is_empty())
                 .collect(),
             app_base_url: var("APP_BASE_URL", "https://mail.anukulraj.tech"),
+            send_undo_seconds: var("SEND_UNDO_SECONDS", "30").parse::<i64>().context("SEND_UNDO_SECONDS")?.clamp(0, 600),
         };
         if config.auth_mode == AuthMode::Oidc
             && (config.oidc_issuer_url.is_empty() || config.oidc_audience.is_empty())
@@ -205,6 +208,7 @@ impl Config {
             smtp_password: String::new(),
             smtp_from: String::new(),
             app_base_url: "https://mail.anukulraj.tech".into(),
+            send_undo_seconds: 0,
         }
     }
 }

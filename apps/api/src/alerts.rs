@@ -21,10 +21,12 @@ use serde_json::{Value, json};
 use sqlx::SqlitePool;
 
 use crate::{
+    ai::judge,
     audit::{self, Actor, Entry},
     db::{iso, new_id, now_ms},
     http::AppState,
     jobs::{self, handlers::JobError, kind},
+    mailer::{OutgoingEmail, kind as mail_kind},
     memory_learning::team_addresses,
 };
 
@@ -344,6 +346,38 @@ async fn firing(
     Ok(out)
 }
 
+/// Cheap gate before a new `important_unanswered` alert: high priority always alerts; otherwise
+/// one cached judge question ("important/time-sensitive?") cuts false alerts. Fails open.
+async fn worth_alerting(state: &AppState, workspace_id: &str, c: &Candidate) -> sqlx::Result<bool> {
+    if c.priority == "high" {
+        return Ok(true);
+    }
+    let key = dedupe_key(IMPORTANT_UNANSWERED, Some(&c.id), 1);
+    let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM alerts WHERE workspace_id = ?1 AND dedupe_key = ?2)")
+        .bind(workspace_id)
+        .bind(&key)
+        .fetch_one(&state.db)
+        .await?;
+    if exists {
+        return Ok(true);
+    }
+    let body: String = sqlx::query_scalar("SELECT body_text FROM email_messages WHERE id = ?1")
+        .bind(&c.id)
+        .fetch_optional(&state.db)
+        .await?
+        .unwrap_or_default();
+    let context = judge::email_context(&c.sender_address, &c.subject, c.summary.as_deref(), &body);
+    let scope = format!("alert_important:v1:{workspace_id}");
+    let verdict = match judge::ask_cached(&state.db, state.judge.as_ref(), &scope, &context, &[judge::important_question()]).await {
+        Ok(a) => a.yes_no(judge::IMPORTANT),
+        Err(e) => {
+            tracing::debug!(error = %e, "alert gate unavailable; alerting");
+            None
+        }
+    };
+    Ok(judge::alert_gate(false, verdict))
+}
+
 fn hours_ago(now: i64, at: i64) -> i64 {
     ((now - at) / HOUR_MS).max(0)
 }
@@ -467,6 +501,9 @@ pub async fn evaluate_workspace(state: &AppState, workspace_id: &str, now: i64) 
         report.raised += raise(pool, rule_alert(workspace_id, APPROVAL_PENDING, c, now)).await?.1 as usize;
     }
     for c in important.iter().filter(|c| !approval_ids.contains(c.id.as_str())) {
+        if !worth_alerting(state, workspace_id, c).await? {
+            continue;
+        }
         report.raised += raise(pool, rule_alert(workspace_id, IMPORTANT_UNANSWERED, c, now)).await?.1 as usize;
     }
 
@@ -584,7 +621,8 @@ async fn deliver(state: &AppState, workspace_id: &str, settings: &AlertSettings)
             })
             .collect();
         let (subject, text, html) = render_email(&ws_name, &base, workspace_id, &lines, None);
-        match mailer.send(to, &subject, &text, &html).await {
+        let email = OutgoingEmail { kind: mail_kind::ALERT, to, subject: &subject, text: &text, html: &html };
+        match crate::mailer::deliver(&state.db, mailer.as_ref(), email).await {
             Ok(()) => {
                 sent += 1;
                 for &i in &idxs {
@@ -655,7 +693,8 @@ async fn digest(state: &AppState, workspace_id: &str, settings: &AlertSettings, 
     let (subject, text, html) = render_email(&ws_name, &base, workspace_id, &lines, Some("Daily digest"));
     let mut any = false;
     for to in &settings.recipients {
-        match mailer.send(to, &subject, &text, &html).await {
+        let email = OutgoingEmail { kind: mail_kind::ALERT_DIGEST, to, subject: &subject, text: &text, html: &html };
+        match crate::mailer::deliver(&state.db, mailer.as_ref(), email).await {
             Ok(()) => any = true,
             Err(e) => tracing::warn!(error = %e, "digest email failed"),
         }

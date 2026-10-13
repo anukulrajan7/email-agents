@@ -91,7 +91,7 @@ pub async fn signup(State(state): State<AppState>, Json(body): Json<SignupBody>)
         return Err(AppError::Conflict("an account with this email already exists".into()));
     }
     if verify {
-        issue_code(&state, &id, &email).await;
+        issue_code(&state, &id, &email).await?;
         return Ok((StatusCode::ACCEPTED, Json(json!({ "verification_required": true, "email": email }))));
     }
     let s = sessions::create_session(&state.db, &id).await?;
@@ -125,7 +125,7 @@ pub async fn login(State(state): State<AppState>, Json(body): Json<LoginBody>) -
     };
     state.login_limiter.reset(&email);
     if verified_at.is_none() && state.mailer.is_some() {
-        issue_code(&state, &id, &email).await;
+        issue_code(&state, &id, &email).await?;
         return Err(AppError::EmailNotVerified);
     }
     let s = sessions::create_session(&state.db, &id).await?;
@@ -149,10 +149,11 @@ fn code_hash(user_id: &str, code: &str) -> String {
     sessions::hash_token(&format!("{user_id}:{code}"))
 }
 
-/// Creates and emails a fresh 6-digit code (at most one per minute). Failures are logged,
-/// never surfaced, so responses don't reveal account state; the user can resend.
-async fn issue_code(state: &AppState, user_id: &str, email: &str) {
-    let Some(mailer) = state.mailer.clone() else { return };
+/// Creates and emails a fresh 6-digit code (at most one per minute), with retries. A failed send
+/// is returned (`EmailNotSent`) so the sign-in screen can say so instead of waiting for a code
+/// that will never arrive.
+async fn issue_code(state: &AppState, user_id: &str, email: &str) -> AppResult<()> {
+    let Some(mailer) = state.mailer.clone() else { return Ok(()) };
     let now = now_ms();
     let recent: Option<i64> = sqlx::query_scalar(
         "SELECT created_at FROM email_codes WHERE user_id = ?1 AND purpose = 'verify_email' ORDER BY created_at DESC LIMIT 1",
@@ -163,13 +164,14 @@ async fn issue_code(state: &AppState, user_id: &str, email: &str) {
     .ok()
     .flatten();
     if recent.is_some_and(|t| now - t < RESEND_AFTER_MS) {
-        return;
+        return Ok(());
     }
     let code = format!("{:06}", rand::random::<u32>() % 1_000_000);
+    let code_id = new_id("otp");
     let stored = sqlx::query(
         "INSERT INTO email_codes (id, user_id, purpose, code_hash, created_at, expires_at) VALUES (?1, ?2, 'verify_email', ?3, ?4, ?5)",
     )
-    .bind(new_id("otp"))
+    .bind(&code_id)
     .bind(user_id)
     .bind(code_hash(user_id, &code))
     .bind(now)
@@ -178,12 +180,19 @@ async fn issue_code(state: &AppState, user_id: &str, email: &str) {
     .await;
     if let Err(e) = stored {
         tracing::error!(error = %e, "failed to store verification code");
-        return;
+        return Err(AppError::EmailNotSent(email.to_string()));
     }
     let (subject, text, html) = crate::mailer::verification_email(&code);
-    if let Err(e) = mailer.send(email, &subject, &text, &html).await {
+    let out = crate::mailer::OutgoingEmail { kind: crate::mailer::kind::OTP, to: email, subject: &subject, text: &text, html: &html };
+    if let Err(e) = crate::mailer::deliver(&state.db, mailer.as_ref(), out).await {
         tracing::error!(error = %e, "failed to send verification email");
+        // Not delivered: drop the code so "resend" isn't throttled by a code nobody received.
+        if let Err(e) = sqlx::query("DELETE FROM email_codes WHERE id = ?1").bind(&code_id).execute(&state.db).await {
+            tracing::warn!(error = %e, "could not drop an undelivered verification code");
+        }
+        return Err(AppError::EmailNotSent(email.to_string()));
     }
+    Ok(())
 }
 
 #[derive(Deserialize)]
@@ -259,7 +268,7 @@ pub async fn resend_code(State(state): State<AppState>, Json(body): Json<ResendB
             .fetch_optional(&state.db)
             .await?;
     if let Some((id, None)) = user {
-        issue_code(&state, &id, &email).await;
+        issue_code(&state, &id, &email).await?;
     }
     Ok((StatusCode::ACCEPTED, Json(json!({ "status": "sent" }))))
 }

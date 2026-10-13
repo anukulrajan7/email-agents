@@ -26,7 +26,7 @@ ProcessingStatus  = "pending" | "normalized" | "classified" | "workflow_running"
 Category          = "timesheet" | "leave" | "candidate_referral" | "approval" | "payroll" | "general" | "other"
 Priority          = "low" | "normal" | "high"
 ClassSource       = "jev" | "llm" | "manual" | "fallback"
-DraftStatus       = "suggested" | "edited" | "approved" | "sent"
+DraftStatus       = "suggested" | "edited" | "approved" | "scheduled" | "sent"   // "scheduled" = send pending (undo-able)
 ReviewStatus      = "open" | "closed"
 RunStatus         = "running" | "completed" | "failed" | "skipped"
 JobStatus         = "pending" | "running" | "succeeded" | "dead"
@@ -92,7 +92,9 @@ type Classification = {
   model_id: string | null; updated_at: string;
 };
 
-type Draft = { id: string; message_id: string; status: DraftStatus; body_text: string; model_id: string | null; created_at: string; updated_at: string };
+type Draft = { id: string; message_id: string; status: DraftStatus; body_text: string; model_id: string | null; created_at: string; updated_at: string;
+  send_at: string | null;      // while status = "scheduled": when it goes out
+  send_error: string | null }; // why the last scheduled send didn't go out
 
 type Attachment = { id: string; name: string; media_type: string | null; size_bytes: number | null; scan_status: string };
 
@@ -244,10 +246,15 @@ Codes are 6 digits, valid 10 minutes, max 5 attempts, stored only as a hash.
 |---|---|---|---|
 | POST | `/api/v1/auth/signup` | as before | **202** `{verification_required: true, email}` when verification is on (no token yet); 201 session otherwise |
 | POST | `/api/v1/auth/verify` | `{email, code}` | `{token, expires_at, user}` (signs the user in); 400 `bad_request` "invalid or expired code"; 429 `rate_limited` |
-| POST | `/api/v1/auth/resend-code` | `{email}` | 202 `{status:"sent"}` always (no account enumeration; at most one code per 60 s) |
+| POST | `/api/v1/auth/resend-code` | `{email}` | 202 `{status:"sent"}` (no account enumeration; at most one code per 60 s) |
 | POST | `/api/v1/auth/login` | as before | **403 `email_not_verified`** if the password is right but the email is unverified (a fresh code is sent) |
 
 `GET /api/v1/auth/config` gains `email_verification: boolean`.
+
+Delivery: every OTP and alert email is tried up to 3 times (backoff 0.4 s, 1.2 s) and recorded in `email_outbox`
+(`kind`, `to_address`, `status` sending|sent|failed, `attempts`, `last_error`; OTP subjects are stored as "Verification code").
+When a verification email can't be sent, `signup`, `login` (unverified) and `resend-code` return
+**503 `email_not_sent`** ("we couldn't send the email to …") instead of pretending a code is on its way.
 
 ## Labels (workspace-defined categories)
 
@@ -394,7 +401,8 @@ candidate_referral -> draft + save). New workspaces get `reply_to_questions` and
 and no unanswered items; the sender's domain is in `allowed_domains`; the classification is manual or has confidence >= 0.85
 and did not come from the error fallback; today's sends for this automation are below `daily_cap`; the source can send; the
 sender is not the mailbox itself or an automated address. Sends are audited as `automation.sent_reply`.
-Manual `POST /drafts/{id}/send` is also refused with 409 `draft_incomplete` while the body contains `[NEEDS:`.
+Manual `POST /drafts/{id}/send` is also refused with 409 `send_blocked` while the body contains `[NEEDS:` (see Send safety).
+An automated send also needs the AI review to run; if it can't, the send is held (`ai_review_unavailable`).
 
 `remind_if_no_reply` schedules a delayed job. When due, if the draft was not sent and no later message from someone else
 arrived in the thread, a review item of kind `reminder` ("No reply yet: ...") is opened.
@@ -647,3 +655,49 @@ Runtime:
 - **Models.** Planner `OPENROUTER_PLANNER_MODEL_ID` (default `anthropic/claude-haiku-5.5`); high-priority
   requirement cases use `OPENROUTER_PREMIUM_MODEL_ID`. Critic: the classifier model (else `OPENROUTER_MODEL_ID`).
   Requests disable reasoning and route only to providers with `data_collection: deny`.
+
+## Send safety, undo send (wave 3, agent S)
+
+Every outgoing reply (person, automation, agent approval) goes through `replies::send_draft`, which runs the safety
+check and **schedules** the send `SEND_UNDO_SECONDS` (default 30, 0..600) ahead. The `send_draft` job re-runs the check at
+`send_at`, then calls Gmail. Drafts can't be edited (409) while scheduled.
+
+| Method | Path | Role | Body | Response |
+|---|---|---|---|---|
+| POST | `/api/v1/workspaces/:ws/drafts/:id/check` | operator | optional `{body_text}` (unsaved editor text) | `SafetyReport` (never sends) |
+| POST | `/api/v1/workspaces/:ws/drafts/:id/send` | operator | `{confirm: true}` | `{status: "scheduled", draft_id, send_at}`; **409 `send_blocked`** with `error.blocking` / `error.warnings`; 409 `conflict` if already scheduled/sent |
+| POST | `/api/v1/workspaces/:ws/drafts/:id/undo-send` | operator | – | `{status: "cancelled", draft_id}`; 409 once Gmail has been called ("too late") or if not scheduled |
+
+```ts
+interface Issue { code: string; message: string; fix: string | null }
+interface SafetyReport { blocking: Issue[]; warnings: Issue[] }   // "Send" is disabled while blocking is non-empty
+```
+
+Blocking codes: `invalid_recipient`, `own_mailbox` (reply would go to our mailbox / the email was sent by us),
+`automated_recipient` (no-reply, notifications, mailer-daemon …), `subject_mismatch` (must be `Re: <original>`),
+`empty_body` / `too_short` (< 20 chars) / `too_long` (> 4000), `open_gaps` (`[NEEDS:`), `placeholder` (`{{x}}`, `{name}`,
+`<name>`, `[Name]`, `XXX`, `TBD`), `duplicate` (a reply in the thread in the last 10 min, or another one scheduled),
+`unsupported_promise` (judge: promises approvals/money/dates/decisions not in the email or team notes);
+`ai_review_unavailable` blocks automated sends only.
+Warning codes: `attachment_mentioned`, `unknown_contact` (links/phones not in the thread, team notes, reply style or
+signature), `tone`, `misses_ask` (judge score < 0.5), `ai_review_unavailable` (person sends), `mailbox_unverified`.
+
+No double send: each Gmail call carries our own `Message-ID` (`<snd_…@postroom.mail>`) recorded on the draft first.
+A clear 4xx releases it; a timeout/5xx keeps it open, and before any retry the send is reconciled with Gmail
+(`rfc822msgid:` search, then the thread: our Message-ID or a SENT message after the attempt started). Not found within
+2 minutes = "unsure", no resend. A send that is blocked at send time, or gives up, clears the schedule, sets
+`send_error` and raises a `automation` alert "Reply not sent: …".
+
+### Judge (typed decisions)
+
+`state.judge: Arc<dyn ai::judge::Judge>` answers a batch of typed questions in one cheap call:
+Jev (`TYPESAFE_API_KEY`) → OpenRouter classifier model (strict JSON schema, reasoning off, `data_collection: deny`) → none.
+
+```rust
+async fn judge(&self, context: &str, questions: &[Question]) -> Result<Answers, AiError>;
+// Question::yes_no(id, prompt) | Question::score(id, prompt) /* 0..1 */ | Question::choice(id, prompt, &[options])
+// answers.yes_no(id) -> Option<bool>, .score(id) -> Option<f64>, .choice(id) -> Option<&str>, .reason(id) -> &str
+// ai::judge::ask_cached(&db, judge, scope, context, questions) caches by (scope, material, questions).
+```
+Used for: the pre-send review (above); the `important_unanswered` alert gate (non-high-priority candidates only, cached,
+fails open); needs-reply tie-break when the analyst and classifier disagree. Agent critics can call the same API.

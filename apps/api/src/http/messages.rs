@@ -334,7 +334,8 @@ pub async fn detail(
     .fetch_optional(&state.db)
     .await?;
     let draft: Option<DraftRow> = sqlx::query_as(
-        "SELECT id, message_id, status, body_text, model_id, memory_ids_json, unanswered_json, created_at, updated_at
+        "SELECT id, message_id, status, body_text, model_id, memory_ids_json, unanswered_json, created_at, updated_at,
+                send_at, send_attempt_id, send_error
          FROM drafts WHERE message_id = ?1 AND workspace_id = ?2 ORDER BY created_at DESC, id DESC LIMIT 1",
     )
     .bind(&id)
@@ -656,11 +657,22 @@ pub async fn update_draft(
     {
         return Err(AppError::BadRequest("body_text must be 1-10000 characters".into()));
     }
+    let in_flight: Option<bool> = sqlx::query_scalar(
+        "SELECT send_at IS NOT NULL OR send_attempt_id IS NOT NULL FROM drafts WHERE id = ?1 AND workspace_id = ?2 AND status != 'sent'",
+    )
+    .bind(&id)
+    .bind(&ws)
+    .fetch_optional(&state.db)
+    .await?;
+    if in_flight == Some(true) {
+        return Err(AppError::Conflict("this reply is scheduled to send; undo the send before editing".into()));
+    }
     let mut tx = state.db.begin().await?;
     let row: DraftRow = sqlx::query_as(
         "UPDATE drafts SET body_text = COALESCE(?1, body_text), status = COALESCE(?2, status), updated_at = ?3
-         WHERE id = ?4 AND workspace_id = ?5 AND status != 'sent'
-         RETURNING id, message_id, status, body_text, model_id, memory_ids_json, unanswered_json, created_at, updated_at",
+         WHERE id = ?4 AND workspace_id = ?5 AND status != 'sent' AND send_at IS NULL AND send_attempt_id IS NULL
+         RETURNING id, message_id, status, body_text, model_id, memory_ids_json, unanswered_json, created_at, updated_at,
+                   send_at, send_attempt_id, send_error",
     )
     .bind(&body.body_text)
     .bind(status)

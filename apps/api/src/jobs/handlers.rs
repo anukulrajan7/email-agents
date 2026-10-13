@@ -116,6 +116,7 @@ pub async fn handle(state: &AppState, job: &Job) -> Result<(), JobError> {
         kind::EVALUATE_ALERTS => crate::alerts::evaluate_job(state, &payload).await,
         kind::SEND_MATCH_DIGEST => super::match_digest::digest_job(state, &payload).await,
         kind::AGENT_STEP => super::agent_jobs::agent_step(state, &payload).await,
+        kind::SEND_DRAFT => crate::replies::send_scheduled(state, &payload).await,
         other => Err(JobError::Permanent(format!("unknown job kind {other}"))),
     }
 }
@@ -161,6 +162,10 @@ pub async fn on_dead(state: &AppState, job: &Job, error: &str) {
             kind::EXECUTE_WORKFLOW => {
                 let message_id = str_field(&payload, "message_id")?;
                 set_message_error(state, &message_id, error).await
+            }
+            kind::SEND_DRAFT => {
+                crate::replies::give_up_scheduled(state, &payload, error).await?;
+                Ok(())
             }
             kind::FETCH_FORWARDED_EMAIL => {
                 if let Some(event_id) = payload.get("event_id").and_then(Value::as_str) {
@@ -905,8 +910,21 @@ pub async fn analyze_message(state: &AppState, payload: &Value) -> Result<ai::In
         .fetch_optional(&state.db)
         .await?;
     let (mut insight, model_id) = state.analyst.analyze(&msg.subject, &msg.sender_address, &msg.body_text).await?;
-    // Two independent signals must agree before we skip a reply.
-    insight.needs_reply = insight.needs_reply || (requires_reply == Some(true) && !insight.asks.is_empty());
+    // Two independent signals must agree before we skip a reply; a cheap judge breaks real ties.
+    let has_asks = !insight.asks.is_empty();
+    let judge_says = if ai::judge::needs_reply_disputed(insight.needs_reply, requires_reply, has_asks) {
+        let context = ai::judge::email_context(&msg.sender_address, &msg.subject, Some(&insight.summary), &msg.body_text);
+        match state.judge.judge(&context, &[ai::judge::needs_reply_question()]).await {
+            Ok(a) => a.yes_no(ai::judge::NEEDS_REPLY),
+            Err(e) => {
+                tracing::debug!(error = %e, "needs-reply tie-break unavailable; keeping the rule");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    insight.needs_reply = ai::judge::settle_needs_reply(insight.needs_reply, requires_reply, has_asks, judge_says);
     let source = if model_id == "rules-v1" { "rules" } else { "llm" };
     sqlx::query(
         "INSERT INTO message_insights (message_id, summary, asks_json, deadline, needs_reply, missing_json, source, model_id, created_at)
@@ -1006,6 +1024,8 @@ async fn purge_expired_events(state: &AppState) -> Result<(), JobError> {
         .execute(&state.db)
         .await?
         .rows_affected();
+    sqlx::query("DELETE FROM judge_cache WHERE created_at < ?1").bind(cutoff).execute(&state.db).await?;
+    sqlx::query("DELETE FROM email_outbox WHERE created_at < ?1").bind(cutoff).execute(&state.db).await?;
     tracing::info!(purged_payloads = purged, deleted_jobs = jobs, "retention purge");
     Ok(())
 }

@@ -42,6 +42,7 @@ pub mod kind {
     pub const EVALUATE_ALERTS: &str = "evaluate_alerts";
     pub const SEND_MATCH_DIGEST: &str = "send_match_digest";
     pub const AGENT_STEP: &str = "agent_step";
+    pub const SEND_DRAFT: &str = "send_draft";
 }
 
 #[derive(Debug, Clone, FromRow)]
@@ -153,7 +154,7 @@ async fn priority_for(conn: &mut SqliteConnection, kind: &str, dedupe_key: &str,
 /// burst of background work never delays a new email reaching the inbox.
 pub fn priority_of(kind: &str, dedupe_key: &str) -> i64 {
     match kind {
-        kind::SYNC_NANGO_SOURCE | kind::FETCH_FORWARDED_EMAIL | kind::REGISTER_NANGO_CONNECTION => 10,
+        kind::SYNC_NANGO_SOURCE | kind::FETCH_FORWARDED_EMAIL | kind::REGISTER_NANGO_CONNECTION | kind::SEND_DRAFT => 10,
         kind::CLASSIFY_EMAIL if dedupe_key.contains(":recheck:") => -5,
         kind::CLASSIFY_EMAIL => 5,
         kind::AGENT_STEP => 3,

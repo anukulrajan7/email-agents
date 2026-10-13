@@ -1,8 +1,8 @@
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { Draft, MessageDetail } from '../../api/types';
+import type { Draft, MessageDetail, SafetyReport } from '../../api/types';
 import { DraftPanel } from './DraftPanel';
 
 const draft: Draft = {
@@ -38,10 +38,21 @@ const message = (over: Partial<MessageDetail> = {}): MessageDetail => ({
   ...over,
 });
 
-function setup(m: MessageDetail) {
-  const fetchMock = vi.fn((_url: string, init?: RequestInit) =>
-    Promise.resolve(new Response(JSON.stringify(init?.method === 'POST' ? { status: 'sent' } : {}))),
-  );
+const cleanReport: SafetyReport = { blocking: [], warnings: [] };
+
+function setup(m: MessageDetail, report: SafetyReport = cleanReport) {
+  const fetchMock = vi.fn((url: string, init?: RequestInit) => {
+    const body = url.endsWith('/check')
+      ? report
+      : url.endsWith('/undo-send')
+        ? { status: 'cancelled', draft_id: 'd1' }
+        : url.endsWith('/send')
+          ? { status: 'scheduled', draft_id: 'd1', send_at: new Date(Date.now() + 30_000).toISOString() }
+          : init?.method === 'POST'
+            ? { status: 'queued' }
+            : {};
+    return Promise.resolve(new Response(JSON.stringify(body)));
+  });
   vi.stubGlobal('fetch', fetchMock);
   render(
     <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
@@ -60,8 +71,9 @@ describe('DraftPanel', () => {
     const dialog = screen.getByRole('dialog');
     expect(dialog).toHaveAttribute('aria-modal', 'true');
     expect(screen.getByText('Re: Lunch')).toBeInTheDocument();
-    expect(fetchMock).not.toHaveBeenCalled();
-    await userEvent.click(screen.getByRole('button', { name: 'Send now' }));
+    expect(fetchMock).not.toHaveBeenCalledWith('/api/v1/workspaces/w1/drafts/d1/send', expect.anything());
+    expect(await screen.findByText('Checks passed.')).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: 'Send' }));
     await waitFor(() =>
       expect(fetchMock).toHaveBeenCalledWith(
         '/api/v1/workspaces/w1/drafts/d1/send',
@@ -77,7 +89,78 @@ describe('DraftPanel', () => {
     await userEvent.keyboard('{Escape}');
     expect(screen.queryByRole('dialog')).toBeNull();
     expect(trigger).toHaveFocus();
-    expect(fetchMock).not.toHaveBeenCalled();
+    expect(fetchMock).not.toHaveBeenCalledWith('/api/v1/workspaces/w1/drafts/d1/send', expect.anything());
+  });
+
+  describe('send safety and undo', () => {
+    it('checks the current text and shows blocking issues in red with fixes, disabling Send', async () => {
+      const fetchMock = setup(message(), {
+        blocking: [{ code: 'placeholder', message: 'The reply still has template placeholders: {name}.', fix: 'Replace each placeholder.' }],
+        warnings: [{ code: 'tone', message: 'The tone may not be professional.', fix: null }],
+      });
+      await userEvent.click(screen.getByRole('button', { name: 'Send reply…' }));
+      await waitFor(() =>
+        expect(fetchMock).toHaveBeenCalledWith(
+          '/api/v1/workspaces/w1/drafts/d1/check',
+          expect.objectContaining({ method: 'POST', body: JSON.stringify({ body_text: draft.body_text }) }),
+        ),
+      );
+      const blocking = await screen.findByRole('region', { name: 'Fix before sending' });
+      expect(within(blocking).getByText(/template placeholders/)).toBeInTheDocument();
+      expect(within(blocking).getByText('Replace each placeholder.')).toBeInTheDocument();
+      expect(blocking.className).toContain('text-danger');
+      expect(screen.getByRole('region', { name: 'Check before sending' }).className).toContain('bg-review-tint');
+      expect(screen.getByRole('button', { name: 'Send' })).toBeDisabled();
+    });
+
+    it('allows sending with warnings only', async () => {
+      setup(message(), {
+        blocking: [],
+        warnings: [{ code: 'attachment_mentioned', message: 'The reply mentions an attachment.', fix: 'Remove the mention.' }],
+      });
+      await userEvent.click(screen.getByRole('button', { name: 'Send reply…' }));
+      const warnings = await screen.findByRole('region', { name: 'Check before sending' });
+      expect(within(warnings).getByText('The reply mentions an attachment.')).toBeInTheDocument();
+      expect(screen.queryByRole('region', { name: 'Fix before sending' })).toBeNull();
+      expect(screen.getByRole('button', { name: 'Send' })).toBeEnabled();
+    });
+
+    it('shows "Sending in 30 s · Undo" after sending, and Undo cancels it', async () => {
+      const fetchMock = setup(message());
+      await userEvent.click(screen.getByRole('button', { name: 'Send reply…' }));
+      await screen.findByText('Checks passed.');
+      await userEvent.click(screen.getByRole('button', { name: 'Send' }));
+      expect(await screen.findByText(/Sending in (30|29) s/)).toBeInTheDocument();
+      expect(screen.queryByRole('dialog')).toBeNull();
+      expect(screen.getByLabelText('Draft reply')).toHaveAttribute('readonly');
+      await userEvent.click(screen.getByRole('button', { name: 'Undo' }));
+      await waitFor(() =>
+        expect(fetchMock).toHaveBeenCalledWith('/api/v1/workspaces/w1/drafts/d1/undo-send', expect.objectContaining({ method: 'POST' })),
+      );
+      await waitFor(() => expect(screen.queryByText(/Sending in/)).toBeNull());
+      expect(screen.getByRole('button', { name: 'Send reply…' })).toBeEnabled();
+    });
+
+    it('counts down a scheduled draft and switches to "Sending…" at zero', () => {
+      vi.useFakeTimers();
+      try {
+        setup(message({ draft: { ...draft, status: 'scheduled', send_at: new Date(Date.now() + 3_000).toISOString() } }));
+        expect(screen.getByText('Sending in 3 s')).toBeInTheDocument();
+        expect(screen.queryByRole('button', { name: 'Send reply…' })).toBeNull();
+        act(() => vi.advanceTimersByTime(1_000));
+        expect(screen.getByText('Sending in 2 s')).toBeInTheDocument();
+        act(() => vi.advanceTimersByTime(2_000));
+        expect(screen.getByText('Sending…')).toBeInTheDocument();
+        expect(screen.queryByRole('button', { name: 'Undo' })).toBeNull();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('shows why a scheduled send did not go out', () => {
+      setup(message({ draft: { ...draft, status: 'edited', send_error: 'Not sent: someone already replied.' } }));
+      expect(screen.getByText('Not sent: someone already replied.')).toBeInTheDocument();
+    });
   });
 
   it('saves to Gmail drafts via the provider-draft endpoint', async () => {
