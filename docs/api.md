@@ -237,3 +237,42 @@ Rules: `name` 1–40 chars, `description` 10–300 chars, max 30 active labels p
 `PATCH .../messages/:id/classification` and `GET .../messages?category=` validate against the workspace's active labels.
 Workflow templates attach to a label key (`timesheet_review` → `timesheet`); `Workflow` gains `label_key: string`
 and `available` is false when the workspace has no such active label.
+
+## Matching: referrals ↔ client requirements (P1)
+
+Emails labelled `client_requirement` become **Requirements**; emails labelled `candidate_referral` (and their
+PDF/DOCX CVs) become **Candidates**. Each new record is scored against every open counterpart (0–100: must-have
+skills 60, experience 25, location 15) and kept when the score is ≥ 40, with reasons. The AI proposes; a recruiter
+shortlists or dismisses. Re-scoring never overrides a recruiter's decision.
+
+| Method | Path | Role | Body | Response |
+|---|---|---|---|---|
+| POST | `/api/v1/workspaces/:ws/matching/setup` | admin | – | `{labels: ["client_requirement","candidate_referral"]}` (creates or restores both labels) |
+| GET | `/api/v1/workspaces/:ws/matching/requirements` | member | – | `{items: Requirement[]}` |
+| PATCH | `/api/v1/workspaces/:ws/matching/requirements/:id` | member | `{status: "open"\|"closed"}` | `{id, status}` |
+| GET | `/api/v1/workspaces/:ws/matching/candidates` | member | – | `{items: Candidate[]}` |
+| GET | `/api/v1/workspaces/:ws/matching/matches?requirement_id=&candidate_id=&status=` | member | – | `{items: Match[]}` (score desc; dismissed hidden unless `status=dismissed`) |
+| PATCH | `/api/v1/workspaces/:ws/matching/matches/:id` | member | `{status: "suggested"\|"shortlisted"\|"dismissed"}` | `Match` |
+
+```ts
+type Requirement = {
+  id: string; message_id: string; client: string | null; role_title: string;
+  must_have_skills: string[]; nice_to_have_skills: string[];
+  min_experience: number | null; max_experience: number | null; location: string | null; positions: number | null;
+  status: "open" | "closed"; source: "llm" | "rules" | "manual"; created_at: string;
+  match_count: number; top_score: number | null;
+};
+type Candidate = {
+  id: string; message_id: string; name: string; email: string | null; skills: string[];
+  total_experience: number | null; location: string | null; notice_days: number | null;
+  referred_by: string | null; summary: string | null; status: "active" | "placed" | "archived";
+  source: "llm" | "rules" | "manual"; created_at: string; match_count: number;
+};
+type Match = {
+  id: string; score: number; status: "suggested" | "shortlisted" | "dismissed";
+  reasons: { ok: boolean; text: string }[];
+  requirement: { id: string; role_title: string; client: string | null; location: string | null };
+  candidate: { id: string; name: string; total_experience: number | null; location: string | null; notice_days: number | null };
+  created_at: string; updated_at: string;
+};
+```

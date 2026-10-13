@@ -76,6 +76,28 @@ pub trait Drafter: Send + Sync {
     async fn draft(&self, input: &DraftInput) -> Result<DraftOutput, AiError>;
 }
 
+/// Turns an email (+ attachment text) into typed staffing records.
+#[async_trait]
+pub trait Extractor: Send + Sync {
+    async fn requirement(&self, subject: &str, text: &str, sender_domain: Option<&str>)
+        -> Result<crate::matching::RequirementFields, AiError>;
+    async fn candidate(&self, subject: &str, text: &str, sender: &str) -> Result<crate::matching::CandidateFields, AiError>;
+}
+
+/// Keyword/regex extraction: used when no model is configured, and in tests.
+pub struct RulesExtractor;
+
+#[async_trait]
+impl Extractor for RulesExtractor {
+    async fn requirement(&self, subject: &str, text: &str, sender_domain: Option<&str>)
+        -> Result<crate::matching::RequirementFields, AiError> {
+        Ok(crate::matching::rules_requirement(subject, text, sender_domain))
+    }
+    async fn candidate(&self, subject: &str, text: &str, sender: &str) -> Result<crate::matching::CandidateFields, AiError> {
+        Ok(crate::matching::rules_candidate(subject, text, sender))
+    }
+}
+
 /// A reusable lesson proposed from how an operator changed a draft.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LearnedLesson {

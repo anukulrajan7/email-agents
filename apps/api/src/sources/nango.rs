@@ -362,6 +362,7 @@ pub fn map_gmail_record(rec: &Value, max_body_chars: usize) -> Option<MappedReco
                     filename: normalize::truncate_chars(&str_of(a, &["filename", "name"]).unwrap_or_else(|| "attachment".into()), 255),
                     media_type: str_of(a, &["mimeType", "mime_type", "contentType", "content_type"]),
                     size_bytes: a.get("size").and_then(Value::as_i64),
+                    provider_ref: None,
                 })
                 .collect()
         })
@@ -441,6 +442,7 @@ fn walk_gmail_part(part: &Value, out: &mut GmailContent) {
             filename: normalize::truncate_chars(filename, 255),
             media_type: (!mime.is_empty()).then(|| mime.to_string()),
             size_bytes: body.and_then(|b| b.get("size")).and_then(Value::as_i64),
+            provider_ref: body.and_then(|b| b.get("attachmentId")).and_then(Value::as_str).map(str::to_string),
         });
     } else if let Some(data) = body.and_then(|b| b.get("data")).and_then(Value::as_str) {
         if mime == "text/plain" && out.text.is_none() {

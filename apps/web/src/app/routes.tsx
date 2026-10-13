@@ -8,6 +8,7 @@ import { ReviewsPage } from '../features/reviews/ReviewsPage';
 import { WorkflowsPage } from '../features/workflows/WorkflowsPage';
 import { JobsPage } from '../features/jobs/JobsPage';
 import { LabelsPage } from '../features/labels/LabelsPage';
+import { MatchingPage } from '../features/matching/MatchingPage';
 import { MemoryPage } from '../features/memory/MemoryPage';
 import { ContactPage } from '../features/memory/ContactPage';
 import { AppShell } from './AppShell';
@@ -23,6 +24,7 @@ export function AppRoutes() {
           <Route index element={<Navigate to="inbox" replace />} />
           <Route path="inbox" element={<InboxPage />} />
           <Route path="inbox/:messageId" element={<InboxPage />} />
+          <Route path="matching" element={<MatchingPage />} />
           <Route path="labels" element={<LabelsPage />} />
           <Route path="reviews" element={<ReviewsPage />} />
           <Route path="memory" element={<MemoryPage />} />

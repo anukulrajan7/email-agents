@@ -2,6 +2,7 @@ mod auth_api;
 mod dto;
 mod jobs_api;
 mod labels_api;
+mod matching_api;
 mod memories;
 mod messages;
 mod reviews;
@@ -47,6 +48,7 @@ pub struct AppState {
     pub drafter: Arc<dyn Drafter>,
     /// Proposes memory suggestions from operator draft edits; `None` disables learning.
     pub learner: Option<Arc<dyn Learner>>,
+    pub extractor: Arc<dyn crate::ai::Extractor>,
     pub login_limiter: Arc<crate::sessions::LoginLimiter>,
     /// Sends verification codes; `None` = verification disabled.
     pub mailer: Option<Arc<dyn crate::mailer::Mailer>>,
@@ -93,6 +95,12 @@ pub fn router(state: AppState) -> Router {
         .route("/workspaces/{ws}/memories/{id}", patch(memories::update))
         .route("/workspaces/{ws}/contacts", get(memories::contacts))
         .route("/workspaces/{ws}/contacts/{email}", get(memories::contact))
+        .route("/workspaces/{ws}/matching/setup", post(matching_api::setup))
+        .route("/workspaces/{ws}/matching/requirements", get(matching_api::requirements))
+        .route("/workspaces/{ws}/matching/requirements/{id}", patch(matching_api::update_requirement))
+        .route("/workspaces/{ws}/matching/candidates", get(matching_api::candidates))
+        .route("/workspaces/{ws}/matching/matches", get(matching_api::matches))
+        .route("/workspaces/{ws}/matching/matches/{id}", patch(matching_api::decide))
         .route("/workspaces/{ws}/jobs", get(jobs_api::list))
         .route("/workspaces/{ws}/jobs/{id}/retry", post(jobs_api::retry))
         .fallback(|| async { AppError::NotFound })

@@ -64,6 +64,8 @@ pub async fn handle(state: &AppState, job: &Job) -> Result<(), JobError> {
         kind::PURGE_EXPIRED_EVENTS => purge_expired_events(state).await,
         kind::SYNC_NANGO_SOURCE => crate::sources::nango::sync_source(state, &payload).await,
         kind::LEARN_FROM_DRAFT => learn_from_draft(state, &payload).await,
+        kind::EXTRACT_RECORD => super::matching_jobs::extract_record(state, &payload).await,
+        kind::MATCH_RECORD => super::matching_jobs::match_record(state, &payload).await,
         kind::REGISTER_NANGO_CONNECTION => crate::sources::nango::register_from_webhook(state, &payload).await,
         other => Err(JobError::Permanent(format!("unknown job kind {other}"))),
     }
@@ -354,6 +356,17 @@ pub async fn persist_classification(
     .await?;
     let trigger = trigger.map(str::to_string).unwrap_or_else(|| format!("{}:{}", out.category, now));
     enqueue_workflow(&mut tx, &workspace_id, message_id, &trigger).await?;
+    // Requirement / referral emails also become structured records for matching.
+    if super::matching_jobs::is_extractable(&out.category) {
+        jobs::enqueue(
+            &mut tx,
+            kind::EXTRACT_RECORD,
+            &format!("extract:{message_id}:{}", out.category),
+            Some(&workspace_id),
+            &json!({ "message_id": message_id, "label": out.category }),
+        )
+        .await?;
+    }
     tx.commit().await?;
     Ok(Some(needs_review))
 }

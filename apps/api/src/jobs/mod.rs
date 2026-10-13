@@ -1,6 +1,7 @@
 //! Durable job queue on SQLite. Delivery is at-least-once: every handler must be idempotent.
 
 pub mod handlers;
+pub mod matching_jobs;
 pub mod worker;
 
 use rand::Rng;
@@ -20,6 +21,8 @@ pub mod kind {
     pub const SYNC_NANGO_SOURCE: &str = "sync_nango_source";
     pub const REGISTER_NANGO_CONNECTION: &str = "register_nango_connection";
     pub const LEARN_FROM_DRAFT: &str = "learn_from_draft";
+    pub const EXTRACT_RECORD: &str = "extract_record";
+    pub const MATCH_RECORD: &str = "match_record";
 }
 
 #[derive(Debug, Clone, FromRow)]

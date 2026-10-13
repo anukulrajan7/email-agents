@@ -106,12 +106,16 @@ pub async fn persist_message(
         .await?;
 
     for a in &email.attachments {
-        sqlx::query("INSERT INTO attachments (id, message_id, filename, media_type, size_bytes) VALUES (?1, ?2, ?3, ?4, ?5)")
+        sqlx::query(
+            "INSERT INTO attachments (id, message_id, filename, media_type, size_bytes, provider_attachment_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        )
             .bind(new_id("att"))
             .bind(&message_id)
             .bind(&a.filename)
             .bind(&a.media_type)
             .bind(a.size_bytes)
+            .bind(&a.provider_ref)
             .execute(&mut *conn)
             .await?;
     }
@@ -169,12 +173,16 @@ pub async fn refresh_content(
         .await?;
     if has_attachments == 0 {
         for a in &email.attachments {
-            sqlx::query("INSERT INTO attachments (id, message_id, filename, media_type, size_bytes) VALUES (?1, ?2, ?3, ?4, ?5)")
+            sqlx::query(
+                "INSERT INTO attachments (id, message_id, filename, media_type, size_bytes, provider_attachment_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            )
                 .bind(new_id("att"))
                 .bind(&message_id)
                 .bind(&a.filename)
                 .bind(&a.media_type)
                 .bind(a.size_bytes)
+                .bind(&a.provider_ref)
                 .execute(&mut *conn)
                 .await?;
         }

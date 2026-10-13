@@ -31,6 +31,7 @@ export function AppShell() {
 
   const items = [
     { to: 'inbox', label: 'Inbox' },
+    { to: 'matching', label: 'Matching' },
     { to: 'labels', label: 'Labels' },
     { to: 'reviews', label: 'Reviews' },
     { to: 'memory', label: 'Memory' },

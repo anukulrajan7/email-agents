@@ -67,6 +67,7 @@ pub const LABEL_TEMPLATES: &[LabelTemplate] = &[
             LabelSeed { key: "timesheet", name: "Timesheet", description: "An employee or contractor submits, corrects or asks about a timesheet or hours worked.", color: "slate" },
             LabelSeed { key: "leave", name: "Leave", description: "A request, approval or question about leave, vacation, sick days or time off.", color: "sage" },
             LabelSeed { key: "candidate_referral", name: "Candidate referral", description: "Someone refers or recommends a job candidate, or sends a CV for a referral.", color: "plum" },
+            LabelSeed { key: "client_requirement", name: "Client requirement", description: "A client or recruiter shares a new job requirement, open position or job description to be filled.", color: "postmark" },
             LabelSeed { key: "approval", name: "Approval", description: "A request for a manager or HR approval that is not leave or timesheet related.", color: "ochre" },
             LabelSeed { key: "payroll", name: "Payroll", description: "Salary, payslips, reimbursements, tax forms or payment issues.", color: "teal" },
             LabelSeed { key: "general", name: "General HR", description: "A legitimate HR question or notice that fits no specific label above.", color: "ink" },
@@ -137,6 +138,8 @@ pub struct AttachmentMeta {
     pub filename: String,
     pub media_type: Option<String>,
     pub size_bytes: Option<i64>,
+    /// Provider handle for downloading the bytes later (Gmail attachmentId).
+    pub provider_ref: Option<String>,
 }
 
 pub struct WorkflowTemplate {

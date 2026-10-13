@@ -154,6 +154,7 @@ impl ReceivedEmail {
                     filename: normalize::truncate_chars(a.filename.as_deref().unwrap_or("attachment"), 255),
                     media_type: a.content_type.clone(),
                     size_bytes: a.size,
+                    provider_ref: None,
                 })
                 .collect(),
         }

@@ -252,3 +252,49 @@ export type MemoryCreateBody = {
 };
 export type MemoryPatch = { content?: string; kind?: MemoryKind; status?: MemoryStatus };
 export type ContactDetail = { contact: Contact; memories: Memory[]; recent_messages: MessageSummary[] };
+
+export type MatchSource = 'llm' | 'rules' | 'manual';
+export type MatchStatus = 'suggested' | 'shortlisted' | 'dismissed';
+export type Requirement = {
+  id: string;
+  message_id: string;
+  client: string | null;
+  role_title: string;
+  must_have_skills: string[];
+  nice_to_have_skills: string[];
+  min_experience: number | null;
+  max_experience: number | null;
+  location: string | null;
+  positions: number | null;
+  status: 'open' | 'closed';
+  source: MatchSource;
+  created_at: string;
+  match_count: number;
+  top_score: number | null;
+};
+export type Candidate = {
+  id: string;
+  message_id: string;
+  name: string;
+  email: string | null;
+  skills: string[];
+  total_experience: number | null;
+  location: string | null;
+  notice_days: number | null;
+  referred_by: string | null;
+  summary: string | null;
+  status: 'active' | 'placed' | 'archived';
+  source: MatchSource;
+  created_at: string;
+  match_count: number;
+};
+export type Match = {
+  id: string;
+  score: number;
+  status: MatchStatus;
+  reasons: { ok: boolean; text: string }[];
+  requirement: { id: string; role_title: string; client: string | null; location: string | null };
+  candidate: { id: string; name: string; total_experience: number | null; location: string | null; notice_days: number | null };
+  created_at: string;
+  updated_at: string;
+};

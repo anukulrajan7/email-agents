@@ -12,6 +12,7 @@ import { Postmark } from './Postmark';
 import { RouteTracker } from './RouteTracker';
 import { riseStyle } from '../../lib/motion';
 import { LabelStamp } from '../labels/LabelStamp';
+import { SeeMatchesLink } from '../matching/SeeMatchesLink';
 import { MemoryForm, MemoryItem } from '../memory/MemoryParts';
 
 export function MessageDetailView({ ws, messageId }: { ws: string; messageId: string }) {
@@ -44,6 +45,9 @@ export function MessageDetailView({ ws, messageId }: { ws: string; messageId: st
                   {m.classification && <LabelStamp ws={ws} category={m.classification.category} size="lg" tilted />}
                   <StatusBadge status={m.processing_status} />
                 </div>
+                {(m.classification?.category === 'client_requirement' || m.classification?.category === 'candidate_referral') && (
+                  <SeeMatchesLink ws={ws} messageId={m.id} category={m.classification.category} />
+                )}
                 <h2 className="type-display mt-4 text-4xl leading-[1.1] tracking-[-0.02em] break-words">{m.subject || '(no subject)'}</h2>
               </div>
               <Postmark receivedAt={m.received_at} />
