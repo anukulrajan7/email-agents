@@ -23,6 +23,9 @@ const PRICES: &[(&str, f64, f64)] = &[
     ("moonshotai/kimi-k2.6", 0.65, 3.41),
     ("anthropic/claude-haiku-5.5", 0.10, 0.50),
     ("deepseek/deepseek-v4-flash", 0.091, 0.182),
+    ("deepseek/deepseek-v4-pro", 0.40, 0.80),
+    ("qwen/qwen3-vl-30b-a3b-instruct", 0.15, 0.60),
+    ("qwen/qwen3.8-omni-flash", 0.15, 0.47),
     ("baai/bge-m3", 0.01, 0.0),
 ];
 

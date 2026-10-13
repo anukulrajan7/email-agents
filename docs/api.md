@@ -601,7 +601,7 @@ picks premium when the classification priority is `high`, the label is `client_r
 the insight has 3 or more asks or any missing info, or the request sent `{"quality":"premium"}`; otherwise standard.
 The chosen tier is stored in the `draft.generated` audit metadata as `"tier": "standard" | "premium"`.
 
-Config: `OPENROUTER_DRAFT_MODEL_ID` (standard tier, default `anthropic/claude-haiku-5.5`) and
+Config: `OPENROUTER_DRAFT_MODEL_ID` (standard tier, default `deepseek/deepseek-v4-flash`) and
 `OPENROUTER_PREMIUM_MODEL_ID` (premium tier, default = `OPENROUTER_MODEL_ID`). If only one is set, both tiers use it.
 Without `OPENROUTER_API_KEY` the template drafter is used for both.
 
@@ -652,7 +652,7 @@ Runtime:
   in a row (unusable tool call, unknown tool, bad arguments, tool failure) also fail the case. A turn whose AI call
   keeps failing through all job retries fails the case. Each step stores tokens and cost (provider-reported cost,
   else an estimate); `spent_usd` is the case total.
-- **Models.** Planner `OPENROUTER_PLANNER_MODEL_ID` (default `anthropic/claude-haiku-5.5`); high-priority
+- **Models.** Planner `OPENROUTER_PLANNER_MODEL_ID` (default `deepseek/deepseek-v4-flash`); high-priority
   requirement cases use `OPENROUTER_PREMIUM_MODEL_ID`. Critic: the classifier model (else `OPENROUTER_MODEL_ID`).
   Requests disable reasoning and route only to providers with `data_collection: deny`.
 

@@ -129,6 +129,9 @@ jobs:
           AI_AUTO_HOURS=2
           AUTO_DRAFTS=false
           AI_DAILY_BUDGET_USD=2
+          OPENROUTER_DRAFT_MODEL_ID=deepseek/deepseek-v4-flash
+          OPENROUTER_PREMIUM_MODEL_ID=deepseek/deepseek-v4-pro
+          OPENROUTER_PLANNER_MODEL_ID=deepseek/deepseek-v4-pro
           ENV
           sed -i 's/^ *//' deploy.env
       - name: Ship config and roll out
