@@ -196,11 +196,12 @@ pub async fn put_packs(
 ) -> AppResult<Json<Value>> {
     require_role(&state.db, &ws, &user, Role::Admin).await?;
     let chosen = parse_packs(&body.packs)?;
-    let before = packs::enabled_keys(&state.db, &ws).await?;
+    // Read inside the transaction: a concurrent save makes this one fail instead of diffing a stale list.
+    let mut tx = state.db.begin().await?;
+    let before = packs::enabled_keys(&mut *tx, &ws).await?;
     let added: Vec<&str> = chosen.iter().copied().filter(|k| !before.contains(k)).collect();
     let removed: Vec<&str> = before.iter().copied().filter(|k| !chosen.contains(k)).collect();
     let seeds = packs::labels_for(&added);
-    let mut tx = state.db.begin().await?;
     // Record the implicit default first (a workspace without rows counts as general).
     packs::enable(&mut tx, &ws, &before).await?;
     if !added.is_empty() {

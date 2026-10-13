@@ -90,6 +90,9 @@ async fn new_workspace_is_general_with_no_hr_behaviour() {
     assert!(!rs["default_reply_style"].as_str().unwrap().contains("HR"));
     let (_, presets) = call(&app, "GET", &format!("{base}/automations/presets"), ADMIN, None).await;
     assert!(!presets.to_string().contains("timesheet"));
+    // Matching setup can't sneak the HR labels in.
+    assert_eq!(call(&app, "POST", &format!("{base}/matching/setup"), ADMIN, None).await.0, StatusCode::CONFLICT);
+    assert!(!labels(&app, &ws).await.contains(&"client_requirement".to_string()));
 
     let (_, src) = call(&app, "POST", &format!("{base}/sources/forwarding"), ADMIN, None).await;
     let src = src["id"].as_str().unwrap();
