@@ -20,6 +20,7 @@ use crate::domain::{ClassificationSource, Label, Priority};
 
 pub const PROMPT_VERSION: &str = "classify-v2";
 pub const DRAFT_PROMPT_VERSION: &str = "ack-draft-v2";
+pub const ANALYZE_PROMPT_VERSION: &str = "analyze-v1";
 /// Upper bound on email text sent to any model.
 pub const MAX_MODEL_INPUT_CHARS: usize = 6_000;
 

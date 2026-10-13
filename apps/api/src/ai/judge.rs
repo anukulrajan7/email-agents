@@ -365,13 +365,14 @@ impl Judge for OpenRouterJudge {
         let max_tokens = 60 + 60 * questions.len() as u32;
         let (content, _) = self
             .client
-            .chat_json(
+            .chat_json_checked(
                 &self.model,
                 JUDGE_SYSTEM_PROMPT,
                 openrouter_prompt(context, questions),
                 "judge",
                 openrouter_schema(questions),
                 max_tokens,
+                |raw| parse_openrouter(questions, raw).map(|_| ()),
             )
             .await?;
         parse_openrouter(questions, &content)

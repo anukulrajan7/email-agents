@@ -150,7 +150,7 @@ async fn openrouter_calls_are_recorded_with_task_tokens_cost_and_context() {
     let client = OpenRouterClient::new(reqwest::Client::new(), &url, "k").with_ledger(env.state.db.clone());
 
     let analyst = OpenRouterAnalyst::new(client, "qwen/qwen3.8-flash");
-    let ctx = AiContext { workspace_id: Some(env.ws.clone()), message_id: None, case_id: None };
+    let ctx = AiContext { workspace_id: Some(env.ws.clone()), ..Default::default() };
     ai_ledger::with_context(ctx, analyst.analyze("Payslip", "a@b.co", "Where is my payslip?")).await.unwrap();
     // No context (e.g. a call outside a job or request): recorded with NULL workspace.
     analyst.analyze("Payslip", "a@b.co", "Where is my payslip?").await.unwrap();
@@ -170,6 +170,82 @@ async fn openrouter_calls_are_recorded_with_task_tokens_cost_and_context() {
     assert!((cost - 40.0 * 0.01 / 1e6).abs() < 1e-15);
 }
 
+/// A chat endpoint that answers `content` with provider detail: cache reads, a billed cost, the provider.
+async fn fake_detailed_openrouter(content: &'static str) -> String {
+    let chat = move || async move {
+        Json(json!({
+            "id": "gen-abc", "model": "deepseek/deepseek-v4-flash", "provider": "DeepSeek",
+            "choices": [{"finish_reason": "stop", "message": {"content": content}}],
+            "usage": {"prompt_tokens": 1_000, "completion_tokens": 200, "cost": 0.00002,
+                      "prompt_tokens_details": {"cached_tokens": 900, "cache_write_tokens": 0},
+                      "completion_tokens_details": {"reasoning_tokens": 0}}
+        }))
+    };
+    let app = Router::new().route("/chat/completions", post(chat));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    url
+}
+
+type DetailRow = (f64, String, i64, Option<String>, Option<String>, Option<String>, Option<String>, Option<bool>, i64, bool, Option<String>);
+
+async fn detail_rows(env: &Env) -> Vec<DetailRow> {
+    sqlx::query_as(
+        "SELECT cost_usd, cost_source, cached_tokens, provider, finish_reason, generation_id, prompt_version, schema_ok, attempt, ok, error_class
+         FROM ai_calls ORDER BY rowid",
+    )
+    .fetch_all(&env.state.db)
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn ledger_records_cache_provider_finish_reason_prompt_version_and_provider_cost() {
+    let env = setup_with(|_| {}).await;
+    let url = fake_detailed_openrouter(r#"{"summary":"s","asks":[],"deadline":null,"needs_reply":false,"missing_info":[]}"#).await;
+    let client = OpenRouterClient::new(reqwest::Client::new(), &url, "k").with_ledger(env.state.db.clone());
+    OpenRouterAnalyst::new(client, "deepseek/deepseek-v4-flash").analyze("s", "a@b.co", "b").await.unwrap();
+
+    let rows = detail_rows(&env).await;
+    assert_eq!(rows.len(), 1);
+    let (cost, source, cached, provider, finish, gen_id, version, schema_ok, attempt, ok, class) = rows[0].clone();
+    assert_eq!((cost, source.as_str()), (0.00002, "provider"), "the provider's own cost wins over the price table");
+    assert_eq!((cached, provider.as_deref(), finish.as_deref(), gen_id.as_deref()), (900, Some("DeepSeek"), Some("stop"), Some("gen-abc")));
+    assert_eq!(version.as_deref(), Some("analyze-v1"));
+    assert_eq!((schema_ok, attempt, ok, class), (None, 1, true, None));
+}
+
+#[tokio::test]
+async fn unparseable_answers_are_logged_as_failures_not_successes() {
+    let env = setup_with(|_| {}).await;
+    let client = |url: &str| OpenRouterClient::new(reqwest::Client::new(), url, "k").with_ledger(env.state.db.clone());
+
+    let not_json = fake_detailed_openrouter("sorry, here is some prose").await;
+    assert!(OpenRouterAnalyst::new(client(&not_json), "m").analyze("s", "a@b.co", "b").await.is_err());
+    let wrong_shape = fake_detailed_openrouter(r#"{"summary": 7}"#).await;
+    assert!(OpenRouterAnalyst::new(client(&wrong_shape), "m").analyze("s", "a@b.co", "b").await.is_err());
+
+    let rows = detail_rows(&env).await;
+    assert_eq!(rows.len(), 2);
+    for r in &rows {
+        assert!(!r.9, "ok must be false");
+        assert_eq!(r.7, Some(false), "schema_ok must be false");
+    }
+    assert_eq!(rows[0].10.as_deref(), Some("schema"));
+    assert_eq!(rows[1].10.as_deref(), Some("validation"));
+}
+
+#[tokio::test]
+async fn job_attempt_is_recorded_on_the_ledger_row() {
+    let env = setup_with(|_| {}).await;
+    let url = fake_detailed_openrouter(r#"{"summary":"s","asks":[],"deadline":null,"needs_reply":false,"missing_info":[]}"#).await;
+    let client = OpenRouterClient::new(reqwest::Client::new(), &url, "k").with_ledger(env.state.db.clone());
+    let ctx = AiContext::for_job(Some(&env.ws), &json!({}), 3);
+    ai_ledger::with_context(ctx, OpenRouterAnalyst::new(client, "m").analyze("s", "a@b.co", "b")).await.unwrap();
+    assert_eq!(detail_rows(&env).await[0].8, 3);
+}
+
 #[tokio::test]
 async fn failed_calls_are_recorded_as_errors() {
     let env = setup_with(|_| {}).await;
@@ -185,6 +261,9 @@ async fn failed_calls_are_recorded_as_errors() {
     let errors: Vec<Option<String>> =
         sqlx::query_scalar("SELECT error FROM ai_calls ORDER BY rowid").fetch_all(&env.state.db).await.unwrap();
     assert!(errors.iter().all(|e| e.as_deref().is_some_and(|e| e.contains("500"))));
+    let classes: Vec<Option<String>> =
+        sqlx::query_scalar("SELECT error_class FROM ai_calls WHERE task = 'analyze'").fetch_all(&env.state.db).await.unwrap();
+    assert_eq!(classes, [Some("http_5xx".to_string())]);
 }
 
 #[tokio::test]

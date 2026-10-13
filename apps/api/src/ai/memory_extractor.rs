@@ -191,8 +191,10 @@ impl MemoryExtractor for OpenRouterMemoryExtractor {
             LearnDirection::Incoming => &self.incoming_model,
             LearnDirection::Reply => &self.reply_model,
         };
-        let (content, _) =
-            self.client.chat_json(model, SYSTEM_PROMPT, user_prompt(input), "memory_facts", schema(), 600).await?;
+        let (content, _) = self
+            .client
+            .chat_json_checked(model, SYSTEM_PROMPT, user_prompt(input), "memory_facts", schema(), 600, |raw| parse_facts(raw).map(|_| ()))
+            .await?;
         parse_facts(&content)
     }
 }

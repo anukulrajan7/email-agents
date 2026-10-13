@@ -71,8 +71,7 @@ pub fn request_body(model: &str, media_type: &str, bytes: &[u8]) -> Value {
         "temperature": 0.1,
         "response_format": {"type": "json_object"},
         "reasoning": {"enabled": false},
-        "provider": {"data_collection": "deny"},
-        "usage": {"include": true}
+        "provider": {"data_collection": "deny"}
     })
 }
 

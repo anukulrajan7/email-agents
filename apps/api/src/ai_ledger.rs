@@ -30,7 +30,8 @@ const PRICES: &[(&str, f64, f64)] = &[
 ];
 
 /// Tasks that run on their own for new mail (not because a person clicked). Drives cost per email.
-const AUTOMATIC_TASKS: &[&str] = &["classify", "analyze", "learn", "extract", "embed", "agent_plan", "agent_critic"];
+const AUTOMATIC_TASKS: &[&str] =
+    &["classify", "analyze", "understand", "learn", "extract", "embed", "judge", "vision", "audio", "agent_plan", "agent_critic"];
 
 fn price(model: &str) -> Option<(f64, f64)> {
     let model = model.to_lowercase();
@@ -47,15 +48,23 @@ fn warn_once(model: &str) {
     }
 }
 
-/// Known model: price table. Unknown: the provider-reported cost if present, else 0 (logged once).
-pub fn cost_usd(model: &str, tokens_in: i64, tokens_out: i64, reported: Option<f64>) -> f64 {
+/// The provider-reported `usage.cost` (it already includes cache discounts) when present; else the
+/// price table; else 0 (logged once). Second value says where the number came from.
+pub fn cost_with_source(model: &str, tokens_in: i64, tokens_out: i64, reported: Option<f64>) -> (f64, &'static str) {
+    if let Some(cost) = reported.filter(|c| c.is_finite() && *c >= 0.0) {
+        return (cost, "provider");
+    }
     match price(model) {
-        Some((input, output)) => (tokens_in.max(0) as f64 * input + tokens_out.max(0) as f64 * output) / 1_000_000.0,
+        Some((input, output)) => ((tokens_in.max(0) as f64 * input + tokens_out.max(0) as f64 * output) / 1_000_000.0, "table"),
         None => {
             warn_once(model);
-            reported.filter(|c| c.is_finite() && *c >= 0.0).unwrap_or(0.0)
+            (0.0, "none")
         }
     }
+}
+
+pub fn cost_usd(model: &str, tokens_in: i64, tokens_out: i64, reported: Option<f64>) -> f64 {
+    cost_with_source(model, tokens_in, tokens_out, reported).0
 }
 
 // ---------------------------------------------------------------- context
@@ -67,6 +76,8 @@ pub struct AiContext {
     pub workspace_id: Option<String>,
     pub message_id: Option<String>,
     pub case_id: Option<String>,
+    /// Which try of the surrounding job this is (1 = first). Calls outside a job count as 1.
+    pub attempt: i64,
 }
 
 tokio::task_local! {
@@ -74,15 +85,20 @@ tokio::task_local! {
 }
 
 impl AiContext {
-    pub fn for_job(workspace_id: Option<&str>, payload: &Value) -> Self {
+    pub fn for_job(workspace_id: Option<&str>, payload: &Value, attempt: i64) -> Self {
         let field = |k: &str| payload.get(k).and_then(Value::as_str).map(str::to_string);
-        Self { workspace_id: workspace_id.map(str::to_string), message_id: field("message_id"), case_id: field("case_id") }
+        Self {
+            workspace_id: workspace_id.map(str::to_string),
+            message_id: field("message_id"),
+            case_id: field("case_id"),
+            attempt: attempt.max(1),
+        }
     }
 
     fn from_path(path: &str) -> Self {
         let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
         let after = |name: &str| segments.iter().position(|s| *s == name).and_then(|i| segments.get(i + 1)).map(|s| (*s).to_string());
-        Self { workspace_id: after("workspaces"), message_id: after("messages"), case_id: None }
+        Self { workspace_id: after("workspaces"), message_id: after("messages"), case_id: None, attempt: 1 }
     }
 }
 
@@ -108,29 +124,83 @@ pub struct Usage {
     pub tokens_in: i64,
     pub tokens_out: i64,
     pub reported_cost: Option<f64>,
+    /// Prompt tokens read from the provider's cache (`prompt_tokens_details.cached_tokens`).
+    pub cached_tokens: i64,
+    pub cache_write_tokens: i64,
+    pub reasoning_tokens: i64,
+}
+
+/// What else is worth knowing about one call. Everything is optional: recording never needs it.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct CallMeta {
+    /// Upstream provider that answered (`provider` in the response).
+    pub provider: Option<String>,
+    /// Model that answered, when it differs from the one asked for.
+    pub answered_model: Option<String>,
+    pub finish_reason: Option<String>,
+    pub generation_id: Option<String>,
+    pub prompt_version: Option<String>,
+    /// `Some(false)` when the answer came back but did not parse or validate.
+    pub schema_ok: Option<bool>,
+    /// `timeout|network|http_4xx|http_5xx|empty|schema|validation|refusal`.
+    pub error_class: Option<String>,
 }
 
 /// Reads OpenAI-style `usage` from a provider response body (chat and embeddings).
 pub fn usage_from(body: &Value) -> Usage {
     let usage = body.get("usage");
     let int = |k: &str| usage.and_then(|u| u.get(k)).and_then(Value::as_i64).unwrap_or(0);
+    let nested = |group: &str, k: &str| {
+        usage.and_then(|u| u.get(group)).and_then(|g| g.get(k)).and_then(Value::as_i64).unwrap_or(0)
+    };
     Usage {
         tokens_in: int("prompt_tokens"),
         tokens_out: int("completion_tokens"),
         reported_cost: usage.and_then(|u| u.get("cost")).and_then(Value::as_f64),
+        cached_tokens: nested("prompt_tokens_details", "cached_tokens"),
+        cache_write_tokens: nested("prompt_tokens_details", "cache_write_tokens"),
+        reasoning_tokens: nested("completion_tokens_details", "reasoning_tokens"),
+    }
+}
+
+/// Provider, answering model, finish reason and generation id from a chat response body.
+pub fn meta_from(body: &Value, asked_model: &str) -> CallMeta {
+    let text = |p: &str| body.pointer(p).and_then(Value::as_str).map(str::to_string);
+    CallMeta {
+        provider: text("/provider"),
+        answered_model: text("/model").filter(|m| !m.eq_ignore_ascii_case(asked_model)),
+        finish_reason: text("/choices/0/finish_reason"),
+        generation_id: text("/id"),
+        ..CallMeta::default()
     }
 }
 
 /// Writes one ledger row. Logs and returns on any failure.
 pub async fn record(db: &SqlitePool, task: &str, model: &str, usage: Usage, latency_ms: i64, error: Option<&str>) {
+    record_full(db, task, model, usage, &CallMeta::default(), latency_ms, error).await;
+}
+
+/// Like `record`, with the extra detail. Returns the new row id.
+pub async fn record_full(
+    db: &SqlitePool,
+    task: &str,
+    model: &str,
+    usage: Usage,
+    meta: &CallMeta,
+    latency_ms: i64,
+    error: Option<&str>,
+) -> Option<String> {
     let ctx = current_context();
-    let cost = cost_usd(model, usage.tokens_in, usage.tokens_out, usage.reported_cost);
+    let (cost, cost_source) = cost_with_source(model, usage.tokens_in, usage.tokens_out, usage.reported_cost);
     let error = error.map(|e| crate::sources::normalize::truncate_chars(e, MAX_ERROR_CHARS));
+    let id = new_id("aic");
     let result = sqlx::query(
-        "INSERT INTO ai_calls (id, workspace_id, task, model, tokens_in, tokens_out, cost_usd, latency_ms, ok, error, message_id, case_id, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+        "INSERT INTO ai_calls (id, workspace_id, task, model, tokens_in, tokens_out, cost_usd, latency_ms, ok, error, message_id, case_id,
+                               created_at, cached_tokens, cache_write_tokens, reasoning_tokens, provider, answered_model, finish_reason,
+                               generation_id, prompt_version, schema_ok, attempt, error_class, cost_source)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)",
     )
-    .bind(new_id("aic"))
+    .bind(&id)
     .bind(ctx.workspace_id)
     .bind(task)
     .bind(model)
@@ -143,17 +213,49 @@ pub async fn record(db: &SqlitePool, task: &str, model: &str, usage: Usage, late
     .bind(ctx.message_id)
     .bind(ctx.case_id)
     .bind(now_ms())
+    .bind(usage.cached_tokens)
+    .bind(usage.cache_write_tokens)
+    .bind(usage.reasoning_tokens)
+    .bind(&meta.provider)
+    .bind(&meta.answered_model)
+    .bind(&meta.finish_reason)
+    .bind(&meta.generation_id)
+    .bind(&meta.prompt_version)
+    .bind(meta.schema_ok)
+    .bind(ctx.attempt.max(1))
+    .bind(&meta.error_class)
+    .bind(cost_source)
     .execute(db)
     .await;
-    if let Err(e) = result {
-        tracing::warn!(error = %e, %task, "failed to record AI call");
+    match result {
+        Ok(_) => Some(id),
+        Err(e) => {
+            tracing::warn!(error = %e, %task, "failed to record AI call");
+            None
+        }
     }
 }
 
-/// Records a finished provider call: tokens come from `body.usage` when there is a body.
+/// Records a finished provider call: tokens and detail come from the body when there is one.
 pub async fn log_call(db: &SqlitePool, task: &str, model: &str, started: std::time::Instant, body: Option<&Value>, error: Option<&str>) {
     let usage = body.map(usage_from).unwrap_or_default();
-    record(db, task, model, usage, started.elapsed().as_millis() as i64, error).await;
+    let meta = body.map(|b| meta_from(b, model)).unwrap_or_default();
+    record_full(db, task, model, usage, &meta, started.elapsed().as_millis() as i64, error).await;
+}
+
+/// A call that got a well-formed HTTP answer whose content failed parsing or validation: the row
+/// becomes a failure (`ok = 0`, `schema_ok = 0`) instead of looking like a success.
+pub async fn mark_invalid(db: &SqlitePool, row_id: &str, error_class: &str, error: &str) {
+    let error = crate::sources::normalize::truncate_chars(error, MAX_ERROR_CHARS);
+    let result = sqlx::query("UPDATE ai_calls SET ok = 0, schema_ok = 0, error = ?2, error_class = ?3 WHERE id = ?1")
+        .bind(row_id)
+        .bind(error)
+        .bind(error_class)
+        .execute(db)
+        .await;
+    if let Err(e) = result {
+        tracing::warn!(error = %e, "failed to mark AI call invalid");
+    }
 }
 
 // ---------------------------------------------------------------- budget
@@ -244,12 +346,14 @@ pub struct AiUsage {
 pub fn task_label(task: &str) -> &'static str {
     match task {
         "classify" => "Labelling",
-        "analyze" => "Summaries",
+        "analyze" | "understand" => "Summaries",
         "draft" => "Drafts",
         "learn" => "Memory",
         "extract" => "Matching",
         "embed" => "Search",
         "suggest_labels" => "Label suggestions",
+        "judge" => "Checks",
+        "vision" | "audio" => "Files",
         t if t.starts_with("agent_") => "Agents",
         t if t.starts_with("assistant_") => "Assistant",
         _ => "Other",
@@ -333,11 +437,20 @@ mod tests {
     fn known_models_use_the_price_table() {
         let c = cost_usd("qwen/qwen3.8-flash", 1_000_000, 1_000_000, None);
         assert!((c - 0.62).abs() < 1e-9);
-        let c = cost_usd("Anthropic/Claude-Haiku-5.5", 2_000, 500, Some(99.0));
+        let c = cost_usd("Anthropic/Claude-Haiku-5.5", 2_000, 500, None);
         assert!((c - (2_000.0 * 0.10 + 500.0 * 0.50) / 1e6).abs() < 1e-12);
         assert!((cost_usd("baai/bge-m3", 1_000_000, 0, None) - 0.01).abs() < 1e-12);
         assert!((cost_usd("moonshotai/kimi-k2.6", 1_000_000, 1_000_000, None) - 4.06).abs() < 1e-9);
         assert!((cost_usd("deepseek/deepseek-v4-flash", 1_000_000, 1_000_000, None) - 0.273).abs() < 1e-9);
+    }
+
+    #[test]
+    fn provider_cost_wins_over_the_table() {
+        assert_eq!(cost_with_source("qwen/qwen3.8-flash", 1_000_000, 1_000_000, Some(0.0042)), (0.0042, "provider"));
+        assert_eq!(cost_with_source("qwen/qwen3.8-flash", 1_000_000, 0, Some(-1.0)).1, "table");
+        assert_eq!(cost_with_source("qwen/qwen3.8-flash", 1_000_000, 0, Some(f64::NAN)).1, "table");
+        assert_eq!(cost_with_source("acme/new-model", 10, 10, None), (0.0, "none"));
+        assert_eq!(cost_with_source("deepseek/deepseek-v4-flash", 1_000_000, 0, Some(0.0)), (0.0, "provider"));
     }
 
     #[test]
@@ -350,8 +463,26 @@ mod tests {
     #[test]
     fn reads_usage_from_provider_body() {
         let body = json!({"usage": {"prompt_tokens": 120, "completion_tokens": 30, "cost": 0.0001}});
-        assert_eq!(usage_from(&body), Usage { tokens_in: 120, tokens_out: 30, reported_cost: Some(0.0001) });
+        assert_eq!(usage_from(&body), Usage { tokens_in: 120, tokens_out: 30, reported_cost: Some(0.0001), ..Usage::default() });
         assert_eq!(usage_from(&json!({})), Usage::default());
+    }
+
+    #[test]
+    fn reads_cache_reasoning_and_meta_from_the_body() {
+        let body = json!({
+            "id": "gen-1", "model": "deepseek/deepseek-v4-flash-0901", "provider": "DeepSeek",
+            "choices": [{"finish_reason": "length", "message": {"content": "{}"}}],
+            "usage": {"prompt_tokens": 1000, "completion_tokens": 50, "cost": 0.00004,
+                      "prompt_tokens_details": {"cached_tokens": 800, "cache_write_tokens": 64},
+                      "completion_tokens_details": {"reasoning_tokens": 7}}
+        });
+        let u = usage_from(&body);
+        assert_eq!((u.cached_tokens, u.cache_write_tokens, u.reasoning_tokens), (800, 64, 7));
+        let m = meta_from(&body, "deepseek/deepseek-v4-flash");
+        assert_eq!(m.provider.as_deref(), Some("DeepSeek"));
+        assert_eq!(m.answered_model.as_deref(), Some("deepseek/deepseek-v4-flash-0901"));
+        assert_eq!((m.finish_reason.as_deref(), m.generation_id.as_deref()), (Some("length"), Some("gen-1")));
+        assert_eq!(meta_from(&body, "DeepSeek/DeepSeek-V4-Flash-0901").answered_model, None);
     }
 
     #[test]
@@ -369,5 +500,7 @@ mod tests {
         let c = AiContext::from_path("/api/v1/workspaces/ws_2/search");
         assert_eq!((c.workspace_id.as_deref(), c.message_id), (Some("ws_2"), None));
         assert_eq!(AiContext::from_path("/me").workspace_id, None);
+        assert_eq!(AiContext::for_job(None, &json!({}), 0).attempt, 1);
+        assert_eq!(AiContext::for_job(None, &json!({}), 3).attempt, 3);
     }
 }

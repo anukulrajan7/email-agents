@@ -66,11 +66,33 @@ pub struct OpenRouterClient {
     ledger: Option<sqlx::SqlitePool>,
     /// Ledger task name for calls made through this handle, e.g. "classify".
     task: String,
+    /// Version of the prompt text behind `task`, stored on every ledger row.
+    prompt_version: String,
+}
+
+/// The prompt version recorded for a ledger task. Bump the constant when the prompt text changes.
+pub fn default_prompt_version(task: &str) -> String {
+    match task {
+        "classify" => super::PROMPT_VERSION.to_string(),
+        "analyze" => super::ANALYZE_PROMPT_VERSION.to_string(),
+        "draft" => super::DRAFT_PROMPT_VERSION.to_string(),
+        other => format!("{other}-v1"),
+    }
+}
+
+/// `timeout|network` for a request that never got an answer.
+fn transport_class(e: &reqwest::Error) -> &'static str {
+    if e.is_timeout() { "timeout" } else { "network" }
+}
+
+/// `http_4xx|http_5xx` for a non-success status.
+fn status_class(status: reqwest::StatusCode) -> &'static str {
+    if status.is_server_error() { "http_5xx" } else { "http_4xx" }
 }
 
 impl OpenRouterClient {
     pub fn new(http: reqwest::Client, base_url: &str, api_key: &str) -> Self {
-        Self { http, base_url: base_url.trim_end_matches('/').to_string(), api_key: api_key.into(), ledger: None, task: "other".into() }
+        Self { http, base_url: base_url.trim_end_matches('/').to_string(), api_key: api_key.into(), ledger: None, task: "other".into(), prompt_version: default_prompt_version("other") }
     }
 
     pub fn with_ledger(mut self, db: sqlx::SqlitePool) -> Self {
@@ -80,16 +102,48 @@ impl OpenRouterClient {
 
     /// Same client, recording its calls under `task`.
     pub fn with_task(&self, task: &str) -> Self {
-        Self { task: task.into(), ..self.clone() }
+        Self { task: task.into(), prompt_version: default_prompt_version(task), ..self.clone() }
+    }
+
+    /// Same client, recording `version` as the prompt version of its calls.
+    pub fn with_prompt_version(&self, version: &str) -> Self {
+        Self { prompt_version: version.into(), ..self.clone() }
     }
 
     pub(crate) async fn log_call(&self, model: &str, started: std::time::Instant, body: Option<&Value>, error: Option<&str>) {
-        if let Some(db) = &self.ledger {
-            crate::ai_ledger::log_call(db, &self.task, model, started, body, error).await;
+        self.log_call_detail(model, started, body, error, None, None).await;
+    }
+
+    /// Writes the ledger row for one call; returns its id so a later parse failure can mark it.
+    /// `fallback_cost` prices calls whose response carries no `usage.cost` (speech to text).
+    async fn log_call_detail(
+        &self,
+        model: &str,
+        started: std::time::Instant,
+        body: Option<&Value>,
+        error: Option<&str>,
+        error_class: Option<&str>,
+        fallback_cost: Option<f64>,
+    ) -> Option<String> {
+        let db = self.ledger.as_ref()?;
+        let mut usage = body.map(crate::ai_ledger::usage_from).unwrap_or_default();
+        if usage.reported_cost.is_none() {
+            usage.reported_cost = fallback_cost;
+        }
+        let mut meta = body.map(|b| crate::ai_ledger::meta_from(b, model)).unwrap_or_default();
+        meta.prompt_version = Some(self.prompt_version.clone());
+        meta.error_class = error_class.map(str::to_string);
+        crate::ai_ledger::record_full(db, &self.task, model, usage, &meta, started.elapsed().as_millis() as i64, error).await
+    }
+
+    async fn mark_invalid(&self, row_id: Option<&str>, class: &str, error: &str) {
+        if let (Some(db), Some(id)) = (&self.ledger, row_id) {
+            crate::ai_ledger::mark_invalid(db, id, class, error).await;
         }
     }
 
-    /// One structured chat call. Returns (JSON content string, model that answered).
+    /// One structured chat call. Returns (JSON content string, model that answered). Content that is
+    /// not valid JSON is a failure in the ledger, not a success.
     pub(crate) async fn chat_json(
         &self,
         model: &str,
@@ -98,6 +152,22 @@ impl OpenRouterClient {
         schema_name: &str,
         schema: Value,
         max_tokens: u32,
+    ) -> Result<(String, String), AiError> {
+        self.chat_json_checked(model, system, user, schema_name, schema, max_tokens, |_| Ok(())).await
+    }
+
+    /// Like `chat_json`, and `validate` also judges the content (schema or business rules). When it
+    /// returns an error, the ledger row for this call is marked as a failed, invalid answer.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn chat_json_checked(
+        &self,
+        model: &str,
+        system: &str,
+        user: String,
+        schema_name: &str,
+        schema: Value,
+        max_tokens: u32,
+        validate: impl FnOnce(&str) -> Result<(), AiError>,
     ) -> Result<(String, String), AiError> {
         let body = json!({
             "model": model,
@@ -124,44 +194,52 @@ impl OpenRouterClient {
                 .timeout(Duration::from_secs(45))
                 .send()
                 .await
-                .map_err(|e| AiError::Retryable(format!("OpenRouter request failed: {e}")))?;
+                .map_err(|e| (transport_class(&e), AiError::Retryable(format!("OpenRouter request failed: {e}"))))?;
             if !res.status().is_success() {
-                return Err(classify_http_error(res.status(), "OpenRouter"));
+                return Err((status_class(res.status()), classify_http_error(res.status(), "OpenRouter")));
             }
-            res.json::<Value>().await.map_err(|e| AiError::Retryable(format!("OpenRouter decode: {e}")))
+            res.json::<Value>().await.map_err(|e| ("network", AiError::Retryable(format!("OpenRouter decode: {e}"))))
         }
         .await;
         let body = match sent {
             Ok(body) => body,
-            Err(e) => {
-                self.log_call(model, started, None, Some(&e.to_string())).await;
+            Err((class, e)) => {
+                self.log_call_detail(model, started, None, Some(&e.to_string()), Some(class), None).await;
                 return Err(e);
             }
         };
         let finish = body.pointer("/choices/0/finish_reason").and_then(Value::as_str).unwrap_or("unknown");
+        let refused = body.pointer("/choices/0/message/refusal").and_then(Value::as_str).is_some_and(|r| !r.trim().is_empty());
         let content = body
             .pointer("/choices/0/message/content")
             .and_then(Value::as_str)
             .filter(|c| !c.trim().is_empty())
             .ok_or_else(|| AiError::Retryable(format!("OpenRouter returned no content (finish_reason={finish})")));
-        match content {
-            Ok(content) => {
-                self.log_call(model, started, Some(&body), None).await;
-                let answered_by = body.get("model").and_then(Value::as_str).unwrap_or(model).to_string();
-                Ok((content.to_string(), answered_by))
-            }
+        let content = match content {
+            Ok(content) => content,
             Err(e) => {
-                self.log_call(model, started, Some(&body), Some(&e.to_string())).await;
-                Err(e)
+                let class = if refused { "refusal" } else { "empty" };
+                self.log_call_detail(model, started, Some(&body), Some(&e.to_string()), Some(class), None).await;
+                return Err(e);
             }
+        };
+        let row = self.log_call_detail(model, started, Some(&body), None, None, None).await;
+        let verdict = serde_json::from_str::<Value>(content.trim())
+            .map_err(|_| ("schema", AiError::Retryable(format!("model returned invalid JSON (finish_reason={finish})"))))
+            .and_then(|_| validate(content).map_err(|e| ("validation", e)));
+        if let Err((class, e)) = verdict {
+            self.mark_invalid(row.as_deref(), class, &e.to_string()).await;
+            return Err(e);
         }
+        let answered_by = body.get("model").and_then(Value::as_str).unwrap_or(model).to_string();
+        Ok((content.to_string(), answered_by))
     }
 
     /// One JSON POST to an OpenRouter path with the ledger entry written for the outcome.
     pub(crate) async fn post_json(&self, path: &str, model: &str, body: &Value, timeout: Duration) -> Result<Value, AiError> {
         let started = std::time::Instant::now();
         let request = self.http.post(format!("{}{path}", self.base_url)).bearer_auth(&self.api_key).json(body).timeout(timeout);
-        self.finish(model, started, request).await
+        self.finish(model, started, request, None).await
     }
 
     /// One multipart POST (audio transcription) with the ledger entry written for the outcome.
@@ -171,26 +249,41 @@ impl OpenRouterClient {
         model: &str,
         form: reqwest::multipart::Form,
         timeout: Duration,
+        estimated_cost_usd: Option<f64>,
     ) -> Result<Value, AiError> {
         let started = std::time::Instant::now();
         let request = self.http.post(format!("{}{path}", self.base_url)).bearer_auth(&self.api_key).multipart(form).timeout(timeout);
-        self.finish(model, started, request).await
+        self.finish(model, started, request, estimated_cost_usd).await
     }
 
-    async fn finish(&self, model: &str, started: std::time::Instant, request: reqwest::RequestBuilder) -> Result<Value, AiError> {
+    async fn finish(
+        &self,
+        model: &str,
+        started: std::time::Instant,
+        request: reqwest::RequestBuilder,
+        fallback_cost: Option<f64>,
+    ) -> Result<Value, AiError> {
         let sent = async {
-            let res = request.send().await.map_err(|e| AiError::Retryable(format!("OpenRouter request failed: {e}")))?;
+            let res = request
+                .send()
+                .await
+                .map_err(|e| (transport_class(&e), AiError::Retryable(format!("OpenRouter request failed: {e}"))))?;
             if !res.status().is_success() {
-                return Err(classify_http_error(res.status(), "OpenRouter"));
+                return Err((status_class(res.status()), classify_http_error(res.status(), "OpenRouter")));
             }
-            res.json::<Value>().await.map_err(|e| AiError::Retryable(format!("OpenRouter decode: {e}")))
+            res.json::<Value>().await.map_err(|e| ("network", AiError::Retryable(format!("OpenRouter decode: {e}"))))
         }
         .await;
-        match &sent {
-            Ok(body) => self.log_call(model, started, Some(body), None).await,
-            Err(e) => self.log_call(model, started, None, Some(&e.to_string())).await,
+        match sent {
+            Ok(body) => {
+                self.log_call_detail(model, started, Some(&body), None, None, fallback_cost).await;
+                Ok(body)
+            }
+            Err((class, e)) => {
+                self.log_call_detail(model, started, None, Some(&e.to_string()), Some(class), None).await;
+                Err(e)
+            }
         }
-        sent
     }
 
     /// One tool-calling chat turn (OpenAI-style `tools`). Returns the assistant message as-is
@@ -214,8 +307,7 @@ impl OpenRouterClient {
             "max_tokens": max_tokens,
             "temperature": 0.1,
             "reasoning": {"enabled": false},
-            "provider": {"data_collection": "deny", "require_parameters": true},
-            "usage": {"include": true}
+            "provider": {"data_collection": "deny", "require_parameters": true}
         });
         let started = std::time::Instant::now();
         let res = match self
@@ -230,13 +322,13 @@ impl OpenRouterClient {
             Ok(res) => res,
             Err(e) => {
                 let msg = format!("OpenRouter request failed: {e}");
-                self.log_call(model, started, None, Some(&msg)).await;
+                self.log_call_detail(model, started, None, Some(&msg), Some(transport_class(&e)), None).await;
                 return Err(AiError::Retryable(msg));
             }
         };
         if !res.status().is_success() {
             let status = res.status();
-            self.log_call(model, started, None, Some(&format!("HTTP {status}"))).await;
+            self.log_call_detail(model, started, None, Some(&format!("HTTP {status}")), Some(status_class(status)), None).await;
             return Err(classify_http_error(status, "OpenRouter"));
         }
         let body: Value = res.json().await.map_err(|e| AiError::Retryable(format!("OpenRouter decode: {e}")))?;
@@ -401,8 +493,13 @@ impl Drafter for OpenRouterDrafter {
             "additionalProperties": false
         });
         let model = crate::agent_profiles::draft_model_or(&self.model);
-        let (content, model_id) =
-            self.client.chat_json(&model, &draft_system_prompt(&input.default_sign_off), user, "reply_draft", schema, 700).await?;
+        let (content, model_id) = self
+            .client
+            .chat_json_checked(&model, &draft_system_prompt(&input.default_sign_off), user, "reply_draft", schema, 700, |raw| {
+                let no_reply = serde_json::from_str::<Value>(raw.trim()).is_ok_and(|v| v.get("needs_reply").and_then(Value::as_bool) == Some(false));
+                if no_reply { Ok(()) } else { validate_draft(raw).map(|_| ()) }
+            })
+            .await?;
         let parsed: Value = serde_json::from_str(content.trim()).map_err(|_| AiError::Retryable("draft was not valid JSON".into()))?;
         let unanswered = parsed
             .get("unanswered")
@@ -440,8 +537,12 @@ impl OpenRouterClassifier {
 
     async fn ask(&self, model: &str, input: &ClassifyInput) -> Result<ClassifyOutput, AiError> {
         let user = classify_prompt(input);
-        let (content, model_id) =
-            self.client.chat_json(model, CLASSIFY_SYSTEM_PROMPT, user, "email_label", classify_schema(&input.labels), 120).await?;
+        let (content, model_id) = self
+            .client
+            .chat_json_checked(model, CLASSIFY_SYSTEM_PROMPT, user, "email_label", classify_schema(&input.labels), 120, |raw| {
+                parse_classification(raw, &input.labels).map(|_| ())
+            })
+            .await?;
         let (category, priority, requires_reply, confidence) = parse_classification(&content, &input.labels)?;
         Ok(ClassifyOutput {
             category,
@@ -559,7 +660,14 @@ impl super::Extractor for OpenRouterExtractor {
             fence_inline(sender_domain.unwrap_or("unknown")),
             email_block(subject, text)
         );
-        let (content, _) = self.client.chat_json(&self.model, EXTRACT_SYSTEM_PROMPT, user, "requirement", schema, 500).await?;
+        let (content, _) = self
+            .client
+            .chat_json_checked(&self.model, EXTRACT_SYSTEM_PROMPT, user, "requirement", schema, 500, |raw| {
+                serde_json::from_str::<crate::matching::RequirementFields>(raw.trim())
+                    .map(|_| ())
+                    .map_err(|_| AiError::Retryable("requirement JSON did not match".into()))
+            })
+            .await?;
         let mut r: crate::matching::RequirementFields =
             serde_json::from_str(content.trim()).map_err(|_| AiError::Retryable("requirement JSON did not match".into()))?;
         r.must_have_skills = crate::matching::canonical_skills(&r.must_have_skills);
@@ -587,7 +695,14 @@ impl super::Extractor for OpenRouterExtractor {
             fence_inline(sender),
             email_block(subject, text)
         );
-        let (content, _) = self.client.chat_json(&self.model, EXTRACT_SYSTEM_PROMPT, user, "candidate", schema, 500).await?;
+        let (content, _) = self
+            .client
+            .chat_json_checked(&self.model, EXTRACT_SYSTEM_PROMPT, user, "candidate", schema, 500, |raw| {
+                serde_json::from_str::<crate::matching::CandidateFields>(raw.trim())
+                    .map(|_| ())
+                    .map_err(|_| AiError::Retryable("candidate JSON did not match".into()))
+            })
+            .await?;
         let mut c: crate::matching::CandidateFields =
             serde_json::from_str(content.trim()).map_err(|_| AiError::Retryable("candidate JSON did not match".into()))?;
         c.skills = crate::matching::canonical_skills(&c.skills);
@@ -638,7 +753,14 @@ impl super::Analyst for OpenRouterAnalyst {
             "additionalProperties": false
         });
         let user = format!("From: {}\nSubject: {}\n{}", fence_inline(sender), fence_inline(subject), fence("email", &prepare_text_up_to(body, ANALYZE_MAX_CHARS)));
-        let (content, model_id) = self.client.chat_json(&self.model, ANALYZE_SYSTEM_PROMPT, user, "email_insight", schema, 500).await?;
+        let (content, model_id) = self
+            .client
+            .chat_json_checked(&self.model, ANALYZE_SYSTEM_PROMPT, user, "email_insight", schema, 500, |raw| {
+                serde_json::from_str::<super::Insight>(raw.trim())
+                    .map(|_| ())
+                    .map_err(|_| AiError::Retryable("insight JSON did not match".into()))
+            })
+            .await?;
         let mut i: super::Insight =
             serde_json::from_str(content.trim()).map_err(|_| AiError::Retryable("insight JSON did not match".into()))?;
         i.summary = crate::sources::normalize::truncate_chars(i.summary.trim(), 400);
@@ -702,7 +824,10 @@ impl super::Learner for OpenRouterLearner {
             "required": ["lessons"],
             "additionalProperties": false
         });
-        let (content, _) = self.client.chat_json(&self.model, LEARN_SYSTEM_PROMPT, user, "draft_lessons", schema, 400).await?;
+        let (content, _) = self
+            .client
+            .chat_json_checked(&self.model, LEARN_SYSTEM_PROMPT, user, "draft_lessons", schema, 400, |raw| parse_lessons(raw).map(|_| ()))
+            .await?;
         parse_lessons(&content)
     }
 }
