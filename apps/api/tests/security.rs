@@ -144,6 +144,19 @@ impl H {
 // ---------------------------------------------------------------- 1. sign-up, caps
 
 #[tokio::test]
+async fn star_domain_opens_signup_to_everyone() {
+    let h = harness(|c| {
+        c.auth_mode = AuthMode::Password;
+        c.signup_allowed_domains = vec!["*".into()];
+    })
+    .await;
+    for email in ["someone@anywhere.test", "other@elsewhere.test"] {
+        let (s, _) = h.call("POST", "/api/v1/auth/signup", None, Some(json!({"email": email, "password": PW}))).await;
+        assert_eq!(s, StatusCode::ACCEPTED, "{email} may sign up when any domain is allowed");
+    }
+}
+
+#[tokio::test]
 async fn signup_is_closed_except_bootstrap_allow_lists_and_invites() {
     let h = harness(|c| {
         c.auth_mode = AuthMode::Password;

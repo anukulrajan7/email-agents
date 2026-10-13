@@ -59,12 +59,12 @@ pub struct SignupBody {
     name: Option<String>,
 }
 
-/// Open to: allow-listed emails or domains, anyone an admin invited, and, when no allow-list
-/// is configured, the very first account (bootstrap admin).
+/// Open to: allow-listed emails or domains (`*` = any domain: open sign-up), anyone an admin
+/// invited, and, when no allow-list is configured, the very first account (bootstrap admin).
 async fn signup_allowed(state: &AppState, email: &str) -> AppResult<bool> {
     let cfg = &state.config;
     let domain = email.rsplit('@').next().unwrap_or_default();
-    if cfg.signup_allowed_emails.iter().any(|e| e == email) || cfg.signup_allowed_domains.iter().any(|d| d == domain) {
+    if cfg.signup_allowed_emails.iter().any(|e| e == email) || cfg.signup_allowed_domains.iter().any(|d| d == "*" || d == domain) {
         return Ok(true);
     }
     let invited: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM invitations WHERE email = ?1)")
