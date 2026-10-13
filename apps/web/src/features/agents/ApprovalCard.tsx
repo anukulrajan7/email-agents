@@ -2,10 +2,32 @@ import { useId, useState } from 'react';
 import { Link } from 'react-router';
 import { Button, Card, Label, RelativeTime, Textarea, useToast } from '../../components/ui';
 import { ErrorNote } from '../../components/ErrorNote';
+import { AutomationSentence } from '../automations/Sentence';
+import { useLabelMap } from '../labels/hooks';
+import { AgentByline } from './AgentAvatar';
+import { personName } from './agentLabels';
 import { useDecideApproval } from './hooks';
-import type { Approval } from './types';
+import type { Approval, SuggestedAutomation } from './types';
 
 const HAS_GAPS = /\[NEEDS:/i;
+
+const WANTS: Record<Approval['action'], string> = {
+  send_email: ' wants to send a reply',
+  submit_candidate: ' wants to submit candidates',
+  create_automation: ' suggests an automation',
+};
+
+function AutomationPreview({ ws, automation, reason }: { ws: string; automation: SuggestedAutomation; reason: string }) {
+  const labels = useLabelMap(ws);
+  return (
+    <div className="flex flex-col gap-2 rounded-sm border border-rule bg-raised p-3">
+      <p className="font-semibold text-ink">{automation.name}</p>
+      <AutomationSentence conditions={automation.conditions} actions={automation.actions} labelName={(k) => labels.get(k)?.name ?? k} />
+      {reason && <p className="text-sm text-ink-muted">Why: {reason}</p>}
+      <p className="text-sm text-ink-muted">Approving creates this automation and turns it on. Only an admin can approve it.</p>
+    </div>
+  );
+}
 
 export function ApprovalCard({ ws, approval }: { ws: string; approval: Approval }) {
   const uid = useId();
@@ -17,10 +39,12 @@ export function ApprovalCard({ ws, approval }: { ws: string; approval: Approval 
   const edited = body !== approval.body;
   const busy = decide.isPending;
 
+  const isAutomation = approval.action === 'create_automation' && approval.automation;
+
   const approve = async () => {
     try {
-      await decide.mutateAsync({ id: approval.id, decision: 'approve', ...(edited ? { edited_body: body } : {}) });
-      notify('success', `Approved and sent${approval.to ? ` to ${approval.to}` : ''}.`);
+      await decide.mutateAsync({ id: approval.id, decision: 'approve', ...(edited && !isAutomation ? { edited_body: body } : {}) });
+      notify('success', isAutomation ? 'Automation created and turned on.' : `Approved and sent${approval.to ? ` to ${approval.to}` : ''}.`);
     } catch {
       notify('error', 'Could not send. Nothing was sent.');
     }
@@ -39,6 +63,12 @@ export function ApprovalCard({ ws, approval }: { ws: string; approval: Approval 
   return (
     <Card className="flex flex-col gap-4 p-5" aria-label={approval.summary} role="group">
         <div className="flex flex-col gap-1">
+          {approval.agent && (
+            <AgentByline agent={approval.agent}>
+              {WANTS[approval.action]}
+              {approval.working_for ? ` for ${personName(approval.working_for)}` : ''}
+            </AgentByline>
+          )}
           <h3 className="type-display text-xl tracking-[-0.01em] break-words">{approval.summary}</h3>
           <p className="text-sm text-ink-muted">
             <Link to={`/w/${ws}/agents/${approval.case_id}`} className="underline decoration-current/40 underline-offset-[3px] hover:text-ink">
@@ -78,6 +108,9 @@ export function ApprovalCard({ ws, approval }: { ws: string; approval: Approval 
           </ul>
         )}
 
+        {isAutomation && approval.automation ? (
+          <AutomationPreview ws={ws} automation={approval.automation} reason={approval.body} />
+        ) : (
         <div className="flex flex-col gap-1">
           <Label htmlFor={`${uid}-body`}>Email body</Label>
           <Textarea id={`${uid}-body`} rows={8} value={body} onChange={(e) => setBody(e.target.value)} disabled={busy} className="text-sm" />
@@ -94,6 +127,7 @@ export function ApprovalCard({ ws, approval }: { ws: string; approval: Approval 
             </button>
           )}
         </div>
+        )}
 
         {declining && (
           <div className="flex flex-col gap-1">
@@ -117,7 +151,7 @@ export function ApprovalCard({ ws, approval }: { ws: string; approval: Approval 
           ) : (
             <>
               <Button onClick={approve} loading={busy}>
-                Approve &amp; send
+                {isAutomation ? 'Create automation' : 'Approve & send'}
               </Button>
               <Button variant="secondary" onClick={() => setDeclining(true)} disabled={busy}>
                 Decline

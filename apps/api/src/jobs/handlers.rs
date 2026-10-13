@@ -751,6 +751,8 @@ async fn compose_draft(
     let settings = crate::reply_settings::load(&state.db, &state.config, &msg.workspace_id).await?;
     let reply_instructions =
         if settings.reply_instructions.is_empty() { ai::routing::DEFAULT_REPLY_STYLE.to_string() } else { settings.reply_instructions };
+    let (reply_instructions, signature) =
+        crate::agent_profiles::draft_voice(&state.db, &state.config, &msg.workspace_id, message_id, reply_instructions, settings.signature).await?;
 
     // Trusted memory (staff notes + learned sender profile), retrieved by sender and topic.
     let ctx = if automated {
@@ -784,7 +786,7 @@ async fn compose_draft(
             insight: Some(insight),
             quality,
             reply_instructions,
-            signature: settings.signature,
+            signature,
         })
         .await?;
     Ok((out, ctx, quality))
@@ -919,6 +921,14 @@ pub async fn create_agent_draft(
     }
     tx.commit().await?;
     Ok(sqlx::query_as("SELECT id, body_text FROM drafts WHERE origin_key = ?1").bind(origin_key).fetch_optional(&state.db).await?)
+}
+
+/// Writes a reply without storing it, so people can try out the agent's instructions.
+pub async fn preview_draft(state: &AppState, message_id: &str, requested: Option<ai::DraftQuality>) -> Result<String, JobError> {
+    let msg = load_message(state, message_id).await?;
+    let insight = analyze_message(state, &json!({ "message_id": message_id })).await?;
+    let (out, _, _) = compose_draft(state, message_id, &msg, insight, None, requested, false).await?;
+    Ok(out.body_text)
 }
 
 // ---------------------------------------------------------------- understanding

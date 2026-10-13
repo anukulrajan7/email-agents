@@ -3,8 +3,10 @@
 //! a person's approval, a critic checks proposals first, and every turn is traced with its cost.
 
 pub mod approvals;
+pub mod autonomy;
 pub mod case;
 pub mod critic;
+pub mod persona;
 pub mod planner;
 pub mod runner;
 pub mod tools;

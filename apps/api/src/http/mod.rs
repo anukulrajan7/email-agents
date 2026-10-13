@@ -1,3 +1,4 @@
+mod agent_profiles_api;
 mod ai_usage_api;
 mod agents_api;
 mod alerts_api;
@@ -143,6 +144,7 @@ pub fn router(state: AppState) -> Router {
         .route("/workspaces/{ws}/jobs/{id}/retry", post(jobs_api::retry))
         .merge(automations_api::routes())
         .merge(agents_api::routes())
+        .merge(agent_profiles_api::routes())
         .fallback(|| async { AppError::NotFound })
         .layer(middleware::from_fn(crate::ai_ledger::attach_context))
         .layer(DefaultBodyLimit::max(256 * 1024));

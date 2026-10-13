@@ -1,6 +1,8 @@
 //! Agents API: cases with their step timeline, and the approvals inbox.
 //! Operators read, start cases and decide approvals; admins cancel cases.
 
+use std::collections::HashMap;
+
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
@@ -11,6 +13,7 @@ use serde_json::{Value, json};
 
 use super::AppState;
 use crate::{
+    agent_profiles,
     agents::{
         approvals,
         case::{self, Case, KINDS, NewStep},
@@ -33,6 +36,52 @@ pub fn routes() -> Router<AppState> {
 }
 
 const STATUSES: &[&str] = &["running", "waiting_approval", "waiting_event", "done", "failed", "cancelled"];
+
+/// The workspace agent's badge and the people it works for, for decorating cases and approvals.
+struct Who {
+    agent: Value,
+    people: HashMap<String, Value>,
+}
+
+impl Who {
+    async fn load(state: &AppState, ws: &str) -> AppResult<Self> {
+        let agent = agent_profiles::agent(&state.db, &state.config, ws).await?.badge();
+        let rows: Vec<(String, String, Option<String>)> = sqlx::query_as(
+            "SELECT u.id, u.email, p.display_name FROM memberships ms JOIN users u ON u.id = ms.user_id
+             LEFT JOIN user_agent_profiles p ON p.workspace_id = ms.workspace_id AND p.user_id = u.id
+             WHERE ms.workspace_id = ?1",
+        )
+        .bind(ws)
+        .fetch_all(&state.db)
+        .await?;
+        let people = rows
+            .into_iter()
+            .map(|(id, email, name)| {
+                let name = name.filter(|n| !n.trim().is_empty());
+                (id.clone(), json!({ "user_id": id, "email": email, "name": name }))
+            })
+            .collect();
+        Ok(Self { agent, people })
+    }
+
+    fn working_for(&self, user_id: Option<&str>) -> Value {
+        user_id.and_then(|u| self.people.get(u)).cloned().unwrap_or(Value::Null)
+    }
+
+    fn case(&self, c: &Case) -> Value {
+        let mut v = summary_json(c);
+        v["agent"] = self.agent.clone();
+        v["working_for"] = self.working_for(c.agent_user_id.as_deref());
+        v
+    }
+
+    fn approval(&self, a: &approvals::ApprovalRow) -> Value {
+        let mut v = a.to_json();
+        v["agent"] = self.agent.clone();
+        v["working_for"] = self.working_for(a.agent_user_id.as_deref());
+        v
+    }
+}
 
 fn summary_json(c: &Case) -> Value {
     json!({
@@ -75,12 +124,14 @@ async fn list_cases(
     .bind(kind)
     .fetch_all(&state.db)
     .await?;
-    Ok(Json(json!({ "items": rows.iter().map(summary_json).collect::<Vec<_>>() })))
+    let who = Who::load(&state, &ws).await?;
+    Ok(Json(json!({ "items": rows.iter().map(|c| who.case(c)).collect::<Vec<_>>() })))
 }
 
 async fn case_detail(State(state): State<AppState>, user: AuthUser, Path((ws, id)): Path<(String, String)>) -> AppResult<Json<Value>> {
     require_role(&state.db, &ws, &user, Role::Operator).await?;
     let c = case::get_in(&state.db, &ws, &id).await?.ok_or(AppError::NotFound)?;
+    let who = Who::load(&state, &ws).await?;
     let steps: Vec<Value> = case::steps(&state.db, &c.id)
         .await?
         .into_iter()
@@ -94,8 +145,8 @@ async fn case_detail(State(state): State<AppState>, user: AuthUser, Path((ws, id
         })
         .collect();
     let approvals: Vec<Value> =
-        approvals::list(&state.db, &ws, None, Some(&c.id)).await?.iter().rev().map(approvals::ApprovalRow::to_json).collect();
-    let mut detail = summary_json(&c);
+        approvals::list(&state.db, &ws, None, Some(&c.id)).await?.iter().rev().map(|a| who.approval(a)).collect();
+    let mut detail = who.case(&c);
     // In the detail, `steps` is the timeline itself (the count is `steps.length`).
     detail["steps"] = json!(steps);
     detail["state"] = c.state();
@@ -132,9 +183,13 @@ async fn create_case(
         }
         _ => return Err(AppError::BadRequest("kind must be requirement or inbox".into())),
     };
-    let (case_id, _) = started.ok_or(AppError::NotFound)?;
+    let case_id = match started {
+        triggers::Started::Case(id, _) => id,
+        triggers::Started::NotFound => return Err(AppError::NotFound),
+        triggers::Started::NotAllowed(why) => return Err(AppError::Conflict(why)),
+    };
     let c = case::get_in(&state.db, &ws, &case_id).await?.ok_or(AppError::NotFound)?;
-    Ok(Json(summary_json(&c)))
+    Ok(Json(Who::load(&state, &ws).await?.case(&c)))
 }
 
 fn ensure_enabled(state: &AppState) -> AppResult<()> {
@@ -179,7 +234,7 @@ async fn cancel_case(State(state): State<AppState>, user: AuthUser, Path((ws, id
     .await?;
     tx.commit().await?;
     let c = case::get_in(&state.db, &ws, &id).await?.ok_or(AppError::NotFound)?;
-    Ok(Json(summary_json(&c)))
+    Ok(Json(Who::load(&state, &ws).await?.case(&c)))
 }
 
 #[derive(Deserialize)]
@@ -198,7 +253,8 @@ async fn list_approvals(
     if status.as_deref().is_some_and(|s| !matches!(s, "pending" | "approved" | "declined")) {
         return Err(AppError::BadRequest("status must be pending, approved or declined".into()));
     }
-    let items: Vec<Value> = approvals::list(&state.db, &ws, status.as_deref(), None).await?.iter().map(approvals::ApprovalRow::to_json).collect();
+    let who = Who::load(&state, &ws).await?;
+    let items: Vec<Value> = approvals::list(&state.db, &ws, status.as_deref(), None).await?.iter().map(|a| who.approval(a)).collect();
     let pending_count = approvals::pending_count(&state.db, &ws).await?;
     Ok(Json(json!({ "items": items, "pending_count": pending_count })))
 }
@@ -216,7 +272,12 @@ async fn decide(
     Path((ws, id)): Path<(String, String)>,
     Json(body): Json<DecisionBody>,
 ) -> AppResult<Json<Value>> {
-    require_role(&state.db, &ws, &user, Role::Operator).await?;
+    let role = require_role(&state.db, &ws, &user, Role::Operator).await?;
+    let pending = approvals::get(&state.db, &ws, &id).await?.ok_or(AppError::NotFound)?;
+    // Creating an automation is an admin's call, like in the Automations page.
+    if pending.action == "create_automation" && role != Role::Admin && body.decision == "approve" {
+        return Err(AppError::Forbidden);
+    }
     let approve = match body.decision.as_str() {
         "approve" => true,
         "decline" => false,
@@ -230,5 +291,5 @@ async fn decide(
         approvals::Decision { approve, edited_body: body.edited_body.as_deref(), note: body.note.as_deref() },
     )
     .await?;
-    Ok(Json(row.to_json()))
+    Ok(Json(Who::load(&state, &ws).await?.approval(&row)))
 }

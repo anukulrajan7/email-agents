@@ -1,3 +1,4 @@
+pub mod agent_profiles;
 pub mod agents;
 pub mod ai;
 pub mod ai_ledger;

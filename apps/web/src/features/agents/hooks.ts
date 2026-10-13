@@ -1,6 +1,25 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '../../api/client';
-import type { Approval, ApprovalDecision, ApprovalList, CaseDetail, CaseFilter, CaseList, CaseSummary, StartCaseBody } from './types';
+import type { Items, MessageSummary, Paged } from '../../api/types';
+import type {
+  AgentInput,
+  AgentView,
+  Approval,
+  ApprovalDecision,
+  ApprovalList,
+  CaseDetail,
+  CaseFilter,
+  CaseList,
+  CaseSummary,
+  MyProfileView,
+  PreviewBody,
+  PreviewResult,
+  StartCaseBody,
+  TeamProfile,
+  UserProfile,
+  UserProfileInput,
+  WorkspaceAgent,
+} from './types';
 import { FILTER_STATUS } from './labels';
 
 export const AGENT_POLL_MS = 30_000;
@@ -58,5 +77,78 @@ export function useCancelCase(ws: string) {
   return useMutation({
     mutationFn: (id: string) => api<CaseSummary>(`/workspaces/${ws}/cases/${id}/cancel`, { method: 'POST' }),
     onSuccess: () => qc.invalidateQueries({ queryKey: agentsKey(ws) }),
+  });
+}
+
+const agentKey = (ws: string) => ['ws', ws, 'agent'] as const;
+const myProfileKey = (ws: string) => ['ws', ws, 'my-agent-profile'] as const;
+
+export function useAgent(ws: string) {
+  return useQuery({
+    queryKey: agentKey(ws),
+    queryFn: () => api<AgentView>(`/workspaces/${ws}/agent`),
+    staleTime: 30_000,
+  });
+}
+
+export function useSaveAgent(ws: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: AgentInput) => api<WorkspaceAgent>(`/workspaces/${ws}/agent`, { method: 'PUT', body }),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: agentKey(ws) });
+      void qc.invalidateQueries({ queryKey: myProfileKey(ws) });
+      void qc.invalidateQueries({ queryKey: agentsKey(ws) });
+    },
+  });
+}
+
+export function useMyProfile(ws: string) {
+  return useQuery({
+    queryKey: myProfileKey(ws),
+    queryFn: () => api<MyProfileView>(`/workspaces/${ws}/me/agent-profile`),
+    staleTime: 60_000,
+  });
+}
+
+export function useSaveMyProfile(ws: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: Partial<UserProfileInput>) => api<UserProfile>(`/workspaces/${ws}/me/agent-profile`, { method: 'PUT', body }),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: myProfileKey(ws) });
+      void qc.invalidateQueries({ queryKey: [...agentKey(ws), 'team'] });
+    },
+  });
+}
+
+export function useSkipMyProfile(ws: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => api<{ skipped: boolean }>(`/workspaces/${ws}/me/agent-profile/skip`, { method: 'POST' }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: myProfileKey(ws) }),
+  });
+}
+
+export function useTeamProfiles(ws: string, enabled: boolean) {
+  return useQuery({
+    queryKey: [...agentKey(ws), 'team'],
+    queryFn: () => api<Items<TeamProfile>>(`/workspaces/${ws}/agent/profiles`),
+    enabled,
+  });
+}
+
+export function useRecentEmails(ws: string, enabled: boolean) {
+  return useQuery({
+    queryKey: ['ws', ws, 'messages', 'agent-test'],
+    queryFn: () => api<Paged<MessageSummary>>(`/workspaces/${ws}/messages`, { query: { limit: 15, sort: 'recent' } }),
+    enabled,
+    staleTime: 30_000,
+  });
+}
+
+export function usePreviewAgent(ws: string) {
+  return useMutation({
+    mutationFn: (body: PreviewBody) => api<PreviewResult>(`/workspaces/${ws}/agent/preview`, { method: 'POST', body }),
   });
 }

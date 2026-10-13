@@ -182,7 +182,8 @@ async fn reply_style_signature_and_label_meaning_reach_the_drafter() {
     env.email("Can you send the offer letter?", "Hi, can you send the offer letter today?").await;
     {
         let seen = env.recorder.seen.lock().unwrap();
-        assert_eq!(seen.last().unwrap().reply_instructions, DEFAULT_REPLY_STYLE);
+        // The workspace agent's voice (seeded with the standard guidance) writes every draft.
+        assert!(seen.last().unwrap().reply_instructions.contains(DEFAULT_REPLY_STYLE));
         assert_eq!(seen.last().unwrap().signature, None);
         assert!(!seen.last().unwrap().category_description.is_empty(), "label meaning is passed along");
     }
@@ -193,7 +194,7 @@ async fn reply_style_signature_and_label_meaning_reach_the_drafter() {
     env.email("Where is my payslip?", "Hi, where can I find my payslip for last month?").await;
     let seen = env.recorder.seen.lock().unwrap();
     let last = seen.last().unwrap();
-    assert_eq!(last.reply_instructions, "Warm and short. Never discuss salary.");
+    assert!(last.reply_instructions.ends_with("Team reply instructions:\nWarm and short. Never discuss salary."), "{}", last.reply_instructions);
     assert_eq!(last.signature.as_deref(), Some("The Acme Team"));
 }
 

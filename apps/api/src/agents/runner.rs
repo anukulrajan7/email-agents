@@ -5,13 +5,15 @@ use serde_json::{Value, json};
 
 use super::{
     MAX_ERROR_STREAK,
+    autonomy,
     case::{self, Case, NewStep, StepRow},
     critic::{self, CriticInput, RuleContext},
-    planner::{Decision, PlanOutput, PlanRequest, Usage},
+    planner::{self, Decision, PlanOutput, PlanRequest, Usage},
     sentence,
     tools::{self, Preview, Risk, ToolCtx, ToolError, ToolOutput},
 };
 use crate::{
+    agent_profiles::{self, AgentContext},
     ai::AiError,
     audit::{self, Actor, Entry},
     db::{new_id, now_ms},
@@ -35,7 +37,7 @@ pub fn limit_reached(step_count: i64, max_steps: i64, spent_usd: f64, budget_usd
 }
 
 enum TurnResult {
-    Ran { tool: String, input: Value, out: ToolOutput },
+    Ran { tool: String, input: Value, out: ToolOutput, auto_sent: bool },
     Error { tool: Option<String>, input: Value, summary: String, error: String },
     Blocked { tool: String, input: Value, reason: String },
     Approval { tool: String, input: Value, preview: Preview },
@@ -141,6 +143,7 @@ pub async fn run_step(state: &AppState, case_id: &str, turn: i64) -> Result<(), 
 
     let steps = case::steps(&state.db, &case.id).await?;
     let registry = tools::registry();
+    let agent = agent_profiles::context_for_case(&state.db, &state.config, &case).await?;
     let req = PlanRequest {
         case_id: case.id.clone(),
         kind: case.kind.clone(),
@@ -148,6 +151,8 @@ pub async fn run_step(state: &AppState, case_id: &str, turn: i64) -> Result<(), 
         requirement_id: case.requirement_id.clone(),
         message_id: case.message_id.clone(),
         facts: case.state(),
+        system: planner::system_prompt(&agent.planner_block()),
+        model: Some(agent_profiles::tier_model(&state.config, &agent.agent.quality).to_string()).filter(|m| !m.is_empty()),
         prompt: render_prompt(&case, &steps, turn),
         tools: registry.specs(),
     };
@@ -168,12 +173,34 @@ pub async fn run_step(state: &AppState, case_id: &str, turn: i64) -> Result<(), 
             summary: "The assistant made an unusable choice and will try again".into(),
             error,
         },
-        Decision::Call { tool, args } => evaluate(state, &case, turn, &tool, args, &mut usage).await?,
+        Decision::Call { tool, args } => evaluate(state, &case, &agent, turn, &tool, args, &mut usage).await?,
     };
     commit(state, &case, turn, &usage, result).await
 }
 
-async fn evaluate(state: &AppState, case: &Case, turn: i64, name: &str, args: Value, usage: &mut Usage) -> Result<TurnResult, JobError> {
+/// Why the workspace's permissions stop this tool, if they do.
+fn permission_block(agent: &AgentContext, tool: &str) -> Option<String> {
+    let name = &agent.agent.name;
+    match tool {
+        "draft_email" if !agent.agent.permissions.draft => {
+            Some(format!("Writing drafts is switched off for {name}; create a task for a person instead."))
+        }
+        "send_email" | "submit_candidate" if agent.agent.permissions.send == "never" => {
+            Some(format!("Sending is switched off for {name}; create a task for a person instead."))
+        }
+        _ => None,
+    }
+}
+
+async fn evaluate(
+    state: &AppState,
+    case: &Case,
+    agent: &AgentContext,
+    turn: i64,
+    name: &str,
+    args: Value,
+    usage: &mut Usage,
+) -> Result<TurnResult, JobError> {
     let Some(tool) = tools::registry().get(name) else {
         return Ok(TurnResult::Error {
             tool: None,
@@ -190,6 +217,9 @@ async fn evaluate(state: &AppState, case: &Case, turn: i64, name: &str, args: Va
             summary: format!("The assistant gave incomplete details for {} and will try again", tool.name()),
             error: e,
         });
+    }
+    if let Some(reason) = permission_block(agent, &tool_name) {
+        return Ok(TurnResult::Blocked { tool: tool_name, input: args, reason });
     }
     let ctx = ToolCtx { state, case, turn, actor: Actor::System };
     let mut preview = None;
@@ -228,12 +258,29 @@ async fn evaluate(state: &AppState, case: &Case, turn: i64, name: &str, args: Va
             }
         }
     }
+    let mut auto_sent = false;
     if tool.risk() == Risk::High {
         let preview = preview.unwrap_or_default();
-        return Ok(TurnResult::Approval { tool: tool_name, input: args, preview });
+        if tool.name() != "send_email" || !autonomy::may_send_on_its_own(state, case, agent, &preview).await? {
+            return Ok(TurnResult::Approval { tool: tool_name, input: args, preview });
+        }
+        auto_sent = true;
     }
     Ok(match tool.run(&ctx, &args).await {
-        Ok(out) => TurnResult::Ran { tool: tool_name, input: args, out },
+        Ok(mut out) => {
+            if auto_sent {
+                out.summary = format!("Sent automatically (your profile allows routine replies). {}", out.summary);
+                out.value["sent_without_approval"] = json!(true);
+            }
+            TurnResult::Ran { tool: tool_name, input: args, out, auto_sent }
+        }
+        // A send check stopped the automatic send: a person decides instead.
+        Err(ToolError::Failed(m)) if auto_sent => {
+            tracing::info!(case_id = %case.id, reason = %m, "automatic send stopped; asking a person");
+            let mut preview = preview_again(&ctx, tool, &args).await?;
+            preview.summary = format!("{} (sending on its own was stopped: {})", preview.summary, sentence(&m, 120));
+            TurnResult::Approval { tool: tool_name, input: args, preview }
+        }
         Err(ToolError::Failed(m)) => TurnResult::Error {
             tool: Some(tool_name.clone()),
             input: args,
@@ -242,6 +289,14 @@ async fn evaluate(state: &AppState, case: &Case, turn: i64, name: &str, args: Va
         },
         Err(ToolError::Db(e)) => return Err(e.into()),
     })
+}
+
+async fn preview_again(ctx: &ToolCtx<'_>, tool: &dyn tools::Tool, args: &Value) -> Result<Preview, JobError> {
+    match tool.preview(ctx, args).await {
+        Ok(p) => Ok(p.unwrap_or_default()),
+        Err(ToolError::Failed(m)) => Ok(Preview { summary: m, ..Default::default() }),
+        Err(ToolError::Db(e)) => Err(e.into()),
+    }
 }
 
 async fn commit(state: &AppState, case: &Case, turn: i64, usage: &Usage, result: TurnResult) -> Result<(), JobError> {
@@ -282,7 +337,22 @@ async fn commit(state: &AppState, case: &Case, turn: i64, usage: &Usage, result:
     let mut next_at = Some(now);
     let mut error_streak = 0;
     match result {
-        TurnResult::Ran { tool, input, out } => {
+        TurnResult::Ran { tool, input, out, auto_sent } => {
+            if auto_sent {
+                audit::record(
+                    &mut tx,
+                    Entry {
+                        workspace_id: &case.workspace_id,
+                        actor: Actor::System,
+                        action: autonomy::AUTO_SENT_ACTION,
+                        entity_type: "case",
+                        entity_id: &case.id,
+                        message_id: case.message_id.as_deref(),
+                        metadata: json!({"tool": tool, "draft_id": out.value.get("draft_id")}),
+                    },
+                )
+                .await?;
+            }
             case::insert_step(&mut tx, case, step("tool", static_name(&tool), out.summary, input, out.value, "ok")).await?;
             if let Some(patch) = &out.state {
                 case::merge_state(&mut tx, &case.id, patch).await?;
@@ -324,7 +394,7 @@ async fn commit(state: &AppState, case: &Case, turn: i64, usage: &Usage, result:
             .bind(&case.workspace_id)
             .bind(&case.id)
             .bind(seq)
-            .bind(&tool)
+            .bind(tools::approval_action(&tool))
             .bind(sentence(&preview.summary, 200))
             .bind(&preview.to)
             .bind(&preview.subject)
@@ -415,6 +485,7 @@ mod tests {
             requirement_id: Some("req_1".into()),
             thread_id: Some("thr_1".into()),
             next_wake_at: None,
+            agent_user_id: None,
             created_at: 0,
             updated_at: 0,
         }

@@ -34,12 +34,14 @@ pub struct Case {
     pub requirement_id: Option<String>,
     pub thread_id: Option<String>,
     pub next_wake_at: Option<i64>,
+    /// Whose mailbox the case's email arrived in (the person the agent works for).
+    pub agent_user_id: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
 }
 
 pub const CASE_COLUMNS: &str = "id, workspace_id, kind, title, goal, status, outcome, status_note, failure_reason, state_json, priority,
-    step_count, max_steps, spent_usd, budget_usd, error_streak, message_id, requirement_id, thread_id, next_wake_at, created_at, updated_at";
+    step_count, max_steps, spent_usd, budget_usd, error_streak, message_id, requirement_id, thread_id, next_wake_at, agent_user_id, created_at, updated_at";
 
 impl Case {
     pub fn state(&self) -> Value {
@@ -204,6 +206,7 @@ pub struct NewCase<'a> {
     pub thread_id: Option<&'a str>,
     pub state: Value,
     pub created_by: Option<&'a str>,
+    pub agent_user_id: Option<&'a str>,
 }
 
 /// Creates the case and schedules its first turn, unless an equivalent case exists
@@ -213,8 +216,8 @@ pub async fn create(conn: &mut SqliteConnection, config: &Config, new: NewCase<'
     let now = now_ms();
     let created = sqlx::query(
         "INSERT OR IGNORE INTO cases (id, workspace_id, kind, title, goal, status, state_json, priority, max_steps, budget_usd,
-                                      message_id, requirement_id, thread_id, created_by, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, 'running', ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?14)",
+                                      message_id, requirement_id, thread_id, created_by, created_at, updated_at, agent_user_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, 'running', ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?14, ?15)",
     )
     .bind(&id)
     .bind(new.workspace_id)
@@ -230,6 +233,7 @@ pub async fn create(conn: &mut SqliteConnection, config: &Config, new: NewCase<'
     .bind(new.thread_id)
     .bind(new.created_by)
     .bind(now)
+    .bind(new.agent_user_id)
     .execute(&mut *conn)
     .await?
     .rows_affected()

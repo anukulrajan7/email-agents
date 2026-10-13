@@ -3,6 +3,7 @@ import { Card, EmptyState, Page, PageHeader, SkeletonList, Tabs, type TabItem } 
 import { ErrorNote } from '../../components/ErrorNote';
 import { useWorkspace } from '../../app/useWorkspace';
 import { riseStyle } from '../../lib/motion';
+import { LeadAgentCard, MyProfileCard, TeamProfiles } from './AgentSettings';
 import { ApprovalCard } from './ApprovalCard';
 import { CaseRow } from './CaseRow';
 import { useApprovals, useCases } from './hooks';
@@ -68,7 +69,7 @@ function CasesList({ ws, filter }: { ws: string; filter: CaseFilter }) {
 }
 
 export function AgentsPage() {
-  const { ws } = useWorkspace();
+  const { ws, isAdmin } = useWorkspace();
   const [filter, setFilter] = useState<CaseFilter>('all');
   const tabs: TabItem<CaseFilter>[] = FILTERS;
 
@@ -79,6 +80,10 @@ export function AgentsPage() {
         title="Agents"
         description="Agents take an email or a client requirement from start to finish. They always ask you before sending anything important."
       />
+      <div className="rise grid grid-cols-1 items-stretch gap-4 lg:grid-cols-2" style={riseStyle(1)}>
+        <LeadAgentCard ws={ws} />
+        <MyProfileCard ws={ws} />
+      </div>
       <WaitingForYou ws={ws} />
       <section aria-labelledby="cases-heading" className="rise flex flex-col gap-3" style={riseStyle(2)}>
         <h2 id="cases-heading" className="type-display text-2xl tracking-[-0.01em]">
@@ -88,6 +93,7 @@ export function AgentsPage() {
           <CasesList ws={ws} filter={filter} />
         </Tabs>
       </section>
+      {isAdmin && <TeamProfiles ws={ws} />}
     </Page>
   );
 }

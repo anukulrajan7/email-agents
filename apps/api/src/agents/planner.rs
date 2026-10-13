@@ -73,6 +73,10 @@ pub struct PlanRequest {
     pub message_id: Option<String>,
     /// Case facts (the case's state).
     pub facts: Value,
+    /// System prompt: the fixed rules, then the agent's persona and who it works for.
+    pub system: String,
+    /// The quality tier's model, if configured (internal only).
+    pub model: Option<String>,
     /// Goal, facts and previous steps, rendered for the model.
     pub prompt: String,
     /// OpenAI-style function specs, including `finish`.
@@ -119,6 +123,14 @@ Rules:\n\
 - If a step was blocked or failed, read why and change your approach; do not repeat it unchanged.\n\
 - To wait for a reply, call schedule_check. A reply in the conversation wakes the case early.\n\
 - Call finish when the goal is met, when only a person can continue, or when nothing useful is left. Keep summaries to one plain sentence.";
+
+/// The planner's system prompt: the fixed safety rules first, then the trusted persona block.
+pub fn system_prompt(persona_block: &str) -> String {
+    match persona_block.trim() {
+        "" => SYSTEM_PROMPT.to_string(),
+        block => format!("{SYSTEM_PROMPT}\n\n{block}"),
+    }
+}
 
 /// Reads the assistant message of a tool-calling response into a decision. Never trusts it blindly.
 pub fn parse_tool_message(message: &Value) -> Decision {
@@ -167,10 +179,15 @@ impl OpenRouterPlanner {
 #[async_trait]
 impl Planner for OpenRouterPlanner {
     async fn plan(&self, req: &PlanRequest) -> Result<PlanOutput, AiError> {
-        let model = if req.premium { &self.premium_model } else { &self.model };
+        let model = match req.model.as_deref().filter(|m| !m.is_empty()) {
+            Some(tier) => tier,
+            None if req.premium => &self.premium_model,
+            None => &self.model,
+        };
+        let system = if req.system.is_empty() { SYSTEM_PROMPT } else { &req.system };
         let reply = self
             .client
-            .chat_tools(model, SYSTEM_PROMPT, req.prompt.clone(), json!(req.tools), json!("auto"), 700)
+            .chat_tools(model, system, req.prompt.clone(), json!(req.tools), json!("auto"), 700)
             .await?;
         Ok(PlanOutput { decision: parse_tool_message(&reply.message), usage: Usage::from_chat(&reply.usage, &reply.model_id) })
     }
@@ -217,6 +234,7 @@ pub struct ScriptedPlanner {
     scripts: Mutex<HashMap<String, VecDeque<Scripted>>>,
     cost_per_call: f64,
     prompts: Mutex<Vec<String>>,
+    systems: Mutex<Vec<String>>,
 }
 
 impl ScriptedPlanner {
@@ -237,6 +255,11 @@ impl ScriptedPlanner {
     /// Every prompt the planner was shown, in order.
     pub fn prompts(&self) -> Vec<String> {
         self.prompts.lock().expect("prompts lock").clone()
+    }
+
+    /// Every system prompt the planner was given, in order.
+    pub fn systems(&self) -> Vec<String> {
+        self.systems.lock().expect("systems lock").clone()
     }
 }
 
@@ -263,6 +286,7 @@ fn resolve(value: &Value, req: &PlanRequest) -> Value {
 impl Planner for ScriptedPlanner {
     async fn plan(&self, req: &PlanRequest) -> Result<PlanOutput, AiError> {
         self.prompts.lock().expect("prompts lock").push(req.prompt.clone());
+        self.systems.lock().expect("systems lock").push(req.system.clone());
         let next = self.scripts.lock().expect("script lock").get_mut(&req.kind).and_then(VecDeque::pop_front);
         let decision = match next {
             Some(Scripted::Call(tool, args)) => Decision::Call { tool, args: resolve(&args, req) },
@@ -315,6 +339,8 @@ mod tests {
             requirement_id: Some("req_9".into()),
             message_id: None,
             facts: json!({}),
+            system: system_prompt(""),
+            model: None,
             prompt: "p".into(),
             tools: vec![],
         };
@@ -322,5 +348,12 @@ mod tests {
         assert_eq!(first, Decision::Call { tool: "find_candidates".into(), args: json!({"requirement_id": "req_9"}) });
         assert!(matches!(p.plan(&req).await.unwrap().decision, Decision::Finish { .. }));
         assert_eq!(p.prompts().len(), 2);
+        assert_eq!(p.systems()[0], SYSTEM_PROMPT);
+    }
+
+    #[test]
+    fn persona_comes_after_the_rules() {
+        let s = system_prompt("You are Meera.");
+        assert!(s.starts_with(SYSTEM_PROMPT) && s.ends_with("\n\nYou are Meera."));
     }
 }

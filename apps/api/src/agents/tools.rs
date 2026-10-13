@@ -176,11 +176,22 @@ static REGISTRY: LazyLock<Registry> = LazyLock::new(|| Registry {
         Box::new(UpdateCase),
         Box::new(SendEmail),
         Box::new(SubmitCandidate),
+        Box::new(ProposeAutomation),
     ],
 });
 
 pub fn registry() -> &'static Registry {
     &REGISTRY
+}
+
+/// Approvals name what a person decides; a tool's name can differ.
+pub fn approval_action(tool: &str) -> &str {
+    if tool == "propose_automation" { "create_automation" } else { tool }
+}
+
+/// The tool that applies an approved action.
+pub fn tool_for_approval(action: &str) -> &str {
+    if action == "create_automation" { "propose_automation" } else { action }
 }
 
 /// Checks arguments against a tool schema: an object, required keys present, known keys typed.
@@ -548,14 +559,17 @@ impl Tool for DraftEmail {
         let (draft_id, body) = match reused.clone() {
             Some(d) => d,
             None => {
+                let agent = crate::agent_profiles::context_for_case(&ctx.state.db, &ctx.state.config, ctx.case).await?;
                 let quality = match opt_str(args, "quality") {
+                    _ if agent.agent.quality == "best" => Some(DraftQuality::Premium),
                     Some("premium") => Some(DraftQuality::Premium),
                     Some("standard") => Some(DraftQuality::Standard),
                     _ if ctx.case.kind == "requirement" => Some(DraftQuality::Premium),
                     _ => None,
                 };
                 let origin = format!("agent:{}:{}", ctx.case.id, ctx.turn);
-                handlers::create_agent_draft(ctx.state, &msg.id, instructions, quality, &origin)
+                let style = agent.draft_style(&ctx.state.config);
+                crate::agent_profiles::with_draft_style(style, handlers::create_agent_draft(ctx.state, &msg.id, instructions, quality, &origin))
                     .await?
                     .ok_or_else(|| ToolError::Failed("The writer judged that this email needs no reply.".into()))?
             }
@@ -862,6 +876,86 @@ impl Tool for SubmitCandidate {
     }
 }
 
+struct ProposeAutomation;
+
+impl ProposeAutomation {
+    fn parse(args: &Value) -> Result<crate::automations::AutomationInput, ToolError> {
+        let input = json!({
+            "name": args.get("name").cloned().unwrap_or(Value::Null),
+            "enabled": true,
+            "conditions": args.get("conditions").cloned().unwrap_or_else(|| json!([])),
+            "actions": args.get("actions").cloned().unwrap_or_else(|| json!([])),
+        });
+        let input: crate::automations::AutomationInput = serde_json::from_value(input)
+            .map_err(|e| ToolError::Failed(format!("The automation is not in the expected shape: {}", sentence(&e.to_string(), 160))))?;
+        crate::automations::validate(&input.name, &input.conditions, &input.actions).map_err(ToolError::Failed)?;
+        Ok(input)
+    }
+}
+
+#[async_trait]
+impl Tool for ProposeAutomation {
+    fn name(&self) -> &'static str {
+        "propose_automation"
+    }
+    fn description(&self) -> &'static str {
+        "Suggest a standing rule for emails like this one. It is only created if a person approves it. \
+         conditions: [{field: label, op: is|is_not, value: <label key>} | {field: priority, op: is, value: high|normal|low} | \
+         {field: needs_reply, op: is, value: bool} | {field: from|subject, op: contains, value: text}]. \
+         actions: [{type: draft_reply, instructions?} | {type: save_to_gmail_drafts} | {type: create_review, title?} | \
+         {type: remind_if_no_reply, hours} | {type: send_reply, daily_cap, allowed_domains}]."
+    }
+    fn schema(&self) -> Value {
+        object(
+            json!({
+                "name": {"type": "string", "description": "Short name, e.g. \"Acknowledge timesheets\""},
+                "conditions": {"type": "array", "items": {"type": "object"}},
+                "actions": {"type": "array", "items": {"type": "object"}},
+                "reason": {"type": "string", "description": "One sentence: why this would help the team"}
+            }),
+            &["name", "actions"],
+        )
+    }
+    fn risk(&self) -> Risk {
+        // Never activates on its own: a person approves the suggestion.
+        Risk::High
+    }
+    async fn preview(&self, _ctx: &ToolCtx<'_>, args: &Value) -> Result<Option<Preview>, ToolError> {
+        let input = Self::parse(args)?;
+        let reason = opt_str(args, "reason").map(|r| sentence(r, 240)).unwrap_or_default();
+        Ok(Some(Preview { summary: format!("Suggests an automation: {}", sentence(input.name.trim(), 80)), body: reason, ..Default::default() }))
+    }
+    async fn run(&self, ctx: &ToolCtx<'_>, args: &Value) -> Result<ToolOutput, ToolError> {
+        let input = Self::parse(args)?;
+        let mut tx = ctx.state.db.begin().await?;
+        let id = crate::automations::insert(&mut tx, ctx.ws(), &input, None).await?;
+        let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM automations WHERE workspace_id = ?1").bind(ctx.ws()).fetch_one(&mut *tx).await?;
+        if total > crate::automations::MAX_AUTOMATIONS {
+            tx.rollback().await?;
+            return failed("This workspace already has the most automations allowed.");
+        }
+        audit::record(
+            &mut tx,
+            Entry {
+                workspace_id: ctx.ws(),
+                actor: ctx.actor,
+                action: "automation.created",
+                entity_type: "automation",
+                entity_id: &id,
+                message_id: None,
+                metadata: json!({ "by": "agent", "case_id": ctx.case.id, "enabled": true }),
+            },
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(ToolOutput {
+            summary: format!("Created the automation \"{}\"", sentence(input.name.trim(), 80)),
+            value: json!({"automation_id": id}),
+            ..Default::default()
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
@@ -902,7 +996,7 @@ mod tests {
         }
         let expected = [
             "search_mail", "read_email", "read_thread", "find_candidates", "recall_memory", "draft_email", "create_task",
-            "schedule_check", "update_case", "send_email", "submit_candidate",
+            "schedule_check", "update_case", "send_email", "submit_candidate", "propose_automation",
         ];
         assert_eq!(names, expected.into_iter().collect());
         let specs = reg.specs();
@@ -926,6 +1020,7 @@ mod tests {
             assert_eq!(risk(n), Risk::Low, "{n}");
         }
         assert_eq!((risk("send_email"), risk("submit_candidate")), (Risk::High, Risk::High));
+        assert_eq!(risk("propose_automation"), Risk::High, "suggestions wait for a person");
     }
 
     #[test]

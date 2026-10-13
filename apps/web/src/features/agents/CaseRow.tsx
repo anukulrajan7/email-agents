@@ -1,4 +1,6 @@
 import { Link } from 'react-router';
+import { AgentByline } from './AgentAvatar';
+import { personName } from './agentLabels';
 import { CaseKindIcon, KIND_LABEL } from './icons';
 import { CaseStatusChips } from './CaseStatusChips';
 import { formatCents, wakeText } from './labels';
@@ -21,6 +23,11 @@ export function CaseRow({ ws, item }: { ws: string; item: CaseSummary }) {
               {item.title}
             </Link>
             <p className="text-sm break-words text-ink-muted">{item.goal}</p>
+            {item.agent && (
+              <p className="mt-1">
+                <AgentByline agent={item.agent}>{item.working_for ? ` · working for ${personName(item.working_for)}` : ''}</AgentByline>
+              </p>
+            )}
           </div>
           <CaseStatusChips c={item} />
         </div>

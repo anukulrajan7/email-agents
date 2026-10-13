@@ -36,15 +36,25 @@ pub struct ApprovalRow {
     pub decided_by_email: Option<String>,
     pub decided_at: Option<i64>,
     pub created_at: i64,
+    /// The person the agent works for on this case.
+    pub agent_user_id: Option<String>,
 }
 
 const APPROVAL_SELECT: &str = "SELECT a.id, a.case_id, c.title AS case_title, a.step_seq, a.action, a.summary, a.to_address, a.subject,
-        a.body, a.draft_id, a.candidates_json, a.input_json, a.status, u.email AS decided_by_email, a.decided_at, a.created_at
+        a.body, a.draft_id, a.candidates_json, a.input_json, a.status, u.email AS decided_by_email, a.decided_at, a.created_at,
+        c.agent_user_id
  FROM agent_approvals a JOIN cases c ON c.id = a.case_id LEFT JOIN users u ON u.id = a.decided_by";
 
 impl ApprovalRow {
     pub fn to_json(&self) -> Value {
+        // A suggested automation: what would be created, for the approver to read.
+        let automation = (self.action == "create_automation")
+            .then(|| serde_json::from_str::<Value>(&self.input_json).ok())
+            .flatten()
+            .map(|i| json!({"name": i.get("name"), "conditions": i.get("conditions").cloned().unwrap_or_else(|| json!([])),
+                            "actions": i.get("actions").cloned().unwrap_or_else(|| json!([]))}));
         json!({
+            "automation": automation,
             "id": self.id, "case_id": self.case_id, "case_title": self.case_title, "step_seq": self.step_seq,
             "action": self.action, "summary": self.summary, "to": self.to_address, "subject": self.subject, "body": self.body,
             "candidates": serde_json::from_str::<Value>(&self.candidates_json).unwrap_or_else(|_| json!([])),
@@ -145,7 +155,7 @@ pub async fn decide(state: &AppState, ws: &str, approval_id: &str, user_id: &str
 
     // Apply outside any transaction (the send is a network call); its own guards still hold.
     let step = if d.approve {
-        let tool = tools::registry().get(&approval.action).ok_or_else(|| AppError::Internal(anyhow::anyhow!("unknown approval action")))?;
+        let tool = tools::registry().get(tools::tool_for_approval(&approval.action)).ok_or_else(|| AppError::Internal(anyhow::anyhow!("unknown approval action")))?;
         let args: Value = serde_json::from_str(&approval.input_json).unwrap_or_else(|_| json!({}));
         let ctx = ToolCtx { state, case: &case, turn: case.step_count, actor: Actor::User(user_id) };
         match tool.run(&ctx, &args).await {
@@ -168,7 +178,7 @@ pub async fn decide(state: &AppState, ws: &str, approval_id: &str, user_id: &str
         NewStep {
             turn: case.step_count,
             kind: if d.approve { "approval" } else { "note" },
-            tool: tools::registry().get(&approval.action).map(|t| t.name()),
+            tool: tools::registry().get(tools::tool_for_approval(&approval.action)).map(|t| t.name()),
             summary,
             input: json!({"approval_id": approval_id, "decision": if d.approve { "approve" } else { "decline" }, "edited": edited.is_some()}),
             output,

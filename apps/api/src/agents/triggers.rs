@@ -6,6 +6,7 @@ use sqlx::SqliteConnection;
 
 use super::case::{self, NewCase};
 use crate::{
+    agent_profiles::{self, TASK_REPLY, TASK_REQUIREMENTS},
     ai::Insight,
     db::now_ms,
     domain::OTHER_LABEL,
@@ -32,14 +33,38 @@ struct RequirementFacts {
     priority: Option<String>,
 }
 
-/// Starts (or finds) the requirement case. `None` if the requirement isn't in this workspace.
-pub async fn start_requirement_case(
-    state: &AppState,
-    ws: &str,
-    requirement_id: &str,
-    created_by: Option<&str>,
-) -> sqlx::Result<Option<(String, bool)>> {
-    let Some(r) = requirement_facts(state, ws, requirement_id).await? else { return Ok(None) };
+/// What starting a case did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Started {
+    /// The case id, and whether it was created now (false: it already existed).
+    Case(String, bool),
+    /// The requirement or email isn't in this workspace.
+    NotFound,
+    /// The workspace agent doesn't do this job (a plain sentence why).
+    NotAllowed(String),
+}
+
+/// The person whose mailbox the email arrived in, if the agent does `task`; else why not.
+async fn agent_for(state: &AppState, ws: &str, message_id: &str, task: &str) -> sqlx::Result<Result<Option<String>, String>> {
+    let ctx = agent_profiles::context_for_message(&state.db, &state.config, ws, message_id).await?;
+    let name = &ctx.agent.name;
+    if !ctx.agent.enabled {
+        return Ok(Err(format!("{name} is switched off for this workspace")));
+    }
+    if !ctx.agent.does(task) {
+        let job = if task == TASK_REPLY { "reply to emails" } else { "work on client requirements" };
+        return Ok(Err(format!("{name} is not set up to {job}")));
+    }
+    Ok(Ok(ctx.owner.map(|o| o.user_id)))
+}
+
+/// Starts (or finds) the requirement case.
+pub async fn start_requirement_case(state: &AppState, ws: &str, requirement_id: &str, created_by: Option<&str>) -> sqlx::Result<Started> {
+    let Some(r) = requirement_facts(state, ws, requirement_id).await? else { return Ok(Started::NotFound) };
+    let owner = match agent_for(state, ws, &r.message_id, TASK_REQUIREMENTS).await? {
+        Ok(owner) => owner,
+        Err(why) => return Ok(Started::NotAllowed(why)),
+    };
     let role_at = match r.client.as_deref().filter(|c| !c.trim().is_empty()) {
         Some(client) => format!("{} at {client}", r.role_title),
         None => r.role_title.clone(),
@@ -63,11 +88,12 @@ pub async fn start_requirement_case(
                 "must_have_skills": skills, "client_email": r.sender_address,
             }),
             created_by,
+            agent_user_id: owner.as_deref(),
         },
     )
     .await?;
     state.jobs_notify.notify_one();
-    Ok(Some(created))
+    Ok(Started::Case(created.0, created.1))
 }
 
 async fn requirement_facts(state: &AppState, ws: &str, requirement_id: &str) -> sqlx::Result<Option<RequirementFacts>> {
@@ -131,9 +157,13 @@ async fn message_facts(state: &AppState, ws: &str, message_id: &str) -> sqlx::Re
     .await
 }
 
-/// Starts (or finds) the inbox case for one received email. `None` if it isn't an inbound email of this workspace.
-pub async fn start_inbox_case(state: &AppState, ws: &str, message_id: &str, created_by: Option<&str>) -> sqlx::Result<Option<(String, bool)>> {
-    let Some(m) = message_facts(state, ws, message_id).await?.filter(|m| m.direction == "inbound") else { return Ok(None) };
+/// Starts (or finds) the inbox case for one received email of this workspace.
+pub async fn start_inbox_case(state: &AppState, ws: &str, message_id: &str, created_by: Option<&str>) -> sqlx::Result<Started> {
+    let Some(m) = message_facts(state, ws, message_id).await?.filter(|m| m.direction == "inbound") else { return Ok(Started::NotFound) };
+    let owner = match agent_for(state, ws, message_id, TASK_REPLY).await? {
+        Ok(owner) => owner,
+        Err(why) => return Ok(Started::NotAllowed(why)),
+    };
     let mut conn = state.db.acquire().await?;
     let created = case::create(
         &mut conn,
@@ -149,11 +179,12 @@ pub async fn start_inbox_case(state: &AppState, ws: &str, message_id: &str, crea
             thread_id: Some(&m.thread_id),
             state: json!({"from": m.sender_address, "subject": m.subject, "label": m.category}),
             created_by,
+            agent_user_id: owner.as_deref(),
         },
     )
     .await?;
     state.jobs_notify.notify_one();
-    Ok(Some(created))
+    Ok(Started::Case(created.0, created.1))
 }
 
 async fn thread_has_open_case(state: &AppState, thread_id: &str) -> sqlx::Result<bool> {
