@@ -160,8 +160,12 @@ pub async fn run_step(state: &AppState, case_id: &str, turn: i64) -> Result<(), 
         Ok(p) => p,
         Err(AiError::Retryable(m)) => return Err(JobError::Retry(m)),
         Err(AiError::Permanent(e)) => {
+            // The same request fails the same way: stop now instead of retrying it.
             tracing::warn!(case_id = %case.id, error = %e, "planner refused the request");
-            PlanOutput { decision: Decision::Invalid { error: "the AI service refused this request".into() }, usage: Usage::default() }
+            let mut tx = state.db.begin().await?;
+            case::fail(&mut tx, &case, &format!("The AI model couldn't take this request ({e})")).await?;
+            tx.commit().await?;
+            return Ok(());
         }
     };
 

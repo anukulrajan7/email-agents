@@ -209,7 +209,8 @@ impl OpenRouterClient {
             "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
             "tools": tools,
             "tool_choice": tool_choice,
-            "parallel_tool_calls": false,
+            // No `parallel_tool_calls`: with `require_parameters` it leaves DeepSeek/Qwen with no
+            // provider (404). Callers read only the first tool call.
             "max_tokens": max_tokens,
             "temperature": 0.1,
             "reasoning": {"enabled": false},
