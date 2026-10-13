@@ -124,6 +124,7 @@ pub async fn persist_message(
     if !outbound {
         memory::record_contact(&mut *conn, workspace_id, &email.sender_address, email.sender_name.as_deref(), email.received_at)
             .await?;
+        crate::agents::triggers::wake_for_thread(&mut *conn, workspace_id, &thread_id, &message_id).await?;
     }
 
     for a in &email.attachments {

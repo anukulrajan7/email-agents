@@ -1,0 +1,946 @@
+//! Agent tools: each is a thin, schema-described wrapper over an existing function.
+//! `read`/`low` tools run at once (after the critic for `low`); `high` tools only run when a
+//! person approves them.
+
+use std::sync::LazyLock;
+
+use async_trait::async_trait;
+use serde::Serialize;
+use serde_json::{Value, json};
+
+use super::{case::Case, sentence};
+use crate::{
+    ai::DraftQuality,
+    audit::{self, Actor, Entry},
+    db::{iso, new_id, now_ms},
+    error::AppError,
+    http::AppState,
+    jobs::handlers::{self, JobError},
+    knowledge, memory, replies,
+};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Risk {
+    Read,
+    Low,
+    High,
+}
+
+impl Risk {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Risk::Read => "read",
+            Risk::Low => "low",
+            Risk::High => "high",
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ToolError {
+    /// A plain sentence the planner (and a recruiter) can read.
+    #[error("{0}")]
+    Failed(String),
+    #[error("database: {0}")]
+    Db(#[from] sqlx::Error),
+}
+
+impl From<JobError> for ToolError {
+    fn from(e: JobError) -> Self {
+        match e {
+            JobError::Retry(m) if m.starts_with("database") => ToolError::Failed("A temporary storage problem stopped this step.".into()),
+            JobError::Retry(_) => ToolError::Failed("The AI service did not answer; try again later.".into()),
+            JobError::Permanent(m) if m == "message not found" => ToolError::Failed("That email was not found.".into()),
+            JobError::Permanent(_) => ToolError::Failed("The AI service could not complete this step.".into()),
+        }
+    }
+}
+
+impl From<AppError> for ToolError {
+    fn from(e: AppError) -> Self {
+        match e {
+            AppError::DraftIncomplete(m) | AppError::Conflict(m) | AppError::BadRequest(m) => ToolError::Failed(m),
+            AppError::NotFound => ToolError::Failed("That item was not found.".into()),
+            AppError::Unavailable => ToolError::Failed("The mailbox could not be reached; try again later.".into()),
+            _ => ToolError::Failed("The action could not be completed.".into()),
+        }
+    }
+}
+
+fn failed<T>(msg: &str) -> Result<T, ToolError> {
+    Err(ToolError::Failed(msg.into()))
+}
+
+pub struct ToolCtx<'a> {
+    pub state: &'a AppState,
+    pub case: &'a Case,
+    pub turn: i64,
+    /// Who the action is done for: the system, or the person who approved it.
+    pub actor: Actor<'a>,
+}
+
+impl ToolCtx<'_> {
+    fn ws(&self) -> &str {
+        &self.case.workspace_id
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ToolOutput {
+    pub value: Value,
+    /// One plain sentence for the timeline.
+    pub summary: String,
+    /// Facts to merge into the case state.
+    pub state: Option<Value>,
+    /// The case sleeps until this time (unix ms).
+    pub sleep_until: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct Pick {
+    pub id: String,
+    pub name: String,
+    pub score: i64,
+}
+
+/// What a `high` tool would do, shown to the critic and the approver.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct Preview {
+    pub summary: String,
+    pub to: Option<String>,
+    pub subject: Option<String>,
+    pub body: String,
+    pub draft_id: Option<String>,
+    pub draft_status: Option<String>,
+    pub thread_id: Option<String>,
+    pub requirement_id: Option<String>,
+    pub candidates: Vec<Pick>,
+    /// Requested candidate ids that are not matches of the requirement.
+    pub unmatched_candidates: Vec<String>,
+}
+
+#[async_trait]
+pub trait Tool: Send + Sync {
+    fn name(&self) -> &'static str;
+    fn description(&self) -> &'static str;
+    /// JSON Schema (object) for the arguments.
+    fn schema(&self) -> Value;
+    fn risk(&self) -> Risk;
+    /// For `high` tools: what would happen, without doing it.
+    async fn preview(&self, _ctx: &ToolCtx<'_>, _args: &Value) -> Result<Option<Preview>, ToolError> {
+        Ok(None)
+    }
+    async fn run(&self, ctx: &ToolCtx<'_>, args: &Value) -> Result<ToolOutput, ToolError>;
+}
+
+pub struct Registry {
+    tools: Vec<Box<dyn Tool>>,
+}
+
+impl Registry {
+    pub fn get(&self, name: &str) -> Option<&dyn Tool> {
+        self.tools.iter().find(|t| t.name() == name).map(|t| t.as_ref())
+    }
+
+    pub fn all(&self) -> impl Iterator<Item = &dyn Tool> {
+        self.tools.iter().map(|t| t.as_ref())
+    }
+
+    /// OpenAI-style function specs for the planner, with `finish` last.
+    pub fn specs(&self) -> Vec<Value> {
+        let mut specs: Vec<Value> = self
+            .all()
+            .map(|t| {
+                json!({"type": "function", "function": {
+                    "name": t.name(),
+                    "description": format!("{} (risk: {})", t.description(), t.risk().as_str()),
+                    "parameters": t.schema()
+                }})
+            })
+            .collect();
+        specs.push(super::planner::finish_spec());
+        specs
+    }
+}
+
+static REGISTRY: LazyLock<Registry> = LazyLock::new(|| Registry {
+    tools: vec![
+        Box::new(SearchMail),
+        Box::new(ReadEmail),
+        Box::new(ReadThread),
+        Box::new(FindCandidates),
+        Box::new(RecallMemory),
+        Box::new(DraftEmail),
+        Box::new(CreateTask),
+        Box::new(ScheduleCheck),
+        Box::new(UpdateCase),
+        Box::new(SendEmail),
+        Box::new(SubmitCandidate),
+    ],
+});
+
+pub fn registry() -> &'static Registry {
+    &REGISTRY
+}
+
+/// Checks arguments against a tool schema: an object, required keys present, known keys typed.
+pub fn validate_args(schema: &Value, args: &Value) -> Result<(), String> {
+    let Some(obj) = args.as_object() else { return Err("arguments must be an object".into()) };
+    for key in schema.get("required").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str) {
+        if obj.get(key).is_none_or(Value::is_null) {
+            return Err(format!("missing required field {key}"));
+        }
+    }
+    let props = schema.get("properties").and_then(Value::as_object);
+    for (key, value) in obj {
+        let Some(prop) = props.and_then(|p| p.get(key)) else { continue };
+        if value.is_null() {
+            continue;
+        }
+        let ok = match prop.get("type").and_then(Value::as_str) {
+            Some("string") => value.as_str().is_some_and(|s| {
+                prop.get("enum").and_then(Value::as_array).is_none_or(|e| e.iter().any(|x| x.as_str() == Some(s)))
+            }),
+            Some("integer") => value.as_i64().is_some(),
+            Some("number") => value.as_f64().is_some(),
+            Some("boolean") => value.is_boolean(),
+            Some("array") => value.as_array().is_some_and(|items| {
+                prop.pointer("/items/type").and_then(Value::as_str) != Some("string") || items.iter().all(Value::is_string)
+            }),
+            _ => true,
+        };
+        if !ok {
+            return Err(format!("field {key} has the wrong type or value"));
+        }
+    }
+    Ok(())
+}
+
+fn str_arg<'a>(args: &'a Value, key: &str) -> Result<&'a str, ToolError> {
+    args.get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| ToolError::Failed(format!("{key} is required")))
+}
+
+fn opt_str<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
+    args.get(key).and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty())
+}
+
+fn limit_arg(args: &Value, default: i64, max: i64) -> i64 {
+    args.get("limit").and_then(Value::as_i64).unwrap_or(default).clamp(1, max)
+}
+
+fn object(properties: Value, required: &[&str]) -> Value {
+    json!({"type": "object", "properties": properties, "required": required, "additionalProperties": false})
+}
+
+#[derive(sqlx::FromRow)]
+struct MessageRow {
+    id: String,
+    subject: String,
+    sender_address: String,
+    body_text: String,
+    received_at: i64,
+    direction: String,
+    thread_id: String,
+}
+
+async fn message_in_ws(ctx: &ToolCtx<'_>, message_id: &str) -> Result<MessageRow, ToolError> {
+    sqlx::query_as(
+        "SELECT id, subject, sender_address, body_text, received_at, direction, thread_id
+         FROM email_messages WHERE id = ?1 AND workspace_id = ?2",
+    )
+    .bind(message_id)
+    .bind(ctx.ws())
+    .fetch_optional(&ctx.state.db)
+    .await?
+    .ok_or_else(|| ToolError::Failed("That email was not found in this workspace.".into()))
+}
+
+// ---------------------------------------------------------------- read tools
+
+struct SearchMail;
+
+#[async_trait]
+impl Tool for SearchMail {
+    fn name(&self) -> &'static str {
+        "search_mail"
+    }
+    fn description(&self) -> &'static str {
+        "Search this workspace's emails and attachments by meaning and keywords."
+    }
+    fn schema(&self) -> Value {
+        object(json!({"query": {"type": "string"}, "limit": {"type": "integer", "description": "1 to 10, default 5"}}), &["query"])
+    }
+    fn risk(&self) -> Risk {
+        Risk::Read
+    }
+    async fn run(&self, ctx: &ToolCtx<'_>, args: &Value) -> Result<ToolOutput, ToolError> {
+        let query = str_arg(args, "query")?;
+        let hits = knowledge::hybrid_search(
+            &ctx.state.db,
+            ctx.state.embedder.as_ref(),
+            ctx.ws(),
+            query,
+            knowledge::Scope::Documents,
+            limit_arg(args, 5, 10) as usize,
+        )
+        .await?;
+        let items: Vec<Value> = hits
+            .iter()
+            .map(|h| json!({"message_id": h.message_id, "kind": h.kind, "snippet": knowledge::snippet(knowledge::chunk_body(&h.text), query, 240)}))
+            .collect();
+        Ok(ToolOutput {
+            summary: format!("Searched mail for \"{}\" and found {} result{}", sentence(query, 60), items.len(), plural(items.len())),
+            value: json!({"items": items}),
+            ..Default::default()
+        })
+    }
+}
+
+fn plural(n: usize) -> &'static str {
+    if n == 1 { "" } else { "s" }
+}
+
+struct ReadEmail;
+
+#[async_trait]
+impl Tool for ReadEmail {
+    fn name(&self) -> &'static str {
+        "read_email"
+    }
+    fn description(&self) -> &'static str {
+        "Read one email: cleaned text plus what it asks."
+    }
+    fn schema(&self) -> Value {
+        object(json!({"message_id": {"type": "string"}}), &["message_id"])
+    }
+    fn risk(&self) -> Risk {
+        Risk::Read
+    }
+    async fn run(&self, ctx: &ToolCtx<'_>, args: &Value) -> Result<ToolOutput, ToolError> {
+        let msg = message_in_ws(ctx, str_arg(args, "message_id")?).await?;
+        let insight = if msg.direction == "inbound" {
+            Some(handlers::analyze_message(ctx.state, &json!({"message_id": msg.id})).await?)
+        } else {
+            None
+        };
+        Ok(ToolOutput {
+            summary: format!("Read the email \"{}\" from {}", sentence(&msg.subject, 80), msg.sender_address),
+            value: json!({
+                "message_id": msg.id, "from": msg.sender_address, "subject": msg.subject, "received_at": iso(msg.received_at),
+                "direction": msg.direction,
+                "body": crate::sources::normalize::truncate_chars(&knowledge::clean_body(&msg.body_text), 3_000),
+                "insight": insight,
+            }),
+            ..Default::default()
+        })
+    }
+}
+
+struct ReadThread;
+
+#[async_trait]
+impl Tool for ReadThread {
+    fn name(&self) -> &'static str {
+        "read_thread"
+    }
+    fn description(&self) -> &'static str {
+        "Read the whole conversation an email belongs to, oldest first, including replies we sent."
+    }
+    fn schema(&self) -> Value {
+        object(json!({"message_id": {"type": "string"}}), &["message_id"])
+    }
+    fn risk(&self) -> Risk {
+        Risk::Read
+    }
+    async fn run(&self, ctx: &ToolCtx<'_>, args: &Value) -> Result<ToolOutput, ToolError> {
+        let msg = message_in_ws(ctx, str_arg(args, "message_id")?).await?;
+        let rows: Vec<MessageRow> = sqlx::query_as(
+            "SELECT id, subject, sender_address, body_text, received_at, direction, thread_id
+             FROM email_messages WHERE thread_id = ?1 AND workspace_id = ?2 ORDER BY received_at, id LIMIT 30",
+        )
+        .bind(&msg.thread_id)
+        .bind(ctx.ws())
+        .fetch_all(&ctx.state.db)
+        .await?;
+        let sent: Vec<(String, String, i64)> = sqlx::query_as(
+            "SELECT d.id, d.body_text, d.updated_at FROM drafts d JOIN email_messages m ON m.id = d.message_id
+             WHERE m.thread_id = ?1 AND d.workspace_id = ?2 AND d.status = 'sent' ORDER BY d.updated_at LIMIT 20",
+        )
+        .bind(&msg.thread_id)
+        .bind(ctx.ws())
+        .fetch_all(&ctx.state.db)
+        .await?;
+        let mut entries: Vec<(i64, Value)> = rows
+            .iter()
+            .map(|m| {
+                (m.received_at, json!({
+                    "message_id": m.id, "from": m.sender_address, "direction": m.direction, "subject": m.subject,
+                    "received_at": iso(m.received_at),
+                    "body": crate::sources::normalize::truncate_chars(&knowledge::clean_body(&m.body_text), 1_500),
+                }))
+            })
+            .collect();
+        entries.extend(sent.into_iter().map(|(id, body, at)| {
+            (at, json!({"draft_id": id, "from": "us", "direction": "sent_reply", "received_at": iso(at),
+                        "body": crate::sources::normalize::truncate_chars(&body, 1_500)}))
+        }));
+        entries.sort_by_key(|(at, _)| *at);
+        let inbound = rows.iter().filter(|m| m.direction == "inbound").count();
+        Ok(ToolOutput {
+            summary: format!("Read the conversation ({} email{}, {} from the other side)", entries.len(), plural(entries.len()), inbound),
+            value: json!({"thread_id": msg.thread_id, "messages": entries.into_iter().map(|(_, v)| v).collect::<Vec<_>>()}),
+            ..Default::default()
+        })
+    }
+}
+
+struct FindCandidates;
+
+#[derive(sqlx::FromRow)]
+struct MatchRow {
+    candidate_id: String,
+    name: String,
+    score: i64,
+    status: String,
+    reasons_json: String,
+}
+
+#[async_trait]
+impl Tool for FindCandidates {
+    fn name(&self) -> &'static str {
+        "find_candidates"
+    }
+    fn description(&self) -> &'static str {
+        "Best matching candidates for a requirement, with score (0-100) and reasons."
+    }
+    fn schema(&self) -> Value {
+        object(json!({"requirement_id": {"type": "string"}, "limit": {"type": "integer", "description": "1 to 10, default 3"}}), &["requirement_id"])
+    }
+    fn risk(&self) -> Risk {
+        Risk::Read
+    }
+    async fn run(&self, ctx: &ToolCtx<'_>, args: &Value) -> Result<ToolOutput, ToolError> {
+        let requirement_id = str_arg(args, "requirement_id")?;
+        let exists: Option<String> = sqlx::query_scalar("SELECT id FROM requirements WHERE id = ?1 AND workspace_id = ?2")
+            .bind(requirement_id)
+            .bind(ctx.ws())
+            .fetch_optional(&ctx.state.db)
+            .await?;
+        if exists.is_none() {
+            return failed("That requirement was not found in this workspace.");
+        }
+        let rows: Vec<MatchRow> = sqlx::query_as(
+            "SELECT m.candidate_id, c.name, m.score, m.status, m.reasons_json
+             FROM matches m JOIN candidates c ON c.id = m.candidate_id
+             WHERE m.requirement_id = ?1 AND m.workspace_id = ?2 AND m.status != 'dismissed'
+             ORDER BY m.score DESC, m.created_at LIMIT ?3",
+        )
+        .bind(requirement_id)
+        .bind(ctx.ws())
+        .bind(limit_arg(args, 3, 10))
+        .fetch_all(&ctx.state.db)
+        .await?;
+        let items: Vec<Value> = rows
+            .iter()
+            .map(|r| {
+                let reasons: Vec<String> = serde_json::from_str::<Vec<Value>>(&r.reasons_json)
+                    .unwrap_or_default()
+                    .iter()
+                    .filter_map(|x| x.get("text").and_then(Value::as_str).map(str::to_string))
+                    .collect();
+                json!({"candidate_id": r.candidate_id, "name": r.name, "score": r.score, "status": r.status, "reasons": reasons})
+            })
+            .collect();
+        let summary = match rows.first() {
+            None => "No matching candidates yet".to_string(),
+            Some(best) => format!("Found {} candidate{} (best {})", rows.len(), plural(rows.len()), best.score),
+        };
+        let picks: Vec<Pick> = rows.iter().map(|r| Pick { id: r.candidate_id.clone(), name: r.name.clone(), score: r.score }).collect();
+        Ok(ToolOutput {
+            summary,
+            state: Some(json!({"candidates": picks, "candidate_ids": picks.iter().map(|p| p.id.clone()).collect::<Vec<_>>()})),
+            value: json!({"items": items}),
+            ..Default::default()
+        })
+    }
+}
+
+struct RecallMemory;
+
+#[async_trait]
+impl Tool for RecallMemory {
+    fn name(&self) -> &'static str {
+        "recall_memory"
+    }
+    fn description(&self) -> &'static str {
+        "What the team knows about a contact (email address) or a topic/client name."
+    }
+    fn schema(&self) -> Value {
+        object(json!({"about": {"type": "string", "description": "An email address, client or topic"}}), &["about"])
+    }
+    fn risk(&self) -> Risk {
+        Risk::Read
+    }
+    async fn run(&self, ctx: &ToolCtx<'_>, args: &Value) -> Result<ToolOutput, ToolError> {
+        let about = str_arg(args, "about")?.to_lowercase();
+        let mem = if about.contains('@') {
+            memory::context_for(&ctx.state.db, ctx.ws(), &about, "").await?
+        } else {
+            memory::context_for(&ctx.state.db, ctx.ws(), "", &about).await?
+        };
+        let notes = mem.lines();
+        Ok(ToolOutput {
+            summary: format!("Recalled {} note{} about {}", notes.len(), plural(notes.len()), sentence(&about, 60)),
+            value: json!({"notes": notes, "history": mem.sender_history}),
+            ..Default::default()
+        })
+    }
+}
+
+// ---------------------------------------------------------------- low tools
+
+struct DraftEmail;
+
+#[async_trait]
+impl Tool for DraftEmail {
+    fn name(&self) -> &'static str {
+        "draft_email"
+    }
+    fn description(&self) -> &'static str {
+        "Draft a reply to an email in this case's conversation. Put every fact the reply must contain (candidate names, scores, next steps) in instructions."
+    }
+    fn schema(&self) -> Value {
+        object(
+            json!({
+                "message_id": {"type": "string", "description": "The email to reply to"},
+                "instructions": {"type": "string", "description": "What the reply must say"},
+                "quality": {"type": "string", "enum": ["standard", "premium"]}
+            }),
+            &["message_id"],
+        )
+    }
+    fn risk(&self) -> Risk {
+        Risk::Low
+    }
+    async fn run(&self, ctx: &ToolCtx<'_>, args: &Value) -> Result<ToolOutput, ToolError> {
+        let msg = message_in_ws(ctx, str_arg(args, "message_id")?).await?;
+        if msg.direction != "inbound" {
+            return failed("Replies can only answer an email we received.");
+        }
+        if ctx.case.thread_id.as_deref().is_some_and(|t| t != msg.thread_id) {
+            return failed("Replies can only go to this case's conversation.");
+        }
+        let instructions = opt_str(args, "instructions");
+        // Without new instructions, reuse an unsent reply already suggested for this email.
+        let reused: Option<(String, String)> = match instructions {
+            Some(_) => None,
+            None => sqlx::query_as(
+                "SELECT id, body_text FROM drafts WHERE message_id = ?1 AND status != 'sent' ORDER BY created_at DESC, id DESC LIMIT 1",
+            )
+            .bind(&msg.id)
+            .fetch_optional(&ctx.state.db)
+            .await?,
+        };
+        let (draft_id, body) = match reused.clone() {
+            Some(d) => d,
+            None => {
+                let quality = match opt_str(args, "quality") {
+                    Some("premium") => Some(DraftQuality::Premium),
+                    Some("standard") => Some(DraftQuality::Standard),
+                    _ if ctx.case.kind == "requirement" => Some(DraftQuality::Premium),
+                    _ => None,
+                };
+                let origin = format!("agent:{}:{}", ctx.case.id, ctx.turn);
+                handlers::create_agent_draft(ctx.state, &msg.id, instructions, quality, &origin)
+                    .await?
+                    .ok_or_else(|| ToolError::Failed("The writer judged that this email needs no reply.".into()))?
+            }
+        };
+        let gaps = replies::has_open_gaps(&body);
+        let verb = if reused.is_some() { "Used the suggested reply to" } else { "Drafted a reply to" };
+        Ok(ToolOutput {
+            summary: format!("{verb} {}{}", msg.sender_address, if gaps { " (it still has open questions)" } else { "" }),
+            state: Some(json!({"last_draft_id": draft_id})),
+            value: json!({"draft_id": draft_id, "body": body, "has_open_questions": gaps}),
+            ..Default::default()
+        })
+    }
+}
+
+struct CreateTask;
+
+#[async_trait]
+impl Tool for CreateTask {
+    fn name(&self) -> &'static str {
+        "create_task"
+    }
+    fn description(&self) -> &'static str {
+        "Ask a person on the team to do something (shows in Reviews)."
+    }
+    fn schema(&self) -> Value {
+        object(json!({"title": {"type": "string"}, "message_id": {"type": "string", "description": "Defaults to the case's email"}}), &["title"])
+    }
+    fn risk(&self) -> Risk {
+        Risk::Low
+    }
+    async fn run(&self, ctx: &ToolCtx<'_>, args: &Value) -> Result<ToolOutput, ToolError> {
+        let title = sentence(str_arg(args, "title")?, 200);
+        let Some(message_id) = opt_str(args, "message_id").or(ctx.case.message_id.as_deref()) else {
+            return failed("A task needs an email to attach to.");
+        };
+        let msg = message_in_ws(ctx, message_id).await?;
+        let review_id = new_id("rev");
+        let mut tx = ctx.state.db.begin().await?;
+        let created = sqlx::query(
+            "INSERT INTO review_items (id, workspace_id, message_id, workflow_run_id, kind, title, status, created_at)
+             SELECT ?1, ?2, ?3, NULL, 'agent_task', ?4, 'open', ?5
+             WHERE NOT EXISTS (SELECT 1 FROM review_items WHERE message_id = ?3 AND kind = 'agent_task' AND title = ?4 AND status = 'open')",
+        )
+        .bind(&review_id)
+        .bind(ctx.ws())
+        .bind(&msg.id)
+        .bind(&title)
+        .bind(now_ms())
+        .execute(&mut *tx)
+        .await?
+        .rows_affected()
+            == 1;
+        if created {
+            audit::record(
+                &mut tx,
+                Entry {
+                    workspace_id: ctx.ws(),
+                    actor: Actor::System,
+                    action: "review.created",
+                    entity_type: "review_item",
+                    entity_id: &review_id,
+                    message_id: Some(&msg.id),
+                    metadata: json!({"kind": "agent_task", "case_id": ctx.case.id}),
+                },
+            )
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(ToolOutput {
+            summary: format!("Asked the team: {title}"),
+            value: json!({"created": created, "title": title}),
+            ..Default::default()
+        })
+    }
+}
+
+pub const MAX_SLEEP_HOURS: i64 = 14 * 24;
+
+struct ScheduleCheck;
+
+#[async_trait]
+impl Tool for ScheduleCheck {
+    fn name(&self) -> &'static str {
+        "schedule_check"
+    }
+    fn description(&self) -> &'static str {
+        "Pause the case and look again after some hours (a reply in the conversation wakes it earlier)."
+    }
+    fn schema(&self) -> Value {
+        object(json!({"hours": {"type": "integer", "description": "1 to 336"}, "reason": {"type": "string"}}), &["hours", "reason"])
+    }
+    fn risk(&self) -> Risk {
+        Risk::Low
+    }
+    async fn run(&self, _ctx: &ToolCtx<'_>, args: &Value) -> Result<ToolOutput, ToolError> {
+        let hours = args.get("hours").and_then(Value::as_i64).unwrap_or(0);
+        if !(1..=MAX_SLEEP_HOURS).contains(&hours) {
+            return failed("hours must be between 1 and 336");
+        }
+        let reason = sentence(str_arg(args, "reason")?, 160);
+        let wake = now_ms() + hours * 3_600_000;
+        Ok(ToolOutput {
+            summary: format!("Will check again in {hours} hour{}: {reason}", plural(hours as usize)),
+            value: json!({"wake_at": iso(wake)}),
+            sleep_until: Some(wake),
+            ..Default::default()
+        })
+    }
+}
+
+struct UpdateCase;
+
+#[async_trait]
+impl Tool for UpdateCase {
+    fn name(&self) -> &'static str {
+        "update_case"
+    }
+    fn description(&self) -> &'static str {
+        "Record progress on the case and, when known, its outcome."
+    }
+    fn schema(&self) -> Value {
+        object(
+            json!({"status_note": {"type": "string"}, "outcome": {"type": "string", "enum": super::OUTCOMES}}),
+            &["status_note"],
+        )
+    }
+    fn risk(&self) -> Risk {
+        Risk::Low
+    }
+    async fn run(&self, ctx: &ToolCtx<'_>, args: &Value) -> Result<ToolOutput, ToolError> {
+        let note = sentence(str_arg(args, "status_note")?, 240);
+        let outcome = opt_str(args, "outcome");
+        if outcome.is_some_and(|o| !super::OUTCOMES.contains(&o)) {
+            return failed("outcome must be one of submitted, interview, rejected, placed, closed");
+        }
+        sqlx::query("UPDATE cases SET status_note = ?1, outcome = COALESCE(?2, outcome), updated_at = ?3 WHERE id = ?4")
+            .bind(&note)
+            .bind(outcome)
+            .bind(now_ms())
+            .bind(&ctx.case.id)
+            .execute(&ctx.state.db)
+            .await?;
+        let summary = match outcome {
+            Some(o) => format!("Recorded the outcome as {o}: {note}"),
+            None => format!("Progress: {note}"),
+        };
+        Ok(ToolOutput { summary, value: json!({"status_note": note, "outcome": outcome}), ..Default::default() })
+    }
+}
+
+// ---------------------------------------------------------------- high tools (run on approval)
+
+#[derive(sqlx::FromRow)]
+struct DraftRow {
+    id: String,
+    body_text: String,
+    status: String,
+    subject: String,
+    sender_address: String,
+    thread_id: String,
+}
+
+async fn draft_preview(ctx: &ToolCtx<'_>, draft_id: &str) -> Result<Preview, ToolError> {
+    let d: DraftRow = sqlx::query_as(
+        "SELECT d.id, d.body_text, d.status, m.subject, m.sender_address, m.thread_id
+         FROM drafts d JOIN email_messages m ON m.id = d.message_id WHERE d.id = ?1 AND d.workspace_id = ?2",
+    )
+    .bind(draft_id)
+    .bind(ctx.ws())
+    .fetch_optional(&ctx.state.db)
+    .await?
+    .ok_or_else(|| ToolError::Failed("That draft was not found in this workspace.".into()))?;
+    Ok(Preview {
+        summary: format!("Send reply to {}", d.sender_address),
+        to: Some(d.sender_address),
+        subject: Some(replies::reply_subject(&d.subject)),
+        body: d.body_text,
+        draft_id: Some(d.id),
+        draft_status: Some(d.status),
+        thread_id: Some(d.thread_id),
+        ..Default::default()
+    })
+}
+
+struct SendEmail;
+
+#[async_trait]
+impl Tool for SendEmail {
+    fn name(&self) -> &'static str {
+        "send_email"
+    }
+    fn description(&self) -> &'static str {
+        "Send a drafted reply from the connected mailbox. A person approves it first."
+    }
+    fn schema(&self) -> Value {
+        object(json!({"draft_id": {"type": "string"}}), &["draft_id"])
+    }
+    fn risk(&self) -> Risk {
+        Risk::High
+    }
+    async fn preview(&self, ctx: &ToolCtx<'_>, args: &Value) -> Result<Option<Preview>, ToolError> {
+        Ok(Some(draft_preview(ctx, str_arg(args, "draft_id")?).await?))
+    }
+    async fn run(&self, ctx: &ToolCtx<'_>, args: &Value) -> Result<ToolOutput, ToolError> {
+        let preview = draft_preview(ctx, str_arg(args, "draft_id")?).await?;
+        let draft_id = preview.draft_id.clone().unwrap_or_default();
+        let provider_message_id = replies::send_draft(ctx.state, ctx.ws(), &draft_id, ctx.actor).await?;
+        Ok(ToolOutput {
+            summary: format!("Sent the reply to {}", preview.to.unwrap_or_default()),
+            value: json!({"sent": true, "draft_id": draft_id, "provider_message_id": provider_message_id}),
+            state: Some(json!({"last_sent_draft_id": draft_id})),
+            ..Default::default()
+        })
+    }
+}
+
+struct SubmitCandidate;
+
+impl SubmitCandidate {
+    async fn build(ctx: &ToolCtx<'_>, args: &Value) -> Result<(Preview, Vec<String>), ToolError> {
+        let requirement_id = str_arg(args, "requirement_id")?;
+        let ids: Vec<String> = args
+            .get("candidate_ids")
+            .and_then(Value::as_array)
+            .map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect())
+            .unwrap_or_default();
+        let mut preview = draft_preview(ctx, str_arg(args, "draft_id")?).await?;
+        let picks: Vec<(String, String, i64)> = sqlx::query_as(
+            "SELECT m.candidate_id, c.name, m.score FROM matches m JOIN candidates c ON c.id = m.candidate_id
+             WHERE m.requirement_id = ?1 AND m.workspace_id = ?2 AND m.status != 'dismissed'
+               AND m.candidate_id IN (SELECT value FROM json_each(?3))
+             ORDER BY m.score DESC",
+        )
+        .bind(requirement_id)
+        .bind(ctx.ws())
+        .bind(json!(ids).to_string())
+        .fetch_all(&ctx.state.db)
+        .await?;
+        preview.candidates = picks.into_iter().map(|(id, name, score)| Pick { id, name, score }).collect();
+        preview.unmatched_candidates = ids.iter().filter(|id| !preview.candidates.iter().any(|p| &p.id == *id)).cloned().collect();
+        preview.requirement_id = Some(requirement_id.to_string());
+        let n = preview.candidates.len();
+        preview.summary = format!("Send submission of {n} candidate{} to {}", plural(n), preview.to.clone().unwrap_or_default());
+        Ok((preview, ids))
+    }
+}
+
+#[async_trait]
+impl Tool for SubmitCandidate {
+    fn name(&self) -> &'static str {
+        "submit_candidate"
+    }
+    fn description(&self) -> &'static str {
+        "Send the submission draft for up to 3 matched candidates to the client and mark them shortlisted. A person approves it first."
+    }
+    fn schema(&self) -> Value {
+        object(
+            json!({
+                "requirement_id": {"type": "string"},
+                "candidate_ids": {"type": "array", "items": {"type": "string"}},
+                "draft_id": {"type": "string"}
+            }),
+            &["requirement_id", "candidate_ids", "draft_id"],
+        )
+    }
+    fn risk(&self) -> Risk {
+        Risk::High
+    }
+    async fn preview(&self, ctx: &ToolCtx<'_>, args: &Value) -> Result<Option<Preview>, ToolError> {
+        Ok(Some(Self::build(ctx, args).await?.0))
+    }
+    async fn run(&self, ctx: &ToolCtx<'_>, args: &Value) -> Result<ToolOutput, ToolError> {
+        let (preview, _) = Self::build(ctx, args).await?;
+        if preview.candidates.is_empty() || !preview.unmatched_candidates.is_empty() {
+            return failed("Only matched candidates of this requirement can be submitted.");
+        }
+        let draft_id = preview.draft_id.clone().unwrap_or_default();
+        let provider_message_id = replies::send_draft(ctx.state, ctx.ws(), &draft_id, ctx.actor).await?;
+        let ids: Vec<String> = preview.candidates.iter().map(|p| p.id.clone()).collect();
+        let decided_by = match ctx.actor {
+            Actor::User(u) => Some(u),
+            Actor::System => None,
+        };
+        let shortlisted = sqlx::query(
+            "UPDATE matches SET status = 'shortlisted', decided_by = COALESCE(?1, decided_by), updated_at = ?2
+             WHERE requirement_id = ?3 AND workspace_id = ?4 AND status != 'dismissed'
+               AND candidate_id IN (SELECT value FROM json_each(?5))",
+        )
+        .bind(decided_by)
+        .bind(now_ms())
+        .bind(preview.requirement_id.as_deref())
+        .bind(ctx.ws())
+        .bind(json!(ids).to_string())
+        .execute(&ctx.state.db)
+        .await?
+        .rows_affected();
+        Ok(ToolOutput {
+            summary: format!("Submitted {} candidate{} to {}", ids.len(), plural(ids.len()), preview.to.clone().unwrap_or_default()),
+            value: json!({"sent": true, "draft_id": draft_id, "provider_message_id": provider_message_id, "shortlisted": shortlisted}),
+            state: Some(json!({"submitted_candidate_ids": ids, "last_sent_draft_id": draft_id})),
+            ..Default::default()
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+
+    use super::*;
+
+    const TYPES: &[&str] = &["string", "integer", "number", "boolean", "array", "object"];
+
+    fn assert_valid_object_schema(name: &str, schema: &Value) {
+        assert_eq!(schema["type"], "object", "{name}");
+        assert_eq!(schema["additionalProperties"], false, "{name}");
+        let props = schema["properties"].as_object().unwrap_or_else(|| panic!("{name}: properties"));
+        assert!(!props.is_empty(), "{name}");
+        for (key, prop) in props {
+            let t = prop["type"].as_str().unwrap_or_else(|| panic!("{name}.{key}: type"));
+            assert!(TYPES.contains(&t), "{name}.{key}: {t}");
+            if t == "array" {
+                assert!(prop["items"]["type"].is_string(), "{name}.{key}: items");
+            }
+            if let Some(e) = prop.get("enum") {
+                assert!(e.as_array().is_some_and(|e| !e.is_empty() && e.iter().all(Value::is_string)), "{name}.{key}: enum");
+            }
+        }
+        for req in schema["required"].as_array().unwrap_or_else(|| panic!("{name}: required")) {
+            assert!(props.contains_key(req.as_str().unwrap()), "{name}: required {req} not in properties");
+        }
+    }
+
+    #[test]
+    fn every_tool_has_a_valid_schema_and_unique_name() {
+        let reg = registry();
+        let mut names = HashSet::new();
+        for t in reg.all() {
+            assert!(t.name().chars().all(|c| c.is_ascii_lowercase() || c == '_'), "{}", t.name());
+            assert!(names.insert(t.name()), "duplicate {}", t.name());
+            assert!(!t.description().is_empty());
+            assert_valid_object_schema(t.name(), &t.schema());
+        }
+        let expected = [
+            "search_mail", "read_email", "read_thread", "find_candidates", "recall_memory", "draft_email", "create_task",
+            "schedule_check", "update_case", "send_email", "submit_candidate",
+        ];
+        assert_eq!(names, expected.into_iter().collect());
+        let specs = reg.specs();
+        assert_eq!(specs.len(), expected.len() + 1);
+        for spec in &specs {
+            assert_eq!(spec["type"], "function");
+            let f = &spec["function"];
+            assert_valid_object_schema(f["name"].as_str().unwrap(), &f["parameters"]);
+        }
+        assert_eq!(specs.last().unwrap()["function"]["name"], "finish");
+    }
+
+    #[test]
+    fn risks_follow_the_contract() {
+        let reg = registry();
+        let risk = |n: &str| reg.get(n).unwrap().risk();
+        for n in ["search_mail", "read_email", "read_thread", "find_candidates", "recall_memory"] {
+            assert_eq!(risk(n), Risk::Read, "{n}");
+        }
+        for n in ["draft_email", "create_task", "schedule_check", "update_case"] {
+            assert_eq!(risk(n), Risk::Low, "{n}");
+        }
+        assert_eq!((risk("send_email"), risk("submit_candidate")), (Risk::High, Risk::High));
+    }
+
+    #[test]
+    fn validates_arguments_against_schemas() {
+        let reg = registry();
+        let submit = reg.get("submit_candidate").unwrap().schema();
+        assert!(validate_args(&submit, &json!({"requirement_id": "r", "candidate_ids": ["a"], "draft_id": "d"})).is_ok());
+        assert!(validate_args(&submit, &json!({"requirement_id": "r", "draft_id": "d"})).is_err());
+        assert!(validate_args(&submit, &json!({"requirement_id": "r", "candidate_ids": "a", "draft_id": "d"})).is_err());
+        assert!(validate_args(&submit, &json!([1])).is_err());
+        let update = reg.get("update_case").unwrap().schema();
+        assert!(validate_args(&update, &json!({"status_note": "ok", "outcome": "interview"})).is_ok());
+        assert!(validate_args(&update, &json!({"status_note": "ok", "outcome": "hired"})).is_err());
+        let check = reg.get("schedule_check").unwrap().schema();
+        assert!(validate_args(&check, &json!({"hours": "48", "reason": "x"})).is_err());
+        assert!(validate_args(&check, &json!({"hours": 48, "reason": "x", "extra": 1})).is_ok());
+    }
+}

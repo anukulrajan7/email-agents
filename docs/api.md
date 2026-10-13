@@ -596,3 +596,54 @@ The chosen tier is stored in the `draft.generated` audit metadata as `"tier": "s
 Config: `OPENROUTER_DRAFT_MODEL_ID` (standard tier, default `anthropic/claude-haiku-5.5`) and
 `OPENROUTER_PREMIUM_MODEL_ID` (premium tier, default = `OPENROUTER_MODEL_ID`). If only one is set, both tiers use it.
 Without `OPENROUTER_API_KEY` the template drafter is used for both.
+
+## Agents (cases, steps, approvals)
+
+Full contract: `docs/agents-contract.md`. All routes are under `/api/v1/workspaces/:ws`; Operators read, start cases
+and decide approvals; Admins cancel. Other workspaces' ids return 404; non-members get 403.
+
+| Method | Path | Role | Returns |
+|---|---|---|---|
+| GET | `/cases?status=&kind=` | operator | `{ items: CaseSummary[] }` (newest activity first, max 200; one status) |
+| GET | `/cases/:id` | operator | `CaseDetail` |
+| POST | `/cases` | operator | `CaseSummary`; body `{kind:'requirement', requirement_id}` or `{kind:'inbox', message_id}` |
+| POST | `/cases/:id/cancel` | admin | `CaseSummary`; 409 if the case already ended; pending approvals become `declined` |
+| GET | `/approvals?status=` | operator | `{ items: Approval[], pending_count }` (`status` optional: pending, approved, declined) |
+| POST | `/approvals/:id` | operator | `Approval`; body `{decision:'approve'|'decline', edited_body?, note?}`; 409 once decided |
+
+Shapes are as in the contract, with these details:
+
+- `CaseSummary.steps` is the number of planner turns taken; in `CaseDetail`, `steps` is the `Step[]` timeline.
+  `CaseDetail` also has `state` (case facts, e.g. `candidates`, `last_draft_id`, `new_message_id`), `approvals`,
+  `status_note` and `failure_reason` (plain sentence, e.g. "used this case's AI budget of $0.10 without finishing").
+- `Approval` adds `step_seq: number | null` (the timeline step that asked for it). `decided_by` is the person's email.
+- `POST /cases` is idempotent: one case per requirement and per (kind, message); an existing case is returned.
+  409 `conflict` when no planner model is configured; 404 for an unknown requirement or message.
+- Step and approval `summary` strings are plain sentences; no API string names a model.
+
+Runtime:
+
+- **Triggers.** A requirement case starts when matching has run for a new `client_requirement` record (one per
+  conversation: a client's reply that is re-read as a requirement does not start another). An inbox case starts when
+  a new inbound email is understood as needing a reply, its label is not `other` or `client_requirement`, its
+  conversation has no open case, and the workspace's effective auto-reply is on. Mail older than `AI_AUTO_HOURS`
+  never starts a case automatically. Without a planner model nothing starts automatically.
+- **Steps.** Each turn is one durable job `agent_step:<case>:<turn>` (kind `agent_step`, priority 3). The planner
+  returns one tool call or `finish {outcome?, summary}`. `read` tools run at once; `low` and `high` tools are first
+  checked by the critic: fixed rules (no `[NEEDS:]` gaps, only to an inbound sender of the case's conversation,
+  never re-propose a declined draft, only matched candidates, at most 3) and then a cheap model (no invented facts,
+  no promises of money/approvals/dates). A blocked check is a `critic` step with status `blocked`.
+- **Approvals.** `send_email` / `submit_candidate` create a pending approval and the case is `waiting_approval`.
+  Approve (optionally with `edited_body`, which updates the draft first) sends via the normal reply path
+  (`replies::send_draft`, so its guards apply; a refused send is recorded as an error step) and, for submissions,
+  marks the matches `shortlisted`. Decline records a note the planner sees. Both continue the case; audited as
+  `agent_approval.requested|approved|declined`, plus `case.started|finished|failed|cancelled`.
+- **Sleep and wake.** `schedule_check {hours}` sets `waiting_event` and `next_wake_at`; a new inbound email in the
+  case's conversation wakes it at once (its id is in `state.new_message_id`).
+- **Limits.** `AGENT_MAX_STEPS` (default 15) turns and `AGENT_BUDGET_USD` (default 0.10) per case; 3 error turns
+  in a row (unusable tool call, unknown tool, bad arguments, tool failure) also fail the case. A turn whose AI call
+  keeps failing through all job retries fails the case. Each step stores tokens and cost (provider-reported cost,
+  else an estimate); `spent_usd` is the case total.
+- **Models.** Planner `OPENROUTER_PLANNER_MODEL_ID` (default `anthropic/claude-haiku-5.5`); high-priority
+  requirement cases use `OPENROUTER_PREMIUM_MODEL_ID`. Critic: the classifier model (else `OPENROUTER_MODEL_ID`).
+  Requests disable reasoning and route only to providers with `data_collection: deny`.

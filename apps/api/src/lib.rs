@@ -1,3 +1,4 @@
+pub mod agents;
 pub mod ai;
 pub mod ai_ledger;
 pub mod alerts;
@@ -165,7 +166,33 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
         _ => Arc::new(ai::memory_extractor::NoopMemoryExtractor),
     };
 
+    // Agents: a tool-calling planner (premium tier for high-priority requirement cases) and a cheap critic.
+    let (planner, critic): (Arc<dyn agents::planner::Planner>, Arc<dyn agents::critic::Critic>) = match &openrouter {
+        Some(client) if !config.openrouter_planner_model_id.is_empty() => {
+            let critic_model = [&config.openrouter_classifier_model_id, &config.openrouter_model_id, &config.openrouter_planner_model_id]
+                .into_iter()
+                .find(|m| !m.is_empty())
+                .cloned()
+                .unwrap_or_default();
+            tracing::info!(planner = %config.openrouter_planner_model_id, "agents enabled");
+            (
+                Arc::new(agents::planner::OpenRouterPlanner::new(
+                    client.with_task("agent_plan"),
+                    &config.openrouter_planner_model_id,
+                    &config.openrouter_premium_model_id,
+                )),
+                Arc::new(agents::critic::OpenRouterCritic::new(client.with_task("agent_critic"), &critic_model)),
+            )
+        }
+        _ => {
+            tracing::warn!("no planner model configured: agents are off");
+            (Arc::new(agents::planner::DisabledPlanner), Arc::new(agents::critic::PermissiveCritic))
+        }
+    };
+
     Ok(AppState {
+        planner,
+        critic,
         memory_extractor,
         alert_mailer: mailer.clone(),
         analyst,

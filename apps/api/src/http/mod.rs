@@ -1,4 +1,5 @@
 mod ai_usage_api;
+mod agents_api;
 mod alerts_api;
 mod auth_api;
 mod automations_api;
@@ -66,6 +67,10 @@ pub struct AppState {
     pub memory_extractor: Arc<dyn crate::ai::memory_extractor::MemoryExtractor>,
     /// Sends alert emails; `None` = alerts stay in-app only.
     pub alert_mailer: Option<Arc<dyn crate::mailer::Mailer>>,
+    /// Picks each agent step (tool calling). Disabled without a model: no automatic cases.
+    pub planner: Arc<dyn crate::agents::planner::Planner>,
+    /// Checks agent proposals before they run or go to a person.
+    pub critic: Arc<dyn crate::agents::critic::Critic>,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -127,6 +132,7 @@ pub fn router(state: AppState) -> Router {
         .route("/workspaces/{ws}/jobs", get(jobs_api::list))
         .route("/workspaces/{ws}/jobs/{id}/retry", post(jobs_api::retry))
         .merge(automations_api::routes())
+        .merge(agents_api::routes())
         .fallback(|| async { AppError::NotFound })
         .layer(middleware::from_fn(crate::ai_ledger::attach_context))
         .layer(DefaultBodyLimit::max(256 * 1024));

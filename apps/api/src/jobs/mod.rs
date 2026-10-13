@@ -1,5 +1,6 @@
 //! Durable job queue on SQLite. Delivery is at-least-once: every handler must be idempotent.
 
+pub mod agent_jobs;
 pub mod automation_jobs;
 pub mod handlers;
 pub mod knowledge_jobs;
@@ -40,6 +41,7 @@ pub mod kind {
     pub const LEARN_FROM_REPLY: &str = "learn_from_reply";
     pub const EVALUATE_ALERTS: &str = "evaluate_alerts";
     pub const SEND_MATCH_DIGEST: &str = "send_match_digest";
+    pub const AGENT_STEP: &str = "agent_step";
 }
 
 #[derive(Debug, Clone, FromRow)]
@@ -154,6 +156,7 @@ pub fn priority_of(kind: &str, dedupe_key: &str) -> i64 {
         kind::SYNC_NANGO_SOURCE | kind::FETCH_FORWARDED_EMAIL | kind::REGISTER_NANGO_CONNECTION => 10,
         kind::CLASSIFY_EMAIL if dedupe_key.contains(":recheck:") => -5,
         kind::CLASSIFY_EMAIL => 5,
+        kind::AGENT_STEP => 3,
         kind::BACKFILL_KNOWLEDGE | kind::CLEAN_STORED_TEXT | kind::REFETCH_GMAIL_HTML => -5,
         _ => 0,
     }

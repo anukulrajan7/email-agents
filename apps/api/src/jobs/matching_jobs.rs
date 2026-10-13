@@ -586,5 +586,8 @@ pub async fn match_record(state: &AppState, job: &Job, payload: &Value) -> Resul
     }
     tx.commit().await?;
     tracing::info!(record_kind, recalled, kept, semantic = own_vector.is_some(), "matching finished");
+    if record_kind == "requirement" {
+        crate::agents::triggers::after_requirement_matched(state, &ws, id).await?;
+    }
     Ok(())
 }

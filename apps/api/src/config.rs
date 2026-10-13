@@ -49,6 +49,12 @@ pub struct Config {
     pub openrouter_premium_model_id: String,
     pub openrouter_classifier_model_id: String,
     pub openrouter_embedding_model_id: String,
+    /// Agent planner (tool calling). Premium cases use `openrouter_premium_model_id`.
+    pub openrouter_planner_model_id: String,
+    /// Planner turns per agent case before it fails.
+    pub agent_max_steps: i64,
+    /// AI spend per agent case (USD) before it fails.
+    pub agent_budget_usd: f64,
     pub email_retention_days: i64,
     pub job_worker_concurrency: usize,
     pub allow_test_emails: bool,
@@ -111,6 +117,9 @@ impl Config {
             openrouter_model_id,
             openrouter_classifier_model_id: var("OPENROUTER_CLASSIFIER_MODEL_ID", ""),
             openrouter_embedding_model_id: var("OPENROUTER_EMBEDDING_MODEL_ID", "baai/bge-m3"),
+            openrouter_planner_model_id: var("OPENROUTER_PLANNER_MODEL_ID", "anthropic/claude-haiku-5.5"),
+            agent_max_steps: var("AGENT_MAX_STEPS", "15").parse().context("AGENT_MAX_STEPS")?,
+            agent_budget_usd: var("AGENT_BUDGET_USD", "0.10").parse().context("AGENT_BUDGET_USD")?,
             email_retention_days: var("EMAIL_RETENTION_DAYS", "30").parse().context("EMAIL_RETENTION_DAYS")?,
             job_worker_concurrency: var("JOB_WORKER_CONCURRENCY", "2").parse().context("JOB_WORKER_CONCURRENCY")?,
             allow_test_emails: var("ALLOW_TEST_EMAILS", "false") == "true",
@@ -180,6 +189,9 @@ impl Config {
             openrouter_premium_model_id: String::new(),
             openrouter_classifier_model_id: String::new(),
             openrouter_embedding_model_id: "baai/bge-m3".into(),
+            openrouter_planner_model_id: String::new(),
+            agent_max_steps: 15,
+            agent_budget_usd: 0.10,
             email_retention_days: 30,
             job_worker_concurrency: 2,
             allow_test_emails: true,

@@ -99,7 +99,10 @@ pub async fn handle(state: &AppState, job: &Job) -> Result<(), JobError> {
         kind::PURGE_EXPIRED_EVENTS => purge_expired_events(state).await,
         kind::SYNC_NANGO_SOURCE => crate::sources::nango::sync_source(state, &payload).await,
         kind::LEARN_FROM_DRAFT => learn_from_draft(state, &payload).await,
-        kind::ANALYZE_MESSAGE => analyze_message(state, &payload).await.map(|_| ()),
+        kind::ANALYZE_MESSAGE => {
+            let insight = analyze_message(state, &payload).await?;
+            crate::agents::triggers::after_analysis(state, job, &str_field(&payload, "message_id")?, &insight).await
+        }
         kind::CLEAN_STORED_TEXT => super::message_jobs::clean_stored_text(state).await,
         kind::REFETCH_GMAIL_HTML => super::message_jobs::refetch_gmail_html(state, &payload).await,
         kind::EXTRACT_RECORD => super::matching_jobs::extract_record(state, &payload).await,
@@ -112,6 +115,7 @@ pub async fn handle(state: &AppState, job: &Job) -> Result<(), JobError> {
         kind::LEARN_FROM_REPLY => super::learning_jobs::learn_from_reply(state, &payload).await,
         kind::EVALUATE_ALERTS => crate::alerts::evaluate_job(state, &payload).await,
         kind::SEND_MATCH_DIGEST => super::match_digest::digest_job(state, &payload).await,
+        kind::AGENT_STEP => super::agent_jobs::agent_step(state, &payload).await,
         other => Err(JobError::Permanent(format!("unknown job kind {other}"))),
     }
 }
@@ -167,6 +171,7 @@ pub async fn on_dead(state: &AppState, job: &Job, error: &str) {
                 }
                 Ok(())
             }
+            kind::AGENT_STEP => super::agent_jobs::on_dead(state, &payload, error).await,
             _ => Ok(()),
         }
     }
@@ -810,6 +815,68 @@ pub async fn create_draft_for_message(
     }
     // A concurrent run (same origin key) won the insert; use its draft.
     Ok(sqlx::query_scalar("SELECT id FROM drafts WHERE origin_key = ?1").bind(&origin_key).fetch_optional(&state.db).await?)
+}
+
+/// Drafts a reply for an agent step. One draft per `origin_key` (re-runs reuse it); the agent picks
+/// the instructions and tier. `Ok(None)` means the writer judged that no reply is needed.
+pub async fn create_agent_draft(
+    state: &AppState,
+    message_id: &str,
+    instructions: Option<&str>,
+    requested: Option<ai::DraftQuality>,
+    origin_key: &str,
+) -> Result<Option<(String, String)>, JobError> {
+    let existing: Option<(String, String)> = sqlx::query_as("SELECT id, body_text FROM drafts WHERE origin_key = ?1")
+        .bind(origin_key)
+        .fetch_optional(&state.db)
+        .await?;
+    if existing.is_some() {
+        return Ok(existing);
+    }
+    let msg = load_message(state, message_id).await?;
+    let insight = analyze_message(state, &json!({ "message_id": message_id })).await?;
+    let (out, ctx, quality) = compose_draft(state, message_id, &msg, insight, instructions, requested).await?;
+    if out.body_text.trim().is_empty() {
+        return Ok(None);
+    }
+    let draft_id = new_id("drf");
+    let now = now_ms();
+    let mut tx = state.db.begin().await?;
+    let inserted = sqlx::query(
+        "INSERT OR IGNORE INTO drafts (id, workspace_id, message_id, body_text, original_body_text, status, model_id,
+                                       origin_key, memory_ids_json, unanswered_json, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?4, 'suggested', ?5, ?6, ?8, ?9, ?7, ?7)",
+    )
+    .bind(&draft_id)
+    .bind(&msg.workspace_id)
+    .bind(message_id)
+    .bind(&out.body_text)
+    .bind(&out.model_id)
+    .bind(origin_key)
+    .bind(now)
+    .bind(json!(ctx.ids()).to_string())
+    .bind(json!(out.unanswered).to_string())
+    .execute(&mut *tx)
+    .await?
+    .rows_affected()
+        == 1;
+    if inserted {
+        audit::record(
+            &mut tx,
+            Entry {
+                workspace_id: &msg.workspace_id,
+                actor: Actor::System,
+                action: "draft.generated",
+                entity_type: "draft",
+                entity_id: &draft_id,
+                message_id: Some(message_id),
+                metadata: json!({ "model_id": out.model_id, "prompt_version": ai::DRAFT_PROMPT_VERSION, "memories_used": ctx.ids().len(), "by": "agent", "tier": quality.as_str() }),
+            },
+        )
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(sqlx::query_as("SELECT id, body_text FROM drafts WHERE origin_key = ?1").bind(origin_key).fetch_optional(&state.db).await?)
 }
 
 // ---------------------------------------------------------------- understanding

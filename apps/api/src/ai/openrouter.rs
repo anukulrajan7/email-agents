@@ -153,6 +153,78 @@ impl OpenRouterClient {
             }
         }
     }
+
+    /// One tool-calling chat turn (OpenAI-style `tools`). Returns the assistant message as-is
+    /// (the caller validates any tool call), the answering model and token usage.
+    pub(crate) async fn chat_tools(
+        &self,
+        model: &str,
+        system: &str,
+        user: String,
+        tools: Value,
+        tool_choice: Value,
+        max_tokens: u32,
+    ) -> Result<ToolReply, AiError> {
+        let body = json!({
+            "model": model,
+            "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
+            "tools": tools,
+            "tool_choice": tool_choice,
+            "parallel_tool_calls": false,
+            "max_tokens": max_tokens,
+            "temperature": 0.1,
+            "reasoning": {"enabled": false},
+            "provider": {"data_collection": "deny", "require_parameters": true},
+            "usage": {"include": true}
+        });
+        let started = std::time::Instant::now();
+        let res = match self
+            .http
+            .post(format!("{}/chat/completions", self.base_url))
+            .bearer_auth(&self.api_key)
+            .json(&body)
+            .timeout(Duration::from_secs(60))
+            .send()
+            .await
+        {
+            Ok(res) => res,
+            Err(e) => {
+                let msg = format!("OpenRouter request failed: {e}");
+                self.log_call(model, started, None, Some(&msg)).await;
+                return Err(AiError::Retryable(msg));
+            }
+        };
+        if !res.status().is_success() {
+            let status = res.status();
+            self.log_call(model, started, None, Some(&format!("HTTP {status}"))).await;
+            return Err(classify_http_error(status, "OpenRouter"));
+        }
+        let body: Value = res.json().await.map_err(|e| AiError::Retryable(format!("OpenRouter decode: {e}")))?;
+        self.log_call(model, started, Some(&body), None).await;
+        let message = body.pointer("/choices/0/message").cloned().unwrap_or(Value::Null);
+        let usage = ChatUsage {
+            tokens_in: body.pointer("/usage/prompt_tokens").and_then(Value::as_i64).unwrap_or(0),
+            tokens_out: body.pointer("/usage/completion_tokens").and_then(Value::as_i64).unwrap_or(0),
+            cost_usd: body.pointer("/usage/cost").and_then(Value::as_f64),
+        };
+        let model_id = body.get("model").and_then(Value::as_str).unwrap_or(model).to_string();
+        Ok(ToolReply { message, model_id, usage })
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ChatUsage {
+    pub tokens_in: i64,
+    pub tokens_out: i64,
+    /// Provider-reported cost, when the provider returns one.
+    pub cost_usd: Option<f64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ToolReply {
+    pub message: Value,
+    pub model_id: String,
+    pub usage: ChatUsage,
 }
 
 fn email_block(input_subject: &str, body: &str) -> String {
