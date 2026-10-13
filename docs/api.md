@@ -40,7 +40,7 @@ JobStatus         = "pending" | "running" | "succeeded" | "dead"
 | GET | `/health/ready` | – | – | `{status:"ok"}` or 503 |
 | GET | `/api/v1/me` | any | – | `{user:{id,email}, workspaces: Workspace[], auth_mode:"dev"\|"oidc"}` |
 | GET | `/api/v1/workspaces` | any | – | `{items: Workspace[]}` |
-| POST | `/api/v1/workspaces` | any | `{name}` | `Workspace` (caller becomes admin; 3 workflow templates seeded) |
+| POST | `/api/v1/workspaces` | any | `{name, packs?}` | `Workspace` (caller becomes admin; labels and presets of the chosen packs seeded; see Packs) |
 | POST | `/api/v1/workspaces/:ws/members` | admin | `{email, role}` | `{user_id, email, role}` |
 | GET | `/api/v1/workspaces/:ws/sources` | member | – | `{items: Source[]}` |
 | POST | `/api/v1/workspaces/:ws/sources/forwarding` | admin | – | `Source` (idempotent: returns existing forwarding source) |
@@ -293,7 +293,7 @@ type LabelTemplate = "hr" | "general" | "blank";
 | Method | Path | Role | Body | Response |
 |---|---|---|---|---|
 | GET | `/api/v1/label-templates` | any | – | `{items: {key: LabelTemplate, name, description, labels: {key,name,description}[]}[]}` |
-| POST | `/api/v1/workspaces` | any | `{name, template?: LabelTemplate}` (default `"hr"`) | `Workspace` |
+| POST | `/api/v1/workspaces` | any | `{name, packs?: string[], goal?, template?: LabelTemplate}` (default `packs: ["general"]`; `template` is legacy: `hr` = staffing pack) | `Workspace` |
 | GET | `/api/v1/workspaces/:ws/labels?include_archived=` | member | – | `{items: Label[]}` ordered by `position` |
 | POST | `/api/v1/workspaces/:ws/labels` | admin | `{name, description, color?}` | `Label` (key = slug of name; 409 if taken) |
 | PATCH | `/api/v1/workspaces/:ws/labels/:id` | admin | `{name?, description?, color?, archived?, position?}` | `Label` (409 when archiving `other` or a label used by an enabled workflow) |
@@ -302,6 +302,38 @@ Rules: `name` 1–40 chars, `description` 10–300 chars, max 30 active labels p
 `PATCH .../messages/:id/classification` and `GET .../messages?category=` validate against the workspace's active labels.
 Workflow templates attach to a label key (`timesheet_review` → `timesheet`); `Workflow` gains `label_key: string`
 and `available` is false when the workspace has no such active label.
+
+## Packs (use-case bundles)
+
+A pack bundles labels, automation presets, a default reply style and features for one kind of work. New
+workspaces get `general` unless they choose otherwise. Packs: `general` (default business inbox), `support`,
+`sales`, `finance`, `personal`, `staffing` (HR and recruiting). The **staffing** pack alone owns the HR labels
+(timesheet, leave, candidate referral, client requirement, payroll), the built-in HR workflows, CV and
+requirement extraction, candidate matching, requirement-agent cases and the "HR Operations" sign-off. Without it
+none of these run. Existing workspaces were backfilled onto `staffing` (migration `0032_packs.sql`).
+Turning a pack on adds its missing labels (archived labels stay archived; 409 if the 30-active-label cap would be
+exceeded). Turning it off deletes nothing; it only stops the pack's features.
+
+```ts
+type Pack = {
+  key: "general" | "staffing" | "support" | "sales" | "finance" | "personal";
+  name: string; description: string;
+  labels: { key: string; name: string; description: string }[];
+  presets: string[];                 // automation presets offered
+  features: string[];                // "matching" | "requirement_agent" | "hr_workflows" (staffing only)
+};
+type Workspace = { id; name; role; created_at; packs: string[] };   // packs also on GET /me and GET /workspaces
+```
+
+| Method | Path | Role | Body | Response |
+|---|---|---|---|---|
+| GET | `/api/v1/packs` | any | – | `{items: Pack[]}` |
+| GET | `/api/v1/workspaces/:ws/packs` | member | – | `{enabled: string[], items: (Pack & {enabled: boolean})[]}` |
+| PUT | `/api/v1/workspaces/:ws/packs` | admin | `{packs: string[]}` (at least one; 400 on unknown key) | same as GET |
+
+`POST /workspaces` accepts `packs` (same validation) and an optional `goal` (what the workspace is for, max 1,000
+chars). Reply defaults follow the packs: staffing keeps the HR reply style and "HR Operations" sign-off, every
+other pack uses a neutral style and signs off with the workspace name.
 
 ## Matching: referrals ↔ client requirements (P1)
 

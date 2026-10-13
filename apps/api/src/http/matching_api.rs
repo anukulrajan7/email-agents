@@ -18,6 +18,9 @@ use crate::{
 /// Ensures the two labels matching depends on exist and are active.
 pub async fn setup(State(state): State<AppState>, user: AuthUser, Path(ws): Path<String>) -> AppResult<Json<Value>> {
     require_role(&state.db, &ws, &user, Role::Admin).await?;
+    if !crate::packs::has_feature(&state.db, &ws, crate::packs::FEATURE_MATCHING).await? {
+        return Err(AppError::Conflict("matching is part of the HR & recruiting pack; turn that pack on first".into()));
+    }
     let mut tx = state.db.begin().await?;
     for key in [REQUIREMENT_LABEL, CANDIDATE_LABEL] {
         let seed = LABEL_TEMPLATES

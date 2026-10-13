@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useNavigate } from 'react-router';
 import { api, clearToken, getToken, setToken } from '../../api/client';
-import type { AuthConfig, AuthSession, Items, LabelTemplate, LoginBody, MeResponse, SignupBody, SignupResponse, VerifyBody, Workspace } from '../../api/types';
+import type { AuthConfig, AuthSession, Items, LoginBody, MeResponse, SignupBody, SignupResponse, VerifyBody, Workspace } from '../../api/types';
 
 export const meKey = ['me'] as const;
 
@@ -17,7 +17,7 @@ export function useMe() {
 export function useCreateWorkspace() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (body: { name: string; template: LabelTemplate }) => api<Workspace>('/workspaces', { method: 'POST', body }),
+    mutationFn: (body: { name: string; packs: string[] }) => api<Workspace>('/workspaces', { method: 'POST', body }),
     onSuccess: () => qc.invalidateQueries({ queryKey: meKey }),
   });
 }

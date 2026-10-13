@@ -86,7 +86,7 @@ impl H {
     }
 
     async fn workspace(&self, token: &str) -> (String, String) {
-        let (_, ws) = self.call("POST", "/api/v1/workspaces", token, Some(json!({"name":"Acme"}))).await;
+        let (_, ws) = self.call("POST", "/api/v1/workspaces", token, Some(json!({"name":"Acme","template":"hr"}))).await;
         let ws = ws["id"].as_str().unwrap().to_string();
         let (_, src) = self.call("POST", &format!("/api/v1/workspaces/{ws}/sources/forwarding"), token, None).await;
         (ws, src["id"].as_str().unwrap().to_string())

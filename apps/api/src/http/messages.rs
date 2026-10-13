@@ -663,6 +663,8 @@ pub async fn understand_now(
         .bind(&id)
         .fetch_one(&state.db)
         .await?;
+    let matching = crate::packs::has_feature(&state.db, &ws, crate::packs::FEATURE_MATCHING).await?;
+    let category = category.filter(|_| matching);
     let mut tx = state.db.begin().await?;
     if has_attachments {
         jobs::attachment_jobs::enqueue_extract(&mut tx, &ws, &id, true).await?;

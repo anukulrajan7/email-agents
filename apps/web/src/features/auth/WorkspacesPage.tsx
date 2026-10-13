@@ -4,8 +4,8 @@ import { Button, Card, Input, Label, Skeleton, SkeletonList, Stamp } from '../..
 import { riseStyle } from '../../lib/motion';
 import { ErrorNote } from '../../components/ErrorNote';
 import { cn } from '../../lib/cn';
-import { useLabelTemplates } from '../labels/hooks';
-import type { LabelTemplate } from '../../api/types';
+import { PackPicker } from '../packs/PackPicker';
+import { usePackCatalogue } from '../packs/hooks';
 import { useCreateWorkspace, useLogout, useMe } from './hooks';
 
 export function WorkspacesPage() {
@@ -14,8 +14,8 @@ export function WorkspacesPage() {
   const navigate = useNavigate();
   const logout = useLogout();
   const [name, setName] = useState('');
-  const [template, setTemplate] = useState<LabelTemplate>('hr');
-  const templates = useLabelTemplates();
+  const [chosen, setChosen] = useState<string[]>(['general']);
+  const catalogue = usePackCatalogue();
   const workspaces = me.data?.workspaces ?? [];
   const hasWorkspaces = workspaces.length > 0;
 
@@ -24,7 +24,7 @@ export function WorkspacesPage() {
     const trimmed = name.trim();
     if (!trimmed) return;
     create.mutate(
-      { name: trimmed, template },
+      { name: trimmed, packs: chosen },
       {
         onSuccess: (w) => {
           setName('');
@@ -60,7 +60,7 @@ export function WorkspacesPage() {
               {hasWorkspaces ? 'Choose a workspace' : 'Set up your first workspace'}
             </h1>
             <p className="mt-3 max-w-[56ch] text-[15px] leading-relaxed text-ink-muted">
-              A workspace holds one team&apos;s mail, labels and notes. {hasWorkspaces ? 'Open one to get to work, or start another.' : 'Name it and pick a starting set of labels.'}
+              A workspace holds one team&apos;s mail, labels and notes. {hasWorkspaces ? 'Open one to get to work, or start another.' : 'Name it and pick what it is for.'}
             </p>
           </div>
 
@@ -104,50 +104,23 @@ export function WorkspacesPage() {
                 <Label htmlFor="ws-name">Workspace name</Label>
                 <div className="flex flex-col gap-2 sm:flex-row">
                   <Input id="ws-name" required placeholder="Acme Talent Desk" value={name} onChange={(e) => setName(e.target.value)} />
-                  <Button type="submit" loading={create.isPending} disabled={!name.trim()} className="shrink-0">
+                  <Button type="submit" loading={create.isPending} disabled={!name.trim() || chosen.length === 0} className="shrink-0">
                     Create
                   </Button>
                 </div>
               </div>
               <fieldset className="flex flex-col gap-3">
-                <legend className="kicker">Start with a set of labels</legend>
-                <p className="-mt-1 text-sm text-ink-muted">Labels are the categories the AI sorts your email into.</p>
-                {templates.isLoading && (
+                <legend className="kicker">What is this workspace for?</legend>
+                <p className="-mt-1 text-sm text-ink-muted">Packs set up the labels, automations and reply style. You can change them later in Settings.</p>
+                {catalogue.isLoading && (
                   <div className="grid gap-3 sm:grid-cols-3">
                     {[0, 1, 2].map((i) => (
                       <Skeleton key={i} className="h-28" />
                     ))}
                   </div>
                 )}
-                <ErrorNote error={templates.error} />
-                <div className="grid auto-rows-fr gap-3 sm:grid-cols-3">
-                  {templates.data?.items.map((t) => (
-                    <label
-                      key={t.key}
-                      className={cn(
-                        'flex h-full cursor-pointer flex-col gap-1.5 rounded-sm border p-4 text-sm motion-safe:transition-colors',
-                        'has-[:focus-visible]:outline-2 has-[:focus-visible]:outline-offset-2 has-[:focus-visible]:outline-accent',
-                        template === t.key ? 'border-ink bg-surface shadow-[inset_0_3px_0_var(--color-accent)]' : 'border-rule-strong hover:border-ink',
-                      )}
-                    >
-                      <span className="flex items-center gap-2 font-semibold">
-                        <input
-                          type="radio"
-                          name="label-template"
-                          value={t.key}
-                          checked={template === t.key}
-                          onChange={() => setTemplate(t.key)}
-                          className="accent-[var(--color-accent)]"
-                        />
-                        {t.name}
-                      </span>
-                      <span className="text-ink-muted">{t.description}</span>
-                      <span className="mt-auto pt-1 text-xs text-ink-muted">
-                        {t.labels.length === 0 ? 'No labels — start from scratch' : t.labels.map((l) => l.name).join(' · ')}
-                      </span>
-                    </label>
-                  ))}
-                </div>
+                <ErrorNote error={catalogue.error} />
+                {catalogue.data && <PackPicker packs={catalogue.data.items} selected={chosen} onChange={setChosen} />}
               </fieldset>
               <ErrorNote error={create.error} />
             </form>

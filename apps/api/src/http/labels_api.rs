@@ -187,7 +187,7 @@ pub async fn update(
             .ok_or(AppError::NotFound)?;
     match body.archived {
         Some(true) if key == OTHER_LABEL => return Err(AppError::Conflict("the Other label is the safety net and cannot be archived".into())),
-        Some(true) => {
+        Some(true) if crate::packs::has_feature(&state.db, &ws, crate::packs::FEATURE_HR_WORKFLOWS).await? => {
             let keys: Vec<&str> = WORKFLOW_TEMPLATES.iter().filter(|t| t.label_key == key).map(|t| t.key).collect();
             for template_key in keys {
                 let enabled: Option<bool> =

@@ -66,7 +66,7 @@ async fn setup_with(tweak: impl FnOnce(&mut Config)) -> Env {
     state.drafter = recorder.clone();
     db::migrate(&state.db).await.unwrap();
     let app = router(state.clone());
-    let (_, ws) = call(&app, "POST", "/api/v1/workspaces", ADMIN, Some(json!({"name":"Acme"}))).await;
+    let (_, ws) = call(&app, "POST", "/api/v1/workspaces", ADMIN, Some(json!({"name":"Acme","template":"hr"}))).await;
     let base = format!("/api/v1/workspaces/{}", ws["id"].as_str().unwrap());
     call(&app, "GET", "/api/v1/me", OPERATOR, None).await;
     let (s, _) = call(&app, "POST", &format!("{base}/members"), ADMIN, Some(json!({"email":"op@acme.test","role":"operator"}))).await;

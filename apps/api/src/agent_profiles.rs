@@ -140,16 +140,16 @@ pub fn tier_model<'a>(config: &'a Config, quality: &str) -> &'a str {
 }
 
 /// The seeded persona: a friendly personality, the standard guidance and the workspace's own instructions.
-pub fn default_persona(reply_instructions: &str) -> String {
-    let base = format!("{DEFAULT_PERSONALITY}\n\n{DEFAULT_REPLY_STYLE}");
+pub fn default_persona(reply_style: &str, reply_instructions: &str) -> String {
+    let base = format!("{DEFAULT_PERSONALITY}\n\n{reply_style}");
     match reply_instructions.trim() {
         "" => base,
         extra => truncate_chars(&format!("{base}\n\n{extra}"), MAX_PERSONA_CHARS),
     }
 }
 
-pub fn standard_guidance() -> String {
-    default_persona("")
+pub fn standard_guidance(reply_style: &str) -> String {
+    default_persona(reply_style, "")
 }
 
 const AGENT_COLUMNS: &str =
@@ -178,7 +178,7 @@ pub async fn agent(db: &SqlitePool, config: &Config, ws: &str) -> sqlx::Result<W
     .bind(DEFAULT_NAME)
     .bind(DEFAULT_AVATAR)
     .bind(DEFAULT_COLOR)
-    .bind(default_persona(&settings.reply_instructions))
+    .bind(default_persona(crate::packs::reply_style(db, ws).await?, &settings.reply_instructions))
     .bind(settings.signature.map(|s| truncate_chars(&s, MAX_SIGNATURE_CHARS)))
     .bind(now)
     .execute(&mut *tx)
@@ -543,7 +543,7 @@ pub fn merge_voice(style: DraftStyle, workspace_instructions: String, signature:
     let signature = style.signature.or(signature);
     let Some(persona) = style.instructions else { return (workspace_instructions, signature) };
     let team = workspace_instructions.trim();
-    if team.is_empty() || team == DEFAULT_REPLY_STYLE || persona.contains(team) {
+    if team.is_empty() || team == DEFAULT_REPLY_STYLE || team == crate::packs::NEUTRAL_REPLY_STYLE || persona.contains(team) {
         return (persona, signature);
     }
     (format!("{persona}\n\nTeam reply instructions:\n{team}"), signature)
@@ -809,7 +809,7 @@ mod tests {
             avatar: DEFAULT_AVATAR.into(),
             color: DEFAULT_COLOR.into(),
             persona: "Warm.".into(),
-            signature: Some("Meera, HR Desk".into()),
+            signature: Some("Meera, Support Desk".into()),
             tasks: vec!["reply".into(), "requirements".into()],
             permissions: Permissions::default(),
             quality: "balanced".into(),
@@ -887,8 +887,8 @@ mod tests {
 
     #[test]
     fn seeded_persona_is_friendly_and_adds_workspace_instructions() {
-        assert!(standard_guidance().starts_with("I'm Meera") && standard_guidance().contains(DEFAULT_REPLY_STYLE));
-        assert!(default_persona("Mention our 1-day turnaround.").ends_with("\n\nMention our 1-day turnaround."));
+        assert!(standard_guidance(DEFAULT_REPLY_STYLE).starts_with("I'm Meera") && standard_guidance(DEFAULT_REPLY_STYLE).contains(DEFAULT_REPLY_STYLE));
+        assert!(default_persona(DEFAULT_REPLY_STYLE, "Mention our 1-day turnaround.").ends_with("\n\nMention our 1-day turnaround."));
     }
 
     #[test]

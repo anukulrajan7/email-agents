@@ -51,43 +51,49 @@ pub struct LabelTemplate {
     pub labels: &'static [LabelSeed],
 }
 
-const OTHER_SEED: LabelSeed = LabelSeed {
+pub const OTHER_SEED: LabelSeed = LabelSeed {
     key: OTHER_LABEL,
     name: "Other",
     description: "Spam, newsletters, automated notifications, or anything that fits no other label.",
     color: "rule",
 };
 
+/// HR / staffing labels (the `hr` template and the `staffing` pack).
+pub const HR_LABELS: &[LabelSeed] = &[
+    LabelSeed { key: "timesheet", name: "Timesheet", description: "An employee or contractor submits, corrects or asks about a timesheet or hours worked.", color: "slate" },
+    LabelSeed { key: "leave", name: "Leave", description: "A request, approval or question about leave, vacation, sick days or time off.", color: "sage" },
+    LabelSeed { key: "candidate_referral", name: "Candidate referral", description: "Someone refers or recommends a job candidate, or sends a CV for a referral.", color: "plum" },
+    LabelSeed { key: "client_requirement", name: "Client requirement", description: "A client or recruiter shares a new job requirement, open position or job description to be filled.", color: "postmark" },
+    LabelSeed { key: "approval", name: "Approval", description: "A request for a manager or HR approval that is not leave or timesheet related.", color: "ochre" },
+    LabelSeed { key: "payroll", name: "Payroll", description: "Salary, payslips, reimbursements, tax forms or payment issues.", color: "teal" },
+    LabelSeed { key: "general", name: "General HR", description: "A legitimate HR question or notice that fits no specific label above.", color: "ink" },
+    OTHER_SEED,
+];
+
+/// Business inbox labels (the `general` template and pack).
+pub const GENERAL_LABELS: &[LabelSeed] = &[
+    LabelSeed { key: "action_required", name: "Action required", description: "The sender is waiting for us to do something specific: approve, sign, send, decide or fix.", color: "postmark" },
+    LabelSeed { key: "question", name: "Question", description: "Someone asks a question that needs an answer but no other action.", color: "slate" },
+    LabelSeed { key: "customer_support", name: "Customer support", description: "A customer reports a problem, complaint or needs help with our product or service.", color: "plum" },
+    LabelSeed { key: "sales_lead", name: "Sales lead", description: "A potential customer asks about pricing, a demo, a quote or buying from us.", color: "sage" },
+    LabelSeed { key: "billing", name: "Billing", description: "Invoices, receipts, payment reminders, refunds or subscription changes.", color: "teal" },
+    LabelSeed { key: "scheduling", name: "Scheduling", description: "Meeting requests, calendar invites, reschedules or availability questions.", color: "ochre" },
+    LabelSeed { key: "fyi", name: "FYI", description: "Updates or announcements worth reading that need no reply.", color: "ink" },
+    OTHER_SEED,
+];
+
 pub const LABEL_TEMPLATES: &[LabelTemplate] = &[
     LabelTemplate {
         key: "hr",
         name: "HR operations",
         description: "Timesheets, leave, referrals, approvals and payroll for an HR team inbox.",
-        labels: &[
-            LabelSeed { key: "timesheet", name: "Timesheet", description: "An employee or contractor submits, corrects or asks about a timesheet or hours worked.", color: "slate" },
-            LabelSeed { key: "leave", name: "Leave", description: "A request, approval or question about leave, vacation, sick days or time off.", color: "sage" },
-            LabelSeed { key: "candidate_referral", name: "Candidate referral", description: "Someone refers or recommends a job candidate, or sends a CV for a referral.", color: "plum" },
-            LabelSeed { key: "client_requirement", name: "Client requirement", description: "A client or recruiter shares a new job requirement, open position or job description to be filled.", color: "postmark" },
-            LabelSeed { key: "approval", name: "Approval", description: "A request for a manager or HR approval that is not leave or timesheet related.", color: "ochre" },
-            LabelSeed { key: "payroll", name: "Payroll", description: "Salary, payslips, reimbursements, tax forms or payment issues.", color: "teal" },
-            LabelSeed { key: "general", name: "General HR", description: "A legitimate HR question or notice that fits no specific label above.", color: "ink" },
-            OTHER_SEED,
-        ],
+        labels: HR_LABELS,
     },
     LabelTemplate {
         key: "general",
         name: "General inbox",
         description: "A business inbox: things to act on, questions, customers, leads, billing and noise.",
-        labels: &[
-            LabelSeed { key: "action_required", name: "Action required", description: "The sender is waiting for us to do something specific: approve, sign, send, decide or fix.", color: "postmark" },
-            LabelSeed { key: "question", name: "Question", description: "Someone asks a question that needs an answer but no other action.", color: "slate" },
-            LabelSeed { key: "customer_support", name: "Customer support", description: "A customer reports a problem, complaint or needs help with our product or service.", color: "plum" },
-            LabelSeed { key: "sales_lead", name: "Sales lead", description: "A potential customer asks about pricing, a demo, a quote or buying from us.", color: "sage" },
-            LabelSeed { key: "billing", name: "Billing", description: "Invoices, receipts, payment reminders, refunds or subscription changes.", color: "teal" },
-            LabelSeed { key: "scheduling", name: "Scheduling", description: "Meeting requests, calendar invites, reschedules or availability questions.", color: "ochre" },
-            LabelSeed { key: "fyi", name: "FYI", description: "Updates or announcements worth reading that need no reply.", color: "ink" },
-            OTHER_SEED,
-        ],
+        labels: GENERAL_LABELS,
     },
     LabelTemplate {
         key: "blank",

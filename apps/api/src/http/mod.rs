@@ -102,6 +102,8 @@ pub fn router(state: AppState) -> Router {
         .merge(auth)
         .route("/workspaces", get(workspaces::list).post(workspaces::create))
         .route("/label-templates", get(labels_api::templates))
+        .route("/packs", get(workspaces::pack_catalogue))
+        .route("/workspaces/{ws}/packs", get(workspaces::get_packs).put(workspaces::put_packs))
         .route("/workspaces/{ws}/labels", get(labels_api::list).post(labels_api::create))
         .route("/workspaces/{ws}/labels/suggest", post(labels_api::suggest))
         .route("/workspaces/{ws}/labels/health", get(label_health::health))

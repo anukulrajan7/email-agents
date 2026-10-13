@@ -29,11 +29,11 @@ function Badge({ kind, ws }: { kind: NavBadge | undefined; ws: string }) {
   return null;
 }
 
-function SideNav({ ws, isAdmin }: { ws: string; isAdmin: boolean }) {
+function SideNav({ ws, isAdmin, hasStaffing }: { ws: string; isAdmin: boolean; hasStaffing: boolean }) {
   const uid = useId();
   return (
     <nav aria-label="Main" className="flex flex-col gap-6">
-      {navGroups(isAdmin).map((group) => (
+      {navGroups(isAdmin, hasStaffing).map((group) => (
         <div key={group.id} className="flex flex-col gap-1">
           <p id={`${uid}-${group.id}`} className="kicker px-3">
             {group.label}
@@ -127,7 +127,7 @@ function RouteFallback() {
 }
 
 export function AppShell() {
-  const { ws, workspace, isAdmin } = useWorkspace();
+  const { ws, workspace, isAdmin, hasStaffing } = useWorkspace();
   const me = useMe();
   const navigate = useNavigate();
   const location = useLocation();
@@ -174,7 +174,7 @@ export function AppShell() {
             <Wordmark />
           </div>
           <div className="mt-8 flex-1">
-            <SideNav ws={ws} isAdmin={isAdmin} />
+            <SideNav ws={ws} isAdmin={isAdmin} hasStaffing={hasStaffing} />
           </div>
           <div className="mt-8 px-3">
             <AccountFooter workspaceName={workspace.name} />
@@ -193,7 +193,7 @@ export function AppShell() {
           <Button variant="ghost" size="sm" className="self-start" onClick={() => setMenuOpen(false)}>
             Close menu
           </Button>
-          <SideNav ws={ws} isAdmin={isAdmin} />
+          <SideNav ws={ws} isAdmin={isAdmin} hasStaffing={hasStaffing} />
           <AccountFooter workspaceName={workspace.name} />
         </Dialog>
       )}

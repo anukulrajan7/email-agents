@@ -55,6 +55,7 @@ mod tests {
             quality,
             reply_instructions: String::new(),
             signature: None,
+            default_sign_off: "HR Operations".into(),
         }
     }
 

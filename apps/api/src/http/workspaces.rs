@@ -15,13 +15,16 @@ use crate::{
     auth::{AuthUser, VERIFIED_USER, require_role},
     config::AuthMode,
     db::{new_id, now_ms},
-    domain::{Role, WORKFLOW_TEMPLATES},
+    domain::{OTHER_SEED, Role},
     error::{AppError, AppResult},
+    packs,
 };
 
 async fn workspaces_for(state: &AppState, user: &AuthUser) -> AppResult<Vec<Workspace>> {
     let rows: Vec<WorkspaceRow> = sqlx::query_as(
-        "SELECT w.id, w.name, m.role, w.created_at FROM workspaces w
+        "SELECT w.id, w.name, m.role, w.created_at,
+                (SELECT GROUP_CONCAT(p.pack_key) FROM workspace_packs p WHERE p.workspace_id = w.id) AS packs
+         FROM workspaces w
          JOIN memberships m ON m.workspace_id = w.id
          WHERE m.user_id = ?1 ORDER BY w.created_at",
     )
@@ -59,8 +62,26 @@ pub const MAX_WORKSPACES_PER_USER: i64 = 5;
 #[derive(Deserialize)]
 pub struct CreateWorkspace {
     name: String,
-    /// Starting label set: "hr" (default), "general" or "blank".
+    /// Packs to turn on (see `GET /packs`). Default: `["general"]`.
+    packs: Option<Vec<String>>,
+    /// What the workspace is for, in the person's own words.
+    goal: Option<String>,
+    /// Legacy starting label set: "hr" (= staffing pack), "general" or "blank" (general pack, only `other`).
     template: Option<String>,
+}
+
+const MAX_GOAL_CHARS: usize = 1_000;
+
+/// Validated, deduplicated pack keys in catalogue order.
+fn parse_packs(keys: &[String]) -> AppResult<Vec<&'static str>> {
+    if let Some(bad) = keys.iter().find(|k| packs::pack(k).is_none()) {
+        return Err(AppError::BadRequest(format!("unknown pack \"{bad}\"")));
+    }
+    let chosen: Vec<&'static str> = packs::PACKS.iter().map(|p| p.key).filter(|k| keys.iter().any(|c| c == k)).collect();
+    if chosen.is_empty() {
+        return Err(AppError::BadRequest("choose at least one pack".into()));
+    }
+    Ok(chosen)
 }
 
 pub async fn create(
@@ -72,16 +93,28 @@ pub async fn create(
     if name.is_empty() || name.chars().count() > 100 {
         return Err(AppError::BadRequest("name must be 1-100 characters".into()));
     }
-    let template = crate::domain::label_template(body.template.as_deref().unwrap_or("hr"))
-        .ok_or_else(|| AppError::BadRequest("template must be hr, general or blank".into()))?;
+    let goal = body.goal.as_deref().map(str::trim).filter(|g| !g.is_empty());
+    if goal.is_some_and(|g| g.chars().count() > MAX_GOAL_CHARS) {
+        return Err(AppError::BadRequest(format!("goal can be at most {MAX_GOAL_CHARS} characters")));
+    }
+    let (chosen, blank) = match (&body.packs, body.template.as_deref()) {
+        (Some(keys), _) => (parse_packs(keys)?, false),
+        (None, Some(t)) => {
+            let key = packs::from_template(t).ok_or_else(|| AppError::BadRequest("template must be hr, general or blank".into()))?;
+            (vec![key], t == "blank")
+        }
+        (None, None) => (vec![packs::GENERAL], false),
+    };
+    let seeds = if blank { vec![&OTHER_SEED] } else { packs::labels_for(&chosen) };
     let id = new_id("ws");
     let now = now_ms();
     let mut tx = state.db.begin().await?;
     // Write first so SQLite takes the write lock: the cap check below can't race another create.
-    sqlx::query("INSERT INTO workspaces (id, name, created_at) VALUES (?1, ?2, ?3)")
+    sqlx::query("INSERT INTO workspaces (id, name, created_at, goal) VALUES (?1, ?2, ?3, ?4)")
         .bind(&id)
         .bind(name)
         .bind(now)
+        .bind(goal)
         .execute(&mut *tx)
         .await?;
     let administered: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM memberships WHERE user_id = ?1 AND role = 'admin'")
@@ -96,19 +129,8 @@ pub async fn create(
         .bind(&user.id)
         .execute(&mut *tx)
         .await?;
-    crate::labels::seed(&mut tx, &id, template).await?;
-    for t in WORKFLOW_TEMPLATES {
-        // Enable a workflow only when its label exists in the chosen template.
-        let has_label = template.labels.iter().any(|l| l.key == t.label_key);
-        sqlx::query("INSERT INTO workflows (id, workspace_id, template_key, enabled, created_at) VALUES (?1, ?2, ?3, ?4, ?5)")
-            .bind(new_id("wf"))
-            .bind(&id)
-            .bind(t.key)
-            .bind(t.available && has_label)
-            .bind(now)
-            .execute(&mut *tx)
-            .await?;
-    }
+    packs::seed_labels(&mut tx, &id, &seeds).await?;
+    packs::enable(&mut tx, &id, &chosen).await?;
     crate::automations::seed_defaults(&mut tx, &id).await?;
     audit::record(
         &mut tx,
@@ -119,15 +141,100 @@ pub async fn create(
             entity_type: "workspace",
             entity_id: &id,
             message_id: None,
-            metadata: json!({ "template": template.key }),
+            metadata: json!({ "packs": chosen, "template": body.template, "has_goal": goal.is_some() }),
         },
     )
     .await?;
     tx.commit().await?;
     Ok((
         StatusCode::CREATED,
-        Json(Workspace { id, name: name.to_string(), role: Role::Admin.as_str().into(), created_at: crate::db::iso(now) }),
+        Json(Workspace {
+            id,
+            name: name.to_string(),
+            role: Role::Admin.as_str().into(),
+            created_at: crate::db::iso(now),
+            packs: chosen.iter().map(|k| k.to_string()).collect(),
+        }),
     ))
+}
+
+/// The pack catalogue.
+pub async fn pack_catalogue(_user: AuthUser) -> Json<Value> {
+    Json(json!({ "items": packs::PACKS.iter().map(packs::catalogue_json).collect::<Vec<_>>() }))
+}
+
+async fn packs_view(state: &AppState, ws: &str) -> AppResult<Json<Value>> {
+    let enabled = packs::enabled_keys(&state.db, ws).await?;
+    let items: Vec<Value> = packs::PACKS
+        .iter()
+        .map(|p| {
+            let mut v = packs::catalogue_json(p);
+            v["enabled"] = json!(enabled.contains(&p.key));
+            v
+        })
+        .collect();
+    Ok(Json(json!({ "enabled": enabled, "items": items })))
+}
+
+pub async fn get_packs(State(state): State<AppState>, user: AuthUser, Path(ws): Path<String>) -> AppResult<Json<Value>> {
+    require_role(&state.db, &ws, &user, Role::Operator).await?;
+    packs_view(&state, &ws).await
+}
+
+#[derive(Deserialize)]
+pub struct PutPacks {
+    packs: Vec<String>,
+}
+
+/// Sets the enabled packs. Enabling seeds the pack's labels (and staffing's workflows) without
+/// touching existing or archived labels; disabling keeps all data and only gates features.
+pub async fn put_packs(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Path(ws): Path<String>,
+    Json(body): Json<PutPacks>,
+) -> AppResult<Json<Value>> {
+    require_role(&state.db, &ws, &user, Role::Admin).await?;
+    let chosen = parse_packs(&body.packs)?;
+    // Read inside the transaction: a concurrent save makes this one fail instead of diffing a stale list.
+    let mut tx = state.db.begin().await?;
+    let before = packs::enabled_keys(&mut *tx, &ws).await?;
+    let added: Vec<&str> = chosen.iter().copied().filter(|k| !before.contains(k)).collect();
+    let removed: Vec<&str> = before.iter().copied().filter(|k| !chosen.contains(k)).collect();
+    let seeds = packs::labels_for(&added);
+    // Record the implicit default first (a workspace without rows counts as general).
+    packs::enable(&mut tx, &ws, &before).await?;
+    if !added.is_empty() {
+        let active: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM labels WHERE workspace_id = ?1 AND archived = 0")
+            .bind(&ws)
+            .fetch_one(&mut *tx)
+            .await?;
+        let new = packs::missing_labels(&mut tx, &ws, &seeds).await? as i64;
+        if active + new > crate::labels::MAX_ACTIVE_LABELS {
+            return Err(AppError::Conflict(format!(
+                "these packs add {new} labels, but a workspace can have at most {} active labels",
+                crate::labels::MAX_ACTIVE_LABELS
+            )));
+        }
+        packs::seed_labels(&mut tx, &ws, &seeds).await?;
+    }
+    packs::enable(&mut tx, &ws, &added).await?;
+    packs::disable(&mut tx, &ws, &removed).await?;
+    audit::record(
+        &mut tx,
+        Entry {
+            workspace_id: &ws,
+            actor: Actor::User(&user.id),
+            action: "packs.updated",
+            entity_type: "workspace",
+            entity_id: &ws,
+            message_id: None,
+            metadata: json!({ "enabled": added, "disabled": removed }),
+        },
+    )
+    .await?;
+    tx.commit().await?;
+    packs_view(&state, &ws).await
 }
 
 #[derive(Deserialize)]

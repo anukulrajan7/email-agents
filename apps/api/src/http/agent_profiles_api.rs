@@ -44,7 +44,7 @@ async fn get_agent(State(state): State<AppState>, user: AuthUser, Path(ws): Path
     let agent = agent_profiles::agent(&state.db, &state.config, &ws).await?;
     Ok(Json(json!({
         "agent": agent.to_json(),
-        "standard_guidance": agent_profiles::standard_guidance(),
+        "standard_guidance": agent_profiles::standard_guidance(crate::packs::reply_style(&state.db, &ws).await?),
         "can_edit": role == Role::Admin,
     })))
 }
