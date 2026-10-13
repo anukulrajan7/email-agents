@@ -35,8 +35,14 @@ async fn call(app: &Router, method: &str, path: &str, token: &str, body: Option<
 }
 
 async fn setup() -> Env {
+    setup_with(|_| {}).await
+}
+
+async fn setup_with(tweak: impl FnOnce(&mut Config)) -> Env {
     let dir = tempfile::tempdir().unwrap();
-    let state = build_state(Config::for_tests(&format!("sqlite://{}", dir.path().join("t.db").display()))).await.unwrap();
+    let mut config = Config::for_tests(&format!("sqlite://{}", dir.path().join("t.db").display()));
+    tweak(&mut config);
+    let state = build_state(config).await.unwrap();
     db::migrate(&state.db).await.unwrap();
     let app = router(state.clone());
     let (_, ws) = call(&app, "POST", "/api/v1/workspaces", ADMIN, Some(json!({"name":"Acme"}))).await;
@@ -331,4 +337,23 @@ async fn create_review_action_is_idempotent() {
     let (_, reviews) = call(&env.app, "GET", &format!("{}/reviews", env.base), ADMIN, None).await;
     let titles: Vec<&str> = reviews["items"].as_array().unwrap().iter().map(|r| r["title"].as_str().unwrap()).collect();
     assert!(titles.contains(&"Check this invoice"), "{titles:?}");
+}
+
+#[tokio::test]
+async fn with_automatic_drafts_off_only_a_person_gets_a_draft() {
+    let env = setup_with(|c| c.auto_drafts = false).await;
+    let id = env.email("Can you send the offer letter?", "Hi, can you send the offer letter today?").await;
+    let (_, detail) = call(&env.app, "GET", &format!("{}/messages/{id}", env.base), ADMIN, None).await;
+    assert!(detail["draft"].is_null(), "no automatic draft: {}", detail["draft"]);
+    let reply = env.automations().await.into_iter().find(|a| a["preset_key"] == "reply_to_questions").unwrap();
+    let runs = env.runs(reply["id"].as_str().unwrap()).await;
+    let actions = runs[0]["actions"].as_array().unwrap();
+    assert_eq!((actions[0]["type"].as_str(), actions[0]["status"].as_str()), (Some("draft_reply"), Some("skipped")));
+
+    // A person asks: the draft is written.
+    let (s, _) = call(&env.app, "POST", &format!("{}/messages/{id}/draft", env.base), ADMIN, None).await;
+    assert!(s.is_success());
+    worker::drain(&env.state).await;
+    let (_, detail) = call(&env.app, "GET", &format!("{}/messages/{id}", env.base), ADMIN, None).await;
+    assert!(detail["draft"]["id"].is_string());
 }

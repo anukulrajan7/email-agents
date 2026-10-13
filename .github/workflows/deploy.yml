@@ -126,6 +126,8 @@ jobs:
           OPENROUTER_CLASSIFIER_MODEL_ID=${OPENROUTER_CLASSIFIER_MODEL_ID}
           EMAIL_RETENTION_DAYS=30
           JOB_WORKER_CONCURRENCY=4
+          AI_AUTO_HOURS=2
+          AUTO_DRAFTS=false
           ENV
           sed -i 's/^ *//' deploy.env
       - name: Ship config and roll out

@@ -84,6 +84,13 @@ describe('MessageList', () => {
     expect(screen.getByRole('button', { name: 'Newest' })).toHaveAttribute('aria-pressed', 'true');
   });
 
+  it('filters by reply status from the label menu', async () => {
+    const fetchMock = renderList([msg('1', 'First mail')]);
+    await screen.findByText('First mail');
+    await userEvent.selectOptions(screen.getByLabelText('Filter by label'), 'Replied');
+    await waitFor(() => expect(messageUrls(fetchMock).some((u) => u.includes('reply=replied') && !u.includes('category='))).toBe(true));
+  });
+
   it('starts from the stored sort preference', async () => {
     localStorage.setItem('inbox.sort', 'recent');
     const fetchMock = renderList([msg('1', 'First mail')]);
@@ -106,7 +113,7 @@ describe('MessageList', () => {
     expect(await screen.findByText('Ada Lovelace')).toBeInTheDocument();
     expect(screen.getByText('Invoice 123')).toHaveClass('font-bold');
     expect(screen.getByText(/Wants approval by Friday/)).toBeInTheDocument();
-    expect(screen.getByText('Needs reply')).toBeInTheDocument();
+    expect(screen.getByText('Needs reply', { selector: 'span' })).toBeInTheDocument();
     expect(screen.getByRole('img', { name: 'High priority' })).toBeInTheDocument();
     expect(screen.queryByText('Needs review')).toBeNull();
   });

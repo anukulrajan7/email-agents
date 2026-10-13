@@ -9,7 +9,7 @@ import { LabelStamp } from '../labels/LabelStamp';
 import { useLabels } from '../labels/hooks';
 import type { MessageSummary } from '../../api/types';
 import { parseAddress } from './emailText';
-import { useMessages, type MessageSort } from './hooks';
+import { useMessages, type MessageSort, type ReplyFilter } from './hooks';
 
 const SORT_KEY = 'inbox.sort';
 
@@ -104,7 +104,9 @@ export function MessageList({ ws }: { ws: string }) {
   const [sort, setSort] = useState<MessageSort>(readSort);
   const q = useDebounced(search.trim());
   const labels = useLabels(ws, { includeArchived: true });
-  const messages = useMessages(ws, { category: category || undefined, q: q || undefined, sort });
+  // The filter holds a label key, or `reply:awaiting` / `reply:replied` for reply status.
+  const reply = category.startsWith('reply:') ? (category.slice(6) as ReplyFilter) : undefined;
+  const messages = useMessages(ws, { category: reply ? undefined : category || undefined, q: q || undefined, sort, reply });
   const items = messages.data?.pages.flatMap((p) => p.items) ?? [];
 
   return (
@@ -124,12 +126,18 @@ export function MessageList({ ws }: { ws: string }) {
         </label>
         <Select id="msg-category" value={category} onChange={(e) => setCategory(e.target.value)}>
           <option value="">All labels</option>
-          {labels.data?.items.map((l) => (
-            <option key={l.id} value={l.key}>
-              {l.name}
-              {l.archived ? ' (archived)' : ''}
-            </option>
-          ))}
+          <optgroup label="Reply status">
+            <option value="reply:awaiting">Needs reply</option>
+            <option value="reply:replied">Replied</option>
+          </optgroup>
+          <optgroup label="Labels">
+            {labels.data?.items.map((l) => (
+              <option key={l.id} value={l.key}>
+                {l.name}
+                {l.archived ? ' (archived)' : ''}
+              </option>
+            ))}
+          </optgroup>
         </Select>
         <SortToggle
           sort={sort}

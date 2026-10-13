@@ -8,13 +8,15 @@ export const messageKey = (ws: string, id: string) => ['ws', ws, 'message', id] 
 
 export type MessageSort = 'importance' | 'recent';
 
-export function useMessages(ws: string, filters: { category?: Category; q?: string; sort?: MessageSort }) {
+export type ReplyFilter = 'awaiting' | 'replied';
+
+export function useMessages(ws: string, filters: { category?: Category; q?: string; sort?: MessageSort; reply?: ReplyFilter }) {
   return useInfiniteQuery({
     queryKey: [...messagesKey(ws), filters],
     initialPageParam: undefined as string | undefined,
     queryFn: ({ pageParam }) =>
       api<Paged<MessageSummary>>(`/workspaces/${ws}/messages`, {
-        query: { cursor: pageParam, category: filters.category, q: filters.q, sort: filters.sort, limit: PAGE_SIZE },
+        query: { cursor: pageParam, category: filters.category, q: filters.q, sort: filters.sort, reply: filters.reply, limit: PAGE_SIZE },
       }),
     getNextPageParam: (last) => last.next_cursor ?? undefined,
     refetchInterval: 5000,

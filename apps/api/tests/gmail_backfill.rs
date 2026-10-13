@@ -196,6 +196,12 @@ async fn backfills_full_messages_once_with_retry() {
     let (_, list) = call(&app, "GET", &format!("/api/v1/workspaces/{ws}/messages?sort=importance"), None).await;
     let row = list["items"].as_array().unwrap().iter().find(|m| m["id"] == ts["id"]).unwrap();
     assert_eq!(row["replied"], true);
+    let ids = |v: &Value| v["items"].as_array().unwrap().iter().map(|m| m["id"].clone()).collect::<Vec<_>>();
+    let (_, replied) = call(&app, "GET", &format!("/api/v1/workspaces/{ws}/messages?reply=replied"), None).await;
+    assert_eq!(ids(&replied), vec![ts["id"].clone()], "the Replied filter shows only answered mail");
+    let (_, awaiting) = call(&app, "GET", &format!("/api/v1/workspaces/{ws}/messages?reply=awaiting"), None).await;
+    assert!(!ids(&awaiting).contains(&ts["id"]));
+    assert_eq!(call(&app, "GET", &format!("/api/v1/workspaces/{ws}/messages?reply=maybe"), None).await.0, StatusCode::BAD_REQUEST);
 
     // A new email arrives in Gmail after the first sync: the next sync (or the 5-minute
     // poll) imports it straight from Gmail, without waiting for Nango's hourly sync.

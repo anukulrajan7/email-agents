@@ -196,6 +196,9 @@ async fn execute(
     for action in &automation.actions {
         let kind_name = action.type_name();
         let result = match action {
+            Action::DraftReply { .. } if !state.config.auto_drafts => {
+                skipped(kind_name, "automatic drafts are off: open the email and generate a draft")
+            }
             Action::DraftReply { instructions } => {
                 match handlers::create_draft_for_message(state, &ctx.id, instructions.as_deref()).await {
                     Ok(Some(id)) => {

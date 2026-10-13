@@ -36,6 +36,8 @@ pub struct ListQuery {
     sort: Option<String>,
     /// `inbound` (default), `outbound` or `all`.
     direction: Option<String>,
+    /// `replied` (we answered) or `awaiting` (needs a reply, not answered yet).
+    reply: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -157,11 +159,19 @@ pub async fn list(
     };
     let cursor = query.cursor.as_deref().filter(|c| !c.is_empty());
 
-    let filters = "WHERE m.workspace_id = ?1
+    let reply_clause = match query.reply.as_deref().filter(|r| !r.is_empty()) {
+        None => "",
+        Some("replied") => concat!(" AND ", replied_sql!()),
+        Some("awaiting") => concat!(" AND COALESCE(i.needs_reply, c.requires_reply, 0) = 1 AND NOT ", replied_sql!()),
+        Some(_) => return Err(AppError::BadRequest("reply must be replied or awaiting".into())),
+    };
+    let filters = format!(
+        "WHERE m.workspace_id = ?1
            AND (?2 IS NULL OR c.category = ?2)
            AND (?3 IS NULL OR m.subject LIKE ?3 ESCAPE '\\' OR m.sender_address LIKE ?3 ESCAPE '\\'
                 OR m.original_sender_address LIKE ?3 ESCAPE '\\')
-           AND (?4 = 'all' OR m.direction = ?4)";
+           AND (?4 = 'all' OR m.direction = ?4){reply_clause}"
+    );
     let (rows, next_cursor): (Vec<SummaryRow>, Option<String>) = if by_importance {
         // Offset pagination: the importance order has no stable keyset. Needs a reply and not yet
         // replied first, then priority (high > normal > low), then newest.

@@ -577,6 +577,10 @@ async fn generate_draft(state: &AppState, job: &Job, payload: &Value) -> Result<
     let message_id = str_field(payload, "message_id")?;
     let run_id = payload.get("workflow_run_id").and_then(Value::as_str).map(str::to_string);
     let msg = load_message(state, &message_id).await?;
+    // Automatic drafting can be switched off: then only a person's request (`:manual:`) drafts.
+    if !state.config.auto_drafts && !job.dedupe_key.contains(":manual:") {
+        return finish_without_draft(state, &msg.workspace_id, &message_id, run_id.as_deref(), "automatic drafts are off").await;
+    }
     let insight = analyze_message(state, &json!({ "message_id": message_id })).await?;
     // Workflows don't draft replies to email that needs none (newsletters, notifications).
     if run_id.is_some() && !insight.needs_reply {
