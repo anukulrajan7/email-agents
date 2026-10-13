@@ -170,6 +170,21 @@ impl NangoClient {
         Ok(())
     }
 
+    /// Full Gmail message via Nango's proxy (the catalog sync only stores metadata).
+    pub async fn gmail_message_full(&self, connection_id: &str, provider_config_key: &str, id: &str) -> Result<Value, NangoError> {
+        if !id.chars().all(|c| c.is_ascii_alphanumeric()) {
+            return Err(NangoError::Rejected("invalid message id".into()));
+        }
+        self.send(
+            self.http
+                .get(format!("{}/proxy/gmail/v1/users/me/messages/{id}", self.api_url))
+                .header("Connection-Id", connection_id)
+                .header("Provider-Config-Key", provider_config_key)
+                .query(&[("format", "full")]),
+        )
+        .await
+    }
+
     pub async fn list_records(
         &self,
         connection_id: &str,
@@ -273,6 +288,9 @@ pub fn map_gmail_record(rec: &Value, max_body_chars: usize) -> Option<MappedReco
     });
     let cursor = meta.and_then(|m| m.get("cursor")).and_then(Value::as_str).map(str::to_string);
 
+    // Nango's catalog `messages` sync stores Gmail-native records: headers live in
+    // payload.headers and there is no body (only `snippet`) unless enriched later.
+    let header = |name: &str| gmail_header(rec.get("payload"), name);
     let raw_body = str_of(rec, &["body", "text", "bodyText", "snippet"]).unwrap_or_default();
     let looks_html = raw_body.contains("</") || raw_body.contains("<br");
     let body_text = if looks_html { normalize::html_to_text(&raw_body) } else { raw_body.clone() };
@@ -293,14 +311,26 @@ pub fn map_gmail_record(rec: &Value, max_body_chars: usize) -> Option<MappedReco
 
     let email = NormalizedEmail {
         source_message_id: id,
-        rfc_message_id: str_of(rec, &["messageId", "message_id", "rfcMessageId"]),
-        sender_address: normalize::address(&str_of(rec, &["sender", "from"]).unwrap_or_default()),
-        sender_name: str_of(rec, &["sender", "from"]).as_deref().and_then(normalize::display_name),
+        rfc_message_id: str_of(rec, &["messageId", "message_id", "rfcMessageId"]).or_else(|| header("Message-ID")),
+        sender_address: normalize::address(&str_of(rec, &["sender", "from"]).or_else(|| header("From")).unwrap_or_default()),
+        sender_name: str_of(rec, &["sender", "from"]).or_else(|| header("From")).as_deref().and_then(normalize::display_name),
         // A connected mailbox sees the real sender; there is no forwarded wrapper to parse.
         original_sender_address: None,
-        recipients: addresses(rec.get("recipients").or_else(|| rec.get("to"))),
+        recipients: match rec.get("recipients").or_else(|| rec.get("to")) {
+            Some(v) => addresses(Some(v)),
+            None => [header("To"), header("Cc")]
+                .into_iter()
+                .flatten()
+                .flat_map(|h| addresses(Some(&Value::String(h))))
+                .collect(),
+        },
         subject: normalize::truncate_chars(
-            str_of(rec, &["subject"]).as_deref().map(str::trim).filter(|s| !s.is_empty()).unwrap_or("(no subject)"),
+            str_of(rec, &["subject"])
+                .or_else(|| header("Subject"))
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .unwrap_or("(no subject)"),
             998,
         ),
         body_text: normalize::truncate_chars(&body_text, max_body_chars),
@@ -310,7 +340,86 @@ pub fn map_gmail_record(rec: &Value, max_body_chars: usize) -> Option<MappedReco
             .unwrap_or_else(now_ms),
         attachments,
     };
-    Some(MappedRecord { email, thread_id: str_of(rec, &["threadId", "thread_id"]), deleted, cursor })
+    let mut mapped = MappedRecord { email, thread_id: str_of(rec, &["threadId", "thread_id"]), deleted, cursor };
+    // If the record already carries MIME parts (full format), use them directly.
+    if let Some(payload) = rec.get("payload") {
+        apply_gmail_payload(&mut mapped.email, payload, max_body_chars);
+    }
+    Some(mapped)
+}
+
+fn gmail_header(payload: Option<&Value>, name: &str) -> Option<String> {
+    payload?
+        .get("headers")?
+        .as_array()?
+        .iter()
+        .find(|h| h.get("name").and_then(Value::as_str).is_some_and(|n| n.eq_ignore_ascii_case(name)))
+        .and_then(|h| h.get("value").and_then(Value::as_str))
+        .map(str::to_string)
+        .filter(|v| !v.trim().is_empty())
+}
+
+fn decode_b64url(data: &str) -> Option<String> {
+    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+    let bytes = URL_SAFE_NO_PAD.decode(data.trim().trim_end_matches('=')).ok()?;
+    Some(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+#[derive(Default)]
+struct GmailContent {
+    text: Option<String>,
+    html: Option<String>,
+    attachments: Vec<AttachmentMeta>,
+}
+
+/// Walks a Gmail `format=full` MIME tree: first text/plain and text/html bodies, plus
+/// attachment metadata (parts with a filename). Attachment bytes are never fetched.
+fn walk_gmail_part(part: &Value, out: &mut GmailContent) {
+    let mime = part.get("mimeType").and_then(Value::as_str).unwrap_or_default();
+    let filename = part.get("filename").and_then(Value::as_str).unwrap_or_default();
+    let body = part.get("body");
+    if !filename.is_empty() {
+        out.attachments.push(AttachmentMeta {
+            filename: normalize::truncate_chars(filename, 255),
+            media_type: (!mime.is_empty()).then(|| mime.to_string()),
+            size_bytes: body.and_then(|b| b.get("size")).and_then(Value::as_i64),
+        });
+    } else if let Some(data) = body.and_then(|b| b.get("data")).and_then(Value::as_str) {
+        if mime == "text/plain" && out.text.is_none() {
+            out.text = decode_b64url(data);
+        } else if mime == "text/html" && out.html.is_none() {
+            out.html = decode_b64url(data);
+        }
+    }
+    for child in part.get("parts").and_then(Value::as_array).into_iter().flatten() {
+        walk_gmail_part(child, out);
+    }
+}
+
+/// Fills body/attachments (and any missing headers) from a Gmail payload.
+pub fn apply_gmail_payload(email: &mut NormalizedEmail, payload: &Value, max_body_chars: usize) {
+    let mut content = GmailContent::default();
+    walk_gmail_part(payload, &mut content);
+    match (content.text, content.html) {
+        (Some(t), html) if !t.trim().is_empty() => {
+            email.body_text = normalize::truncate_chars(&t, max_body_chars);
+            email.body_html = html.map(|h| normalize::truncate_chars(&h, max_body_chars));
+        }
+        (_, Some(h)) => {
+            email.body_text = normalize::truncate_chars(&normalize::html_to_text(&h), max_body_chars);
+            email.body_html = Some(normalize::truncate_chars(&h, max_body_chars));
+        }
+        _ => {}
+    }
+    if !content.attachments.is_empty() {
+        email.attachments = content.attachments;
+    }
+    if email.sender_address.is_empty()
+        && let Some(from) = gmail_header(Some(payload), "From")
+    {
+        email.sender_address = normalize::address(&from);
+        email.sender_name = normalize::display_name(&from);
+    }
 }
 
 // ---------------------------------------------------------------- connection registration
@@ -498,6 +607,19 @@ pub async fn sync_source(state: &AppState, payload: &Value) -> Result<(), JobErr
         candidates.truncate(state.config.nango_backfill_max);
     }
 
+    // Skip messages we already have, then fetch full content for the new ones only.
+    let ids: Vec<&str> = candidates.iter().map(|r| r.email.source_message_id.as_str()).collect();
+    let existing: Vec<String> = sqlx::query_scalar(
+        "SELECT source_message_id FROM email_messages WHERE source_id = ?1 AND source_message_id IN (SELECT value FROM json_each(?2))",
+    )
+    .bind(&source_id)
+    .bind(json!(ids).to_string())
+    .fetch_all(&state.db)
+    .await?;
+    let existing: std::collections::HashSet<String> = existing.into_iter().collect();
+    candidates.retain(|r| !existing.contains(&r.email.source_message_id));
+    enrich_with_full_messages(state, &connection_id, &pck, &mut candidates).await;
+
     let mut imported = 0usize;
     let chunks: Vec<&[MappedRecord]> = candidates.chunks(PERSIST_CHUNK).collect();
     let total_chunks = chunks.len().max(1);
@@ -541,6 +663,36 @@ pub async fn sync_source(state: &AppState, payload: &Value) -> Result<(), JobErr
     Ok(())
 }
 
+const ENRICH_CONCURRENCY: usize = 8;
+
+/// Fetches bodies + attachment metadata through Nango's proxy, 8 at a time, outside any
+/// transaction. A failed fetch keeps the snippet rather than failing the whole sync.
+async fn enrich_with_full_messages(state: &AppState, connection_id: &str, pck: &str, records: &mut [MappedRecord]) {
+    let permits = std::sync::Arc::new(tokio::sync::Semaphore::new(ENRICH_CONCURRENCY));
+    let mut tasks = tokio::task::JoinSet::new();
+    for (i, r) in records.iter().enumerate() {
+        let (nango, permits) = (state.nango.clone(), permits.clone());
+        let (conn, pck, id) = (connection_id.to_string(), pck.to_string(), r.email.source_message_id.clone());
+        tasks.spawn(async move {
+            let _permit = permits.acquire_owned().await.ok()?;
+            match nango.gmail_message_full(&conn, &pck, &id).await {
+                Ok(full) => Some((i, full)),
+                Err(e) => {
+                    tracing::warn!(error = %e, "could not fetch full Gmail message; keeping snippet");
+                    None
+                }
+            }
+        });
+    }
+    while let Some(done) = tasks.join_next().await {
+        if let Ok(Some((i, full))) = done
+            && let Some(payload) = full.get("payload")
+        {
+            apply_gmail_payload(&mut records[i].email, payload, state.config.max_body_chars);
+        }
+    }
+}
+
 /// Background registration from an `auth` webhook (no signed-in user available).
 pub async fn register_from_webhook(state: &AppState, payload: &Value) -> Result<(), JobError> {
     let connection_id = payload.get("connection_id").and_then(Value::as_str).unwrap_or_default();
@@ -569,6 +721,43 @@ mod tests {
         assert!(!verify_webhook("old", &h, body));
         assert!(!verify_webhook("new", &h, b"{}"));
         assert!(!verify_webhook("new", &HeaderMap::new(), body));
+    }
+
+    #[test]
+    fn maps_nango_catalog_gmail_messages() {
+        use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+        let rec = json!({
+            "id": "18c2ab", "threadId": "t9", "snippet": "Please find my timesheet", "historyId": "1",
+            "internalDate": "1791900000000",
+            "payload": {"headers": [
+                {"name": "From", "value": "Priya Sharma <Priya@Acme.com>"},
+                {"name": "To", "value": "hr@acme.com"}, {"name": "Cc", "value": "lead@acme.com"},
+                {"name": "Subject", "value": "September timesheet"}, {"name": "Message-ID", "value": "<abc@mail>"}
+            ]},
+            "_nango_metadata": {"deleted_at": null, "last_action": "ADDED", "cursor": "c9"}
+        });
+        let m = map_gmail_record(&rec, 10_000).unwrap();
+        assert_eq!(m.email.sender_address, "priya@acme.com");
+        assert_eq!(m.email.sender_name.as_deref(), Some("Priya Sharma"));
+        assert_eq!(m.email.recipients, vec!["hr@acme.com", "lead@acme.com"]);
+        assert_eq!(m.email.subject, "September timesheet");
+        assert_eq!(m.email.received_at, 1_791_900_000_000);
+        assert_eq!(m.email.body_text, "Please find my timesheet", "snippet until enriched");
+
+        // Enrichment from format=full: nested multipart with a PDF attachment.
+        let full = json!({"mimeType": "multipart/mixed", "headers": [], "parts": [
+            {"mimeType": "multipart/alternative", "parts": [
+                {"mimeType": "text/plain", "body": {"data": URL_SAFE_NO_PAD.encode("Hi HR,\nAttached: 168 hours.")}},
+                {"mimeType": "text/html", "body": {"data": URL_SAFE_NO_PAD.encode("<p>Hi HR</p>")}}
+            ]},
+            {"mimeType": "application/pdf", "filename": "timesheet.pdf", "body": {"attachmentId": "a1", "size": 4821}}
+        ]});
+        let mut email = m.email.clone();
+        apply_gmail_payload(&mut email, &full, 10_000);
+        assert_eq!(email.body_text, "Hi HR,\nAttached: 168 hours.");
+        assert_eq!(email.body_html.as_deref(), Some("<p>Hi HR</p>"));
+        assert_eq!(email.attachments.len(), 1);
+        assert_eq!((email.attachments[0].filename.as_str(), email.attachments[0].size_bytes), ("timesheet.pdf", Some(4821)));
     }
 
     #[test]
