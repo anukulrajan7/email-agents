@@ -12,7 +12,7 @@ Forward an HR email → it shows up in the inbox → it is classified → a time
 Needs Rust (stable) and Node 24 + pnpm.
 
 ```bash
-cp .env.example .env          # AUTH_MODE=dev, ALLOW_TEST_EMAILS=true by default
+cp .env.example .env          # AUTH_MODE=password; for a dev login set AUTH_MODE=dev + ALLOW_DEV_AUTH=1
 make api                      # API + worker on :8080 (runs migrations on start)
 make web                      # in a second terminal: http://localhost:5173
 ```

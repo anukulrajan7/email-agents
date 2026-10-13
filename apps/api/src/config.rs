@@ -67,8 +67,14 @@ pub struct Config {
     pub smtp_username: String,
     pub smtp_password: String,
     pub smtp_from: String,
-    /// Lower-case email domains allowed to sign up; empty = any domain.
+    /// Lower-case email domains allowed to sign up. With `signup_allowed_emails` also empty,
+    /// sign-up is closed except for invited emails and the very first account.
     pub signup_allowed_domains: Vec<String>,
+    /// Lower-case email addresses allowed to sign up (in addition to the allowed domains).
+    pub signup_allowed_emails: Vec<String>,
+    /// Global, all workspaces, per UTC day: automatic labelling + embedding of new mail. Above it,
+    /// labelling falls back to rules and embedding waits until someone opens the email.
+    pub ai_global_daily_budget_usd: f64,
     /// Public URL of the web app, used for deep links in alert emails.
     pub app_base_url: String,
     /// Replies are sent this many seconds after "Send" so people can undo (0 = next worker run).
@@ -133,11 +139,11 @@ impl Config {
             smtp_username: var("SMTP_USERNAME", ""),
             smtp_password: var("SMTP_PASSWORD", ""),
             smtp_from: var("SMTP_FROM", ""),
-            signup_allowed_domains: var("SIGNUP_ALLOWED_DOMAINS", "")
-                .split(',')
-                .map(|d| d.trim().trim_start_matches('@').to_lowercase())
-                .filter(|d| !d.is_empty())
-                .collect(),
+            signup_allowed_domains: list(&var("SIGNUP_ALLOWED_DOMAINS", ""), true),
+            signup_allowed_emails: list(&var("SIGNUP_ALLOWED_EMAILS", ""), false),
+            ai_global_daily_budget_usd: var("AI_GLOBAL_DAILY_BUDGET_USD", "10")
+                .parse()
+                .context("AI_GLOBAL_DAILY_BUDGET_USD")?,
             app_base_url: var("APP_BASE_URL", "https://mail.anukulraj.tech"),
             send_undo_seconds: var("SEND_UNDO_SECONDS", "30").parse::<i64>().context("SEND_UNDO_SECONDS")?.clamp(0, 600),
         };
@@ -147,14 +153,7 @@ impl Config {
             bail!("AUTH_MODE=oidc requires OIDC_ISSUER_URL and OIDC_AUDIENCE (use AUTH_MODE=dev locally)");
         }
         if config.auth_mode == AuthMode::Dev {
-            let loopback = config
-                .bind_addr
-                .parse::<std::net::SocketAddr>()
-                .map(|a| a.ip().is_loopback())
-                .unwrap_or(false);
-            if !loopback {
-                bail!("AUTH_MODE=dev accepts any email as a login; it may only bind to a loopback address");
-            }
+            check_dev_auth(var("ALLOW_DEV_AUTH", "") == "1", &config.public_web_url, &config.bind_addr)?;
         }
         Ok(config)
     }
@@ -202,6 +201,8 @@ impl Config {
             web_dist_dir: String::new(),
             signup_enabled: true,
             signup_allowed_domains: vec![],
+            signup_allowed_emails: vec![],
+            ai_global_daily_budget_usd: 10.0,
             smtp_host: String::new(),
             smtp_port: 465,
             smtp_username: String::new(),
@@ -213,9 +214,53 @@ impl Config {
     }
 }
 
+fn list(raw: &str, domains: bool) -> Vec<String> {
+    raw.split(',')
+        .map(|d| if domains { d.trim().trim_start_matches('@') } else { d.trim() }.to_lowercase())
+        .filter(|d| !d.is_empty())
+        .collect()
+}
+
+/// `AUTH_MODE=dev` accepts any email as a login: only with `ALLOW_DEV_AUTH=1`, a non-https
+/// public URL and a loopback bind address.
+pub fn check_dev_auth(allow_dev_auth: bool, public_web_url: &str, bind_addr: &str) -> anyhow::Result<()> {
+    if !allow_dev_auth {
+        bail!("AUTH_MODE=dev accepts any email as a login; set ALLOW_DEV_AUTH=1 to use it locally (use AUTH_MODE=password otherwise)");
+    }
+    if public_web_url.trim().to_lowercase().starts_with("https://") {
+        bail!("AUTH_MODE=dev is refused when PUBLIC_WEB_URL is https (that looks like production); use AUTH_MODE=password");
+    }
+    let loopback = bind_addr.parse::<std::net::SocketAddr>().map(|a| a.ip().is_loopback()).unwrap_or(false);
+    if !loopback {
+        bail!("AUTH_MODE=dev accepts any email as a login; it may only bind to a loopback address");
+    }
+    Ok(())
+}
+
 /// Svix-format secret for tests, built at runtime so no secret-shaped literal lives in
 /// the source (secret scanners flag `whsec_` strings). Not a credential.
 pub fn test_webhook_secret() -> String {
     use base64::{Engine, engine::general_purpose::STANDARD};
     format!("{}_{}", "whsec", STANDARD.encode("unit-test-only-not-a-credential"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dev_auth_is_hard_opt_in() {
+        assert!(check_dev_auth(true, "http://localhost:5173", "127.0.0.1:8080").is_ok());
+        assert!(check_dev_auth(false, "http://localhost:5173", "127.0.0.1:8080").is_err());
+        assert!(check_dev_auth(true, "https://mail.example.com", "127.0.0.1:8080").is_err());
+        assert!(check_dev_auth(true, "HTTPS://mail.example.com", "127.0.0.1:8080").is_err());
+        assert!(check_dev_auth(true, "http://localhost:5173", "0.0.0.0:8080").is_err());
+    }
+
+    #[test]
+    fn allow_lists_are_normalised() {
+        assert_eq!(list(" @Acme.com, ,beta.io ", true), ["acme.com", "beta.io"]);
+        assert_eq!(list("Priya@Acme.com,", false), ["priya@acme.com"]);
+        assert!(list("", false).is_empty());
+    }
 }

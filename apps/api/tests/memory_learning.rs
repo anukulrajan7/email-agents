@@ -73,7 +73,11 @@ impl H {
     }
 
     async fn auto(&self, ws: &str) -> Vec<Value> {
-        let (s, list) = self.call("GET", &format!("/api/v1/workspaces/{ws}/memories?origin=auto"), None).await;
+        self.auto_with(ws, "active").await
+    }
+
+    async fn auto_with(&self, ws: &str, status: &str) -> Vec<Value> {
+        let (s, list) = self.call("GET", &format!("/api/v1/workspaces/{ws}/memories?origin=auto&status={status}"), None).await;
         assert_eq!(s, StatusCode::OK);
         list["items"].as_array().unwrap().clone()
     }
@@ -111,7 +115,8 @@ async fn learns_from_incoming_mail_dedupes_and_gates_drafts() {
          FACT: client | false | Acme Corp | size | Acme Corp is a small company. | 0.1"
     );
     let m1 = h.email(&ws, &src, priya, "September timesheet", &body).await;
-    let auto = h.auto(&ws).await;
+    assert!(h.auto(&ws).await.is_empty(), "outside mail never creates active memories");
+    let auto = h.auto_with(&ws, "suggested").await;
     assert_eq!(auto.len(), 2, "{auto:?}");
     let role = by_content(&auto, "Priya Sharma is the HR manager");
     assert_eq!((role["scope"].as_str(), role["contact_email"].as_str()), (Some("contact"), Some("priya.sharma@example.com")));
@@ -119,21 +124,25 @@ async fn learns_from_incoming_mail_dedupes_and_gates_drafts() {
     assert_eq!(conf(role), 0.7, "outside mail is capped at 0.7");
     assert_eq!(role["source_message_id"].as_str(), Some(m1.as_str()));
     let client = by_content(&auto, "Acme Corp needs timesheets");
-    assert_eq!((client["scope"].as_str(), conf(client)), (Some("workspace"), 0.5));
+    assert_eq!(
+        (client["scope"].as_str(), client["contact_email"].as_str(), conf(client)),
+        (Some("contact"), Some("priya.sharma@example.com"), 0.5),
+        "a client fact from outside mail is only what this sender told us, never workspace-wide"
+    );
 
-    // 2. Low-confidence auto memories are kept but not used in drafts.
+    // 2. Suggestions are kept but never used in drafts until a person confirms them.
     let used = h.fresh_draft_memories(&ws, &m1).await;
-    assert!(used.iter().any(|u| u.starts_with("Priya Sharma is the HR manager")), "{used:?}");
-    assert!(!used.iter().any(|u| u.starts_with("Acme Corp needs")), "{used:?}");
+    assert!(used.is_empty(), "{used:?}");
 
     // 3. Seen again in another email: merged (no duplicates), confidence raised within the cap.
     let m2 = h.email(&ws, &src, priya, "October timesheet", &format!("October timesheet attached.\n{ROLE_FACT}\n{CLIENT_FACT}")).await;
-    let auto = h.auto(&ws).await;
+    let auto = h.auto_with(&ws, "suggested").await;
     assert_eq!(auto.len(), 2, "{auto:?}");
     let client = by_content(&auto, "Acme Corp needs timesheets");
     assert!((conf(client) - 0.6).abs() < 1e-9, "{client}");
     assert_eq!(client["source_message_id"].as_str(), Some(m2.as_str()));
     assert_eq!(conf(by_content(&auto, "Priya Sharma is the HR manager")), 0.7);
+    assert!(h.fresh_draft_memories(&ws, &m2).await.is_empty(), "still suggestions");
 
     // Reprocessing the same email is idempotent.
     let learn_again = memory_learning::store(&h.state.db, &ws, &m2, &m2, LearnDirection::Incoming,
@@ -145,17 +154,16 @@ async fn learns_from_incoming_mail_dedupes_and_gates_drafts() {
         .unwrap();
     assert_eq!((learn_again.created, learn_again.merged, learn_again.skipped), (0, 0, 1));
 
-    // 4. Now at 0.6 it is used; usage is recorded.
+    // 4. A person confirms the suggestion: active at confidence 1, used in drafts, usage recorded.
+    let cid = client["id"].as_str().unwrap().to_string();
+    let (s, c) = h.call("PATCH", &format!("{base}/memories/{cid}"), Some(json!({"confirmed": true}))).await;
+    assert_eq!((s, conf(&c), c["status"].as_str()), (StatusCode::OK, 1.0, Some("active")));
     let used = h.fresh_draft_memories(&ws, &m2).await;
     assert!(used.iter().any(|u| u.starts_with("Acme Corp needs")), "{used:?}");
-    let auto = h.auto(&ws).await;
-    let client = by_content(&auto, "Acme Corp needs timesheets");
+    let client = by_content(&h.auto(&ws).await, "Acme Corp needs timesheets").clone();
     assert!(client["use_count"].as_i64().unwrap() >= 1 && client["last_used_at"].is_string(), "{client}");
 
     // 5. People pin, confirm, delete; manual memories stay separate.
-    let cid = client["id"].as_str().unwrap();
-    let (s, c) = h.call("PATCH", &format!("{base}/memories/{cid}"), Some(json!({"confirmed": true}))).await;
-    assert_eq!((s, conf(&c)), (StatusCode::OK, 1.0));
     let (_, c) = h.call("PATCH", &format!("{base}/memories/{cid}"), Some(json!({"pinned": true}))).await;
     assert_eq!(c["pinned"], true);
     assert_eq!(h.call("PATCH", &format!("{base}/memories/{cid}"), Some(json!({"confirmed": false}))).await.0, StatusCode::BAD_REQUEST);
@@ -169,7 +177,7 @@ async fn learns_from_incoming_mail_dedupes_and_gates_drafts() {
     let rid = by_content(&auto, "Priya Sharma is the HR manager")["id"].as_str().unwrap().to_string();
     h.call("PATCH", &format!("{base}/memories/{rid}"), Some(json!({"status": "archived"}))).await;
     h.email(&ws, &src, priya, "November timesheet", &format!("November timesheet attached.\n{ROLE_FACT}")).await;
-    assert!(h.auto(&ws).await.iter().all(|m| m["id"] != rid.as_str()), "deleted memories are not relearned");
+    assert!(h.auto_with(&ws, "suggested").await.is_empty(), "deleted memories are not relearned");
     let (_, archived) = h.call("GET", &format!("{base}/memories?status=archived&origin=auto"), None).await;
     assert_eq!(archived["items"].as_array().unwrap().len(), 1);
 
@@ -177,6 +185,7 @@ async fn learns_from_incoming_mail_dedupes_and_gates_drafts() {
     h.email(&ws, &src, "Portal <no-reply@portal.example>", "Your weekly digest", &format!("Digest.\n{ROLE_FACT}\n\
         FACT: client | false | Portal | plan | Portal plan renews every January. | 0.9")).await;
     assert_eq!(h.auto(&ws).await.len(), 1);
+    assert!(h.auto_with(&ws, "suggested").await.is_empty());
 }
 
 #[tokio::test]
@@ -187,7 +196,7 @@ async fn approved_replies_teach_standing_answers_and_corroborate() {
     let m1 = h
         .email(&ws, &src, "Priya Sharma <priya.sharma@example.com>", "Timesheet deadline?", &format!("When is the timesheet due?\n{CLIENT_FACT}"))
         .await;
-    assert_eq!(conf(by_content(&h.auto(&ws).await, "Acme Corp needs")), 0.5);
+    assert_eq!(conf(by_content(&h.auto_with(&ws, "suggested").await, "Acme Corp needs")), 0.5);
 
     let (_, detail) = h.call("GET", &format!("{base}/messages/{m1}"), None).await;
     let draft_id = detail["draft"]["id"].as_str().expect("timesheet workflow drafts a reply").to_string();
@@ -206,6 +215,7 @@ async fn approved_replies_teach_standing_answers_and_corroborate() {
     assert_eq!(by_content(&auto, "Sign replies as")["kind"], "style");
     let client = by_content(&auto, "Acme Corp needs");
     assert!((conf(client) - 0.95).abs() < 1e-9, "a team reply lifts the outside cap: {client}");
+    assert!(h.auto_with(&ws, "suggested").await.is_empty(), "the team's reply made the suggestion usable");
 
     // Approving again (same draft) doesn't double count.
     h.call("PATCH", &format!("{base}/drafts/{draft_id}"), Some(json!({"status": "approved"}))).await;

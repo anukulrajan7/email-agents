@@ -7,6 +7,7 @@ import { ErrorNote } from '../../components/ErrorNote';
 import { cn } from '../../lib/cn';
 import { riseStyle } from '../../lib/motion';
 import { BrandPanel } from './BrandPanel';
+import { ResetPassword } from './ResetPassword';
 import { useAuthConfig, useLogin, useResendCode, useSignup, useVerify } from './hooks';
 
 const MIN_PASSWORD = 10;
@@ -22,7 +23,7 @@ function authErrorMessage(error: unknown, mode: Mode): Error | undefined {
     if (error.status === 401) return new Error('Email or password is incorrect');
     if (error.status === 409) return new Error('An account with this email already exists — sign in instead');
     if (error.status === 429) return new Error('Too many attempts. Try again in a few minutes.');
-    if (error.status === 403 && mode === 'sign-up') return new Error("Sign-ups are restricted for this workspace's domain.");
+    if (error.status === 403 && mode === 'sign-up') return new Error('Sign-up is by invitation. Ask a workspace admin to invite you.');
   }
   return error instanceof Error ? error : new Error('Something went wrong');
 }
@@ -200,6 +201,8 @@ function PasswordForm({ mode, signupEnabled }: { mode: Mode; signupEnabled: bool
   const [show, setShow] = useState(false);
   const [capsOn, setCapsOn] = useState(false);
   const [pending, setPending] = useState<{ email: string; notice?: string } | undefined>();
+  const [resetting, setResetting] = useState(false);
+  const [resetNotice, setResetNotice] = useState<string | undefined>();
   const login = useLogin();
   const signup = useSignup();
   const action = isSignUp ? signup : login;
@@ -252,6 +255,19 @@ function PasswordForm({ mode, signupEnabled }: { mode: Mode; signupEnabled: bool
         onBack={() => {
           action.reset();
           setPending(undefined);
+          setPassword('');
+        }}
+      />
+    );
+  }
+
+  if (resetting) {
+    return (
+      <ResetPassword
+        initialEmail={email.trim()}
+        onDone={(notice) => {
+          setResetting(false);
+          setResetNotice(notice);
           setPassword('');
         }}
       />
@@ -376,7 +392,17 @@ function PasswordForm({ mode, signupEnabled }: { mode: Mode; signupEnabled: bool
               </FieldHint>
             </div>
           )}
+          {!isSignUp && (
+            <button type="button" className={cn(linkClass, 'self-start text-xs')} onClick={() => setResetting(true)}>
+              Forgot password?
+            </button>
+          )}
         </div>
+        {resetNotice && (
+          <p role="status" className="text-sm text-ink-muted">
+            {resetNotice}
+          </p>
+        )}
         <ErrorNote error={error} />
         {conflict && (
           <Link to="/sign-in" className={cn(linkClass, 'text-sm')}>

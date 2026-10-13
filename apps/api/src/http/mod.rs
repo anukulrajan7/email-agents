@@ -76,14 +76,20 @@ pub struct AppState {
 }
 
 pub fn router(state: AppState) -> Router {
+    // Endpoints that hash passwords or send email: limited per client IP.
+    let auth = Router::new()
+        .route("/auth/signup", post(auth_api::signup))
+        .route("/auth/login", post(auth_api::login))
+        .route("/auth/verify", post(auth_api::verify))
+        .route("/auth/resend-code", post(auth_api::resend_code))
+        .route("/auth/password-reset/request", post(auth_api::password_reset_request))
+        .route("/auth/password-reset/confirm", post(auth_api::password_reset_confirm))
+        .route_layer(middleware::from_fn_with_state(state.clone(), crate::security::auth_rate_limit));
     let api = Router::new()
         .route("/me", get(workspaces::me))
         .route("/auth/config", get(auth_api::config))
-        .route("/auth/signup", post(auth_api::signup))
-        .route("/auth/login", post(auth_api::login))
         .route("/auth/logout", post(auth_api::logout))
-        .route("/auth/verify", post(auth_api::verify))
-        .route("/auth/resend-code", post(auth_api::resend_code))
+        .merge(auth)
         .route("/workspaces", get(workspaces::list).post(workspaces::create))
         .route("/label-templates", get(labels_api::templates))
         .route("/workspaces/{ws}/labels", get(labels_api::list).post(labels_api::create))
@@ -167,6 +173,7 @@ pub fn router(state: AppState) -> Router {
     app.layer(TraceLayer::new_for_http())
         .layer(middleware::from_fn(request_id_middleware))
         .layer(cors)
+        .layer(middleware::from_fn(crate::security::security_headers))
         .with_state(state)
 }
 

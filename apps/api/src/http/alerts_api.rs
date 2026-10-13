@@ -9,11 +9,14 @@ use super::AppState;
 use crate::{
     alerts::{self, ALERT_SELECT, AlertLine, AlertRow, AlertSettings},
     audit::{self, Actor, Entry},
-    auth::{AuthUser, require_role},
+    auth::{AuthUser, VERIFIED_USER, require_role},
     db::now_ms,
     domain::Role,
     error::{AppError, AppResult},
 };
+
+/// One test alert email per workspace per 10 minutes.
+const TEST_ALERT_WINDOW_MS: i64 = 10 * 60_000;
 
 #[derive(Deserialize)]
 pub struct ListQuery {
@@ -130,6 +133,16 @@ pub async fn put_settings(
 ) -> AppResult<Json<AlertSettings>> {
     require_role(&state.db, &ws, &user, Role::Admin).await?;
     let settings = body.validated().map_err(AppError::BadRequest)?;
+    // Alert email goes only to people who proved they own the address and belong here.
+    let members: Vec<String> = sqlx::query_scalar(&format!(
+        "SELECT lower(u.email) FROM memberships m JOIN users u ON u.id = m.user_id WHERE m.workspace_id = ?1 AND {VERIFIED_USER}"
+    ))
+    .bind(&ws)
+    .fetch_all(&state.db)
+    .await?;
+    if let Some(outsider) = settings.recipients.iter().chain(&settings.escalate_to).find(|e| !members.contains(e)) {
+        return Err(AppError::BadRequest(format!("{outsider} is not a verified member of this workspace")));
+    }
     alerts::save_settings(&state.db, &ws, &settings).await?;
     let mut conn = state.db.acquire().await?;
     audit::record(
@@ -156,6 +169,9 @@ pub async fn test(State(state): State<AppState>, user: AuthUser, Path(ws): Path<
     let settings = alerts::load_settings(&state.db, &ws).await?;
     if settings.recipients.is_empty() {
         return Err(AppError::BadRequest("add at least one recipient first".into()));
+    }
+    if !crate::security::take(&state.db, "alert_test", &ws, 1, TEST_ALERT_WINDOW_MS).await? {
+        return Err(AppError::RateLimited);
     }
     let base = state.config.app_base_url.trim_end_matches('/').to_string();
     let name: String = sqlx::query_scalar("SELECT name FROM workspaces WHERE id = ?1").bind(&ws).fetch_one(&state.db).await?;

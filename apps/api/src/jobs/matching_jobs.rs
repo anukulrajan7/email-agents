@@ -76,7 +76,7 @@ async fn read_attachments(state: &AppState, message_id: &str, msg: &MessageRow) 
                 let path = format!("messages/{}/attachments/{att}", msg.source_message_id);
                 match state.nango.gmail_call(Method::GET, conn, pck, &path, None).await {
                     Ok(v) => match v.get("data").and_then(Value::as_str).and_then(|d| URL_SAFE_NO_PAD.decode(d.trim_end_matches('=')).ok()) {
-                        Some(bytes) => match matching::attachment_text(&a.filename, a.media_type.as_deref(), &bytes) {
+                        Some(bytes) => match matching::attachment_text_isolated(a.filename.clone(), a.media_type.clone(), bytes).await {
                             TextResult::Text(t) => ("extracted", Some(t)),
                             TextResult::Unsupported => ("unsupported", None),
                             TextResult::Failed(e) => {

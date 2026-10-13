@@ -145,9 +145,12 @@ async fn maintenance(state: &AppState) {
         tracing::warn!(error = %e, "failed to schedule match digest");
     }
     let hour_bucket = now_ms() / 3_600_000;
+    let day = now_ms() / 86_400_000;
     let enqueued = async {
         let mut conn = state.db.acquire().await?;
-        jobs::enqueue(&mut conn, kind::PURGE_EXPIRED_EVENTS, &format!("purge:{hour_bucket}"), None, &json!({})).await
+        jobs::enqueue(&mut conn, kind::PURGE_EXPIRED_EVENTS, &format!("purge:{hour_bucket}"), None, &json!({})).await?;
+        // Nightly: the first maintenance pass of each UTC day.
+        jobs::enqueue(&mut conn, kind::BACKUP_DATABASE, &format!("backup:{day}"), None, &json!({})).await
     }
     .await;
     if let Err(e) = enqueued {

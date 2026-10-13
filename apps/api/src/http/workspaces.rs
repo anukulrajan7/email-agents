@@ -12,7 +12,7 @@ use super::{
 };
 use crate::{
     audit::{self, Actor, Entry},
-    auth::{AuthUser, require_role},
+    auth::{AuthUser, VERIFIED_USER, require_role},
     config::AuthMode,
     db::{new_id, now_ms},
     domain::{Role, WORKFLOW_TEMPLATES},
@@ -53,6 +53,9 @@ pub async fn list(State(state): State<AppState>, user: AuthUser) -> AppResult<Js
     Ok(Json(Items { items: workspaces_for(&state, &user).await? }))
 }
 
+/// Workspaces one person may administer (each one seeds labels, workflows and automations).
+pub const MAX_WORKSPACES_PER_USER: i64 = 5;
+
 #[derive(Deserialize)]
 pub struct CreateWorkspace {
     name: String,
@@ -74,12 +77,20 @@ pub async fn create(
     let id = new_id("ws");
     let now = now_ms();
     let mut tx = state.db.begin().await?;
+    // Write first so SQLite takes the write lock: the cap check below can't race another create.
     sqlx::query("INSERT INTO workspaces (id, name, created_at) VALUES (?1, ?2, ?3)")
         .bind(&id)
         .bind(name)
         .bind(now)
         .execute(&mut *tx)
         .await?;
+    let administered: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM memberships WHERE user_id = ?1 AND role = 'admin'")
+        .bind(&user.id)
+        .fetch_one(&mut *tx)
+        .await?;
+    if administered >= MAX_WORKSPACES_PER_USER {
+        return Err(AppError::Denied(format!("You can have at most {MAX_WORKSPACES_PER_USER} workspaces")));
+    }
     sqlx::query("INSERT INTO memberships (workspace_id, user_id, role) VALUES (?1, ?2, 'admin')")
         .bind(&id)
         .bind(&user.id)
@@ -130,18 +141,54 @@ pub async fn add_member(
     user: AuthUser,
     Path(ws): Path<String>,
     Json(body): Json<AddMember>,
-) -> AppResult<Json<Value>> {
+) -> AppResult<(StatusCode, Json<Value>)> {
     require_role(&state.db, &ws, &user, Role::Admin).await?;
     let role = Role::parse(&body.role).ok_or_else(|| AppError::BadRequest("role must be admin or operator".into()))?;
     let email = body.email.trim().to_lowercase();
     if email.is_empty() {
         return Err(AppError::BadRequest("email is required".into()));
     }
-    let member_id: String = sqlx::query_scalar("SELECT id FROM users WHERE email = ?1 ORDER BY created_at LIMIT 1")
+    if email.len() > 254 || !email.split_once('@').is_some_and(|(l, d)| !l.is_empty() && d.contains('.')) {
+        return Err(AppError::BadRequest("enter a valid email address".into()));
+    }
+    // Only an account that proved it owns the address joins directly. Anyone else (no account,
+    // or an unverified sign-up that might be a squatter) gets a pending invitation that turns
+    // into a membership when the real owner signs up and verifies.
+    let member_id: Option<String> = sqlx::query_scalar(&format!(
+        "SELECT u.id FROM users u WHERE u.email = ?1 AND {VERIFIED_USER} ORDER BY u.created_at LIMIT 1"
+    ))
+    .bind(&email)
+    .fetch_optional(&state.db)
+    .await?;
+    let Some(member_id) = member_id else {
+        let mut tx = state.db.begin().await?;
+        sqlx::query(
+            "INSERT INTO invitations (workspace_id, email, role, invited_by, created_at) VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(workspace_id, email) DO UPDATE SET role = excluded.role, invited_by = excluded.invited_by",
+        )
+        .bind(&ws)
         .bind(&email)
-        .fetch_optional(&state.db)
-        .await?
-        .ok_or_else(|| AppError::BadRequest("user must sign in once before being added".into()))?;
+        .bind(role.as_str())
+        .bind(&user.id)
+        .bind(now_ms())
+        .execute(&mut *tx)
+        .await?;
+        audit::record(
+            &mut tx,
+            Entry {
+                workspace_id: &ws,
+                actor: Actor::User(&user.id),
+                action: "member.invited",
+                entity_type: "invitation",
+                entity_id: &email,
+                message_id: None,
+                metadata: json!({ "role": role.as_str() }),
+            },
+        )
+        .await?;
+        tx.commit().await?;
+        return Ok((StatusCode::ACCEPTED, Json(json!({ "invited": true, "email": email, "role": role.as_str() }))));
+    };
     let mut tx = state.db.begin().await?;
     sqlx::query(
         "INSERT INTO memberships (workspace_id, user_id, role) VALUES (?1, ?2, ?3)
@@ -174,5 +221,5 @@ pub async fn add_member(
     )
     .await?;
     tx.commit().await?;
-    Ok(Json(json!({ "user_id": member_id, "email": email, "role": role.as_str() })))
+    Ok((StatusCode::OK, Json(json!({ "user_id": member_id, "email": email, "role": role.as_str() }))))
 }

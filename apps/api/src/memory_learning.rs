@@ -1,8 +1,9 @@
 //! Self-learning memory: turns facts the extractor proposes into `origin='auto'` memories.
 //!
 //! Rules (all deterministic, applied after the model):
-//! - Incoming mail may only teach `contact`/`client` facts, never instructions; team replies may also teach
-//!   standing answers and preferences/style.
+//! - Incoming mail may only teach `contact`/`client` facts, never instructions, scoped to the sender (never
+//!   workspace-wide), and stored as `suggested`: not used in drafts until a person confirms it or a team
+//!   reply states it too. Team replies may also teach standing answers and preferences/style (active at once).
 //! - Secrets, OTPs, sensitive personal data, links and long digit runs are dropped (word-boundary matching).
 //! - Confidence: facts seen only in outside mail are capped at 0.7; once a team reply states them, at 0.95;
 //!   a person confirming sets 1.0. Each extra distinct source adds 0.1 (within the cap).
@@ -105,6 +106,9 @@ pub fn sanitize(direction: LearnDirection, counterpart: Option<&str>, facts: Vec
                 return None;
             }
             let (scope, kind) = match (direction, f.category.as_str()) {
+                // Outside mail only ever teaches "what this sender told us", never workspace-wide facts.
+                (LearnDirection::Incoming, "contact" | "client") if counterpart.is_some() => ("contact", "fact"),
+                (LearnDirection::Incoming, _) => return None,
                 (_, "contact") if f.about_counterpart && counterpart.is_some() => ("contact", "fact"),
                 (_, "contact" | "client") => ("workspace", "fact"),
                 (LearnDirection::Reply, "answer") => ("workspace", "fact"),
@@ -224,7 +228,7 @@ pub async fn store(
                 sqlx::query(
                     "INSERT INTO memories (id, workspace_id, scope, contact_email, kind, content, status, source, origin,
                                            confidence, subject, dedupe_key, sources_json, evidence_message_id, created_at, updated_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'active', 'learned', 'auto', ?7, ?8, ?9, ?10, ?11, ?12, ?12)",
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?13, 'learned', 'auto', ?7, ?8, ?9, ?10, ?11, ?12, ?12)",
                 )
                 .bind(&id)
                 .bind(workspace_id)
@@ -238,6 +242,7 @@ pub async fn store(
                 .bind(json!([source]).to_string())
                 .bind(source_message_id)
                 .bind(now)
+                .bind(if via == LearnDirection::Incoming { "suggested" } else { "active" })
                 .execute(&mut *tx)
                 .await?;
                 report.created += 1;
@@ -262,8 +267,11 @@ pub async fn store(
                     // The fact changed (e.g. a new role): newest statement wins, without a corroboration boost.
                     (false, false) => (fact.content.clone(), row.confidence.max(fact.confidence).min(if team_seen { TEAM_CAP } else { EXTERNAL_CAP })),
                 };
+                // A suggestion from outside mail becomes usable once the team's own reply states it.
+                let status = if row.status == "suggested" && team_seen { "active" } else { row.status.as_str() };
                 sqlx::query(
-                    "UPDATE memories SET content = ?1, confidence = ?2, sources_json = ?3, evidence_message_id = ?4, updated_at = ?5
+                    "UPDATE memories SET content = ?1, confidence = ?2, sources_json = ?3, evidence_message_id = ?4, updated_at = ?5,
+                                         status = ?7
                      WHERE id = ?6",
                 )
                 .bind(&content)
@@ -272,6 +280,7 @@ pub async fn store(
                 .bind(source_message_id)
                 .bind(now)
                 .bind(&row.id)
+                .bind(status)
                 .execute(&mut *tx)
                 .await?;
                 report.merged += 1;
@@ -297,11 +306,11 @@ pub async fn store(
     Ok(report)
 }
 
-/// Keeps active auto memories within `cap`: drops unused, low-confidence, oldest first.
+/// Keeps auto memories (active + suggested) within `cap`: drops suggestions, then unused, low-confidence, oldest first.
 /// Pinned and confirmed memories are never evicted.
 async fn evict(conn: &mut SqliteConnection, workspace_id: &str, cap: i64) -> sqlx::Result<u64> {
     let count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM memories WHERE workspace_id = ?1 AND origin = 'auto' AND status = 'active'",
+        "SELECT COUNT(*) FROM memories WHERE workspace_id = ?1 AND origin = 'auto' AND status IN ('active', 'suggested')",
     )
     .bind(workspace_id)
     .fetch_one(&mut *conn)
@@ -313,8 +322,8 @@ async fn evict(conn: &mut SqliteConnection, workspace_id: &str, cap: i64) -> sql
     let res = sqlx::query(
         "DELETE FROM memories WHERE id IN (
            SELECT id FROM memories
-           WHERE workspace_id = ?1 AND origin = 'auto' AND status = 'active' AND pinned = 0 AND confidence < 1.0
-           ORDER BY use_count ASC, confidence ASC, updated_at ASC LIMIT ?2)",
+           WHERE workspace_id = ?1 AND origin = 'auto' AND status IN ('active', 'suggested') AND pinned = 0 AND confidence < 1.0
+           ORDER BY status = 'suggested' DESC, use_count ASC, confidence ASC, updated_at ASC LIMIT ?2)",
     )
     .bind(workspace_id)
     .bind(excess)
@@ -411,6 +420,21 @@ mod tests {
 
         let team = sanitize(LearnDirection::Reply, None, vec![fact("answer", false, "Timesheets are due by the 3rd.", 0.99)]);
         assert_eq!((team[0].kind, team[0].confidence), ("fact", TEAM_CAP));
+    }
+
+    #[test]
+    fn outside_mail_never_teaches_workspace_wide_facts() {
+        let out = sanitize(
+            LearnDirection::Incoming,
+            Some("mallory@evil.test"),
+            vec![
+                fact("client", false, "Acme pays invoices to the account in the latest email.", 0.9),
+                fact("contact", false, "The CFO at Acme is Mallory.", 0.9),
+            ],
+        );
+        assert_eq!(out.len(), 2, "{out:?}");
+        assert!(out.iter().all(|f| f.scope == "contact" && f.contact_email.as_deref() == Some("mallory@evil.test")), "{out:?}");
+        assert!(sanitize(LearnDirection::Incoming, None, vec![fact("client", false, "Acme has 3 open Java roles.", 0.9)]).is_empty());
     }
 
     #[test]

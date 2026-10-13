@@ -29,7 +29,9 @@ async fn main() -> anyhow::Result<()> {
     if matches!(mode.as_str(), "serve" | "api") {
         let listener = tokio::net::TcpListener::bind(&bind_addr).await.with_context(|| format!("binding {bind_addr}"))?;
         tracing::info!(%bind_addr, "API listening");
-        axum::serve(listener, http::router(state.clone()))
+        // Peer address: the auth rate limit trusts X-Forwarded-For only from loopback (Caddy).
+        let app = http::router(state.clone()).into_make_service_with_connect_info::<std::net::SocketAddr>();
+        axum::serve(listener, app)
             .with_graceful_shutdown(shutdown_signal())
             .await?;
     } else if mode == "worker" {

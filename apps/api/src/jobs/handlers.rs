@@ -51,6 +51,14 @@ impl From<AiError> for JobError {
 /// call, no tokens) and run when a person opens the email (`:open:` jobs) or asks (`:manual:`).
 /// Plain labelling of newly imported mail still runs: it's one cheap call and fills the inbox.
 async fn deferred_until_opened(state: &AppState, job: &Job, payload: &Value) -> Result<bool, JobError> {
+    // Global inbound cap: automatic embedding waits; opening the email (`index:{id}:open`) re-runs it.
+    let by_person = job.dedupe_key.contains(":open") || job.dedupe_key.contains(":manual:");
+    if job.kind == kind::INDEX_MESSAGE
+        && !by_person
+        && !ai_ledger::within_global_budget(&state.db, state.config.ai_global_daily_budget_usd).await
+    {
+        return Ok(true);
+    }
     let deferrable = match job.kind.as_str() {
         kind::ANALYZE_MESSAGE | kind::LEARN_FROM_MESSAGE | kind::INDEX_MESSAGE | kind::RUN_AUTOMATIONS | kind::EXTRACT_RECORD
         | kind::EXECUTE_WORKFLOW => true,
@@ -58,7 +66,7 @@ async fn deferred_until_opened(state: &AppState, job: &Job, payload: &Value) -> 
         kind::CLASSIFY_EMAIL => job.dedupe_key.contains(":recheck:") || job.dedupe_key.contains(":label:"),
         _ => false,
     };
-    if !deferrable || job.dedupe_key.contains(":open:") || job.dedupe_key.contains(":manual:") {
+    if !deferrable || (job.dedupe_key.contains(":open:") || job.dedupe_key.ends_with(":open")) || job.dedupe_key.contains(":manual:") {
         return Ok(false);
     }
     let costs_tokens = matches!(
@@ -97,6 +105,7 @@ pub async fn handle(state: &AppState, job: &Job) -> Result<(), JobError> {
         kind::EXECUTE_WORKFLOW => execute_workflow(state, &payload).await,
         kind::GENERATE_DRAFT => generate_draft(state, job, &payload).await,
         kind::PURGE_EXPIRED_EVENTS => purge_expired_events(state).await,
+        kind::BACKUP_DATABASE => backup_database(state).await,
         kind::SYNC_NANGO_SOURCE => crate::sources::nango::sync_source(state, &payload).await,
         kind::LEARN_FROM_DRAFT => learn_from_draft(state, &payload).await,
         kind::ANALYZE_MESSAGE => {
@@ -305,8 +314,16 @@ async fn classify_email(state: &AppState, job: &Job, payload: &Value) -> Result<
         .fetch_all(&state.db)
         .await?;
     let sender_history = memory::context_for(&state.db, &msg.workspace_id, &msg.sender_address, "").await?.sender_history;
+    // Over the global inbound cap, automatic labelling uses the free rules (no model, no embedding).
+    let over_global_cap = !job.dedupe_key.contains(":reprocess:")
+        && !ai_ledger::within_global_budget(&state.db, state.config.ai_global_daily_budget_usd).await;
+    let examples = if over_global_cap {
+        vec![]
+    } else {
+        crate::knowledge::label_examples(&state.db, state.embedder.as_ref(), &msg.workspace_id, &message_id, &msg.subject, &msg.body_text).await
+    };
     let input = ClassifyInput {
-        examples: crate::knowledge::label_examples(&state.db, state.embedder.as_ref(), &msg.workspace_id, &message_id, &msg.subject, &msg.body_text).await,
+        examples,
         subject: msg.subject,
         sender: msg.sender_address,
         body_text: msg.body_text,
@@ -314,7 +331,12 @@ async fn classify_email(state: &AppState, job: &Job, payload: &Value) -> Result<
         sender_history,
         labels: labels::active(&state.db, &msg.workspace_id).await?,
     };
-    let out = state.classifier.classify(&input).await?;
+    let out = if over_global_cap {
+        tracing::warn!("global daily AI budget reached: labelling with rules");
+        ai::Classifier::classify(&ai::fallback::RulesClassifier, &input).await?
+    } else {
+        state.classifier.classify(&input).await?
+    };
     persist_classification(state, &message_id, &out, Actor::System, Some(&job.id), WriteMode::Upsert).await?;
     state.jobs_notify.notify_one();
     Ok(())
@@ -619,9 +641,10 @@ async fn generate_draft(state: &AppState, job: &Job, payload: &Value) -> Result<
         None => None,
     };
     let requested = (payload.get("quality").and_then(Value::as_str) == Some("premium")).then_some(ai::DraftQuality::Premium);
+    let by_person = job.dedupe_key.contains(":manual:");
     let generated = match automation_draft {
         Some(_) => None,
-        None => Some(compose_draft(state, &message_id, &msg, insight, None, requested).await?),
+        None => Some(compose_draft(state, &message_id, &msg, insight, None, requested, !by_person).await?),
     };
     if let Some((out, _, _)) = &generated
         && out.body_text.trim().is_empty()
@@ -701,6 +724,8 @@ async fn generate_draft(state: &AppState, job: &Job, payload: &Value) -> Result<
 
 /// Runs the drafter with the workspace's labels, trusted memory and the email's insight.
 /// `extra_instructions` (from an automation) is passed to the drafter as one more memory note.
+/// `automated` (nobody asked for this draft): past replies only from the sender's own domain and
+/// no auto-learned workspace-wide notes, so outside mail can't pull other clients' data into it.
 async fn compose_draft(
     state: &AppState,
     message_id: &str,
@@ -708,6 +733,7 @@ async fn compose_draft(
     insight: ai::Insight,
     extra_instructions: Option<&str>,
     requested: Option<ai::DraftQuality>,
+    automated: bool,
 ) -> Result<(ai::DraftOutput, memory::MemoryContext, ai::DraftQuality), JobError> {
     let classification: Option<(String, String)> =
         sqlx::query_as("SELECT category, priority FROM classifications WHERE message_id = ?1")
@@ -727,15 +753,26 @@ async fn compose_draft(
         if settings.reply_instructions.is_empty() { ai::routing::DEFAULT_REPLY_STYLE.to_string() } else { settings.reply_instructions };
 
     // Trusted memory (staff notes + learned sender profile), retrieved by sender and topic.
-    let ctx = memory::context_for(&state.db, &msg.workspace_id, &msg.sender_address, &msg.subject).await?;
+    let ctx = if automated {
+        memory::context_for_automation(&state.db, &msg.workspace_id, &msg.sender_address, &msg.subject).await?
+    } else {
+        memory::context_for(&state.db, &msg.workspace_id, &msg.sender_address, &msg.subject).await?
+    };
     let mut memory_notes = ctx.lines();
     if let Some(extra) = extra_instructions.map(str::trim).filter(|e| !e.is_empty()) {
         memory_notes.push(format!("Instruction for this reply: {extra}"));
     }
+    let (db, embedder) = (&state.db, state.embedder.as_ref());
+    let examples = if automated {
+        let domain = msg.sender_address.rsplit_once('@').map(|(_, d)| d.to_lowercase()).unwrap_or_default();
+        crate::knowledge::reply_examples_from_domain(db, embedder, &msg.workspace_id, message_id, &msg.subject, &msg.body_text, &domain).await
+    } else {
+        crate::knowledge::reply_examples(db, embedder, &msg.workspace_id, message_id, &msg.subject, &msg.body_text).await
+    };
     let out = state
         .drafter
         .draft(&DraftInput {
-            examples: crate::knowledge::reply_examples(&state.db, state.embedder.as_ref(), &msg.workspace_id, message_id, &msg.subject, &msg.body_text).await,
+            examples,
             category,
             category_name,
             category_description,
@@ -773,7 +810,7 @@ pub async fn create_draft_for_message(
     if !insight.needs_reply {
         return Ok(None);
     }
-    let (out, ctx, quality) = compose_draft(state, message_id, &msg, insight, extra_instructions, None).await?;
+    let (out, ctx, quality) = compose_draft(state, message_id, &msg, insight, extra_instructions, None, true).await?;
     if out.body_text.trim().is_empty() {
         return Ok(None);
     }
@@ -840,7 +877,7 @@ pub async fn create_agent_draft(
     }
     let msg = load_message(state, message_id).await?;
     let insight = analyze_message(state, &json!({ "message_id": message_id })).await?;
-    let (out, ctx, quality) = compose_draft(state, message_id, &msg, insight, instructions, requested).await?;
+    let (out, ctx, quality) = compose_draft(state, message_id, &msg, insight, instructions, requested, true).await?;
     if out.body_text.trim().is_empty() {
         return Ok(None);
     }
@@ -1012,6 +1049,17 @@ async fn learn_from_draft(state: &AppState, payload: &Value) -> Result<(), JobEr
 
 // ---------------------------------------------------------------- retention
 
+async fn backup_database(state: &AppState) -> Result<(), JobError> {
+    let Some(dir) = crate::backup::backup_dir(&state.config.database_url) else { return Ok(()) };
+    let today = time::OffsetDateTime::now_utc().date();
+    match crate::backup::run(&state.db, &dir, today, crate::backup::KEEP).await {
+        Ok(Some(path)) => tracing::info!(path = %path.display(), "database backup written"),
+        Ok(None) => {}
+        Err(e) => return Err(JobError::Retry(format!("database backup failed: {e:#}"))),
+    }
+    Ok(())
+}
+
 async fn purge_expired_events(state: &AppState) -> Result<(), JobError> {
     let cutoff = now_ms() - state.config.email_retention_days * 86_400_000;
     let purged = sqlx::query("UPDATE inbound_events SET payload_json = '{}' WHERE created_at < ?1 AND payload_json != '{}'")
@@ -1026,6 +1074,7 @@ async fn purge_expired_events(state: &AppState) -> Result<(), JobError> {
         .rows_affected();
     sqlx::query("DELETE FROM judge_cache WHERE created_at < ?1").bind(cutoff).execute(&state.db).await?;
     sqlx::query("DELETE FROM email_outbox WHERE created_at < ?1").bind(cutoff).execute(&state.db).await?;
-    tracing::info!(purged_payloads = purged, deleted_jobs = jobs, "retention purge");
+    let rate_events = crate::security::purge_rate_events(&state.db).await?;
+    tracing::info!(purged_payloads = purged, deleted_jobs = jobs, rate_events, "retention purge");
     Ok(())
 }

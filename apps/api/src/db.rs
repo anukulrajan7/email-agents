@@ -40,12 +40,32 @@ pub async fn connect(database_url: &str) -> anyhow::Result<SqlitePool> {
     {
         std::fs::create_dir_all(parent).context("creating database directory")?;
     }
+    create_private(options.get_filename()).context("creating database file")?;
 
     SqlitePoolOptions::new()
         .max_connections(8)
         .connect_with(options)
         .await
         .context("connecting to SQLite")
+}
+
+/// A new database file is created owner-only (0600); SQLite gives its -wal/-shm files the
+/// same permissions. An existing file is left as it is.
+#[cfg(unix)]
+fn create_private(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::OpenOptionsExt;
+    if path.as_os_str().is_empty() || path.to_str() == Some(":memory:") || path.exists() {
+        return Ok(());
+    }
+    match std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(path) {
+        Err(e) if e.kind() != std::io::ErrorKind::AlreadyExists => Err(e),
+        _ => Ok(()),
+    }
+}
+
+#[cfg(not(unix))]
+fn create_private(_path: &Path) -> std::io::Result<()> {
+    Ok(())
 }
 
 pub async fn migrate(pool: &SqlitePool) -> anyhow::Result<()> {

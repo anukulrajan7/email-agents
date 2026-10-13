@@ -553,7 +553,30 @@ pub async fn reply_examples(
     subject: &str,
     body: &str,
 ) -> Vec<ReplyExample> {
-    match try_reply_examples(db, embedder, workspace_id, exclude_message_id, subject, body).await {
+    match try_reply_examples(db, embedder, workspace_id, exclude_message_id, subject, body, None).await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(error = %e, "reply example retrieval failed; drafting without examples");
+            vec![]
+        }
+    }
+}
+
+/// Like `reply_examples`, but only replies to senders at `sender_domain`: drafts nobody asked
+/// for must not quote what the team wrote to other organisations.
+pub async fn reply_examples_from_domain(
+    db: &SqlitePool,
+    embedder: &dyn Embedder,
+    workspace_id: &str,
+    exclude_message_id: &str,
+    subject: &str,
+    body: &str,
+    sender_domain: &str,
+) -> Vec<ReplyExample> {
+    if sender_domain.is_empty() {
+        return vec![];
+    }
+    match try_reply_examples(db, embedder, workspace_id, exclude_message_id, subject, body, Some(sender_domain)).await {
         Ok(v) => v,
         Err(e) => {
             tracing::warn!(error = %e, "reply example retrieval failed; drafting without examples");
@@ -569,6 +592,7 @@ async fn try_reply_examples(
     exclude_message_id: &str,
     subject: &str,
     body: &str,
+    sender_domain: Option<&str>,
 ) -> sqlx::Result<Vec<ReplyExample>> {
     if !has_chunks(db, workspace_id, kind::REPLY).await? {
         return Ok(vec![]);
@@ -587,10 +611,13 @@ async fn try_reply_examples(
     }
     let sql = format!(
         "SELECT d.id, m.subject, d.body_text FROM drafts d JOIN email_messages m ON m.id = d.message_id
-         WHERE d.workspace_id = ? AND d.status IN ('approved', 'sent') AND d.id IN ({})",
+         WHERE d.workspace_id = ? AND d.status IN ('approved', 'sent')
+           AND (? IS NULL OR lower(substr(m.sender_address, instr(m.sender_address, '@') + 1)) = ?)
+           AND d.id IN ({})",
         in_list(ids.len())
     );
-    let mut q = sqlx::query_as::<_, (String, String, String)>(&sql).bind(workspace_id);
+    let domain = sender_domain.map(str::to_lowercase);
+    let mut q = sqlx::query_as::<_, (String, String, String)>(&sql).bind(workspace_id).bind(&domain).bind(&domain);
     for id in &ids {
         q = q.bind(id);
     }

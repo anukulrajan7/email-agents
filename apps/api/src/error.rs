@@ -40,6 +40,9 @@ pub enum AppError {
     Unauthorized,
     #[error("you do not have access to this resource")]
     Forbidden,
+    /// 403 with a specific, user-facing reason (e.g. "Sign-up is by invitation").
+    #[error("{0}")]
+    Denied(String),
     #[error("not found")]
     NotFound,
     #[error("{0}")]
@@ -80,7 +83,7 @@ impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         let (status, code) = match &self {
             AppError::Unauthorized => (StatusCode::UNAUTHORIZED, "unauthorized"),
-            AppError::Forbidden => (StatusCode::FORBIDDEN, "forbidden"),
+            AppError::Forbidden | AppError::Denied(_) => (StatusCode::FORBIDDEN, "forbidden"),
             AppError::NotFound => (StatusCode::NOT_FOUND, "not_found"),
             AppError::BadRequest(_) => (StatusCode::BAD_REQUEST, "bad_request"),
             AppError::Conflict(_) => (StatusCode::CONFLICT, "conflict"),

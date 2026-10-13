@@ -6,7 +6,7 @@ use std::collections::{HashMap, HashSet};
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
-use super::{AiError, openrouter::OpenRouterClient, prepare_text};
+use super::{AiError, fence::fence_inline, openrouter::OpenRouterClient, prepare_text};
 use crate::{
     domain::Label,
     labels::{COLORS, slugify},
@@ -129,7 +129,12 @@ impl LabelSuggester for OpenRouterLabelSuggester {
         }
         user.push_str("</existing_labels>\n<emails>\n");
         for (i, s) in samples.iter().take(MAX_SAMPLES).enumerate() {
-            user.push_str(&format!("{}. Subject: {}\n   {}\n", i + 1, prepare_text(&s.subject), prepare_text(&s.snippet).replace('\n', " ")));
+            user.push_str(&format!(
+                "{}. Subject: {}\n   {}\n",
+                i + 1,
+                fence_inline(&prepare_text(&s.subject)),
+                fence_inline(&prepare_text(&s.snippet))
+            ));
         }
         user.push_str("</emails>");
         let schema = json!({

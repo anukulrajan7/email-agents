@@ -372,15 +372,48 @@ pub fn attachment_text(filename: &str, media_type: Option<&str>, bytes: &[u8]) -
     }
 }
 
+/// Parsers get this long before the job records a failure.
+pub const PARSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+/// Zip-bomb guards for DOCX: entries, declared uncompressed total, and the document part.
+const MAX_DOCX_ENTRIES: usize = 2_000;
+const MAX_DOCX_UNCOMPRESSED: u64 = 100 * 1024 * 1024;
+const MAX_DOCX_XML: u64 = 20 * 1024 * 1024;
+
+/// `attachment_text` off the async runtime, isolated: a parser panic or a parse that runs past
+/// `PARSE_TIMEOUT` becomes `TextResult::Failed`, never a dead worker. (A timed-out parse keeps
+/// its blocking thread until it ends; it can't hold up the job.)
+pub async fn attachment_text_isolated(filename: String, media_type: Option<String>, bytes: Vec<u8>) -> TextResult {
+    if bytes.len() > MAX_ATTACHMENT_BYTES {
+        return TextResult::Unsupported;
+    }
+    let parse = tokio::task::spawn_blocking(move || {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| attachment_text(&filename, media_type.as_deref(), &bytes)))
+    });
+    match tokio::time::timeout(PARSE_TIMEOUT, parse).await {
+        Ok(Ok(Ok(result))) => result,
+        Ok(Ok(Err(_))) | Ok(Err(_)) => TextResult::Failed("the attachment parser crashed on this file".into()),
+        Err(_) => TextResult::Failed(format!("reading the attachment took longer than {}s", PARSE_TIMEOUT.as_secs())),
+    }
+}
+
 fn docx_text(bytes: &[u8]) -> Result<String, String> {
     let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).map_err(|e| e.to_string())?;
+    if archive.len() > MAX_DOCX_ENTRIES {
+        return Err("DOCX has too many parts".into());
+    }
+    let mut declared = 0u64;
+    for i in 0..archive.len() {
+        declared = declared.saturating_add(archive.by_index_raw(i).map_err(|e| e.to_string())?.size());
+        if declared > MAX_DOCX_UNCOMPRESSED {
+            return Err("DOCX expands to more than 100 MB".into());
+        }
+    }
     let mut xml = String::new();
-    archive
-        .by_name("word/document.xml")
-        .map_err(|e| e.to_string())?
-        .take(MAX_ATTACHMENT_BYTES as u64)
-        .read_to_string(&mut xml)
-        .map_err(|e| e.to_string())?;
+    let document = archive.by_name("word/document.xml").map_err(|e| e.to_string())?;
+    if document.size() > MAX_DOCX_XML {
+        return Err("DOCX document part is too large".into());
+    }
+    document.take(MAX_DOCX_XML).read_to_string(&mut xml).map_err(|e| e.to_string())?;
     let with_breaks = xml.replace("</w:p>", "\n").replace("<w:tab/>", "\t").replace("<w:br/>", "\n");
     Ok(crate::sources::normalize::html_to_text(&with_breaks))
 }
@@ -388,6 +421,33 @@ fn docx_text(bytes: &[u8]) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn docx(entries: usize, document: &str) -> Vec<u8> {
+        use std::io::Write;
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let opts = zip::write::SimpleFileOptions::default();
+        for i in 0..entries {
+            zip.start_file(format!("word/media/{i}.xml"), opts).unwrap();
+        }
+        zip.start_file("word/document.xml", opts).unwrap();
+        zip.write_all(document.as_bytes()).unwrap();
+        zip.finish().unwrap().into_inner()
+    }
+
+    #[tokio::test]
+    async fn attachment_parsing_is_bounded_and_isolated() {
+        let ok = docx(0, "<w:p>Java developer</w:p>");
+        assert!(matches!(attachment_text_isolated("cv.docx".into(), None, ok).await, TextResult::Text(t) if t.contains("Java developer")));
+        let bomb = docx(MAX_DOCX_ENTRIES + 1, "<w:p>x</w:p>");
+        assert!(matches!(attachment_text_isolated("cv.docx".into(), None, bomb).await, TextResult::Failed(e) if e.contains("too many")));
+        let garbage = b"%PDF-1.7\n\x00\x01 not really a pdf".to_vec();
+        assert!(matches!(attachment_text_isolated("cv.pdf".into(), None, garbage).await, TextResult::Failed(_)));
+        let huge = vec![b'a'; MAX_ATTACHMENT_BYTES + 1];
+        assert!(matches!(attachment_text_isolated("cv.txt".into(), None, huge).await, TextResult::Unsupported));
+        let long = "word ".repeat(MAX_TEXT_CHARS);
+        assert!(matches!(attachment_text_isolated("cv.txt".into(), None, long.into_bytes()).await,
+            TextResult::Text(t) if t.chars().count() <= MAX_TEXT_CHARS));
+    }
 
     #[test]
     fn rules_extract_requirement_and_candidate() {

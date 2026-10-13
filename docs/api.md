@@ -219,8 +219,10 @@ last_used_at: string | null;
 
 ## Auth: email + password (v1)
 
-`AUTH_MODE=password` (production). `AUTH_MODE=dev` (local only) keeps the `dev:<email>` token. The client always
-sends its token as `X-Auth-Token`. Sessions are opaque random tokens (only a SHA-256 hash is stored), 30-day expiry.
+`AUTH_MODE=password` (production). `AUTH_MODE=dev` (local only) keeps the `dev:<email>` token; the server refuses
+to start with it unless `ALLOW_DEV_AUTH=1`, `PUBLIC_WEB_URL` is not https and the bind address is loopback. The client
+always sends its token as `X-Auth-Token`. Sessions are opaque random tokens (only a SHA-256 hash is stored), 7-day
+sliding expiry (renewed on use).
 
 | Method | Path | Auth | Body | Response |
 |---|---|---|---|---|
@@ -231,10 +233,23 @@ sends its token as `X-Auth-Token`. Sessions are opaque random tokens (only a SHA
 
 Rules and errors:
 - Password 10–128 characters. Email normalized to lowercase. `name` optional, ≤ 100 characters.
-- Signup: 409 `conflict` if the email already has an account; 403 `forbidden` if signup is disabled or the
-  email domain is not in `SIGNUP_ALLOWED_DOMAINS` (when set).
+- Signup is by invitation: allowed for emails in `SIGNUP_ALLOWED_EMAILS`, domains in `SIGNUP_ALLOWED_DOMAINS`,
+  emails an admin invited (`POST /workspaces/{ws}/members` for an address without a verified account → 202
+  `{invited: true}`; the membership is created when that person signs up and verifies), and, only when both lists
+  are empty, the very first account. Otherwise 403 `forbidden` "Sign-up is by invitation".
+- Signup: 409 `conflict` if the email already has a *verified* account. An unverified account is taken over by the
+  new sign-up (new password; old codes and sessions revoked), so nobody can pre-claim an address. The first
+  successful verification revokes all other sessions.
 - Login: always the same 401 `unauthorized` "invalid email or password" (no account enumeration);
-  429 `rate_limited` after too many failed attempts for that email (15-minute window).
+  429 `rate_limited` after 10 failed attempts for that email from the same IP (15-minute window). Failures for one
+  email across many IPs only slow attempts down (≤ 5 s), never lock the owner out.
+- All auth endpoints except `config`/`logout`: 429 `rate_limited` above 10 requests/min per client IP (burst 20).
+  `X-Forwarded-For` is honoured only from a loopback peer (the local reverse proxy).
+
+| Method | Path | Body | Response |
+|---|---|---|---|
+| POST | `/api/v1/auth/password-reset/request` | `{email}` | 200 `{status:"sent"}` always; emails a 6-digit code (≤ 1/min, ≤ 5/hour per email) |
+| POST | `/api/v1/auth/password-reset/confirm` | `{email, code, new_password}` | 200 `{status:"password_reset"}`; all sessions revoked (sign in again); 400 invalid code or password |
 - `GET /api/v1/me` returns `user.name` too, and `auth_mode`.
 
 ## Email verification (OTP)

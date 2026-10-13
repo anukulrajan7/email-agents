@@ -162,6 +162,42 @@ fn valid_domain(d: &str) -> bool {
     !d.is_empty() && d.len() <= 100 && d.contains('.') && d.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
 }
 
+const FREE_MAIL_DOMAINS: &[&str] = &[
+    "gmail.com", "googlemail.com", "outlook.com", "hotmail.com", "live.com", "msn.com", "icloud.com", "me.com", "mac.com",
+    "aol.com", "proton.me", "protonmail.com", "protonmail.ch", "pm.me", "mail.com", "gmx.com", "gmx.net", "web.de",
+    "zoho.com", "zohomail.com", "tutanota.com", "tuta.io", "hey.com", "fastmail.com", "yandex.com", "yandex.ru",
+    "ymail.com", "rocketmail.com", "rediffmail.com", "qq.com", "163.com", "126.com", "hushmail.com", "inbox.com",
+    "mail.ru",
+];
+/// Provider families with many country domains (yahoo.co.in, hotmail.fr, …).
+const FREE_MAIL_PREFIXES: &[&str] = &["yahoo.", "hotmail.", "outlook.", "live.", "gmx.", "yandex.", "aol."];
+
+/// Domains where anyone can register an address: never a basis for trusting a sender.
+pub fn is_free_mail_domain(domain: &str) -> bool {
+    let d = domain.trim().trim_end_matches('.').to_lowercase();
+    FREE_MAIL_DOMAINS.contains(&d.as_str()) || FREE_MAIL_PREFIXES.iter().any(|p| d.starts_with(p))
+}
+
+/// Someone on the team has already replied to this contact by hand: sent a draft from Post
+/// Room themselves, or written to them from the mailbox (synced sent mail that no draft sent).
+pub async fn has_human_reply(db: &SqlitePool, workspace_id: &str, contact: &str) -> sqlx::Result<bool> {
+    sqlx::query_scalar(
+        "SELECT EXISTS(
+           SELECT 1 FROM audit_events a JOIN email_messages m ON m.id = a.message_id
+           WHERE a.workspace_id = ?1 AND a.action = 'draft.sent' AND a.actor_type = 'user' AND lower(m.sender_address) = ?2
+         ) OR EXISTS(
+           SELECT 1 FROM email_messages o
+           WHERE o.workspace_id = ?1 AND o.direction = 'outbound'
+             AND EXISTS (SELECT 1 FROM json_each(o.recipients_json) r WHERE lower(r.value) = ?2)
+             AND NOT EXISTS (SELECT 1 FROM drafts d WHERE d.workspace_id = ?1 AND d.provider_message_id = o.source_message_id)
+         )",
+    )
+    .bind(workspace_id)
+    .bind(contact.trim().to_lowercase())
+    .fetch_one(db)
+    .await
+}
+
 /// Returns the first problem as a human-readable message.
 pub fn validate(name: &str, conditions: &[Condition], actions: &[Action]) -> Result<(), String> {
     if let Some(e) = bad_text("name", name, 100) {
@@ -218,6 +254,11 @@ pub fn validate(name: &str, conditions: &[Condition], actions: &[Action]) -> Res
                 }
                 if let Some(d) = allowed_domains.iter().find(|d| !valid_domain(&d.trim().to_lowercase())) {
                     return Err(format!("\"{d}\" is not a valid domain (use e.g. acme.com)"));
+                }
+                if let Some(d) = allowed_domains.iter().find(|d| is_free_mail_domain(&d.trim().to_lowercase())) {
+                    return Err(format!(
+                        "\"{d}\" is a free email provider: anyone can get an address there, so it can't be trusted for automatic replies"
+                    ));
                 }
             }
             Action::CreateReview { title } => {

@@ -9,9 +9,10 @@ concurrency:
   group: deploy-production
   cancel-in-progress: false
 
+# Least privilege: read-only by default; only the image job may push to GHCR.
+# TODO(security): pin third-party actions to full commit SHAs (needs network access to resolve them reliably).
 permissions:
   contents: read
-  packages: write
 
 env:
   IMAGE: ghcr.io/anukulrajan7/email-agents
@@ -50,6 +51,9 @@ jobs:
   image:
     needs: test
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
@@ -71,6 +75,10 @@ jobs:
   deploy:
     needs: image
     runs-on: ubuntu-latest
+    # The VPS pulls the image with this job's GITHUB_TOKEN.
+    permissions:
+      contents: read
+      packages: read
     environment:
       name: production
       url: https://mail.anukulraj.tech
@@ -95,6 +103,7 @@ jobs:
           SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
           SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
           SIGNUP_ALLOWED_DOMAINS: ${{ vars.SIGNUP_ALLOWED_DOMAINS }}
+          SIGNUP_ALLOWED_EMAILS: ${{ vars.SIGNUP_ALLOWED_EMAILS }}
           NANGO_GMAIL_MODEL: ${{ vars.NANGO_GMAIL_MODEL || 'GmailEmail' }}
         run: |
           umask 077
@@ -105,6 +114,7 @@ jobs:
           AUTH_MODE=password
           SIGNUP_ENABLED=true
           SIGNUP_ALLOWED_DOMAINS=${SIGNUP_ALLOWED_DOMAINS}
+          SIGNUP_ALLOWED_EMAILS=${SIGNUP_ALLOWED_EMAILS}
           SMTP_HOST=smtp.hostinger.com
           SMTP_PORT=465
           SMTP_USERNAME=${SMTP_USERNAME}

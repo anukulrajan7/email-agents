@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 use axum::{extract::FromRequestParts, http::request::Parts};
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header, jwk::JwkSet};
 use serde::Deserialize;
-use sqlx::SqlitePool;
+use sqlx::{SqliteConnection, SqlitePool};
 use tokio::sync::RwLock;
 
 use crate::{
@@ -86,6 +86,12 @@ impl Authenticator {
         .bind(now_ms())
         .fetch_one(db)
         .await?;
+        // Dev and OIDC emails are verified (OIDC stores only `email_verified` addresses).
+        if !email.is_empty() {
+            let mut tx = db.begin().await?;
+            accept_invitations(&mut tx, &id, &email).await?;
+            tx.commit().await?;
+        }
         Ok(AuthUser { id, email })
     }
 
@@ -187,6 +193,42 @@ impl FromRequestParts<AppState> for AuthUser {
         let token = request_token(&parts.headers).ok_or(AppError::Unauthorized)?;
         state.auth.authenticate(&state.db, token).await
     }
+}
+
+/// SQL predicate on `users u`: the email address is proven (a verified password account, or a
+/// dev/OIDC identity, whose email is verified by construction).
+pub const VERIFIED_USER: &str = "(u.email_verified_at IS NOT NULL OR u.external_auth_subject NOT LIKE 'pw|%')";
+
+/// Turns pending invitations for `email` into memberships. Call only once the person has
+/// proven they own the address.
+pub async fn accept_invitations(conn: &mut SqliteConnection, user_id: &str, email: &str) -> sqlx::Result<u64> {
+    let invites: Vec<(String, String)> = sqlx::query_as("SELECT workspace_id, role FROM invitations WHERE email = ?1")
+        .bind(email)
+        .fetch_all(&mut *conn)
+        .await?;
+    for (workspace_id, role) in &invites {
+        sqlx::query("INSERT INTO memberships (workspace_id, user_id, role) VALUES (?1, ?2, ?3) ON CONFLICT DO NOTHING")
+            .bind(workspace_id)
+            .bind(user_id)
+            .bind(role)
+            .execute(&mut *conn)
+            .await?;
+        crate::audit::record(
+            &mut *conn,
+            crate::audit::Entry {
+                workspace_id,
+                actor: crate::audit::Actor::User(user_id),
+                action: "member.joined",
+                entity_type: "user",
+                entity_id: user_id,
+                message_id: None,
+                metadata: serde_json::json!({ "role": role, "via": "invitation" }),
+            },
+        )
+        .await?;
+    }
+    sqlx::query("DELETE FROM invitations WHERE email = ?1").bind(email).execute(&mut *conn).await?;
+    Ok(invites.len() as u64)
 }
 
 /// Server-side tenant authorization. The workspace ID in a URL is only a request;

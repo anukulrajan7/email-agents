@@ -185,6 +185,33 @@ pub async fn within_budget(db: &SqlitePool, daily_budget_usd: f64, workspace_id:
     }
 }
 
+/// Inbound work every new email triggers on its own, whoever sent it: counted against one
+/// global cap so a mail flood can't run up an unbounded bill.
+pub const GLOBAL_CAPPED_TASKS: &[&str] = &["classify", "embed"];
+
+/// Today's (UTC) spend on `GLOBAL_CAPPED_TASKS`, across all workspaces.
+pub async fn global_inbound_spend_today(db: &SqlitePool) -> sqlx::Result<f64> {
+    sqlx::query_scalar(
+        "SELECT COALESCE(SUM(cost_usd), 0.0) FROM ai_calls WHERE created_at >= ?1 AND task IN (SELECT value FROM json_each(?2))",
+    )
+    .bind(today_start_ms())
+    .bind(serde_json::json!(GLOBAL_CAPPED_TASKS).to_string())
+    .fetch_one(db)
+    .await
+}
+
+/// True while today's global inbound spend is under `AI_GLOBAL_DAILY_BUDGET_USD`. A lookup error
+/// counts as within budget.
+pub async fn within_global_budget(db: &SqlitePool, global_budget_usd: f64) -> bool {
+    match global_inbound_spend_today(db).await {
+        Ok(spent) => spent < global_budget_usd,
+        Err(e) => {
+            tracing::warn!(error = %e, "global budget check failed; allowing");
+            true
+        }
+    }
+}
+
 // ---------------------------------------------------------------- usage report
 
 #[derive(Debug, Serialize, PartialEq)]

@@ -22,6 +22,7 @@ async fn make_app(configure: impl FnOnce(&mut Config)) -> (Router, tempfile::Tem
     let dir = tempfile::tempdir().unwrap();
     let mut config = Config::for_tests(&format!("sqlite://{}", dir.path().join("t.db").display()));
     config.auth_mode = AuthMode::Password;
+    config.signup_allowed_domains = vec!["acme.com".into()];
     configure(&mut config);
     let state = build_state(config).await.unwrap();
     db::migrate(&state.db).await.unwrap();

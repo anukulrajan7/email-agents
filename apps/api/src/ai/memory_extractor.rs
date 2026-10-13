@@ -5,7 +5,8 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::{AiError, openrouter::OpenRouterClient, prepare_text};
+pub use super::fence::{fence, fence_inline};
+use super::{AiError, openrouter::OpenRouterClient};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LearnDirection {
@@ -108,13 +109,6 @@ subject: who/what the fact is about (an email, a person, a company, or \"team\")
 subject, max 200 characters. confidence: probability 0..1 that the fact is correct and durable.\n\
 Return at most 5 facts; return an empty list when nothing durable is stated. Return JSON matching the schema.";
 
-/// Untrusted text in a delimiter block. Angle brackets are swapped for look-alikes so text such
-/// as a literal `</email>` can never close the block early.
-pub fn fence(tag: &str, text: &str) -> String {
-    let safe = prepare_text(text).replace('<', "‹").replace('>', "›");
-    format!("<{tag}>\n{safe}\n</{tag}>")
-}
-
 fn user_prompt(input: &MemoryExtractInput) -> String {
     let mut u = String::new();
     let (allowed, who) = match input.direction {
@@ -139,10 +133,6 @@ fn user_prompt(input: &MemoryExtractInput) -> String {
     let tag = if input.direction == LearnDirection::Reply { "reply" } else { "email" };
     u.push_str(&fence(tag, &input.text));
     u
-}
-
-fn fence_inline(s: &str) -> String {
-    s.replace('<', "‹").replace('>', "›").replace('\n', " ")
 }
 
 fn schema() -> Value {

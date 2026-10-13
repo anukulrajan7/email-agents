@@ -153,6 +153,23 @@ pub async fn search_ids(pool: &SqlitePool, workspace_id: &str, text: &str, limit
 }
 
 pub async fn context_for(pool: &SqlitePool, workspace_id: &str, sender: &str, topic: &str) -> sqlx::Result<MemoryContext> {
+    context_with(pool, workspace_id, sender, topic, true).await
+}
+
+/// For drafts nobody asked for (workflows, automations, auto-send): workspace-wide notes only if
+/// a person wrote them, so an auto-learned fact can't steer replies to everyone.
+pub async fn context_for_automation(pool: &SqlitePool, workspace_id: &str, sender: &str, topic: &str) -> sqlx::Result<MemoryContext> {
+    context_with(pool, workspace_id, sender, topic, false).await
+}
+
+async fn context_with(
+    pool: &SqlitePool,
+    workspace_id: &str,
+    sender: &str,
+    topic: &str,
+    auto_workspace_notes: bool,
+) -> sqlx::Result<MemoryContext> {
+    let workspace_origin = if auto_workspace_notes { "" } else { " AND origin = 'manual'" };
     let contact_notes: Vec<NoteRow> = sqlx::query_as(&format!(
         "SELECT id, kind, scope, content FROM memories
          WHERE workspace_id = ?1 AND {USABLE} AND scope = 'contact' AND contact_email = ?2
@@ -169,7 +186,7 @@ pub async fn context_for(pool: &SqlitePool, workspace_id: &str, sender: &str, to
     } else {
         sqlx::query_as(&format!(
             "SELECT id, kind, scope, content FROM memories
-             WHERE id IN (SELECT value FROM json_each(?1)) AND scope = 'workspace' AND {USABLE}"
+             WHERE id IN (SELECT value FROM json_each(?1)) AND scope = 'workspace' AND {USABLE}{workspace_origin}"
         ))
         .bind(json!(hit_ids).to_string())
         .fetch_all(pool)
@@ -177,7 +194,7 @@ pub async fn context_for(pool: &SqlitePool, workspace_id: &str, sender: &str, to
     };
     let workspace_notes: Vec<NoteRow> = sqlx::query_as(&format!(
         "SELECT id, kind, scope, content FROM memories
-         WHERE workspace_id = ?1 AND {USABLE} AND scope = 'workspace'
+         WHERE workspace_id = ?1 AND {USABLE} AND scope = 'workspace'{workspace_origin}
          ORDER BY pinned DESC, (origin = 'manual') DESC, confidence DESC, updated_at DESC LIMIT ?2"
     ))
     .bind(workspace_id)

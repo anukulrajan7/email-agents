@@ -75,6 +75,17 @@ impl H {
         (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
     }
 
+    /// Alert recipients must be verified members: dev identities sign in once, then join.
+    async fn add_members(&self, ws: &str, emails: &[&str]) {
+        for email in emails {
+            self.call("GET", "/api/v1/me", &format!("dev:{email}"), None).await;
+            let (s, _) = self
+                .call("POST", &format!("/api/v1/workspaces/{ws}/members"), ADMIN, Some(json!({"email": email, "role": "operator"})))
+                .await;
+            assert_eq!(s, StatusCode::OK, "{email}");
+        }
+    }
+
     async fn workspace(&self) -> (String, String) {
         let (_, ws) = self.call("POST", "/api/v1/workspaces", ADMIN, Some(json!({"name":"Acme"}))).await;
         let ws = ws["id"].as_str().unwrap().to_string();
@@ -136,6 +147,7 @@ async fn rules_raise_batch_escalate_and_auto_resolve() {
     assert_eq!(settings, json!({"enabled": true, "recipients": ["admin@acme.test"], "escalate_to": [], "unanswered_hours": 4,
         "escalate_after_hours": 24, "daily_digest": true, "digest_hour": 9}));
     // Escalations go to the boss; digest off so the injected clock can't land in the digest hour.
+    h.add_members(&ws, &["boss@acme.test"]).await;
     let (s, _) = h
         .call("PUT", &format!("{base}/alert-settings"), ADMIN, Some(json!({"enabled": true, "recipients": ["admin@acme.test"],
             "escalate_to": ["Boss@Acme.test"], "unanswered_hours": 4, "escalate_after_hours": 24, "daily_digest": false, "digest_hour": 9})))
@@ -237,12 +249,15 @@ async fn patch_snooze_settings_validation_and_test_email() {
     assert_eq!(r.raised, 0);
     assert_eq!(alert_for(&h.alerts(&ws, "all").await, &msg)["status"], "resolved");
 
-    // Settings: admin only, validated.
-    let good = json!({"enabled": true, "recipients": ["a@acme.test", "b@acme.test"], "escalate_to": [], "unanswered_hours": 2,
+    // Settings: admin only, validated; recipients must be verified members.
+    h.add_members(&ws, &["a@acme.test", "b@acme.test"]).await;
+    let good =json!({"enabled": true, "recipients": ["a@acme.test", "b@acme.test"], "escalate_to": [], "unanswered_hours": 2,
                       "escalate_after_hours": 8, "daily_digest": true, "digest_hour": 7});
     assert_eq!(h.call("PUT", &format!("{base}/alert-settings"), OPERATOR, Some(good.clone())).await.0, StatusCode::FORBIDDEN);
     for bad in [
         json!({"recipients": ["not-an-email"]}),
+        json!({"recipients": ["stranger@elsewhere.test"]}),
+        json!({"escalate_to": ["stranger@elsewhere.test"]}),
         json!({"unanswered_hours": 0}),
         json!({"escalate_after_hours": 1000}),
         json!({"digest_hour": 24}),
@@ -267,6 +282,9 @@ async fn patch_snooze_settings_validation_and_test_email() {
     let sent = h.mail.take();
     assert_eq!(sent.len(), 2);
     assert!(sent[0].1.starts_with("[Post Room] Test alert"));
+    // One test per workspace per 10 minutes.
+    assert_eq!(h.call("POST", &format!("{base}/alert-settings/test"), ADMIN, None).await.0, StatusCode::TOO_MANY_REQUESTS);
+    assert!(h.mail.take().is_empty());
 
     // Disabled: rules don't raise.
     let mut off = good.clone();

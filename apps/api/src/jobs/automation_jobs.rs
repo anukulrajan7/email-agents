@@ -301,6 +301,12 @@ async fn send_reply(
     if !allowed_domains.iter().any(|d| d.trim().to_lowercase() == domain) {
         return Ok(skipped(K, "sender's domain is not in allowed_domains"));
     }
+    if crate::automations::is_free_mail_domain(&domain) {
+        return Ok(skipped(K, "the sender uses a free email provider"));
+    }
+    if !crate::automations::has_human_reply(&state.db, workspace_id, &ctx.sender_address).await? {
+        return Ok(skipped(K, "nobody on the team has replied to this sender yet; the first reply is sent by a person"));
+    }
     let classification: Option<(Option<f64>, String, Option<String>)> =
         sqlx::query_as("SELECT confidence, source, model_id FROM classifications WHERE message_id = ?1")
             .bind(&ctx.id)

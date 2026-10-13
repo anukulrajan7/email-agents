@@ -3,6 +3,7 @@
 
 pub mod embeddings;
 pub mod fallback;
+pub mod fence;
 pub mod jev;
 pub mod judge;
 pub mod label_suggest;

@@ -23,7 +23,10 @@ use crate::{
     },
 };
 
-const SOURCE_COLUMNS: &str = "id, kind, status, inbound_alias, capabilities_json, last_synced_at, last_error, created_at";
+/// Sample emails an admin may inject per workspace per day (`ALLOW_TEST_EMAILS`).
+pub const TEST_EMAILS_PER_DAY: i64 = 20;
+
+const SOURCE_COLUMNS: &str ="id, kind, status, inbound_alias, capabilities_json, last_synced_at, last_error, created_at";
 
 pub async fn list(State(state): State<AppState>, user: AuthUser, Path(ws): Path<String>) -> AppResult<Json<Items<Source>>> {
     require_role(&state.db, &ws, &user, Role::Operator).await?;
@@ -106,6 +109,9 @@ pub async fn test_email(
     .await?
     .flatten();
     let alias = alias.ok_or(AppError::NotFound)?;
+    if !crate::security::take(&state.db, "test_email", &ws, TEST_EMAILS_PER_DAY, 86_400_000).await? {
+        return Err(AppError::RateLimited);
+    }
     let body = body.map(|Json(b)| b).unwrap_or_default();
     // The sample attachment only accompanies the default timesheet sample.
     let attachments = if body.subject.is_none() {
