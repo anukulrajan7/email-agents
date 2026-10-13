@@ -1,4 +1,5 @@
 pub mod ai;
+pub mod alerts;
 pub mod audit;
 pub mod auth;
 pub mod config;
@@ -13,6 +14,7 @@ pub mod mailer;
 pub mod matching;
 pub mod replies;
 pub mod memory;
+pub mod memory_learning;
 pub mod sessions;
 pub mod sources;
 
@@ -109,7 +111,19 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
         _ => Arc::new(ai::RulesAnalyst),
     };
 
+    // Memory learning: efficient model for incoming mail, drafting model for the team's replies.
+    let memory_extractor: Arc<dyn ai::memory_extractor::MemoryExtractor> = match &openrouter {
+        Some(client) if !(config.openrouter_classifier_model_id.is_empty() && config.openrouter_model_id.is_empty()) => {
+            let incoming = if config.openrouter_classifier_model_id.is_empty() { &config.openrouter_model_id } else { &config.openrouter_classifier_model_id };
+            let reply = if config.openrouter_model_id.is_empty() { incoming } else { &config.openrouter_model_id };
+            Arc::new(ai::memory_extractor::OpenRouterMemoryExtractor::new(client.clone(), incoming, reply))
+        }
+        _ => Arc::new(ai::memory_extractor::NoopMemoryExtractor),
+    };
+
     Ok(AppState {
+        memory_extractor,
+        alert_mailer: mailer.clone(),
         analyst,
         extractor,
         mailer,

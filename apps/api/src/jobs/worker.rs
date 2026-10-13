@@ -137,6 +137,9 @@ async fn maintenance(state: &AppState) {
     if let Err(e) = polled {
         tracing::warn!(error = %e, "failed to schedule mailbox polling");
     }
+    if let Err(e) = crate::alerts::schedule(state).await {
+        tracing::warn!(error = %e, "failed to schedule alert evaluation");
+    }
     let hour_bucket = now_ms() / 3_600_000;
     let enqueued = async {
         let mut conn = state.db.acquire().await?;

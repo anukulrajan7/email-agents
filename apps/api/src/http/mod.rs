@@ -1,3 +1,4 @@
+mod alerts_api;
 mod auth_api;
 mod dto;
 mod jobs_api;
@@ -54,6 +55,10 @@ pub struct AppState {
     /// Sends verification codes; `None` = verification disabled.
     pub mailer: Option<Arc<dyn crate::mailer::Mailer>>,
     pub jobs_notify: Arc<Notify>,
+    /// Learns durable facts from emails and replies (no-op without a model).
+    pub memory_extractor: Arc<dyn crate::ai::memory_extractor::MemoryExtractor>,
+    /// Sends alert emails; `None` = alerts stay in-app only.
+    pub alert_mailer: Option<Arc<dyn crate::mailer::Mailer>>,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -102,6 +107,10 @@ pub fn router(state: AppState) -> Router {
         .route("/workspaces/{ws}/matching/candidates", get(matching_api::candidates))
         .route("/workspaces/{ws}/matching/matches", get(matching_api::matches))
         .route("/workspaces/{ws}/matching/matches/{id}", patch(matching_api::decide))
+        .route("/workspaces/{ws}/alerts", get(alerts_api::list))
+        .route("/workspaces/{ws}/alerts/{id}", patch(alerts_api::update))
+        .route("/workspaces/{ws}/alert-settings", get(alerts_api::get_settings).put(alerts_api::put_settings))
+        .route("/workspaces/{ws}/alert-settings/test", post(alerts_api::test))
         .route("/workspaces/{ws}/jobs", get(jobs_api::list))
         .route("/workspaces/{ws}/jobs/{id}/retry", post(jobs_api::retry))
         .fallback(|| async { AppError::NotFound })
@@ -111,7 +120,7 @@ pub fn router(state: AppState) -> Router {
         .allow_origin(
             HeaderValue::from_str(&state.config.public_web_url).unwrap_or(HeaderValue::from_static("http://localhost:5173")),
         )
-        .allow_methods([Method::GET, Method::POST, Method::PATCH])
+        .allow_methods([Method::GET, Method::POST, Method::PATCH, Method::PUT])
         .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE, HeaderName::from_static("x-auth-token")])
         .expose_headers([HeaderName::from_static("x-request-id")]);
 

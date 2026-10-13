@@ -51,6 +51,8 @@ pub struct Config {
     pub smtp_from: String,
     /// Lower-case email domains allowed to sign up; empty = any domain.
     pub signup_allowed_domains: Vec<String>,
+    /// Public URL of the web app, used for deep links in alert emails.
+    pub app_base_url: String,
 }
 
 fn var(name: &str, default: &str) -> String {
@@ -106,6 +108,7 @@ impl Config {
                 .map(|d| d.trim().trim_start_matches('@').to_lowercase())
                 .filter(|d| !d.is_empty())
                 .collect(),
+            app_base_url: var("APP_BASE_URL", "https://mail.anukulraj.tech"),
         };
         if config.auth_mode == AuthMode::Oidc
             && (config.oidc_issuer_url.is_empty() || config.oidc_audience.is_empty())
@@ -164,6 +167,7 @@ impl Config {
             smtp_username: String::new(),
             smtp_password: String::new(),
             smtp_from: String::new(),
+            app_base_url: "https://mail.anukulraj.tech".into(),
         }
     }
 }

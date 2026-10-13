@@ -236,6 +236,10 @@ pub async fn send(
     )
     .await?;
     tx.commit().await?;
+    if let Err(e) = crate::jobs::learning_jobs::enqueue_reply_learning(&state.db, &ctx.draft_id).await {
+        tracing::warn!(error = %e, "could not schedule learning from the sent reply");
+    }
+    state.jobs_notify.notify_one();
     Ok(Json(json!({ "status": "sent", "provider_message_id": gmail_message_id })))
 }
 

@@ -17,6 +17,10 @@ const MAX_CONTACT_MEMORIES: i64 = 10;
 const MAX_SEARCH_HITS: i64 = 5;
 const MAX_CONTEXT_CHARS: usize = 2_500;
 pub const MAX_MEMORY_CHARS: usize = 500;
+/// Auto-learned memories below this confidence are kept but never given to the drafter until confirmed.
+pub const USE_THRESHOLD: f64 = 0.6;
+/// SQL predicate: a memory the agent may use.
+const USABLE: &str = "status = 'active' AND (origin = 'manual' OR confidence >= 0.6)";
 
 /// Upserts the sender's profile. Called once per newly stored message.
 pub async fn record_contact(
@@ -149,11 +153,11 @@ pub async fn search_ids(pool: &SqlitePool, workspace_id: &str, text: &str, limit
 }
 
 pub async fn context_for(pool: &SqlitePool, workspace_id: &str, sender: &str, topic: &str) -> sqlx::Result<MemoryContext> {
-    let contact_notes: Vec<NoteRow> = sqlx::query_as(
+    let contact_notes: Vec<NoteRow> = sqlx::query_as(&format!(
         "SELECT id, kind, scope, content FROM memories
-         WHERE workspace_id = ?1 AND status = 'active' AND scope = 'contact' AND contact_email = ?2
-         ORDER BY updated_at DESC LIMIT ?3",
-    )
+         WHERE workspace_id = ?1 AND {USABLE} AND scope = 'contact' AND contact_email = ?2
+         ORDER BY pinned DESC, (origin = 'manual') DESC, confidence DESC, updated_at DESC LIMIT ?3"
+    ))
     .bind(workspace_id)
     .bind(sender)
     .bind(MAX_CONTACT_MEMORIES)
@@ -163,19 +167,19 @@ pub async fn context_for(pool: &SqlitePool, workspace_id: &str, sender: &str, to
     let hits: Vec<NoteRow> = if hit_ids.is_empty() {
         vec![]
     } else {
-        sqlx::query_as(
+        sqlx::query_as(&format!(
             "SELECT id, kind, scope, content FROM memories
-             WHERE id IN (SELECT value FROM json_each(?1)) AND scope = 'workspace'",
-        )
+             WHERE id IN (SELECT value FROM json_each(?1)) AND scope = 'workspace' AND {USABLE}"
+        ))
         .bind(json!(hit_ids).to_string())
         .fetch_all(pool)
         .await?
     };
-    let workspace_notes: Vec<NoteRow> = sqlx::query_as(
+    let workspace_notes: Vec<NoteRow> = sqlx::query_as(&format!(
         "SELECT id, kind, scope, content FROM memories
-         WHERE workspace_id = ?1 AND status = 'active' AND scope = 'workspace'
-         ORDER BY updated_at DESC LIMIT ?2",
-    )
+         WHERE workspace_id = ?1 AND {USABLE} AND scope = 'workspace'
+         ORDER BY pinned DESC, (origin = 'manual') DESC, confidence DESC, updated_at DESC LIMIT ?2"
+    ))
     .bind(workspace_id)
     .bind(MAX_WORKSPACE_MEMORIES)
     .fetch_all(pool)
@@ -258,8 +262,9 @@ pub async fn store_suggestions(
         let contact = (s.scope == "contact").then_some(contact_email);
         sqlx::query(
             "INSERT INTO memories (id, workspace_id, scope, contact_email, kind, content, status, source,
-                                   evidence_message_id, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'suggested', 'learned', ?7, ?8, ?8)",
+                                   evidence_message_id, created_at, updated_at, origin, confidence, sources_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'suggested', 'learned', ?7, ?8, ?8, 'auto', 0.5,
+                     json_array(json_object('id', ?7, 'via', 'reply')))",
         )
         .bind(&id)
         .bind(workspace_id)
@@ -299,6 +304,11 @@ mod tests {
         assert_eq!(fts_query("Re: September timesheet").as_deref(), Some(r#""september" OR "timesheet""#));
         assert_eq!(fts_query(r#"NEAR(" OR *) AND payroll"#).as_deref(), Some(r#""near" OR "and" OR "payroll""#));
         assert_eq!(fts_query("a b"), None);
+    }
+
+    #[test]
+    fn usable_predicate_matches_threshold() {
+        assert!(USABLE.contains(&format!("confidence >= {USE_THRESHOLD}")));
     }
 
     #[test]
