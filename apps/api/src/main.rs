@@ -20,6 +20,7 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("migrations applied");
         return Ok(());
     }
+    jobs::knowledge_jobs::enqueue_backfill(&state.db).await.context("scheduling knowledge backfill")?;
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let worker = matches!(mode.as_str(), "serve" | "worker")

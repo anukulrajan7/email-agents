@@ -2,6 +2,7 @@
 
 pub mod automation_jobs;
 pub mod handlers;
+pub mod knowledge_jobs;
 pub mod matching_jobs;
 pub mod worker;
 
@@ -27,6 +28,9 @@ pub mod kind {
     pub const RUN_AUTOMATIONS: &str = "run_automations";
     pub const REMIND_NO_REPLY: &str = "remind_no_reply";
     pub const ANALYZE_MESSAGE: &str = "analyze_message";
+    pub const INDEX_MESSAGE: &str = "index_message";
+    pub const INDEX_REPLY: &str = "index_reply";
+    pub const BACKFILL_KNOWLEDGE: &str = "backfill_knowledge";
 }
 
 #[derive(Debug, Clone, FromRow)]

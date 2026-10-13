@@ -503,6 +503,7 @@ pub async fn update_draft(
             &json!({ "draft_id": row.id }),
         )
         .await?;
+        jobs::knowledge_jobs::enqueue_index_reply(&mut tx, &ws, &row.id, &row.updated_at.to_string()).await?;
     }
     tx.commit().await?;
     state.jobs_notify.notify_one();

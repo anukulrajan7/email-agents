@@ -7,6 +7,7 @@ mod matching_api;
 mod memories;
 mod messages;
 mod reviews;
+mod search_api;
 mod sources;
 mod webhooks;
 mod workflows;
@@ -51,6 +52,7 @@ pub struct AppState {
     pub learner: Option<Arc<dyn Learner>>,
     pub extractor: Arc<dyn crate::ai::Extractor>,
     pub analyst: Arc<dyn crate::ai::Analyst>,
+    pub embedder: Arc<dyn crate::ai::embeddings::Embedder>,
     pub login_limiter: Arc<crate::sessions::LoginLimiter>,
     /// Sends verification codes; `None` = verification disabled.
     pub mailer: Option<Arc<dyn crate::mailer::Mailer>>,
@@ -103,6 +105,7 @@ pub fn router(state: AppState) -> Router {
         .route("/workspaces/{ws}/matching/candidates", get(matching_api::candidates))
         .route("/workspaces/{ws}/matching/matches", get(matching_api::matches))
         .route("/workspaces/{ws}/matching/matches/{id}", patch(matching_api::decide))
+        .route("/workspaces/{ws}/search", get(search_api::search))
         .route("/workspaces/{ws}/jobs", get(jobs_api::list))
         .route("/workspaces/{ws}/jobs/{id}/retry", post(jobs_api::retry))
         .merge(automations_api::routes())

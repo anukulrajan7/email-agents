@@ -101,6 +101,7 @@ mod tests {
                 labels: crate::domain::label_template("hr").unwrap().labels.iter().map(|l| crate::domain::Label {
                     key: l.key.into(), name: l.name.into(), description: l.description.into(),
                 }).collect(),
+                examples: vec![],
             })
             .await
             .unwrap();

@@ -1,6 +1,7 @@
 //! AI adapters. Models only *propose*: a category, or draft text. `policy` and the
 //! workflow engine decide what actually happens.
 
+pub mod embeddings;
 pub mod fallback;
 pub mod jev;
 pub mod openrouter;
@@ -10,7 +11,7 @@ use async_trait::async_trait;
 
 use crate::domain::{ClassificationSource, Label, Priority};
 
-pub const PROMPT_VERSION: &str = "classify-v1";
+pub const PROMPT_VERSION: &str = "classify-v2";
 pub const DRAFT_PROMPT_VERSION: &str = "ack-draft-v1";
 /// Upper bound on email text sent to any model.
 pub const MAX_MODEL_INPUT_CHARS: usize = 6_000;
@@ -25,6 +26,23 @@ pub struct ClassifyInput {
     pub sender_history: Option<String>,
     /// The workspace taxonomy. Output must be one of these keys (else coerced to `other`).
     pub labels: Vec<Label>,
+    /// Similar past emails with trustworthy labels (few-shot). Email text is untrusted data.
+    pub examples: Vec<LabelExample>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct LabelExample {
+    pub subject: String,
+    pub snippet: String,
+    /// Label key the team gave this email.
+    pub label: String,
+}
+
+/// A reply this team approved or sent to a similar email.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReplyExample {
+    pub subject: String,
+    pub reply: String,
 }
 
 #[derive(Debug, Clone)]
@@ -52,6 +70,8 @@ pub struct DraftInput {
     pub sender_history: Option<String>,
     /// What the sender asks, from the analysis step. The draft must address each one.
     pub insight: Option<Insight>,
+    /// Up to 3 past replies to similar emails (tone and standard answers).
+    pub examples: Vec<ReplyExample>,
 }
 
 /// The AI's reading of an email, produced before any reply is drafted.

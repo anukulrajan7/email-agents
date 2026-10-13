@@ -331,3 +331,26 @@ Manual `POST /drafts/{id}/send` is also refused with 409 `draft_incomplete` whil
 
 `remind_if_no_reply` schedules a delayed job. When due, if the draft was not sent and no later message from someone else
 arrived in the thread, a review item of kind `reminder` ("No reply yet: ...") is opened.
+
+## Search (knowledge store)
+
+| Method | Path | Role | Body | Response |
+|---|---|---|---|---|
+| GET | `/api/v1/workspaces/:ws/search?q=&limit=10` | member | – | `{items: SearchItem[]}` |
+
+```ts
+type SearchItem = {
+  kind: "email" | "attachment";  // where the match was: the email body or an attachment's text
+  message_id: string;
+  subject: string;
+  snippet: string;               // ~200 chars around the first matching word ("… " marks a cut)
+  score: number;                 // reciprocal-rank-fusion score; only meaningful for ordering
+};
+```
+
+- Hybrid: keyword (FTS5 BM25) and meaning (vector KNN, `baai/bge-m3`) results merged by reciprocal rank fusion.
+  Meaning search always returns the nearest items, so a query with no keyword match still gets ranked results.
+- One item per `(kind, message_id)`, best match first. `limit` 1–50 (default 10); blank `q` → `{items: []}`.
+  `q` is plain text (FTS operators are treated as words), max 500 chars.
+- Scoped to the workspace; approved/sent replies are indexed for drafting but never returned here.
+- Indexing is asynchronous (after classification), so a brand-new email appears a few seconds later.
