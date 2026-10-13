@@ -6,10 +6,10 @@ import type {
   Items,
   Memory,
   MemoryCreateBody,
-  MemoryPatch,
   MemoryScope,
   MemoryStatus,
 } from '../../api/types';
+import type { LearnedMemory, MemoryUpdate } from './types';
 
 export const memoriesKey = (ws: string) => ['ws', ws, 'memories'] as const;
 export const contactsKey = (ws: string) => ['ws', ws, 'contacts'] as const;
@@ -19,7 +19,7 @@ export type MemoryFilters = { status?: MemoryStatus; scope?: MemoryScope; contac
 export function useMemories(ws: string, filters: MemoryFilters, enabled = true) {
   return useQuery({
     queryKey: [...memoriesKey(ws), filters],
-    queryFn: () => api<Items<Memory>>(`/workspaces/${ws}/memories`, { query: filters }),
+    queryFn: () => api<Items<LearnedMemory>>(`/workspaces/${ws}/memories`, { query: filters }),
     enabled,
   });
 }
@@ -44,7 +44,7 @@ export function useCreateMemory(ws: string) {
 export function useUpdateMemory(ws: string) {
   const invalidate = useInvalidateMemory(ws);
   return useMutation({
-    mutationFn: ({ id, ...patch }: MemoryPatch & { id: string }) =>
+    mutationFn: ({ id, ...patch }: MemoryUpdate & { id: string }) =>
       api<Memory>(`/workspaces/${ws}/memories/${id}`, { method: 'PATCH', body: patch }),
     onSuccess: invalidate,
   });

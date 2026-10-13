@@ -11,6 +11,7 @@ import { LabelsPage } from '../features/labels/LabelsPage';
 import { MatchingPage } from '../features/matching/MatchingPage';
 import { MemoryPage } from '../features/memory/MemoryPage';
 import { ContactPage } from '../features/memory/ContactPage';
+import { AlertsPage } from '../features/alerts/AlertsPage';
 import { AppShell } from './AppShell';
 
 export function AppRoutes() {
@@ -27,6 +28,7 @@ export function AppRoutes() {
           <Route path="matching" element={<MatchingPage />} />
           <Route path="labels" element={<LabelsPage />} />
           <Route path="reviews" element={<ReviewsPage />} />
+          <Route path="alerts" element={<AlertsPage />} />
           <Route path="memory" element={<MemoryPage />} />
           <Route path="memory/contacts/:email" element={<ContactPage />} />
           <Route path="workflows" element={<WorkflowsPage />} />

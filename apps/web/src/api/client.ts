@@ -42,7 +42,7 @@ async function parseError(res: Response): Promise<ApiError> {
 }
 
 export type RequestOptions = {
-  method?: 'GET' | 'POST' | 'PATCH';
+  method?: 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE';
   body?: unknown;
   query?: Record<string, string | number | undefined>;
 };
