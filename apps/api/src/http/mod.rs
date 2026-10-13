@@ -1,3 +1,4 @@
+mod ai_usage_api;
 mod alerts_api;
 mod auth_api;
 mod automations_api;
@@ -122,10 +123,12 @@ pub fn router(state: AppState) -> Router {
         .route("/workspaces/{ws}/alert-settings", get(alerts_api::get_settings).put(alerts_api::put_settings))
         .route("/workspaces/{ws}/alert-settings/test", post(alerts_api::test))
         .route("/workspaces/{ws}/reply-settings", get(reply_settings_api::get_settings).put(reply_settings_api::put_settings))
+        .route("/workspaces/{ws}/ai-usage", get(ai_usage_api::get))
         .route("/workspaces/{ws}/jobs", get(jobs_api::list))
         .route("/workspaces/{ws}/jobs/{id}/retry", post(jobs_api::retry))
         .merge(automations_api::routes())
         .fallback(|| async { AppError::NotFound })
+        .layer(middleware::from_fn(crate::ai_ledger::attach_context))
         .layer(DefaultBodyLimit::max(256 * 1024));
 
     let cors = CorsLayer::new()

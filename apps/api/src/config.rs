@@ -35,6 +35,8 @@ pub struct Config {
     pub ai_auto_hours: i64,
     /// Draft replies automatically (workflows, automations). Off: drafts only when a person asks.
     pub auto_drafts: bool,
+    /// Per workspace, per UTC day. At or above it, automatic non-essential AI waits for a person.
+    pub ai_daily_budget_usd: f64,
     pub typesafe_api_key: String,
     pub jev_api_url: String,
     pub jev_model_id: String,
@@ -98,6 +100,7 @@ impl Config {
             nango_backfill_max: var("NANGO_BACKFILL_MAX", "100").parse().context("NANGO_BACKFILL_MAX")?,
             ai_auto_hours: var("AI_AUTO_HOURS", "2").parse().context("AI_AUTO_HOURS")?,
             auto_drafts: var("AUTO_DRAFTS", "false").parse().context("AUTO_DRAFTS")?,
+            ai_daily_budget_usd: var("AI_DAILY_BUDGET_USD", "2.0").parse().context("AI_DAILY_BUDGET_USD")?,
             typesafe_api_key: var("TYPESAFE_API_KEY", ""),
             jev_api_url: var("JEV_API_URL", "https://api.typesafe.ai/v1/systemone"),
             jev_model_id: var("JEV_MODEL_ID", "jev-latest"),
@@ -166,6 +169,7 @@ impl Config {
             nango_backfill_max: 500,
             ai_auto_hours: 48,
             auto_drafts: true,
+            ai_daily_budget_usd: 2.0,
             typesafe_api_key: String::new(),
             jev_api_url: String::new(),
             jev_model_id: "jev-latest".into(),

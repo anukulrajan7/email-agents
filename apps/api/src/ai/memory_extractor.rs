@@ -190,7 +190,7 @@ pub struct OpenRouterMemoryExtractor {
 
 impl OpenRouterMemoryExtractor {
     pub fn new(client: OpenRouterClient, incoming_model: &str, reply_model: &str) -> Self {
-        Self { client, incoming_model: incoming_model.into(), reply_model: reply_model.into() }
+        Self { client: client.with_task("learn"), incoming_model: incoming_model.into(), reply_model: reply_model.into() }
     }
 }
 

@@ -69,7 +69,8 @@ pub async fn process(state: &AppState, worker_id: &str, job: Job) {
 
 async fn process_inner(state: &AppState, worker_id: &str, job: Job) {
     let started = std::time::Instant::now();
-    match handlers::handle(state, &job).await {
+    let ctx = crate::ai_ledger::AiContext::for_job(job.workspace_id.as_deref(), &job.payload());
+    match crate::ai_ledger::with_context(ctx, handlers::handle(state, &job)).await {
         Ok(()) => {
             if let Err(e) = jobs::complete(&state.db, &job, worker_id).await {
                 tracing::warn!(job_id = %job.id, error = %e, "failed to mark job succeeded");

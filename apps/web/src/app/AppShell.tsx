@@ -42,6 +42,7 @@ export function AppShell() {
     { to: 'automations', label: 'Automations' },
     { to: 'workflows', label: 'Workflows' },
     { to: 'integrations', label: 'Integrations' },
+    ...(isAdmin ? [{ to: 'usage', label: 'AI usage' }] : []),
     ...(isAdmin ? [{ to: 'jobs', label: 'Jobs' }] : []),
   ];
 

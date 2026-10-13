@@ -6,6 +6,7 @@ use serde_json::{Value, json};
 
 use super::{Job, kind};
 use crate::{
+    ai_ledger,
     ai::{self, AiError, ClassifyInput, ClassifyOutput, DraftInput, policy},
     audit::{self, Actor, Entry},
     db::{new_id, now_ms},
@@ -60,6 +61,16 @@ async fn deferred_until_opened(state: &AppState, job: &Job, payload: &Value) -> 
     if !deferrable || job.dedupe_key.contains(":open:") || job.dedupe_key.contains(":manual:") {
         return Ok(false);
     }
+    let costs_tokens = matches!(
+        job.kind.as_str(),
+        kind::ANALYZE_MESSAGE | kind::LEARN_FROM_MESSAGE | kind::EXTRACT_RECORD | kind::RUN_AUTOMATIONS
+    );
+    if costs_tokens
+        && let Some(ws) = &job.workspace_id
+        && !ai_ledger::within_budget(&state.db, state.config.ai_daily_budget_usd, ws).await
+    {
+        return Ok(true);
+    }
     let Some(message_id) = payload.get("message_id").and_then(Value::as_str) else { return Ok(false) };
     let received: Option<i64> =
         sqlx::query_scalar("SELECT received_at FROM email_messages WHERE id = ?1").bind(message_id).fetch_optional(&state.db).await?;
@@ -77,7 +88,7 @@ fn str_field(payload: &Value, key: &str) -> Result<String, JobError> {
 pub async fn handle(state: &AppState, job: &Job) -> Result<(), JobError> {
     let payload = job.payload();
     if deferred_until_opened(state, job, &payload).await? {
-        tracing::debug!(kind = %job.kind, key = %job.dedupe_key, "old mail: AI deferred until someone opens it");
+        tracing::debug!(kind = %job.kind, key = %job.dedupe_key, "AI deferred until someone opens the email (old mail or daily budget reached)");
         return Ok(());
     }
     match job.kind.as_str() {

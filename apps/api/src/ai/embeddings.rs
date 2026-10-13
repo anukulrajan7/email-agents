@@ -38,11 +38,17 @@ pub struct OpenRouterEmbedder {
     base_url: String,
     api_key: String,
     model: String,
+    ledger: Option<sqlx::SqlitePool>,
 }
 
 impl OpenRouterEmbedder {
     pub fn new(http: reqwest::Client, base_url: &str, api_key: &str, model: &str) -> Self {
-        Self { http, base_url: base_url.trim_end_matches('/').to_string(), api_key: api_key.into(), model: model.into() }
+        Self { http, base_url: base_url.trim_end_matches('/').to_string(), api_key: api_key.into(), model: model.into(), ledger: None }
+    }
+
+    pub fn with_ledger(mut self, db: sqlx::SqlitePool) -> Self {
+        self.ledger = Some(db);
+        self
     }
 
     async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, AiError> {
@@ -52,20 +58,32 @@ impl OpenRouterEmbedder {
             "encoding_format": "float",
             "provider": {"data_collection": "deny"}
         });
-        let res = self
-            .http
-            .post(format!("{}/embeddings", self.base_url))
-            .bearer_auth(&self.api_key)
-            .json(&body)
-            .timeout(Duration::from_secs(30))
-            .send()
-            .await
-            .map_err(|e| AiError::Retryable(format!("embeddings request failed: {e}")))?;
-        if !res.status().is_success() {
-            return Err(classify_http_error(res.status(), "OpenRouter embeddings"));
+        let started = std::time::Instant::now();
+        let sent = async {
+            let res = self
+                .http
+                .post(format!("{}/embeddings", self.base_url))
+                .bearer_auth(&self.api_key)
+                .json(&body)
+                .timeout(Duration::from_secs(30))
+                .send()
+                .await
+                .map_err(|e| AiError::Retryable(format!("embeddings request failed: {e}")))?;
+            if !res.status().is_success() {
+                return Err(classify_http_error(res.status(), "OpenRouter embeddings"));
+            }
+            res.json::<Value>().await.map_err(|e| AiError::Retryable(format!("embeddings decode: {e}")))
         }
-        let body: Value = res.json().await.map_err(|e| AiError::Retryable(format!("embeddings decode: {e}")))?;
-        parse_embeddings(&body, texts.len())
+        .await;
+        let parsed = sent.as_ref().map_err(|e| AiError::Retryable(e.to_string())).and_then(|b| parse_embeddings(b, texts.len()));
+        if let Some(db) = &self.ledger {
+            let error = parsed.as_ref().err().map(ToString::to_string);
+            crate::ai_ledger::log_call(db, "embed", &self.model, started, sent.as_ref().ok(), error.as_deref()).await;
+        }
+        match sent {
+            Ok(_) => parsed,
+            Err(e) => Err(e),
+        }
     }
 }
 

@@ -96,7 +96,7 @@ pub struct OpenRouterLabelSuggester {
 
 impl OpenRouterLabelSuggester {
     pub fn new(client: OpenRouterClient, model: &str) -> Self {
-        Self { client, model: model.into() }
+        Self { client: client.with_task("suggest_labels"), model: model.into() }
     }
 }
 

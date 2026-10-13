@@ -15,6 +15,7 @@ import { AlertsPage } from '../features/alerts/AlertsPage';
 import { AutomationsPage } from '../features/automations/AutomationsPage';
 import { AgentsPage } from '../features/agents/AgentsPage';
 import { CaseDetailPage } from '../features/agents/CaseDetailPage';
+import { UsagePage } from '../features/usage/UsagePage';
 import { AppShell } from './AppShell';
 
 export function AppRoutes() {
@@ -39,6 +40,7 @@ export function AppRoutes() {
           <Route path="automations" element={<AutomationsPage />} />
           <Route path="workflows" element={<WorkflowsPage />} />
           <Route path="integrations" element={<IntegrationsPage />} />
+          <Route path="usage" element={<UsagePage />} />
           <Route path="jobs" element={<JobsPage />} />
         </Route>
       </Route>

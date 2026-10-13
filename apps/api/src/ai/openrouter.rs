@@ -59,11 +59,31 @@ pub struct OpenRouterClient {
     http: reqwest::Client,
     base_url: String,
     api_key: String,
+    /// Where calls are recorded (`ai_calls`); `None` records nothing.
+    ledger: Option<sqlx::SqlitePool>,
+    /// Ledger task name for calls made through this handle, e.g. "classify".
+    task: String,
 }
 
 impl OpenRouterClient {
     pub fn new(http: reqwest::Client, base_url: &str, api_key: &str) -> Self {
-        Self { http, base_url: base_url.trim_end_matches('/').to_string(), api_key: api_key.into() }
+        Self { http, base_url: base_url.trim_end_matches('/').to_string(), api_key: api_key.into(), ledger: None, task: "other".into() }
+    }
+
+    pub fn with_ledger(mut self, db: sqlx::SqlitePool) -> Self {
+        self.ledger = Some(db);
+        self
+    }
+
+    /// Same client, recording its calls under `task`.
+    pub fn with_task(&self, task: &str) -> Self {
+        Self { task: task.into(), ..self.clone() }
+    }
+
+    pub(crate) async fn log_call(&self, model: &str, started: std::time::Instant, body: Option<&Value>, error: Option<&str>) {
+        if let Some(db) = &self.ledger {
+            crate::ai_ledger::log_call(db, &self.task, model, started, body, error).await;
+        }
     }
 
     /// One structured chat call. Returns (JSON content string, model that answered).
@@ -91,27 +111,47 @@ impl OpenRouterClient {
             // Only providers that don't retain/train on prompts, and that honour the schema.
             "provider": {"data_collection": "deny", "require_parameters": true}
         });
-        let res = self
-            .http
-            .post(format!("{}/chat/completions", self.base_url))
-            .bearer_auth(&self.api_key)
-            .json(&body)
-            .timeout(Duration::from_secs(45))
-            .send()
-            .await
-            .map_err(|e| AiError::Retryable(format!("OpenRouter request failed: {e}")))?;
-        if !res.status().is_success() {
-            return Err(classify_http_error(res.status(), "OpenRouter"));
+        let started = std::time::Instant::now();
+        let sent = async {
+            let res = self
+                .http
+                .post(format!("{}/chat/completions", self.base_url))
+                .bearer_auth(&self.api_key)
+                .json(&body)
+                .timeout(Duration::from_secs(45))
+                .send()
+                .await
+                .map_err(|e| AiError::Retryable(format!("OpenRouter request failed: {e}")))?;
+            if !res.status().is_success() {
+                return Err(classify_http_error(res.status(), "OpenRouter"));
+            }
+            res.json::<Value>().await.map_err(|e| AiError::Retryable(format!("OpenRouter decode: {e}")))
         }
-        let body: Value = res.json().await.map_err(|e| AiError::Retryable(format!("OpenRouter decode: {e}")))?;
+        .await;
+        let body = match sent {
+            Ok(body) => body,
+            Err(e) => {
+                self.log_call(model, started, None, Some(&e.to_string())).await;
+                return Err(e);
+            }
+        };
         let finish = body.pointer("/choices/0/finish_reason").and_then(Value::as_str).unwrap_or("unknown");
         let content = body
             .pointer("/choices/0/message/content")
             .and_then(Value::as_str)
             .filter(|c| !c.trim().is_empty())
-            .ok_or_else(|| AiError::Retryable(format!("OpenRouter returned no content (finish_reason={finish})")))?;
-        let answered_by = body.get("model").and_then(Value::as_str).unwrap_or(model).to_string();
-        Ok((content.to_string(), answered_by))
+            .ok_or_else(|| AiError::Retryable(format!("OpenRouter returned no content (finish_reason={finish})")));
+        match content {
+            Ok(content) => {
+                self.log_call(model, started, Some(&body), None).await;
+                let answered_by = body.get("model").and_then(Value::as_str).unwrap_or(model).to_string();
+                Ok((content.to_string(), answered_by))
+            }
+            Err(e) => {
+                self.log_call(model, started, Some(&body), Some(&e.to_string())).await;
+                Err(e)
+            }
+        }
     }
 }
 
@@ -173,7 +213,7 @@ pub struct OpenRouterDrafter {
 
 impl OpenRouterDrafter {
     pub fn new(client: OpenRouterClient, model: &str) -> Self {
-        Self { client, model: model.into() }
+        Self { client: client.with_task("draft"), model: model.into() }
     }
 }
 
@@ -255,7 +295,7 @@ pub const ESCALATE_BELOW: f64 = 0.75;
 
 impl OpenRouterClassifier {
     pub fn new(client: OpenRouterClient, model: &str) -> Self {
-        Self { client, model: model.into(), escalation_model: None }
+        Self { client: client.with_task("classify"), model: model.into(), escalation_model: None }
     }
 
     pub fn with_escalation(mut self, model: &str) -> Self {
@@ -350,7 +390,7 @@ pub struct OpenRouterExtractor {
 
 impl OpenRouterExtractor {
     pub fn new(client: OpenRouterClient, model: &str) -> Self {
-        Self { client, model: model.into() }
+        Self { client: client.with_task("extract"), model: model.into() }
     }
 }
 
@@ -427,7 +467,7 @@ pub struct OpenRouterAnalyst {
 
 impl OpenRouterAnalyst {
     pub fn new(client: OpenRouterClient, model: &str) -> Self {
-        Self { client, model: model.into() }
+        Self { client: client.with_task("analyze"), model: model.into() }
     }
 }
 
@@ -466,7 +506,7 @@ pub struct OpenRouterLearner {
 
 impl OpenRouterLearner {
     pub fn new(client: OpenRouterClient, model: &str) -> Self {
-        Self { client, model: model.into() }
+        Self { client: client.with_task("learn"), model: model.into() }
     }
 }
 

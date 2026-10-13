@@ -1,4 +1,5 @@
 pub mod ai;
+pub mod ai_ledger;
 pub mod alerts;
 pub mod audit;
 pub mod automations;
@@ -52,7 +53,7 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
         .build()?;
 
     let openrouter = (!config.openrouter_api_key.is_empty())
-        .then(|| OpenRouterClient::new(http.clone(), &config.openrouter_api_url, &config.openrouter_api_key));
+        .then(|| OpenRouterClient::new(http.clone(), &config.openrouter_api_url, &config.openrouter_api_key).with_ledger(db.clone()));
 
     // Jev if configured, else an efficient OpenRouter model, else keyword rules.
     let classifier: Arc<dyn Classifier> = match (&openrouter, config.typesafe_api_key.is_empty()) {
@@ -132,12 +133,15 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
 
     let embedder: Arc<dyn ai::embeddings::Embedder> =
         if openrouter.is_some() && !config.openrouter_embedding_model_id.is_empty() {
-            Arc::new(ai::embeddings::OpenRouterEmbedder::new(
-                http.clone(),
-                &config.openrouter_api_url,
-                &config.openrouter_api_key,
-                &config.openrouter_embedding_model_id,
-            ))
+            Arc::new(
+                ai::embeddings::OpenRouterEmbedder::new(
+                    http.clone(),
+                    &config.openrouter_api_url,
+                    &config.openrouter_api_key,
+                    &config.openrouter_embedding_model_id,
+                )
+                .with_ledger(db.clone()),
+            )
         } else {
             tracing::warn!("no embedding model configured: using offline hash embeddings");
             Arc::new(ai::embeddings::HashEmbedder)

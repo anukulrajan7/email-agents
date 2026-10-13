@@ -128,6 +128,7 @@ jobs:
           JOB_WORKER_CONCURRENCY=4
           AI_AUTO_HOURS=2
           AUTO_DRAFTS=false
+          AI_DAILY_BUDGET_USD=2
           ENV
           sed -i 's/^ *//' deploy.env
       - name: Ship config and roll out
