@@ -795,17 +795,20 @@ async fn ids_from_another_workspace_are_rejected_and_nothing_leaks() {
     let env = env().await;
     let (foreign, foreign_att) = env.foreign_message().await;
 
-    let (status, body) = env.command_in(OPERATOR, "what is this?", json!({ "message_id": foreign })).await;
-    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
-    for key in ["case_id", "requirement_id"] {
-        let (status, _) = env.command_in(OPERATOR, "what is this?", json!({ key: "does_not_exist" })).await;
-        assert_eq!(status, StatusCode::NOT_FOUND, "{key}");
-    }
     let (status, _) = env.command_in(OPERATOR, "x", json!({ "message_id": "m".repeat(200) })).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     let (status, _) = env.command_in(OPERATOR, "x", json!({ "unknown": "field" })).await;
     assert!(status.is_client_error());
     assert!(env.planner.prompts().is_empty(), "a rejected request must not reach the model");
+
+    // A foreign, deleted or unknown page id is dropped silently: Meera answers without it and nothing leaks.
+    for ctx in [json!({ "message_id": foreign }), json!({ "case_id": "does_not_exist" }), json!({ "requirement_id": "does_not_exist" })] {
+        env.planner.push(vec![answer("Here is what I know.", json!([]))]);
+        let (status, body) = env.command_in(OPERATOR, "what is this?", ctx.clone()).await;
+        assert_eq!(status, StatusCode::OK, "{ctx} {body}");
+        let last = env.planner.prompts().last().unwrap().clone();
+        assert!(!last.contains("<viewing>") && !last.contains("TOPSECRET") && !last.contains(&foreign), "{last}");
+    }
 
     env.planner.push(vec![
         tool("read_attachment", json!({"attachment_id": foreign_att})),

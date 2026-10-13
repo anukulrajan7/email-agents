@@ -60,7 +60,8 @@ pub async fn resolve(db: &SqlitePool, ws: &str, ctx: &PageContext) -> AppResult<
 
     let mut message_id = clean_id(&ctx.message_id)?.map(str::to_string);
     if let Some(id) = clean_id(&ctx.case_id)? {
-        let c = case::get_in(db, ws, id).await?.ok_or(AppError::NotFound)?;
+        // Unknown, deleted or foreign ids are dropped the same way: nothing leaks and Meera still answers.
+        if let Some(c) = case::get_in(db, ws, id).await? {
         lines.push(format!(
             "agent case: case_id={}; title={}; status={}; goal={}",
             c.id,
@@ -71,6 +72,7 @@ pub async fn resolve(db: &SqlitePool, ws: &str, ctx: &PageContext) -> AppResult<
         if message_id.is_none() {
             message_id = c.message_id.clone();
         }
+        }
     }
     if let Some(id) = clean_id(&ctx.requirement_id)? {
         let found: Option<(String, Option<String>, String)> =
@@ -79,7 +81,7 @@ pub async fn resolve(db: &SqlitePool, ws: &str, ctx: &PageContext) -> AppResult<
                 .bind(ws)
                 .fetch_optional(db)
                 .await?;
-        let (role, client, req_message) = found.ok_or(AppError::NotFound)?;
+        if let Some((role, client, req_message)) = found {
         lines.push(format!(
             "requirement: requirement_id={id}; role={}; client={}",
             datamark(&role, 15),
@@ -87,6 +89,7 @@ pub async fn resolve(db: &SqlitePool, ws: &str, ctx: &PageContext) -> AppResult<
         ));
         if message_id.is_none() {
             message_id = Some(req_message);
+        }
         }
     }
 
@@ -101,7 +104,7 @@ pub async fn resolve(db: &SqlitePool, ws: &str, ctx: &PageContext) -> AppResult<
         .bind(ws)
         .fetch_optional(db)
         .await?;
-        let (subject, sender, received_at, direction, summary, thread_size) = row.ok_or(AppError::NotFound)?;
+        if let Some((subject, sender, received_at, direction, summary, thread_size)) = row {
         lines.push(format!(
             "email: message_id={id}; subject={}; from={sender}; date={}; direction={direction}; messages_in_thread={thread_size}",
             datamark(&subject, 20),
@@ -127,6 +130,7 @@ pub async fn resolve(db: &SqlitePool, ws: &str, ctx: &PageContext) -> AppResult<
         }
         out.seen.push(id.clone());
         out.message_id = Some(id);
+        }
     }
 
     if !lines.is_empty() {
