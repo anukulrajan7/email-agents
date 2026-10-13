@@ -72,7 +72,14 @@ async fn spawn_mock(flaky_first: Arc<AtomicUsize>, calls: Calls) -> String {
         )
         .route(
             "/proxy/gmail/v1/users/me/messages",
-            get(|| async { Json(json!({"messages": [{"id": "m1"}, {"id": "m2"}, {"id": "m3"}], "resultSizeEstimate": 3})) }),
+            get(|| async {
+                // A new email "arrives" in Gmail once the test flips NEW_MAIL.
+                let mut ids = vec![json!({"id": "m1"}), json!({"id": "m2"}), json!({"id": "m3"})];
+                if std::env::var("BF_NEW_MAIL").is_ok() {
+                    ids.insert(0, json!({"id": "m4"}));
+                }
+                Json(json!({"messages": ids}))
+            }),
         )
         .route(
             "/proxy/gmail/v1/users/me/messages/{id}",
@@ -86,6 +93,7 @@ async fn spawn_mock(flaky_first: Arc<AtomicUsize>, calls: Calls) -> String {
                     let (subject, body) = match id.as_str() {
                         "m1" => ("Requirement: 3 Java developers, Pune", "Need 3 Java devs with Spring Boot, 5-8 yrs, Pune."),
                         "m2" => ("Timesheet for September", "Please find my timesheet attached. 168 hours."),
+                        "m4" => ("Brand new email", "This arrived after the first sync."),
                         _ => ("Hello", "Just saying hi."),
                     };
                     (StatusCode::OK, Json(full_message(&id, subject, body)))
@@ -179,4 +187,14 @@ async fn backfills_full_messages_once_with_retry() {
     let (_, detail) = call(&app, "GET", &format!("/api/v1/workspaces/{ws}/messages/{}", ts["id"].as_str().unwrap()), None).await;
     assert_eq!(detail["draft"]["status"], "sent");
     assert!(detail["audit"].as_array().unwrap().iter().any(|a| a["action"] == "draft.sent"));
+
+    // A new email arrives in Gmail after the first sync: the next sync (or the 5-minute
+    // poll) imports it straight from Gmail, without waiting for Nango's hourly sync.
+    unsafe { std::env::set_var("BF_NEW_MAIL", "1") };
+    call(&app, "POST", &format!("/api/v1/workspaces/{ws}/sources/{}/sync", src["id"].as_str().unwrap()), None).await;
+    worker::drain(&state).await;
+    let (_, msgs) = call(&app, "GET", &format!("/api/v1/workspaces/{ws}/messages"), None).await;
+    let subjects: Vec<&str> = msgs["items"].as_array().unwrap().iter().map(|m| m["subject"].as_str().unwrap()).collect();
+    assert_eq!(subjects.len(), 4, "{subjects:?}");
+    assert!(subjects.contains(&"Brand new email"));
 }

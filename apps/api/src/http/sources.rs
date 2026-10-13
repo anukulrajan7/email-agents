@@ -234,7 +234,8 @@ pub async fn sync(
         return Err(AppError::Conflict("source is disconnected; reconnect it first".into()));
     }
     let mut tx = state.db.begin().await?;
-    nango::enqueue_sync(&mut tx, &ws, &source_id, "manual").await?;
+    // Unique per click: a second "Sync now" must never be silently swallowed.
+    nango::enqueue_sync(&mut tx, &ws, &source_id, &format!("manual:{}", new_id("req"))).await?;
     audit::record(
         &mut tx,
         Entry {

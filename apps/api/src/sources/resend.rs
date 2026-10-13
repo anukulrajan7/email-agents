@@ -157,6 +157,8 @@ impl ReceivedEmail {
                     provider_ref: None,
                 })
                 .collect(),
+            // Forwarded mail arrives complete.
+            preview_only: false,
         }
     }
 }

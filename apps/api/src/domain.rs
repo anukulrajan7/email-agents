@@ -131,6 +131,8 @@ pub struct NormalizedEmail {
     pub body_html: Option<String>,
     pub received_at: i64,
     pub attachments: Vec<AttachmentMeta>,
+    /// True when only a provider preview (snippet) is known, not the full body.
+    pub preview_only: bool,
 }
 
 #[derive(Debug, Clone, Default)]

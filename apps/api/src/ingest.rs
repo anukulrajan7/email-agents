@@ -82,8 +82,9 @@ pub async fn persist_message(
     sqlx::query(
         "INSERT INTO email_messages
            (id, workspace_id, source_id, thread_id, source_message_id, rfc_message_id, sender_address,
-            original_sender_address, recipients_json, subject, body_text, body_html, received_at, created_at, processing_status)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, 'normalized')",
+            original_sender_address, recipients_json, subject, body_text, body_html, received_at, created_at, processing_status,
+            content_complete)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, 'normalized', ?15)",
     )
     .bind(&message_id)
     .bind(workspace_id)
@@ -99,6 +100,7 @@ pub async fn persist_message(
     .bind(&email.body_html)
     .bind(email.received_at)
     .bind(now)
+    .bind(!email.preview_only)
     .execute(&mut *conn)
     .await?;
 
@@ -155,9 +157,12 @@ pub async fn refresh_content(
     source_id: &str,
     email: &NormalizedEmail,
 ) -> sqlx::Result<Option<String>> {
+    if email.preview_only {
+        return Ok(None);
+    }
     let updated: Option<(String, String)> = sqlx::query_as(
-        "UPDATE email_messages SET body_text = ?1, body_html = COALESCE(?2, body_html)
-         WHERE source_id = ?3 AND source_message_id = ?4 AND length(body_text) < length(?1)
+        "UPDATE email_messages SET body_text = ?1, body_html = COALESCE(?2, body_html), content_complete = 1
+         WHERE source_id = ?3 AND source_message_id = ?4 AND content_complete = 0
          RETURNING id, workspace_id",
     )
     .bind(&email.body_text)

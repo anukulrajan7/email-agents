@@ -111,6 +111,32 @@ async fn maintenance(state: &AppState) {
         }
         Err(e) => tracing::warn!(error = %e, "lease sweep failed"),
     }
+    // Connected mailboxes: pull new mail every 5 minutes (Nango's template sync is hourly).
+    let five_min_bucket = now_ms() / 300_000;
+    let polled = async {
+        let sources: Vec<(String, String)> = sqlx::query_as(
+            "SELECT id, workspace_id FROM email_sources WHERE kind = 'nango_gmail' AND status != 'disconnected'",
+        )
+        .fetch_all(&state.db)
+        .await?;
+        let mut conn = state.db.acquire().await?;
+        for (source_id, ws) in sources {
+            jobs::enqueue_with_attempts(
+                &mut conn,
+                kind::SYNC_NANGO_SOURCE,
+                &format!("sync:{source_id}:poll:{five_min_bucket}"),
+                Some(&ws),
+                &json!({ "source_id": source_id }),
+                3,
+            )
+            .await?;
+        }
+        Ok::<(), sqlx::Error>(())
+    }
+    .await;
+    if let Err(e) = polled {
+        tracing::warn!(error = %e, "failed to schedule mailbox polling");
+    }
     let hour_bucket = now_ms() / 3_600_000;
     let enqueued = async {
         let mut conn = state.db.acquire().await?;

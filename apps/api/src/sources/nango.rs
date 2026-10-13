@@ -398,6 +398,8 @@ pub fn map_gmail_record(rec: &Value, max_body_chars: usize) -> Option<MappedReco
             .and_then(|d| parse_iso_ms(&d).or_else(|| d.parse::<i64>().ok()))
             .unwrap_or_else(now_ms),
         attachments,
+        // Only a snippet unless an explicit body field was present.
+        preview_only: str_of(rec, &["body", "text", "bodyText"]).is_none(),
     };
     let mut mapped = MappedRecord { email, thread_id: str_of(rec, &["threadId", "thread_id"]), deleted, cursor };
     // If the record already carries MIME parts (full format), use them directly.
@@ -464,10 +466,12 @@ pub fn apply_gmail_payload(email: &mut NormalizedEmail, payload: &Value, max_bod
         (Some(t), html) if !t.trim().is_empty() => {
             email.body_text = normalize::truncate_chars(&t, max_body_chars);
             email.body_html = html.map(|h| normalize::truncate_chars(&h, max_body_chars));
+            email.preview_only = false;
         }
         (_, Some(h)) => {
             email.body_text = normalize::truncate_chars(&normalize::html_to_text(&h), max_body_chars);
             email.body_html = Some(normalize::truncate_chars(&h, max_body_chars));
+            email.preview_only = false;
         }
         _ => {}
     }
@@ -632,6 +636,15 @@ pub async fn sync_source(state: &AppState, payload: &Value) -> Result<(), JobErr
             Ok(n) => tracing::info!(%source_id, imported_or_refreshed = n, "gmail backfill finished"),
             Err(e) => tracing::warn!(%source_id, error = %e, "gmail backfill failed; will retry next sync"),
         }
+    } else {
+        match incremental_from_gmail(state, &source_id, &src.workspace_id, &connection_id, &pck).await {
+            Ok(n) => tracing::info!(%source_id, new = n, "gmail incremental pull finished"),
+            Err(JobError::Permanent(e)) => {
+                mark_source(state, &source_id, "degraded", Some(&e)).await?;
+                return Err(JobError::Permanent(e));
+            }
+            Err(e) => tracing::warn!(%source_id, error = %e, "gmail incremental pull failed; Nango records still checked"),
+        }
     }
 
     // Network first, outside any transaction: page through everything new.
@@ -734,8 +747,7 @@ pub async fn sync_source(state: &AppState, payload: &Value) -> Result<(), JobErr
 
 const ENRICH_CONCURRENCY: usize = 8;
 
-/// Lists the last N days of mail straight from Gmail, fetches each message in full and
-/// stores new ones / upgrades preview-only ones. Marks the source as backfilled.
+/// One-time: the last N days of mail, straight from Gmail. Marks the source backfilled.
 async fn backfill_from_gmail(
     state: &AppState,
     source_id: &str,
@@ -744,17 +756,65 @@ async fn backfill_from_gmail(
     pck: &str,
 ) -> Result<usize, JobError> {
     let q = format!("newer_than:{}d -in:chats", state.config.nango_backfill_days);
+    let changed =
+        pull_from_gmail(state, source_id, workspace_id, connection_id, pck, &q, state.config.nango_backfill_max, "backfill").await?;
+    sqlx::query("UPDATE email_sources SET backfilled_at = ?1 WHERE id = ?2").bind(now_ms()).bind(source_id).execute(&state.db).await?;
+    Ok(changed)
+}
+
+/// Every sync: mail newer than the newest stored message (minus 1 h overlap; dedupe
+/// absorbs repeats). Independent of Nango's hourly template sync.
+async fn incremental_from_gmail(
+    state: &AppState,
+    source_id: &str,
+    workspace_id: &str,
+    connection_id: &str,
+    pck: &str,
+) -> Result<usize, JobError> {
+    let newest: Option<i64> = sqlx::query_scalar("SELECT MAX(received_at) FROM email_messages WHERE source_id = ?1")
+        .bind(source_id)
+        .fetch_one(&state.db)
+        .await?;
+    let since_secs = newest.map(|ms| ms / 1000 - 3600).unwrap_or_else(|| now_ms() / 1000 - 86_400);
+    let q = format!("after:{since_secs} -in:chats");
+    pull_from_gmail(state, source_id, workspace_id, connection_id, pck, &q, 200, "incremental").await
+}
+
+/// Lists Gmail message ids matching `q`, fetches the new ones in full and stores them;
+/// already-stored preview-only messages are upgraded. Returns how many changed.
+#[allow(clippy::too_many_arguments)]
+async fn pull_from_gmail(
+    state: &AppState,
+    source_id: &str,
+    workspace_id: &str,
+    connection_id: &str,
+    pck: &str,
+    q: &str,
+    cap: usize,
+    via: &str,
+) -> Result<usize, JobError> {
     let mut ids: Vec<String> = Vec::new();
     let mut token: Option<String> = None;
     loop {
-        let (page, next) = state.nango.gmail_list_ids(connection_id, pck, &q, token.as_deref()).await?;
+        let (page, next) = state.nango.gmail_list_ids(connection_id, pck, q, token.as_deref()).await?;
         ids.extend(page);
-        if ids.len() >= state.config.nango_backfill_max || next.is_none() {
+        if ids.len() >= cap || next.is_none() {
             break;
         }
         token = next;
     }
-    ids.truncate(state.config.nango_backfill_max);
+    ids.truncate(cap);
+    // Skip what we already have with a full body (incremental runs re-list an hour of overlap).
+    let known: Vec<String> = sqlx::query_scalar(
+        "SELECT source_message_id FROM email_messages WHERE source_id = ?1 AND content_complete = 1
+           AND source_message_id IN (SELECT value FROM json_each(?2))",
+    )
+    .bind(source_id)
+    .bind(json!(ids).to_string())
+    .fetch_all(&state.db)
+    .await?;
+    let known: std::collections::HashSet<String> = known.into_iter().collect();
+    ids.retain(|id| !known.contains(id));
 
     // Reuse the enrichment path: start from bare records, fill from format=full.
     let mut records: Vec<MappedRecord> = ids
@@ -779,7 +839,7 @@ async fn backfill_from_gmail(
                 workspace_id,
                 &r.email,
                 r.thread_id.as_deref(),
-                json!({ "provider": GMAIL_KIND, "via": "backfill" }),
+                json!({ "provider": GMAIL_KIND, "via": via }),
             )
             .await?;
             if created.is_some() || ingest::refresh_content(&mut tx, source_id, &r.email).await?.is_some() {
@@ -788,7 +848,6 @@ async fn backfill_from_gmail(
         }
         tx.commit().await?;
     }
-    sqlx::query("UPDATE email_sources SET backfilled_at = ?1 WHERE id = ?2").bind(now_ms()).bind(source_id).execute(&state.db).await?;
     state.jobs_notify.notify_one();
     Ok(changed)
 }
