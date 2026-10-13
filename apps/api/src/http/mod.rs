@@ -93,7 +93,8 @@ pub fn router(state: AppState) -> Router {
         app.fallback(|| async { AppError::NotFound })
     } else {
         let index = std::path::Path::new(&web_dir).join("index.html");
-        app.fallback_service(ServeDir::new(&web_dir).not_found_service(ServeFile::new(index)))
+        // `fallback` (not `not_found_service`) so deep links return 200, not 404.
+        app.fallback_service(ServeDir::new(&web_dir).fallback(ServeFile::new(index)))
     };
     app.layer(TraceLayer::new_for_http())
         .layer(middleware::from_fn(request_id_middleware))

@@ -399,3 +399,28 @@ async fn model_failures_retry_then_dead_letter_to_review() {
     let (s, j) = h.call("POST", &format!("/api/v1/workspaces/{ws}/jobs/{job_id}/retry"), Some(ADMIN), None).await;
     assert_eq!((s, j["status"].as_str()), (StatusCode::OK, Some("pending")));
 }
+
+#[tokio::test]
+async fn serves_spa_with_deep_link_fallback_but_json_404_for_api() {
+    let dir = tempfile::tempdir().unwrap();
+    let web = dir.path().join("web");
+    std::fs::create_dir_all(web.join("assets")).unwrap();
+    std::fs::write(web.join("index.html"), "<title>Post Room</title>").unwrap();
+    std::fs::write(web.join("assets/app.js"), "console.log(1)").unwrap();
+    let mut config = Config::for_tests(&format!("sqlite://{}", dir.path().join("t.db").display()));
+    config.web_dist_dir = web.display().to_string();
+    let state = build_state(config).await.unwrap();
+    db::migrate(&state.db).await.unwrap();
+    let app = router(state);
+    let get = |p: &str| Request::get(p).body(Body::empty()).unwrap();
+
+    for path in ["/", "/w/ws_1/inbox/msg_1", "/assets/app.js"] {
+        let res = app.clone().oneshot(get(path)).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK, "{path}");
+    }
+    let res = app.clone().oneshot(get("/w/ws_1/inbox")).await.unwrap();
+    let body = res.into_body().collect().await.unwrap().to_bytes();
+    assert!(String::from_utf8_lossy(&body).contains("Post Room"));
+    assert_eq!(app.clone().oneshot(get("/api/v1/nope")).await.unwrap().status(), StatusCode::NOT_FOUND);
+    assert_eq!(app.oneshot(get("/api/v1/me")).await.unwrap().status(), StatusCode::UNAUTHORIZED);
+}
