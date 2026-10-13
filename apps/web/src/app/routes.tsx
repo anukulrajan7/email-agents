@@ -12,6 +12,7 @@ import { MemoryPage } from '../features/memory/MemoryPage';
 import { ContactPage } from '../features/memory/ContactPage';
 import { AlertsPage } from '../features/alerts/AlertsPage';
 import { AgentsPage } from '../features/agents/AgentsPage';
+import { PacksPage } from '../features/packs/PacksPage';
 import { UsagePage } from '../features/usage/UsagePage';
 import { AppShell } from './AppShell';
 
@@ -41,6 +42,7 @@ export function AppRoutes() {
           <Route path="memory/contacts/:email" element={<ContactPage />} />
           <Route path="automations" element={<AutomationsPage />} />
           <Route path="workflows" element={<WorkflowsPage />} />
+          <Route path="packs" element={<PacksPage />} />
           <Route path="integrations" element={<IntegrationsPage />} />
           <Route path="usage" element={<UsagePage />} />
           <Route path="jobs" element={<JobsPage />} />

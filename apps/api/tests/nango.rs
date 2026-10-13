@@ -154,7 +154,7 @@ impl H {
 
     /// Workspace + admin user id.
     async fn setup(&self) -> (String, String) {
-        let (_, ws) = self.call("POST", "/api/v1/workspaces", ADMIN, Some(json!({"name":"Acme"}))).await;
+        let (_, ws) = self.call("POST", "/api/v1/workspaces", ADMIN, Some(json!({"name":"Acme","template":"hr"}))).await;
         let (_, me) = self.call("GET", "/api/v1/me", ADMIN, None).await;
         (ws["id"].as_str().unwrap().into(), me["user"]["id"].as_str().unwrap().into())
     }

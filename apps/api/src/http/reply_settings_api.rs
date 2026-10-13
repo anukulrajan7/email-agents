@@ -7,7 +7,6 @@ use serde_json::json;
 
 use super::AppState;
 use crate::{
-    ai::routing::DEFAULT_REPLY_STYLE,
     audit::{self, Actor, Entry},
     auth::{AuthUser, require_role},
     domain::Role,
@@ -26,7 +25,8 @@ pub struct ReplySettingsView {
 pub async fn get_settings(State(state): State<AppState>, user: AuthUser, Path(ws): Path<String>) -> AppResult<Json<ReplySettingsView>> {
     require_role(&state.db, &ws, &user, Role::Operator).await?;
     let settings = reply_settings::load(&state.db, &state.config, &ws).await?;
-    Ok(Json(ReplySettingsView { settings, default_reply_style: DEFAULT_REPLY_STYLE }))
+    let default_reply_style = crate::packs::reply_style(&state.db, &ws).await?;
+    Ok(Json(ReplySettingsView { settings, default_reply_style }))
 }
 
 pub async fn put_settings(

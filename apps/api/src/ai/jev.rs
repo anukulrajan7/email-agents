@@ -48,7 +48,7 @@ impl JevClassifier {
                 },
                 "priority": {
                     "type": "score",
-                    "instructions": "How urgently does the HR team need to act on this email?",
+                    "instructions": "How urgently does the team need to act on this email?",
                     "criteria": [
                         "low: informational, no deadline",
                         "normal: needs action in the usual working cycle",
@@ -57,7 +57,7 @@ impl JevClassifier {
                 },
                 "requires_reply": {
                     "type": "noul",
-                    "instructions": "The sender expects a reply or acknowledgement from the HR team.",
+                    "instructions": "The sender expects a reply or acknowledgement from the team.",
                 },
             }
         })

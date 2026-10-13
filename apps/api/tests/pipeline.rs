@@ -107,7 +107,7 @@ impl Harness {
 
     /// Creates a workspace + forwarding source; returns (workspace_id, alias token).
     async fn workspace_with_alias(&self, admin: &str) -> (String, String) {
-        let (s, ws) = self.call("POST", "/api/v1/workspaces", Some(admin), Some(json!({"name":"Acme HR"}))).await;
+        let (s, ws) = self.call("POST", "/api/v1/workspaces", Some(admin), Some(json!({"name":"Acme HR","template":"hr"}))).await;
         assert_eq!(s, StatusCode::CREATED);
         let ws = ws["id"].as_str().unwrap().to_string();
         let (s, src) = self.call("POST", &format!("/api/v1/workspaces/{ws}/sources/forwarding"), Some(admin), None).await;

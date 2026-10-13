@@ -20,6 +20,7 @@ pub mod knowledge;
 pub mod labels;
 pub mod mailer;
 pub mod matching;
+pub mod packs;
 pub mod replies;
 pub mod send_safety;
 pub mod security;

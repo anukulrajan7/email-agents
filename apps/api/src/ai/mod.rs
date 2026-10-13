@@ -103,6 +103,8 @@ pub struct DraftInput {
     pub reply_instructions: String,
     /// Team-written sign-off; replaces the default one when set.
     pub signature: Option<String>,
+    /// Sign-off when `signature` is unset (`packs::default_sign_off`): "HR Operations" for staffing, else the workspace name.
+    pub default_sign_off: String,
 }
 
 /// The AI's reading of an email, produced before any reply is drafted.

@@ -467,8 +467,10 @@ pub async fn persist_classification(
         .await?;
     super::knowledge_jobs::enqueue_index_message(&mut tx, &workspace_id, message_id).await?;
     jobs::enqueue(&mut tx, kind::LEARN_FROM_MESSAGE, &format!("learn:{message_id}"), Some(&workspace_id), &json!({ "message_id": message_id })).await?;
-    // Requirement / referral emails also become structured records for matching.
-    if super::matching_jobs::is_extractable(&out.category) {
+    // Requirement / referral emails also become structured records for matching (staffing pack only).
+    if super::matching_jobs::is_extractable(&out.category)
+        && crate::packs::has_feature(&mut *tx, &workspace_id, crate::packs::FEATURE_MATCHING).await?
+    {
         jobs::enqueue(
             &mut tx,
             kind::EXTRACT_RECORD,
@@ -527,7 +529,8 @@ async fn execute_workflow(state: &AppState, payload: &Value) -> Result<(), JobEr
     if source_status == "disconnected" {
         return Ok(());
     }
-    let Some(template) = domain::WORKFLOW_TEMPLATES.iter().find(|t| t.label_key == category && t.available)
+    let hr_workflows = crate::packs::has_feature(&state.db, &workspace_id, crate::packs::FEATURE_HR_WORKFLOWS).await?;
+    let Some(template) = domain::WORKFLOW_TEMPLATES.iter().find(|t| hr_workflows && t.label_key == category && t.available)
     else {
         // No workflow for this category: classified is the end of the line.
         return mark_processed_if_classified(state, &message_id).await;
@@ -765,10 +768,16 @@ async fn compose_draft(
         .find(|l| l.key == category)
         .map(|l| (l.name, l.description))
         .unwrap_or_else(|| (category.clone(), String::new()));
-    let quality = ai::routing::draft_quality(Priority::parse(&priority).unwrap_or(Priority::Normal), &category, Some(&insight), requested);
+    let staffing = crate::packs::enabled(&state.db, &msg.workspace_id, crate::packs::STAFFING).await?;
+    let quality =
+        ai::routing::draft_quality(Priority::parse(&priority).unwrap_or(Priority::Normal), &category, Some(&insight), requested, staffing);
     let settings = crate::reply_settings::load(&state.db, &state.config, &msg.workspace_id).await?;
-    let reply_instructions =
-        if settings.reply_instructions.is_empty() { ai::routing::DEFAULT_REPLY_STYLE.to_string() } else { settings.reply_instructions };
+    let reply_instructions = if settings.reply_instructions.is_empty() {
+        crate::packs::reply_style(&state.db, &msg.workspace_id).await?.to_string()
+    } else {
+        settings.reply_instructions
+    };
+    let default_sign_off = crate::packs::default_sign_off(&state.db, &msg.workspace_id).await?;
     let (reply_instructions, signature) =
         crate::agent_profiles::draft_voice(&state.db, &state.config, &msg.workspace_id, message_id, reply_instructions, settings.signature).await?;
 
@@ -805,6 +814,7 @@ async fn compose_draft(
             quality,
             reply_instructions,
             signature,
+            default_sign_off,
         })
         .await?;
     Ok((out, ctx, quality))

@@ -67,9 +67,14 @@ pub fn template_body(input: &DraftInput) -> String {
         "timesheet" => "Thank you for submitting your timesheet. We have received it and it is now with the HR team for review. We will get back to you if anything needs clarification.",
         "leave" => "Thank you for your leave request. We have received it and will review it shortly.",
         "candidate_referral" => "Thank you for the referral. We have received the candidate's details and the recruiting team will review them.",
-        _ => "Thank you for your email. We have received it and the HR team will get back to you.",
+        _ => "Thank you for your email. We have received it and the team will get back to you.",
     };
-    let sign_off = input.signature.as_deref().map(str::trim).filter(|s| !s.is_empty()).unwrap_or("HR Operations");
+    let sign_off = [input.signature.as_deref(), Some(input.default_sign_off.as_str())]
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .find(|s| !s.is_empty())
+        .unwrap_or("The team");
     format!("{greeting}\n\n{line}\n\nBest regards,\n{sign_off}")
 }
 

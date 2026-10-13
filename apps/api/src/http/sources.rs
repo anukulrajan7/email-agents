@@ -129,7 +129,7 @@ pub async fn test_email(
         to: vec![alias],
         subject: Some(body.subject.unwrap_or_else(|| "September timesheet".into())),
         text: Some(body.body_text.unwrap_or_else(|| {
-            "Hi HR team,\n\nPlease find attached my timesheet for September (168 hours). \
+            "Hi team,\n\nPlease find attached my timesheet for September (168 hours). \
              Let me know if anything needs correcting.\n\nThanks,\nPriya"
                 .into()
         })),

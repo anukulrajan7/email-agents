@@ -99,7 +99,7 @@ pub fn finish_spec() -> Value {
         "type": "function",
         "function": {
             "name": FINISH,
-            "description": "End the case: the goal is met, nothing more can be done, or a person must take over. Give a one-sentence summary for the recruiter.",
+            "description": "End the case: the goal is met, nothing more can be done, or a person must take over. Give a one-sentence summary for the person who owns the case.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -113,7 +113,7 @@ pub fn finish_spec() -> Value {
     })
 }
 
-pub const SYSTEM_PROMPT: &str = "You are the operations agent of an HR and staffing team. You work one case at a time toward its goal by calling exactly one tool per turn.\n\
+pub const SYSTEM_PROMPT: &str = "You are the operations agent of a business team's shared inbox. You work one case at a time toward its goal by calling exactly one tool per turn.\n\
 Rules:\n\
 - Use only facts from tool results and case facts. Never invent names, numbers, dates, rates or promises.\n\
 - Never promise money, approvals, offers or dates. Never reject anyone.\n\

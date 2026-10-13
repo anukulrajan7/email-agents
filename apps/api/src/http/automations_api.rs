@@ -207,7 +207,8 @@ pub async fn remove(
 
 pub async fn presets(State(state): State<AppState>, user: AuthUser, Path(ws): Path<String>) -> ApiResult<Json<Items<PresetInfo>>> {
     require_role(&state.db, &ws, &user, Role::Operator).await?;
-    Ok(Json(Items { items: automations::presets() }))
+    let offered = crate::packs::presets_for(&crate::packs::enabled_keys(&state.db, &ws).await?);
+    Ok(Json(Items { items: offered.iter().filter_map(|k| automations::preset(k)).collect() }))
 }
 
 pub async fn create_from_preset(
@@ -216,7 +217,8 @@ pub async fn create_from_preset(
     Path((ws, key)): Path<(String, String)>,
 ) -> ApiResult<(StatusCode, Json<Automation>)> {
     require_role(&state.db, &ws, &user, Role::Admin).await?;
-    let preset = automations::preset(&key).ok_or(AppError::NotFound)?;
+    let offered = crate::packs::presets_for(&crate::packs::enabled_keys(&state.db, &ws).await?);
+    let preset = automations::preset(&key).filter(|_| offered.contains(&key.as_str())).ok_or(AppError::NotFound)?;
     let created = create_validated(&state, &ws, &user, &preset.automation.into(), Some(&key)).await?;
     Ok((StatusCode::CREATED, Json(created)))
 }

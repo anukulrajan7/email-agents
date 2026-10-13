@@ -48,10 +48,9 @@ async fn templates_seed_labels_and_custom_labels_drive_classification() {
     assert!(keys(&labels).contains(&"sales_lead".to_string()));
     assert!(!keys(&labels).contains(&"timesheet".to_string()));
 
-    // Timesheet workflow is unavailable without its label.
+    // HR workflows belong to the staffing pack: a general workspace has none.
     let (_, wfs) = call(&app, "GET", &format!("{base}/workflows"), ADMIN, None).await;
-    let ts = wfs["items"].as_array().unwrap().iter().find(|w| w["template_key"] == "timesheet_review").unwrap().clone();
-    assert_eq!((ts["available"].as_bool(), ts["enabled"].as_bool(), ts["label_key"].as_str()), (Some(false), Some(false), Some("timesheet")));
+    assert!(wfs["items"].as_array().unwrap().is_empty());
 
     // Custom label: created, slugged, validated, conflict on duplicate.
     let (s, l) = call(&app, "POST", &format!("{base}/labels"), ADMIN,
@@ -87,7 +86,7 @@ async fn templates_seed_labels_and_custom_labels_drive_classification() {
 #[tokio::test]
 async fn label_guards_and_reordering() {
     let (_state, app, _d) = setup().await;
-    let (_, ws) = call(&app, "POST", "/api/v1/workspaces", ADMIN, Some(json!({"name":"HR"}))).await;
+    let (_, ws) = call(&app, "POST", "/api/v1/workspaces", ADMIN, Some(json!({"name":"HR","template":"hr"}))).await;
     let base = format!("/api/v1/workspaces/{}", ws["id"].as_str().unwrap());
     let (_, labels) = call(&app, "GET", &format!("{base}/labels"), ADMIN, None).await;
     let items = labels["items"].as_array().unwrap().clone();
@@ -110,13 +109,22 @@ async fn label_guards_and_reordering() {
 #[tokio::test]
 async fn workflow_setup_adds_label_and_approve_clears_review() {
     let (state, app, _d) = setup().await;
-    let (_, ws) = call(&app, "POST", "/api/v1/workspaces", ADMIN, Some(json!({"name":"Ops","template":"general"}))).await;
+    let (_, ws) = call(&app, "POST", "/api/v1/workspaces", ADMIN, Some(json!({"name":"Ops","template":"hr"}))).await;
     let base = format!("/api/v1/workspaces/{}", ws["id"].as_str().unwrap());
 
-    // "Needs label" → one click: label created from the HR seed, workflow enabled.
+    // The Timesheet label was archived (after turning its workflow off): the workflow needs its label.
     let (_, wfs) = call(&app, "GET", &format!("{base}/workflows"), ADMIN, None).await;
     let ts_id = wfs["items"].as_array().unwrap().iter().find(|w| w["template_key"] == "timesheet_review").unwrap()["id"]
         .as_str().unwrap().to_string();
+    call(&app, "PATCH", &format!("{base}/workflows/{ts_id}"), ADMIN, Some(json!({"enabled":false}))).await;
+    let (_, labels) = call(&app, "GET", &format!("{base}/labels"), ADMIN, None).await;
+    let ts_label = labels["items"].as_array().unwrap().iter().find(|l| l["key"] == "timesheet").unwrap()["id"].as_str().unwrap().to_string();
+    assert_eq!(call(&app, "PATCH", &format!("{base}/labels/{ts_label}"), ADMIN, Some(json!({"archived":true}))).await.0, StatusCode::OK);
+    let (_, wfs) = call(&app, "GET", &format!("{base}/workflows"), ADMIN, None).await;
+    let ts = wfs["items"].as_array().unwrap().iter().find(|w| w["template_key"] == "timesheet_review").unwrap().clone();
+    assert_eq!((ts["available"].as_bool(), ts["enabled"].as_bool()), (Some(false), Some(false)));
+
+    // "Needs label" → one click: label restored from the HR seed, workflow enabled.
     assert_eq!(call(&app, "POST", &format!("{base}/workflows/{ts_id}/setup"), "dev:op@acme.test", None).await.0, StatusCode::FORBIDDEN);
     let (s, wf) = call(&app, "POST", &format!("{base}/workflows/{ts_id}/setup"), ADMIN, None).await;
     assert_eq!((s, wf["available"].as_bool(), wf["enabled"].as_bool()), (StatusCode::OK, Some(true), Some(true)));

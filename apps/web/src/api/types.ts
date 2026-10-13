@@ -54,7 +54,18 @@ export type LabelTemplateInfo = {
 export type LabelCreateBody = { name: string; description: string; color?: LabelColor };
 export type LabelPatch = Partial<{ name: string; description: string; color: LabelColor; archived: boolean; position: number }>;
 
-export type Workspace = { id: string; name: string; role: Role; created_at: string };
+export type Workspace = { id: string; name: string; role: Role; created_at: string; packs?: string[] };
+
+export type Pack = {
+  key: string;
+  name: string;
+  description: string;
+  labels: { key: string; name: string; description: string }[];
+  presets: string[];
+  features: string[];
+};
+export type WorkspacePack = Pack & { enabled: boolean };
+export type WorkspacePacks = { enabled: string[]; items: WorkspacePack[] };
 
 export type MeResponse = {
   user: { id: string; email: string; name: string | null };

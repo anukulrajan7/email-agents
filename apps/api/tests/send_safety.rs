@@ -128,7 +128,7 @@ async fn harness(undo_seconds: i64) -> H {
     let app = router(state.clone());
     let mut h = H { state, app, mock, judge, ws: String::new(), msg: String::new(), _dir: dir };
 
-    let (_, ws) = h.call("POST", "/api/v1/workspaces", Some(json!({"name": "Acme"}))).await;
+    let (_, ws) = h.call("POST", "/api/v1/workspaces", Some(json!({"name": "Acme", "template": "hr"}))).await;
     h.ws = ws["id"].as_str().unwrap().to_string();
     let (_, src) = h.call("POST", &format!("/api/v1/workspaces/{}/sources/forwarding", h.ws), None).await;
     let src = src["id"].as_str().unwrap().to_string();

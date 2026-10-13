@@ -112,7 +112,7 @@ async fn requirement_facts(state: &AppState, ws: &str, requirement_id: &str) -> 
 
 /// Hook after matching ran for a requirement record: start its case once, for new mail only.
 pub async fn after_requirement_matched(state: &AppState, ws: &str, requirement_id: &str) -> Result<(), JobError> {
-    if !state.planner.enabled() {
+    if !state.planner.enabled() || !crate::packs::has_feature(&state.db, ws, crate::packs::FEATURE_REQUIREMENT_AGENT).await? {
         return Ok(());
     }
     let Some(r) = requirement_facts(state, ws, requirement_id).await? else { return Ok(()) };

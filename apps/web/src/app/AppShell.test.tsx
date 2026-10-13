@@ -61,7 +61,7 @@ describe('AppShell navigation', () => {
   it('adds Jobs and AI usage to Settings for admins', async () => {
     renderShell('admin');
     const nav = await screen.findByRole('navigation', { name: 'Main' });
-    expect(itemsOf(nav, 'Settings')).toEqual(['Integrations', 'Workflows', 'Reviews', 'Jobs', 'AI usage']);
+    expect(itemsOf(nav, 'Settings')).toEqual(['Integrations', 'Workflows', 'Packs', 'Reviews', 'Jobs', 'AI usage']);
     expect(within(nav).getByRole('link', { name: 'AI usage' })).toHaveAttribute('href', '/w/w1/usage');
   });
 

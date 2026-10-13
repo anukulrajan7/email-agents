@@ -16,6 +16,8 @@ pub struct Workspace {
     pub name: String,
     pub role: String,
     pub created_at: String,
+    /// Enabled pack keys in catalogue order (see `packs::PACKS`).
+    pub packs: Vec<String>,
 }
 
 #[derive(FromRow)]
@@ -24,11 +26,19 @@ pub struct WorkspaceRow {
     pub name: String,
     pub role: String,
     pub created_at: i64,
+    /// Comma-separated enabled pack keys.
+    pub packs: Option<String>,
 }
 
 impl From<WorkspaceRow> for Workspace {
     fn from(r: WorkspaceRow) -> Self {
-        Self { id: r.id, name: r.name, role: r.role, created_at: iso(r.created_at) }
+        let enabled: Vec<&str> = r.packs.as_deref().unwrap_or_default().split(',').collect();
+        let mut packs: Vec<String> =
+            crate::packs::PACKS.iter().map(|p| p.key).filter(|k| enabled.contains(k)).map(str::to_string).collect();
+        if packs.is_empty() {
+            packs.push(crate::packs::GENERAL.into());
+        }
+        Self { id: r.id, name: r.name, role: r.role, created_at: iso(r.created_at), packs }
     }
 }
 

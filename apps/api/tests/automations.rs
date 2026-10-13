@@ -45,7 +45,7 @@ async fn setup_with(tweak: impl FnOnce(&mut Config)) -> Env {
     let state = build_state(config).await.unwrap();
     db::migrate(&state.db).await.unwrap();
     let app = router(state.clone());
-    let (_, ws) = call(&app, "POST", "/api/v1/workspaces", ADMIN, Some(json!({"name":"Acme"}))).await;
+    let (_, ws) = call(&app, "POST", "/api/v1/workspaces", ADMIN, Some(json!({"name":"Acme","template":"hr"}))).await;
     let base = format!("/api/v1/workspaces/{}", ws["id"].as_str().unwrap());
     // The operator must have signed in once to exist; any authenticated call does that.
     call(&app, "GET", "/api/v1/me", OPERATOR, None).await;

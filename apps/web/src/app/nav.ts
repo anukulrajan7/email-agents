@@ -31,6 +31,7 @@ export function navGroups(isAdmin: boolean): NavGroup[] {
       items: [
         { to: 'integrations', label: 'Integrations' },
         { to: 'workflows', label: 'Workflows' },
+        ...(isAdmin ? [{ to: 'packs', label: 'Packs' }] : []),
         { to: 'reviews', label: 'Reviews' },
         ...(isAdmin
           ? [
