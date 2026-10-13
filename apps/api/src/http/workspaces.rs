@@ -98,6 +98,7 @@ pub async fn create(
             .execute(&mut *tx)
             .await?;
     }
+    crate::automations::seed_defaults(&mut tx, &id).await?;
     audit::record(
         &mut tx,
         Entry {

@@ -75,7 +75,7 @@ type Condition =
 type Action =
   | { type: 'draft_reply'; instructions?: string }           // extra guidance for the drafter
   | { type: 'save_to_gmail_drafts' }                          // needs draft_reply before it
-  | { type: 'send_reply'; daily_cap: number }                 // guarded: skipped if draft has [NEEDS], cap reached, or no Gmail source
+  | { type: 'send_reply'; daily_cap: number; allowed_domains: string[] }  // guarded: skipped if draft has [NEEDS], sender domain not in allowed_domains (non-empty), classification confidence < 0.85 or error-fallback label, cap reached, no Gmail source, or sender is the mailbox itself
   | { type: 'create_review'; title?: string }
   | { type: 'remind_if_no_reply'; hours: number };          // creates review item 'reminder' if thread still unanswered
 interface AutomationInput { name: string; enabled: boolean; conditions: Condition[]; actions: Action[] }   // conditions AND-ed
@@ -88,8 +88,8 @@ interface AutomationRun { id: string; automation_id: string; message_id: string;
 ```
 Presets: `reply_to_questions` (needs_reply=true → draft_reply + save_to_gmail_drafts), `acknowledge_timesheets`
 (label=timesheet → draft_reply + save_to_gmail_drafts), `chase_important` (priority=high, needs_reply → remind 4h),
-`auto_ack_referrals` (label=referral → draft_reply + send_reply cap 20). New workspaces get `reply_to_questions` and
-`chase_important` enabled by default. Errors: 400 `invalid_automation` for unknown fields/ops/action order.
+`auto_ack_referrals` (label=candidate_referral → draft_reply + save_to_gmail_drafts). No preset auto-sends; `send_reply` is only something a user builds deliberately. New workspaces get `reply_to_questions` and
+`chase_important` enabled by default. Errors: 400 `invalid_automation` for unknown fields/ops/action order, empty `allowed_domains`, non-positive caps/hours. Every send (manual too) is refused with 409 `draft_incomplete` while the draft body contains `[NEEDS:`.
 
 ### C. Knowledge / RAG (internal, plus one endpoint)
 `GET /search?q=…&limit=10` → `{ items: [{ kind: 'email'|'attachment', message_id, subject, snippet, score }] }`.

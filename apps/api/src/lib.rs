@@ -1,5 +1,6 @@
 pub mod ai;
 pub mod audit;
+pub mod automations;
 pub mod auth;
 pub mod config;
 pub mod db;

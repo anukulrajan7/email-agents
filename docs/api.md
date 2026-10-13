@@ -276,3 +276,58 @@ type Match = {
   created_at: string; updated_at: string;
 };
 ```
+
+## Automations (when X, do Y)
+
+All under `/api/v1/workspaces/{ws}`. Operators read, admins write. Trigger `email_received` fires after an email is
+classified and understood (insight). Conditions are AND-ed. Each automation runs at most once per message.
+
+| Method | Path | Role | Result |
+|---|---|---|---|
+| GET | `/automations` | Operator | `{ items: Automation[] }` (seeds the two default automations the first time a pre-existing workspace looks) |
+| POST | `/automations` | Admin | 201 `Automation` (body `AutomationInput`) |
+| PATCH | `/automations/{id}` | Admin | `Automation` (partial `AutomationInput`) |
+| DELETE | `/automations/{id}` | Admin | 204 |
+| GET | `/automations/presets` | Operator | `{ items: Preset[] }` |
+| POST | `/automations/presets/{key}` | Admin | 201 `Automation` created from the preset (404 unknown key) |
+| GET | `/automations/{id}/runs?limit=50` | Operator | `{ items: AutomationRun[] }` newest first (limit 1-200) |
+| POST | `/automations/{id}/test` | Operator | `{ matched: [{ message_id, subject }] }` dry run over the last 50 messages, no side effects |
+
+```ts
+type Condition =
+  | { field: "label"; op: "is" | "is_not"; value: string }            // label key
+  | { field: "priority"; op: "is"; value: "high" | "normal" | "low" }
+  | { field: "needs_reply"; op: "is"; value: boolean }                 // insight, falling back to the classifier
+  | { field: "from"; op: "contains"; value: string }                   // case-insensitive
+  | { field: "subject"; op: "contains"; value: string };
+type Action =
+  | { type: "draft_reply"; instructions?: string }                     // reuses the message's existing draft
+  | { type: "save_to_gmail_drafts" }                                    // needs draft_reply before it
+  | { type: "send_reply"; daily_cap: number; allowed_domains: string[] } // needs draft_reply before it; guarded
+  | { type: "create_review"; title?: string }
+  | { type: "remind_if_no_reply"; hours: number };                      // review item kind "reminder" if still unanswered
+type AutomationInput = { name: string; enabled: boolean; conditions: Condition[]; actions: Action[] };
+type Automation = AutomationInput & { id: string; trigger: "email_received"; preset_key: string | null;
+  run_count: number; last_run_at: string | null; created_at: string; updated_at: string };
+type Preset = { key: string; name: string; description: string; automation: AutomationInput };
+type AutomationRun = { id: string; automation_id: string; message_id: string; message_subject: string;
+  status: "completed" | "skipped" | "failed";
+  actions: { type: string; status: "done" | "skipped" | "failed"; detail: string | null }[]; created_at: string };
+```
+
+Limits: name 1-100 chars, 1-10 actions, at most 10 conditions, `daily_cap` 1-1000, `hours` 1-720, at most 50
+automations per workspace. Any violation, unknown field/op/action type, `save_to_gmail_drafts` or `send_reply` without an
+earlier `draft_reply`, or an empty `allowed_domains` returns 400 `invalid_automation`.
+
+Presets: `reply_to_questions` (needs_reply -> draft + save to Gmail Drafts), `acknowledge_timesheets` (label timesheet ->
+draft + save), `chase_important` (priority high + needs_reply -> remind after 4h), `auto_ack_referrals` (label
+candidate_referral -> draft + save). New workspaces get `reply_to_questions` and `chase_important`, enabled. No preset sends.
+
+`send_reply` safety (any failed check records the action as `skipped` with a reason): the draft has no `[NEEDS: ...]` gap
+and no unanswered items; the sender's domain is in `allowed_domains`; the classification is manual or has confidence >= 0.85
+and did not come from the error fallback; today's sends for this automation are below `daily_cap`; the source can send; the
+sender is not the mailbox itself or an automated address. Sends are audited as `automation.sent_reply`.
+Manual `POST /drafts/{id}/send` is also refused with 409 `draft_incomplete` while the body contains `[NEEDS:`.
+
+`remind_if_no_reply` schedules a delayed job. When due, if the draft was not sent and no later message from someone else
+arrived in the thread, a review item of kind `reminder` ("No reply yet: ...") is opened.

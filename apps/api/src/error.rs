@@ -47,6 +47,8 @@ pub enum AppError {
     #[error("{0}")]
     Conflict(String),
     #[error("{0}")]
+    DraftIncomplete(String),
+    #[error("{0}")]
     NotImplemented(String),
     #[error("dependency unavailable")]
     Unavailable,
@@ -75,6 +77,7 @@ impl IntoResponse for AppError {
             AppError::NotFound => (StatusCode::NOT_FOUND, "not_found"),
             AppError::BadRequest(_) => (StatusCode::BAD_REQUEST, "bad_request"),
             AppError::Conflict(_) => (StatusCode::CONFLICT, "conflict"),
+            AppError::DraftIncomplete(_) => (StatusCode::CONFLICT, "draft_incomplete"),
             AppError::NotImplemented(_) => (StatusCode::NOT_IMPLEMENTED, "not_implemented"),
             AppError::Unavailable => (StatusCode::SERVICE_UNAVAILABLE, "unavailable"),
             AppError::RateLimited => (StatusCode::TOO_MANY_REQUESTS, "rate_limited"),

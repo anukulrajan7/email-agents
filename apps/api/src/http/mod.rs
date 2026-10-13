@@ -1,4 +1,5 @@
 mod auth_api;
+mod automations_api;
 mod dto;
 mod jobs_api;
 mod labels_api;
@@ -104,6 +105,7 @@ pub fn router(state: AppState) -> Router {
         .route("/workspaces/{ws}/matching/matches/{id}", patch(matching_api::decide))
         .route("/workspaces/{ws}/jobs", get(jobs_api::list))
         .route("/workspaces/{ws}/jobs/{id}/retry", post(jobs_api::retry))
+        .merge(automations_api::routes())
         .fallback(|| async { AppError::NotFound })
         .layer(DefaultBodyLimit::max(256 * 1024));
 
@@ -111,7 +113,7 @@ pub fn router(state: AppState) -> Router {
         .allow_origin(
             HeaderValue::from_str(&state.config.public_web_url).unwrap_or(HeaderValue::from_static("http://localhost:5173")),
         )
-        .allow_methods([Method::GET, Method::POST, Method::PATCH])
+        .allow_methods([Method::GET, Method::POST, Method::PATCH, Method::DELETE])
         .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE, HeaderName::from_static("x-auth-token")])
         .expose_headers([HeaderName::from_static("x-request-id")]);
 
