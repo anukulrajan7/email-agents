@@ -47,6 +47,7 @@ export function PlanCardView({
           )}
         </p>
       )}
+      {state.status === 'expired' && <p className="text-[13px] text-ink-muted">This card expired. Ask again if you still want it.</p>}
       {state.status === 'cancelled' && <p className="text-[13px] text-ink-muted">Cancelled. Nothing was done.</p>}
     </article>
   );

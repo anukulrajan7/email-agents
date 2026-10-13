@@ -7,7 +7,8 @@ import { TOKEN_KEY } from '../../api/client';
 import { ToastProvider } from '../../components/ui';
 import { AppShell } from '../../app/AppShell';
 import { AskMeera } from './AskMeera';
-import type { CommandResponse } from './types';
+import { readPageContext } from './pageContext';
+import type { CommandResponse, HistoryMessage, HistoryPage } from './types';
 
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
 
@@ -37,11 +38,11 @@ function mockFetch(handler: Handler) {
 const callsTo = (fetchMock: ReturnType<typeof mockFetch>, suffix: string) =>
   fetchMock.mock.calls.filter(([url]) => String(url).endsWith(suffix)) as [string, RequestInit][];
 
-function renderAssistant() {
+function renderAssistant(path = '/w/w1/inbox') {
   return render(
     <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } })}>
       <ToastProvider>
-        <MemoryRouter initialEntries={['/w/w1/inbox']}>
+        <MemoryRouter initialEntries={[path]}>
           <Routes>
             <Route path="/w/:ws/*" element={<AskMeera ws="w1" />} />
           </Routes>
@@ -102,7 +103,7 @@ describe('Ask Meera', () => {
     expect(within(panel).getByRole('link', { name: 'Offer letter for Priya' })).toHaveAttribute('href', '/w/w1/inbox/m1');
     const [url, init] = callsTo(fetchMock, '/assistant/command')[0]!;
     expect(url).toBe('/api/v1/workspaces/w1/assistant/command');
-    expect(JSON.parse(String(init.body))).toEqual({ text: 'What is Priya waiting for?' });
+    expect(JSON.parse(String(init.body))).toEqual({ text: 'What is Priya waiting for?', context: { route: '/w/w1/inbox' } });
   });
 
   it('shows a plan card that only runs after Confirm, then toasts the result', async () => {
@@ -193,7 +194,7 @@ describe('Ask Meera', () => {
     expect((form.get('audio') as Blob).size).toBeGreaterThan(0);
     expect(Number(form.get('duration_ms'))).toBeGreaterThanOrEqual(0);
     expect((init.headers as Record<string, string>)['Content-Type']).toBeUndefined();
-    expect(JSON.parse(String(callsTo(fetchMock, '/assistant/command')[0]![1].body))).toEqual({ text: 'what needs a reply' });
+    expect(JSON.parse(String(callsTo(fetchMock, '/assistant/command')[0]![1].body))).toEqual({ text: 'what needs a reply', context: { route: '/w/w1/inbox' } });
     expect(within(panel).getByText('what needs a reply')).toBeInTheDocument();
   });
 
@@ -235,6 +236,113 @@ describe('Ask Meera', () => {
     await waitFor(() => expect(speak).toHaveBeenCalledTimes(1));
     expect((speak.mock.calls[0]![0] as { text: string }).text).toMatch(/offer letter will be ready/);
     Reflect.deleteProperty(window, 'speechSynthesis');
+  });
+
+  it('shows the saved conversation when opened, with earlier plan cards restored and older messages on request', async () => {
+    const msg = (id: number, role: 'user' | 'assistant', text: string, extra: Partial<HistoryMessage> = {}): HistoryMessage => ({
+      id,
+      role,
+      text,
+      created_at: new Date(Date.now() - (10 - id) * 86_400_000).toISOString(),
+      citations: [],
+      plan: [],
+      ...extra,
+    });
+    const newest: HistoryPage = {
+      items: [
+        msg(3, 'user', 'draft a reply to Priya'),
+        msg(4, 'assistant', 'I prepared a draft reply.', {
+          plan: [
+            { ...draftCard, state: 'done' },
+            { ...draftCard, id: 'apl_old', action: 'snooze_alert', summary: 'Snooze the alert “Late reply” for 4 hours', state: 'expired' },
+          ],
+        }),
+      ],
+      next_before: 3,
+    };
+    const older: HistoryPage = { items: [msg(1, 'user', 'what needs a reply?'), msg(2, 'assistant', 'Two emails need a reply.')], next_before: null };
+    const fetchMock = mockFetch((url) => {
+      if (!url.includes('/assistant/history')) return undefined;
+      return json(url.includes('before=3') ? older : newest);
+    });
+    renderAssistant();
+    const { user, panel } = await openPanel();
+
+    expect(await within(panel).findByText('draft a reply to Priya')).toBeInTheDocument();
+    expect(within(panel).queryByText('what needs a reply?')).not.toBeInTheDocument();
+    expect(within(panel).queryByText(/Type or speak a request/)).not.toBeInTheDocument();
+    const done = within(panel).getByRole('article', { name: /Draft a reply/ });
+    expect(within(done).getByText('Confirmed earlier.')).toBeInTheDocument();
+    expect(within(done).queryByRole('button', { name: /^Confirm/ })).not.toBeInTheDocument();
+    const expired = within(panel).getByRole('article', { name: /Snooze alert/ });
+    expect(within(expired).getByText(/expired/)).toBeInTheDocument();
+    expect(within(expired).queryByRole('button', { name: /^Confirm/ })).not.toBeInTheDocument();
+
+    await user.click(within(panel).getByRole('button', { name: 'Show earlier messages' }));
+    expect(await within(panel).findByText('Two emails need a reply.')).toBeInTheDocument();
+    const earlier = within(panel).getByText('what needs a reply?');
+    const later = within(panel).getByText('draft a reply to Priya');
+    expect(earlier.compareDocumentPosition(later) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(within(panel).queryByRole('button', { name: 'Show earlier messages' })).not.toBeInTheDocument();
+    const urls = fetchMock.mock.calls.map(([u]) => String(u)).filter((u) => u.includes('/assistant/history'));
+    expect(urls[0]).toContain('/api/v1/workspaces/w1/assistant/history?limit=20');
+    expect(urls[1]).toContain('before=3');
+  });
+
+  it('is one continuous conversation: no new-chat button and no history drawer', async () => {
+    mockFetch(() => undefined);
+    renderAssistant();
+    const { panel } = await openPanel();
+    expect(within(panel).queryByRole('button', { name: /new chat|new conversation|history|chats/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /new chat|history/i })).not.toBeInTheDocument();
+  });
+
+  it('tells the assistant what is open: the email, the agent case or the selected requirement', async () => {
+    const fetchMock = mockFetch((url) => (url.endsWith('/assistant/command') ? json(answer({ citations: [] })) : undefined));
+    const view = renderAssistant('/w/w1/inbox/m42');
+    const { user, panel } = await openPanel();
+    expect(within(panel).getByText(/Looking at/)).toHaveTextContent('Looking at this email');
+    expect(within(panel).getByRole('textbox', { name: 'Message to Meera' })).toHaveAttribute('placeholder', 'Ask Meera about this email');
+
+    await user.type(within(panel).getByRole('textbox', { name: 'Message to Meera' }), 'in sheet what is, can you read it for me{Enter}');
+    await within(panel).findByText(/offer letter will be ready/);
+    expect(JSON.parse(String(callsTo(fetchMock, '/assistant/command')[0]![1].body))).toEqual({
+      text: 'in sheet what is, can you read it for me',
+      context: { route: '/w/w1/inbox/m42', message_id: 'm42' },
+    });
+    view.unmount();
+
+    expect(readPageContext('/w/w1/agents/case9', '')).toEqual({ context: { route: '/w/w1/agents/case9', case_id: 'case9' }, label: 'this agent case' });
+    expect(readPageContext('/w/w1/matching', '?req=req7')).toEqual({ context: { route: '/w/w1/matching', requirement_id: 'req7' }, label: 'this requirement' });
+    expect(readPageContext('/w/w1/alerts', '')).toEqual({ context: { route: '/w/w1/alerts' }, label: undefined });
+    expect(readPageContext('/w/w1/inbox', '').context).toEqual({ route: '/w/w1/inbox' });
+  });
+
+  it('cites the attachment an answer came from', async () => {
+    mockFetch((url) =>
+      url.endsWith('/assistant/command')
+        ? json(answer({ answer: 'Ravi logged 168 hours.', citations: [{ message_id: 'm1', subject: 'September timesheet', attachment_id: 'att1', attachment_name: 'September timesheet.xlsx' }] }))
+        : undefined,
+    );
+    renderAssistant('/w/w1/inbox/m1');
+    const { user, panel } = await openPanel();
+    await user.type(within(panel).getByRole('textbox', { name: 'Message to Meera' }), 'read the sheet{Enter}');
+    const link = await within(panel).findByRole('link', { name: /September timesheet\.xlsx, attached to September timesheet/ });
+    expect(link).toHaveAttribute('href', '/w/w1/inbox/m1');
+  });
+
+  it('explains when the AI service is down and puts the question back in the box', async () => {
+    mockFetch((url) =>
+      url.endsWith('/assistant/command')
+        ? json({ error: { code: 'ai_unavailable', message: 'the AI service is unavailable right now; try again shortly', request_id: 'r' } }, 503)
+        : undefined,
+    );
+    renderAssistant();
+    const { user, panel } = await openPanel();
+    const box = within(panel).getByRole('textbox', { name: 'Message to Meera' });
+    await user.type(box, 'what needs a reply?{Enter}');
+    expect(await within(panel).findByRole('alert')).toHaveTextContent(/can't reach the AI service/);
+    expect(box).toHaveValue('what needs a reply?');
   });
 
   it('is available on every page inside the app shell', async () => {
