@@ -212,7 +212,7 @@ async fn ledger_records_cache_provider_finish_reason_prompt_version_and_provider
     let (cost, source, cached, provider, finish, gen_id, version, schema_ok, attempt, ok, class) = rows[0].clone();
     assert_eq!((cost, source.as_str()), (0.00002, "provider"), "the provider's own cost wins over the price table");
     assert_eq!((cached, provider.as_deref(), finish.as_deref(), gen_id.as_deref()), (900, Some("DeepSeek"), Some("stop"), Some("gen-abc")));
-    assert_eq!(version.as_deref(), Some("analyze-v1"));
+    assert_eq!(version.as_deref(), Some("analyze-v2"));
     assert_eq!((schema_ok, attempt, ok, class), (None, 1, true, None));
 }
 

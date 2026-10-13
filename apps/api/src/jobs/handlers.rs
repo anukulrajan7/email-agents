@@ -342,9 +342,9 @@ async fn classify_email(state: &AppState, job: &Job, payload: &Value) -> Result<
     };
     let input = ClassifyInput {
         examples,
+        body_text: ai::body::model_body(&msg.subject, &msg.body_text),
         subject: msg.subject,
         sender: msg.sender_address,
-        body_text: msg.body_text,
         attachment_names,
         sender_history,
         labels: labels::active(&state.db, &msg.workspace_id).await?,
@@ -807,7 +807,7 @@ async fn compose_draft(
             category_description,
             subject: msg.subject.clone(),
             sender: msg.sender_address.clone(),
-            body_text: msg.body_text.clone(),
+            body_text: ai::body::model_body(&msg.subject, &msg.body_text),
             memory_notes,
             sender_history: ctx.sender_history.clone(),
             insight: Some(insight),
@@ -815,6 +815,7 @@ async fn compose_draft(
             reply_instructions,
             signature,
             default_sign_off,
+            thread_digest: thread_digest(state, message_id).await?,
         })
         .await?;
     Ok((out, ctx, quality))
@@ -961,6 +962,32 @@ pub async fn preview_draft(state: &AppState, message_id: &str, requested: Option
 
 // ---------------------------------------------------------------- understanding
 
+/// Earlier messages of this email's conversation as a short digest (newest four, oldest first), or `None` when
+/// the email starts the conversation.
+async fn thread_digest(state: &AppState, message_id: &str) -> Result<Option<String>, JobError> {
+    let rows: Vec<(String, Option<String>, String, i64, String, String)> = sqlx::query_as(
+        "SELECT p.sender_address, p.sender_name, p.direction, p.received_at, p.subject, p.body_text
+         FROM email_messages m JOIN email_messages p ON p.thread_id = m.thread_id AND p.id != m.id AND p.received_at < m.received_at
+         WHERE m.id = ?1 ORDER BY p.received_at DESC LIMIT 4",
+    )
+    .bind(message_id)
+    .fetch_all(&state.db)
+    .await?;
+    let entries: Vec<ai::body::DigestEntry> = rows
+        .into_iter()
+        .rev()
+        .map(|(address, name, direction, received_at_ms, subject, body)| ai::body::DigestEntry {
+            who: if direction == "outbound" { "us".into() } else { name.filter(|n| !n.trim().is_empty()).unwrap_or(address) },
+            received_at_ms,
+            subject,
+            body,
+        })
+        .collect();
+    Ok(Some(ai::body::thread_digest(&entries, THREAD_DIGEST_CHARS)).filter(|d| !d.is_empty()))
+}
+
+const THREAD_DIGEST_CHARS: usize = 700;
+
 /// Returns the stored insight, computing and storing it on first use (idempotent).
 /// `summary, asks_json, deadline, needs_reply, missing_json, attachments_hash` of a stored insight.
 type StoredInsight = (String, String, Option<String>, bool, String, Option<String>);
@@ -994,12 +1021,15 @@ pub async fn analyze_message(state: &AppState, payload: &Value) -> Result<ai::In
         .bind(&message_id)
         .fetch_optional(&state.db)
         .await?;
+    let new_part = ai::body::model_body(&msg.subject, &msg.body_text);
     let analyst_body = if attachments_block.is_empty() {
-        msg.body_text.clone()
+        new_part
     } else {
-        format!("{}{attachments_block}", crate::sources::normalize::truncate_chars(&msg.body_text, ai::MAX_MODEL_INPUT_CHARS))
+        format!("{}{attachments_block}", crate::sources::normalize::truncate_chars(&new_part, ai::MAX_MODEL_INPUT_CHARS))
     };
-    let (mut insight, model_id) = state.analyst.analyze(&msg.subject, &msg.sender_address, &analyst_body).await?;
+    let digest = thread_digest(state, &message_id).await?;
+    let (mut insight, model_id) =
+        state.analyst.analyze_in_thread(&msg.subject, &msg.sender_address, &analyst_body, digest.as_deref()).await?;
     // Two independent signals must agree before we skip a reply; a cheap judge breaks real ties.
     let has_asks = !insight.asks.is_empty();
     let judge_says = if ai::judge::needs_reply_disputed(insight.needs_reply, requires_reply, has_asks) {
