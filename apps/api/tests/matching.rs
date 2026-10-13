@@ -61,7 +61,7 @@ async fn referral_and_requirement_emails_become_explained_matches() {
     let (_, reqs) = call(&app, "GET", &format!("{base}/requirements"), None).await;
     let req = &reqs["items"][0];
     assert_eq!(reqs["items"].as_array().unwrap().len(), 1);
-    assert_eq!((req["role_title"].as_str(), req["client"].as_str(), req["location"].as_str()), (Some("Java Developer"), Some("capgemini"), Some("Pune")));
+    assert_eq!((req["role_title"].as_str(), req["client"].as_str(), req["location"].as_str()), (Some("Java Developer"), Some("Capgemini"), Some("Pune")));
     assert_eq!(req["must_have_skills"], json!(["java", "spring boot", "microservices"]));
     assert_eq!((req["min_experience"].as_f64(), req["max_experience"].as_f64(), req["positions"].as_i64()), (Some(5.0), Some(8.0), Some(3)));
 

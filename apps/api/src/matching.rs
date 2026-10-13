@@ -164,7 +164,7 @@ pub fn rules_requirement(subject: &str, text: &str, sender_domain: Option<&str>)
         .trim()
         .to_string();
     RequirementFields {
-        client: sender_domain.map(|d| d.split('.').next().unwrap_or(d).to_string()).filter(|d| !d.is_empty()),
+        client: sender_domain.map(|d| title_case(d.split('.').next().unwrap_or(d))).filter(|d| !d.is_empty()),
         role_title: if role_title.is_empty() { "Untitled requirement".into() } else { role_title },
         must_have_skills: skills_in(&all),
         nice_to_have_skills: vec![],
@@ -175,6 +175,12 @@ pub fn rules_requirement(subject: &str, text: &str, sender_domain: Option<&str>)
             .captures(&all)
             .and_then(|c| c[1].parse().ok()),
     }
+}
+
+/// "capgemini" → "Capgemini" (domain-derived client names).
+fn title_case(s: &str) -> String {
+    let mut chars = s.chars();
+    chars.next().map(|c| c.to_uppercase().collect::<String>() + chars.as_str()).unwrap_or_default()
 }
 
 pub fn rules_candidate(subject: &str, text: &str, sender: &str) -> CandidateFields {
@@ -268,7 +274,7 @@ pub fn score(req: &RequirementFields, cand: &CandidateFields) -> (u8, Vec<Reason
 
     let loc_points = match (req.location.as_deref(), cand.location.as_deref()) {
         (Some(r), Some(c)) if canonical_city(r) == canonical_city(c) || canonical_city(r) == "Remote" => {
-            reasons.push(Reason { ok: true, text: format!("Location {} ✓", canonical_city(c)) });
+            reasons.push(Reason { ok: true, text: format!("Location {} matches", canonical_city(c)) });
             15.0
         }
         (Some(r), Some(c)) => {
@@ -359,7 +365,7 @@ mod tests {
             Some("capgemini.com"),
         );
         assert_eq!(r.role_title, "Java Developer");
-        assert_eq!(r.client.as_deref(), Some("capgemini"));
+        assert_eq!(r.client.as_deref(), Some("Capgemini"));
         assert_eq!(r.must_have_skills, ["java", "spring boot", "microservices"]);
         assert_eq!((r.min_experience, r.max_experience, r.positions), (Some(5.0), Some(8.0), Some(3)));
         assert_eq!(r.location.as_deref(), Some("Pune"));
