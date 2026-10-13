@@ -21,6 +21,7 @@ RUN apt-get update \
  && mkdir -p /app/data && chown app /app/data
 WORKDIR /app
 COPY --from=api /api/target/release/email-ai-api /usr/local/bin/email-ai-api
+COPY --from=api /api/target/release/selftest /usr/local/bin/selftest
 COPY --from=web /web/dist /app/web
 ENV WEB_DIST_DIR=/app/web \
     DATABASE_URL=sqlite:///app/data/email_ai.db \
