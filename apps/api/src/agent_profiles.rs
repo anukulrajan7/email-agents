@@ -130,6 +130,16 @@ impl WorkspaceAgent {
     }
 }
 
+/// The one rule for combining the agent's quality tier with a call's own tier: the agent's tier is
+/// the floor, and a premium call can only raise it to `best`. Never lowers a tier.
+pub fn effective_tier(agent_quality: &str, premium: bool) -> &'static str {
+    match (agent_quality, premium) {
+        ("best", _) | (_, true) => "best",
+        ("fast", false) => "fast",
+        _ => "balanced",
+    }
+}
+
 /// The model behind a quality tier; empty when not configured (the normal models are used).
 pub fn tier_model<'a>(config: &'a Config, quality: &str) -> &'a str {
     match quality {
@@ -205,6 +215,7 @@ pub async fn agent(db: &SqlitePool, config: &Config, ws: &str) -> sqlx::Result<W
 }
 
 pub async fn save_agent(db: &SqlitePool, ws: &str, f: &AgentFields, user_id: &str) -> sqlx::Result<()> {
+    let mut tx = db.begin().await?;
     sqlx::query(
         "UPDATE workspace_agents SET name = ?1, avatar = ?2, color = ?3, persona = ?4, signature = ?5, tasks_json = ?6,
                 permissions_json = ?7, quality = ?8, enabled = ?9, updated_by = ?10, updated_at = ?11
@@ -222,9 +233,14 @@ pub async fn save_agent(db: &SqlitePool, ws: &str, f: &AgentFields, user_id: &st
     .bind(user_id)
     .bind(now_ms())
     .bind(ws)
-    .execute(db)
+    .execute(&mut *tx)
     .await?;
-    Ok(())
+    // The registry's lead mirrors this agent, and the workspace's send setting moves the default agents with it.
+    if let Some(lead) = crate::agent_registry::store::lead(&mut *tx, ws).await? {
+        crate::agent_registry::store::set_identity(&mut tx, ws, &lead.id, &f.name, &f.avatar, &f.color).await?;
+    }
+    crate::agent_registry::store::sync_default_agents_from_settings(&mut tx, ws, &f.permissions.send).await?;
+    tx.commit().await
 }
 
 // ---------------------------------------------------------------- people's profiles
@@ -458,8 +474,9 @@ impl AgentContext {
     /// the owner's signature (else the agent's) and the quality tier's model.
     pub fn draft_style(&self, config: &Config) -> DraftStyle {
         let signature = self.owner.as_ref().and_then(|o| o.profile.as_ref()).and_then(|p| p.tone.sign_off.clone()).or_else(|| self.agent.signature.clone());
-        let model = Some(tier_model(config, &self.agent.quality).to_string()).filter(|m| !m.is_empty());
-        DraftStyle { instructions: Some(self.blocks().drafter).filter(|i| !i.trim().is_empty()), signature, model }
+        let model = Some(tier_model(config, effective_tier(&self.agent.quality, false)).to_string()).filter(|m| !m.is_empty());
+        let premium_model = Some(tier_model(config, effective_tier(&self.agent.quality, true)).to_string()).filter(|m| !m.is_empty());
+        DraftStyle { instructions: Some(self.blocks().drafter).filter(|i| !i.trim().is_empty()), signature, model, premium_model }
     }
 }
 
@@ -507,8 +524,10 @@ pub async fn context_for_case(db: &SqlitePool, config: &Config, case: &crate::ag
 pub struct DraftStyle {
     pub instructions: Option<String>,
     pub signature: Option<String>,
-    /// The quality tier's model; internal only.
+    /// The model for the agent's own tier; internal only.
     pub model: Option<String>,
+    /// The model for a premium call (the agent's tier raised to `best`); internal only.
+    pub premium_model: Option<String>,
 }
 
 tokio::task_local! {
@@ -549,9 +568,14 @@ pub fn merge_voice(style: DraftStyle, workspace_instructions: String, signature:
     (format!("{persona}\n\nTeam reply instructions:\n{team}"), signature)
 }
 
-/// Hook for the drafting model: the agent's tier model when one is set for this call.
-pub fn draft_model_or(model: &str) -> String {
-    DRAFT_STYLE.try_with(|s| s.model.clone()).ok().flatten().unwrap_or_else(|| model.to_string())
+/// Hook for the drafting model: the agent's tier model when one is set for this call. A premium
+/// draft uses the `best` tier's model if one is configured, else the drafter's own premium model.
+pub fn draft_model_or(model: &str, premium: bool) -> String {
+    DRAFT_STYLE
+        .try_with(|s| if premium { s.premium_model.clone() } else { s.model.clone() })
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| model.to_string())
 }
 
 // ---------------------------------------------------------------- validation
@@ -879,6 +903,30 @@ mod tests {
     }
 
     #[test]
+    fn tiers_combine_with_one_rule() {
+        for (agent, premium, want) in [
+            ("fast", false, "fast"), ("fast", true, "best"), ("balanced", false, "balanced"), ("balanced", true, "best"),
+            ("best", false, "best"), ("best", true, "best"), ("anything else", false, "balanced"),
+        ] {
+            assert_eq!(effective_tier(agent, premium), want, "{agent} premium={premium}");
+        }
+        let mut config = Config::for_tests("sqlite::memory:");
+        config.agent_fast_model_id = "fast-m".into();
+        config.agent_best_model_id = "best-m".into();
+        let ctx = |quality: &str| AgentContext {
+            agent: WorkspaceAgent { quality: quality.into(), ..agent() },
+            mailbox: None,
+            owner: None,
+        };
+        let style = ctx("fast").draft_style(&config);
+        assert_eq!((style.model.as_deref(), style.premium_model.as_deref()), (Some("fast-m"), Some("best-m")), "premium raises the floor");
+        let style = ctx("balanced").draft_style(&config);
+        assert_eq!((style.model.as_deref(), style.premium_model.as_deref()), (None, Some("best-m")), "no balanced model configured");
+        let style = ctx("best").draft_style(&config);
+        assert_eq!((style.model.as_deref(), style.premium_model.as_deref()), (Some("best-m"), Some("best-m")));
+    }
+
+    #[test]
     fn stored_permissions_fall_back_to_asking() {
         assert_eq!(Permissions::parse("garbage"), Permissions::default());
         assert_eq!(Permissions::parse(r#"{"draft":false,"send":"auto"}"#), Permissions { draft: false, send: "auto".into() });
@@ -913,13 +961,15 @@ mod tests {
 
     #[tokio::test]
     async fn draft_style_applies_only_inside_scope() {
-        assert_eq!(draft_model_or("m"), "m");
-        let style = DraftStyle { instructions: Some("persona".into()), signature: None, model: Some("tier".into()) };
-        let inside = with_draft_style(style, async { draft_model_or("m") }).await;
-        assert_eq!(inside, "tier");
+        assert_eq!(draft_model_or("m", false), "m");
+        let style = DraftStyle { instructions: Some("persona".into()), signature: None, model: Some("tier".into()), premium_model: Some("top".into()) };
+        let inside = with_draft_style(style.clone(), async { (draft_model_or("m", false), draft_model_or("m", true)) }).await;
+        assert_eq!(inside, ("tier".to_string(), "top".to_string()));
+        let no_premium = DraftStyle { premium_model: None, ..style };
+        assert_eq!(with_draft_style(no_premium, async { draft_model_or("own premium", true) }).await, "own premium");
         let none = DraftStyle::default();
         assert_eq!(merge_voice(none, "ws".into(), Some("sig".into())), ("ws".to_string(), Some("sig".to_string())));
-        let persona = || DraftStyle { instructions: Some("Be Meera.".into()), signature: Some("Meera".into()), model: None };
+        let persona = || DraftStyle { instructions: Some("Be Meera.".into()), signature: Some("Meera".into()), model: None, premium_model: None };
         assert_eq!(merge_voice(persona(), DEFAULT_REPLY_STYLE.into(), None), ("Be Meera.".to_string(), Some("Meera".to_string())));
         assert_eq!(merge_voice(persona(), "Mention SLAs.".into(), None).0, "Be Meera.\n\nTeam reply instructions:\nMention SLAs.");
     }

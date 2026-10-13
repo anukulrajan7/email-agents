@@ -6,11 +6,13 @@ pub mod approvals;
 pub mod autonomy;
 pub mod case;
 pub mod critic;
+pub mod injection;
 pub mod persona;
 pub mod planner;
 pub mod runner;
 pub mod tools;
 pub mod triggers;
+pub mod workflow;
 
 /// Outcomes a case can record (`update_case` / `finish`).
 pub const OUTCOMES: &[&str] = &["submitted", "interview", "rejected", "placed", "closed"];

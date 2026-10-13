@@ -38,11 +38,13 @@ pub struct ApprovalRow {
     pub created_at: i64,
     /// The person the agent works for on this case.
     pub agent_user_id: Option<String>,
+    /// The agent that asked.
+    pub agent_id: Option<String>,
 }
 
 const APPROVAL_SELECT: &str = "SELECT a.id, a.case_id, c.title AS case_title, a.step_seq, a.action, a.summary, a.to_address, a.subject,
         a.body, a.draft_id, a.candidates_json, a.input_json, a.status, u.email AS decided_by_email, a.decided_at, a.created_at,
-        c.agent_user_id
+        c.agent_user_id, a.agent_id
  FROM agent_approvals a JOIN cases c ON c.id = a.case_id LEFT JOIN users u ON u.id = a.decided_by";
 
 impl ApprovalRow {
@@ -64,24 +66,51 @@ impl ApprovalRow {
     }
 }
 
-pub async fn list(db: &SqlitePool, ws: &str, status: Option<&str>, case_id: Option<&str>) -> sqlx::Result<Vec<ApprovalRow>> {
+/// Approvals the viewer may see: another member's personal agent's requests are never listed.
+pub async fn list(db: &SqlitePool, ws: &str, viewer: &str, status: Option<&str>, case_id: Option<&str>) -> sqlx::Result<Vec<ApprovalRow>> {
     sqlx::query_as(&format!(
         "{APPROVAL_SELECT} WHERE a.workspace_id = ?1 AND (?2 IS NULL OR a.status = ?2) AND (?3 IS NULL OR a.case_id = ?3)
-         ORDER BY a.created_at DESC LIMIT 200"
+           AND {}
+         ORDER BY a.created_at DESC LIMIT 200",
+        crate::agent_registry::store::hide_foreign_personal("a", "?4")
     ))
     .bind(ws)
     .bind(status)
     .bind(case_id)
+    .bind(viewer)
     .fetch_all(db)
     .await
 }
 
-pub async fn get(db: &SqlitePool, ws: &str, id: &str) -> sqlx::Result<Option<ApprovalRow>> {
-    sqlx::query_as(&format!("{APPROVAL_SELECT} WHERE a.id = ?1 AND a.workspace_id = ?2")).bind(id).bind(ws).fetch_optional(db).await
+pub async fn get(db: &SqlitePool, ws: &str, viewer: &str, id: &str) -> sqlx::Result<Option<ApprovalRow>> {
+    sqlx::query_as(&format!(
+        "{APPROVAL_SELECT} WHERE a.id = ?1 AND a.workspace_id = ?2 AND {}",
+        crate::agent_registry::store::hide_foreign_personal("a", "?3")
+    ))
+    .bind(id)
+    .bind(ws)
+    .bind(viewer)
+    .fetch_optional(db)
+    .await
 }
 
-pub async fn pending_count(db: &SqlitePool, ws: &str) -> sqlx::Result<i64> {
-    sqlx::query_scalar("SELECT COUNT(*) FROM agent_approvals WHERE workspace_id = ?1 AND status = 'pending'").bind(ws).fetch_one(db).await
+pub async fn pending_count(db: &SqlitePool, ws: &str, viewer: &str) -> sqlx::Result<i64> {
+    sqlx::query_scalar(&format!(
+        "SELECT COUNT(*) FROM agent_approvals a WHERE a.workspace_id = ?1 AND a.status = 'pending' AND {}",
+        crate::agent_registry::store::hide_foreign_personal("a", "?2")
+    ))
+    .bind(ws)
+    .bind(viewer)
+    .fetch_one(db)
+    .await
+}
+
+/// Fingerprint of exactly what the person approved: recipient, subject and the final text.
+fn approved_hash(approval: &ApprovalRow, edited: Option<&str>) -> String {
+    use sha2::{Digest, Sha256};
+    let body = edited.unwrap_or(&approval.body);
+    let material = format!("{}\n{}\n{}", approval.to_address.as_deref().unwrap_or(""), approval.subject.as_deref().unwrap_or(""), body.trim());
+    Sha256::digest(material.as_bytes()).iter().map(|b| format!("{b:02x}")).collect()
 }
 
 pub struct Decision<'a> {
@@ -92,7 +121,7 @@ pub struct Decision<'a> {
 
 /// Records a person's decision, applies an approval, and lets the case continue. Audited.
 pub async fn decide(state: &AppState, ws: &str, approval_id: &str, user_id: &str, d: Decision<'_>) -> AppResult<ApprovalRow> {
-    let approval = get(&state.db, ws, approval_id).await?.ok_or(AppError::NotFound)?;
+    let approval = get(&state.db, ws, user_id, approval_id).await?.ok_or(AppError::NotFound)?;
     if approval.status != "pending" {
         return Err(AppError::Conflict("this approval was already decided".into()));
     }
@@ -113,7 +142,7 @@ pub async fn decide(state: &AppState, ws: &str, approval_id: &str, user_id: &str
 
     let mut tx = state.db.begin().await?;
     let decided = sqlx::query(
-        "UPDATE agent_approvals SET status = ?1, decided_by = ?2, decided_at = ?3, note = ?4, body = COALESCE(?5, body)
+        "UPDATE agent_approvals SET status = ?1, decided_by = ?2, decided_at = ?3, note = ?4, body = COALESCE(?5, body), approved_hash = ?7
          WHERE id = ?6 AND status = 'pending'",
     )
     .bind(if d.approve { "approved" } else { "declined" })
@@ -122,6 +151,7 @@ pub async fn decide(state: &AppState, ws: &str, approval_id: &str, user_id: &str
     .bind(&note)
     .bind(&edited)
     .bind(approval_id)
+    .bind(d.approve.then(|| approved_hash(&approval, edited.as_deref())))
     .execute(&mut *tx)
     .await?
     .rows_affected()
@@ -191,15 +221,15 @@ pub async fn decide(state: &AppState, ws: &str, approval_id: &str, user_id: &str
     )
     .await?;
     if let Some(patch) = &patch {
-        case::merge_state(&mut tx, &case.id, patch).await?;
+        case::merge_state(&mut tx, ws, &case.id, patch).await?;
     }
     if !d.approve && let Some(draft_id) = &approval.draft_id {
-        case::merge_state(&mut tx, &case.id, &json!({"declined_draft_id": draft_id})).await?;
+        case::merge_state(&mut tx, ws, &case.id, &json!({"declined_draft_id": draft_id})).await?;
     }
-    if case::set_status(&mut tx, &case.id, "running").await? {
+    if case::set_status(&mut tx, ws, &case.id, "running").await? {
         case::enqueue_step(&mut tx, ws, &case.id, case.step_count + 1, now_ms()).await?;
     }
     tx.commit().await?;
     state.jobs_notify.notify_one();
-    get(&state.db, ws, approval_id).await?.ok_or(AppError::NotFound)
+    get(&state.db, ws, user_id, approval_id).await?.ok_or(AppError::NotFound)
 }

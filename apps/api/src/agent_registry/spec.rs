@@ -19,6 +19,54 @@ static DOMAIN: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$").expect("valid regex"));
 static ATTACHMENT_TYPE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[a-z0-9][a-z0-9./+-]{0,31}$").expect("valid regex"));
 
+/// What an agent may touch at all. A tool outside the agent's scopes is never offered or run, so a
+/// read-only agent (`read_mail` only) cannot draft, label or send whatever its prompt says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Scope {
+    /// Read mail, threads, memory and search.
+    ReadMail,
+    /// Write drafts.
+    Draft,
+    /// Send mail, submit candidates.
+    Send,
+    /// Organise work: tasks and case notes.
+    Label,
+    /// Wake later, propose automations.
+    Schedule,
+}
+
+impl Scope {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Scope::ReadMail => "read_mail",
+            Scope::Draft => "draft",
+            Scope::Send => "send",
+            Scope::Label => "label",
+            Scope::Schedule => "schedule",
+        }
+    }
+}
+
+/// The scope a tool needs.
+pub fn scope_of_tool(tool: &str) -> Scope {
+    match tool {
+        "draft_email" => Scope::Draft,
+        "send_email" | "submit_candidate" => Scope::Send,
+        "create_task" | "update_case" => Scope::Label,
+        "schedule_check" | "propose_automation" => Scope::Schedule,
+        _ => Scope::ReadMail,
+    }
+}
+
+/// The scopes that exactly cover these tools (sorted, no repeats).
+pub fn scopes_for_tools(tools: &[String]) -> Vec<Scope> {
+    let mut scopes: Vec<Scope> = tools.iter().map(|t| scope_of_tool(t)).collect();
+    scopes.sort();
+    scopes.dedup();
+    scopes
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Mode {
@@ -171,6 +219,10 @@ pub struct Permissions {
     pub daily_send_cap: u32,
 }
 
+fn default_scopes() -> Vec<Scope> {
+    vec![Scope::ReadMail, Scope::Draft]
+}
+
 fn yes() -> bool {
     true
 }
@@ -239,6 +291,9 @@ pub struct AgentSpec {
     pub steps: Vec<Step>,
     #[serde(default)]
     pub tools: Vec<String>,
+    /// Explicit scopes; every tool must be covered by one.
+    #[serde(default = "default_scopes")]
+    pub scopes: Vec<Scope>,
     pub permissions: Permissions,
     #[serde(default)]
     pub memory: MemorySpec,
@@ -264,6 +319,15 @@ impl AgentSpec {
 
     pub fn has_tool(&self, name: &str) -> bool {
         self.tools.iter().any(|t| t == name)
+    }
+
+    pub fn has_scope(&self, scope: Scope) -> bool {
+        self.scopes.contains(&scope)
+    }
+
+    /// Tools the agent may call: listed in `tools` and covered by a scope.
+    pub fn usable_tools(&self) -> Vec<String> {
+        self.tools.iter().filter(|t| self.has_scope(scope_of_tool(t))).cloned().collect()
     }
 }
 
@@ -391,7 +455,19 @@ pub fn validate_basic(spec: &AgentSpec) -> Vec<Issue> {
             out.push(issue(format!("tools[{i}]"), "duplicate_tool", format!("{tool} is listed twice")));
         }
     }
+    for (i, tool) in spec.tools.iter().enumerate() {
+        let needed = scope_of_tool(tool);
+        if !spec.has_scope(needed) && crate::agents::tools::registry().get(tool).is_some() {
+            out.push(issue(format!("tools[{i}]"), "tool_outside_scopes", format!("{tool} needs the {} scope", needed.as_str())));
+        }
+    }
+    if spec.scopes.is_empty() || spec.scopes.windows(2).any(|w| w[0] >= w[1]) {
+        out.push(issue("scopes", "bad_scopes", "list each scope once, in the order read_mail, draft, send, label, schedule"));
+    }
     let p = &spec.permissions;
+    if p.send != SendMode::Never && !spec.has_scope(Scope::Send) && spec.has_tool("send_email") {
+        out.push(issue("permissions.send", "send_without_scope", "sending needs the send scope"));
+    }
     if p.max_autonomy > MAX_AUTONOMY {
         out.push(issue("permissions.max_autonomy", "bad_autonomy", "max_autonomy is 0 to 3"));
     }
@@ -450,6 +526,7 @@ mod tests {
                 {"type": "label", "value": "handled"}, {"type": "start_case"}, {"type": "notify", "to": "owner"}
             ],
             "tools": ["read_email", "read_thread", "recall_memory", "search_mail", "draft_email", "create_task", "schedule_check", "update_case", "send_email"],
+            "scopes": ["read_mail", "draft", "send", "label", "schedule"],
             "permissions": {"draft": true, "send": "earned", "max_autonomy": 2, "daily_send_cap": 20},
             "memory": {"scope": "own+shared", "learn_from": ["edits", "approvals", "labels", "routes"]},
             "drafting": {"rules": ["Be brief"], "never_do": ["Promise refunds"], "quality_tier": "balanced"},
@@ -492,6 +569,17 @@ mod tests {
     }
 
     #[test]
+    fn scopes_gate_tools() {
+        let spec: AgentSpec = serde_json::from_value(spec_json()).unwrap();
+        assert_eq!(spec.usable_tools().len(), 9);
+        let read_only = AgentSpec { scopes: vec![Scope::ReadMail], ..spec.clone() };
+        assert_eq!(read_only.usable_tools(), ["read_email", "read_thread", "recall_memory", "search_mail"]);
+        assert_eq!(scopes_for_tools(&spec.tools), spec.scopes);
+        assert_eq!(scope_of_tool("submit_candidate"), Scope::Send);
+        assert_eq!(scope_of_tool("find_candidates"), Scope::ReadMail);
+    }
+
+    #[test]
     fn validation_catches_each_rule() {
         assert_eq!(codes(|s| s.key = "Bad Key".into()), ["bad_key"]);
         assert_eq!(codes(|s| s.name = " ".into()), ["bad_length"]);
@@ -500,6 +588,9 @@ mod tests {
         assert_eq!(codes(|s| s.tools.push("rm_rf".into())), ["unknown_tool"]);
         assert_eq!(codes(|s| s.tools.push("read_email".into())), ["duplicate_tool"]);
         assert_eq!(codes(|s| s.permissions.max_autonomy = 4), ["bad_autonomy"]);
+        assert_eq!(codes(|s| s.scopes.retain(|c| *c != Scope::Send)), ["tool_outside_scopes", "send_without_scope"]);
+        assert_eq!(codes(|s| s.scopes.retain(|c| *c != Scope::Schedule)), ["tool_outside_scopes"]);
+        assert_eq!(codes(|s| s.scopes = vec![Scope::Draft, Scope::ReadMail, Scope::Send, Scope::Label, Scope::Schedule]), ["bad_scopes"]);
         assert_eq!(codes(|s| s.permissions.max_autonomy = 1), ["earned_needs_level_2"]);
         assert_eq!(codes(|s| s.tools.retain(|t| t != "send_email")), ["send_without_tool"]);
         assert_eq!(codes(|s| s.permissions.send = SendMode::Never), ["send_tool_without_permission"]);

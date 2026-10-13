@@ -142,7 +142,8 @@ pub async fn handle(state: &AppState, job: &Job) -> Result<(), JobError> {
         kind::LEARN_FROM_REPLY => super::learning_jobs::learn_from_reply(state, &payload).await,
         kind::EVALUATE_ALERTS => crate::alerts::evaluate_job(state, &payload).await,
         kind::SEND_MATCH_DIGEST => super::match_digest::digest_job(state, &payload).await,
-        kind::AGENT_STEP => super::agent_jobs::agent_step(state, &payload).await,
+        kind::AGENT_STEP => super::agent_jobs::agent_step(state, job, &payload).await,
+        kind::AGENT_SCHEDULE_TICK => crate::agents::triggers::schedule_tick_job(state, job).await,
         kind::SEND_DRAFT => crate::replies::send_scheduled(state, &payload).await,
         other => Err(JobError::Permanent(format!("unknown job kind {other}"))),
     }
@@ -203,7 +204,7 @@ pub async fn on_dead(state: &AppState, job: &Job, error: &str) {
                 }
                 Ok(())
             }
-            kind::AGENT_STEP => super::agent_jobs::on_dead(state, &payload, error).await,
+            kind::AGENT_STEP => super::agent_jobs::on_dead(state, job, &payload, error).await,
             _ => Ok(()),
         }
     }

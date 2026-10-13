@@ -88,7 +88,14 @@ fn answer_spec() -> Value {
     )
 }
 
-fn tool_specs(role: Role, last_turn: bool) -> Vec<Value> {
+/// Which pack features are on: tools of an off feature are not even offered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Features {
+    matching: bool,
+    requirement_agent: bool,
+}
+
+fn tool_specs(role: Role, last_turn: bool, features: Features) -> Vec<Value> {
     if last_turn {
         return vec![answer_spec()];
     }
@@ -115,23 +122,26 @@ fn tool_specs(role: Role, last_turn: bool) -> Vec<Value> {
         spec("list_alerts", "Open or snoozed alerts.", json!({}), &[]),
         spec("get_case", "Status and recent steps of one agent case.", json!({"id": {"type": "string"}}), &["id"]),
         spec(
-            "list_matches",
-            "Candidates matched to a requirement. Give the requirement id, or part of its role or client name.",
-            json!({"requirement": {"type": "string"}}),
-            &["requirement"],
-        ),
-        spec(
             "draft_reply",
             "Prepare a card to draft a reply to an email. Nothing happens until the person confirms.",
             json!({"message_id": {"type": "string"}, "instructions": {"type": "string", "description": "Optional guidance for the reply"}}),
             &["message_id"],
         ),
-        spec(
-            "start_agent",
-            "Prepare a card to start an agent on a requirement (requirement_id) or an inbound email (message_id).",
-            json!({"kind": {"type": "string", "enum": ["requirement", "inbox"]}, "requirement_id": {"type": "string"}, "message_id": {"type": "string"}}),
-            &["kind"],
-        ),
+        if features.requirement_agent {
+            spec(
+                "start_agent",
+                "Prepare a card to start an agent on a requirement (requirement_id) or an inbound email (message_id).",
+                json!({"kind": {"type": "string", "enum": ["requirement", "inbox"]}, "requirement_id": {"type": "string"}, "message_id": {"type": "string"}}),
+                &["kind"],
+            )
+        } else {
+            spec(
+                "start_agent",
+                "Prepare a card to start an agent on an inbound email (message_id).",
+                json!({"kind": {"type": "string", "enum": ["inbox"]}, "message_id": {"type": "string"}}),
+                &["kind"],
+            )
+        },
         spec(
             "approve",
             "Prepare a card to approve a pending approval.",
@@ -151,6 +161,14 @@ fn tool_specs(role: Role, last_turn: bool) -> Vec<Value> {
             &["alert_id", "hours"],
         ),
     ];
+    if features.matching {
+        tools.push(spec(
+            "list_matches",
+            "Candidates matched to a requirement. Give the requirement id, or part of its role or client name.",
+            json!({"requirement": {"type": "string"}}),
+            &["requirement"],
+        ));
+    }
     if role == Role::Admin {
         tools.push(spec(
             "create_automation",
@@ -224,20 +242,25 @@ struct Session<'a> {
     ws: &'a str,
     user: &'a AuthUser,
     role: Role,
+    features: Features,
     /// Message ids that appeared in tool results: the only ones an answer may cite.
     seen: Vec<String>,
     plan: Vec<PlanCard>,
 }
 
 pub async fn run(state: &AppState, ws: &str, user: &AuthUser, role: Role, text: &str) -> AppResult<Outcome> {
-    let mut session = Session { state, ws, user, role, seen: vec![], plan: vec![] };
+    let features = Features {
+        matching: crate::packs::has_feature(&state.db, ws, crate::packs::FEATURE_MATCHING).await?,
+        requirement_agent: crate::packs::has_feature(&state.db, ws, crate::packs::FEATURE_REQUIREMENT_AGENT).await?,
+    };
+    let mut session = Session { state, ws, user, role, features, seen: vec![], plan: vec![] };
     let today = iso(crate::db::now_ms());
     let today = today.get(..10).unwrap_or(&today).to_string();
     let mut transcript: Vec<String> = vec![];
 
     for turn in 1..=MAX_TURNS {
         let last = turn == MAX_TURNS;
-        let req = CommandRequest { prompt: render(text, &today, &transcript, turn), tools: tool_specs(role, last), turn };
+        let req = CommandRequest { prompt: render(text, &today, &transcript, turn), tools: tool_specs(role, last, features), turn };
         let out = state.assistant_planner.next(&req).await.map_err(|e| {
             tracing::warn!(error = %e, "assistant planner failed");
             AppError::AiUnavailable
@@ -409,7 +432,7 @@ impl Session<'_> {
     }
 
     async fn list_approvals(&mut self) -> ToolResult {
-        let rows = approvals::list(&self.state.db, self.ws, Some("pending"), None).await?;
+        let rows = approvals::list(&self.state.db, self.ws, &self.user.id, Some("pending"), None).await?;
         let items: Vec<Value> = rows
             .iter()
             .take(10)
@@ -447,13 +470,16 @@ impl Session<'_> {
     async fn get_case(&mut self, args: &Value) -> ToolResult {
         let id = text_arg(args, "id").ok_or_else(|| failed("id is required"))?;
         let c = case::get_in(&self.state.db, self.ws, id).await?.ok_or_else(|| failed("no case with that id"))?;
-        let steps = case::steps(&self.state.db, &c.id).await?;
+        if !crate::agent_registry::store::can_see(&self.state.db, self.ws, c.agent_id.as_deref(), &self.user.id).await? {
+            return Err(failed("no case with that id"));
+        }
+        let steps = case::steps(&self.state.db, self.ws, &c.id).await?;
         let recent: Vec<Value> = steps
             .iter()
             .skip(steps.len().saturating_sub(5))
             .map(|s| json!({"tool": s.tool, "status": s.status, "summary": datamark(&s.summary, 30)}))
             .collect();
-        let pending: Vec<Value> = approvals::list(&self.state.db, self.ws, Some("pending"), Some(&c.id))
+        let pending: Vec<Value> = approvals::list(&self.state.db, self.ws, &self.user.id, Some("pending"), Some(&c.id))
             .await?
             .iter()
             .map(|a| json!({"approval_id": a.id, "action": a.action}))
@@ -468,6 +494,9 @@ impl Session<'_> {
     }
 
     async fn list_matches(&mut self, args: &Value) -> ToolResult {
+        if !self.features.matching {
+            return Err(failed("unknown tool"));
+        }
         let key = text_arg(args, "requirement").ok_or_else(|| failed("requirement is required"))?;
         let found: Option<(String, Option<String>, String, String)> = sqlx::query_as(
             "SELECT id, client, role_title, message_id FROM requirements
@@ -544,6 +573,7 @@ impl Session<'_> {
             return Err(failed("agents are not set up yet"));
         }
         match text_arg(args, "kind") {
+            Some("requirement") if !self.features.requirement_agent => Err(failed("requirements are not part of this workspace")),
             Some("requirement") => {
                 let id = text_arg(args, "requirement_id").ok_or_else(|| failed("requirement_id is required"))?;
                 let found: Option<(String, Option<String>)> =
@@ -572,7 +602,7 @@ impl Session<'_> {
 
     async fn approval_card(&mut self, args: &Value, approve: bool) -> ToolResult {
         let id = text_arg(args, "approval_id").ok_or_else(|| failed("approval_id is required"))?;
-        let approval = approvals::get(&self.state.db, self.ws, id).await?.ok_or_else(|| failed("no approval with that id"))?;
+        let approval = approvals::get(&self.state.db, self.ws, &self.user.id, id).await?.ok_or_else(|| failed("no approval with that id"))?;
         if approval.status != "pending" {
             return Err(failed("that approval was already decided"));
         }

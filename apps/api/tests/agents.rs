@@ -144,6 +144,11 @@ async fn env_with(planner: ScriptedPlanner, tweak: impl FnOnce(&mut Config)) -> 
     let (_, ws) = call(&app, "POST", "/api/v1/workspaces", ADMIN, Some(json!({"name": "Acme", "template": "hr"}))).await;
     let ws = ws["id"].as_str().unwrap().to_string();
     assert_eq!(call(&app, "POST", &format!("/api/v1/workspaces/{ws}/matching/setup"), ADMIN, None).await.0, StatusCode::OK);
+    sqlx::query("UPDATE agents SET status = 'paused', paused_reason = 'user' WHERE workspace_id = ?1 AND template_key IN ('general.inbox', 'personal.mailbox')")
+        .bind(&ws)
+        .execute(&state.db)
+        .await
+        .unwrap();
     let src = "src_gmail_test".to_string();
     sqlx::query(
         "INSERT INTO email_sources (id, workspace_id, kind, status, external_connection_id, provider_config_key, capabilities_json, created_at, mailbox_address)

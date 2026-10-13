@@ -197,6 +197,11 @@ async fn env_with(planner: ScriptedPlanner, tweak: impl FnOnce(&mut Config)) -> 
     // Automatic drafts and cases off: tests start cases themselves.
     let settings = json!({"auto_reply": false, "reply_instructions": "", "signature": null});
     call(&app, "PUT", &format!("/api/v1/workspaces/{ws}/reply-settings"), ADMIN, Some(settings)).await;
+    sqlx::query("UPDATE agents SET status = 'paused', paused_reason = 'user' WHERE workspace_id = ?1 AND template_key IN ('general.inbox', 'personal.mailbox')")
+        .bind(&ws)
+        .execute(&state.db)
+        .await
+        .unwrap();
     let src = "src_priya".to_string();
     sqlx::query(
         "INSERT INTO email_sources (id, workspace_id, kind, status, external_connection_id, provider_config_key, capabilities_json,

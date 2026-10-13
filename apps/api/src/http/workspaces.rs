@@ -131,6 +131,7 @@ pub async fn create(
         .await?;
     packs::seed_labels(&mut tx, &id, &seeds).await?;
     packs::enable(&mut tx, &id, &chosen).await?;
+    crate::agent_registry::seed::seed_workspace(&mut tx, &id).await?;
     crate::automations::seed_defaults(&mut tx, &id).await?;
     audit::record(
         &mut tx,
@@ -306,6 +307,7 @@ pub async fn add_member(
     .bind(role.as_str())
     .execute(&mut *tx)
     .await?;
+    crate::agent_registry::seed::ensure_personal(&mut tx, &ws, &member_id).await?;
     let admins: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM memberships WHERE workspace_id = ?1 AND role = 'admin'")
         .bind(&ws)
         .fetch_one(&mut *tx)

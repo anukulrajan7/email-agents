@@ -163,6 +163,19 @@ pub fn parse_tool_message(message: &Value) -> Decision {
     Decision::Call { tool: name.to_string(), args }
 }
 
+/// The planner only emits a tool call or `finish`, so its answers are short.
+pub const PLANNER_MAX_TOKENS: u32 = 300;
+
+/// Which model plans this turn: a configured tier model first (already the agent's tier raised by
+/// `premium`), else the premium planner model for premium turns, else the default planner model.
+pub fn pick_model<'a>(req: &'a PlanRequest, default: &'a str, premium: &'a str) -> &'a str {
+    match req.model.as_deref().filter(|m| !m.is_empty()) {
+        Some(tier) => tier,
+        None if req.premium => premium,
+        None => default,
+    }
+}
+
 pub struct OpenRouterPlanner {
     client: OpenRouterClient,
     model: String,
@@ -179,15 +192,11 @@ impl OpenRouterPlanner {
 #[async_trait]
 impl Planner for OpenRouterPlanner {
     async fn plan(&self, req: &PlanRequest) -> Result<PlanOutput, AiError> {
-        let model = match req.model.as_deref().filter(|m| !m.is_empty()) {
-            Some(tier) => tier,
-            None if req.premium => &self.premium_model,
-            None => &self.model,
-        };
+        let model = pick_model(req, &self.model, &self.premium_model);
         let system = if req.system.is_empty() { SYSTEM_PROMPT } else { &req.system };
         let reply = self
             .client
-            .chat_tools(model, system, req.prompt.clone(), json!(req.tools), json!("auto"), 700)
+            .chat_tools(model, system, req.prompt.clone(), json!(req.tools), json!("auto"), PLANNER_MAX_TOKENS)
             .await?;
         Ok(PlanOutput { decision: parse_tool_message(&reply.message), usage: Usage::from_chat(&reply.usage, &reply.model_id) })
     }
@@ -349,6 +358,30 @@ mod tests {
         assert!(matches!(p.plan(&req).await.unwrap().decision, Decision::Finish { .. }));
         assert_eq!(p.prompts().len(), 2);
         assert_eq!(p.systems()[0], SYSTEM_PROMPT);
+    }
+
+    #[test]
+    fn model_choice_honours_tier_and_premium() {
+        let mut req = PlanRequest {
+            case_id: "c".into(),
+            kind: "inbox".into(),
+            premium: false,
+            requirement_id: None,
+            message_id: None,
+            facts: json!({}),
+            system: String::new(),
+            model: None,
+            prompt: String::new(),
+            tools: vec![],
+        };
+        assert_eq!(pick_model(&req, "flash", "pro"), "flash", "default planner");
+        req.premium = true;
+        assert_eq!(pick_model(&req, "flash", "pro"), "pro", "premium raises the planner");
+        req.model = Some("tier-model".into());
+        assert_eq!(pick_model(&req, "flash", "pro"), "tier-model", "a configured tier model wins");
+        req.model = Some(String::new());
+        assert_eq!(pick_model(&req, "flash", "pro"), "pro");
+        assert_eq!(PLANNER_MAX_TOKENS, 300);
     }
 
     #[test]

@@ -44,6 +44,7 @@ pub mod kind {
     pub const EVALUATE_ALERTS: &str = "evaluate_alerts";
     pub const SEND_MATCH_DIGEST: &str = "send_match_digest";
     pub const AGENT_STEP: &str = "agent_step";
+    pub const AGENT_SCHEDULE_TICK: &str = "agent_schedule_tick";
     pub const SEND_DRAFT: &str = "send_draft";
     pub const BACKUP_DATABASE: &str = "backup_database";
 }
