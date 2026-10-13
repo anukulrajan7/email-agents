@@ -212,13 +212,14 @@ export function DraftPanel({
     return () => clearTimeout(id);
   }, [awaiting, onAwaitingChange]);
 
-  const start = () =>
-    generate.mutate(undefined, {
+  const start = (better = false) =>
+    generate.mutate(better ? { quality: 'premium' } : undefined, {
       onSuccess: () => {
         setSavedToGmail(false);
         setBaseline({ updatedAt: draft?.updated_at ?? null });
       },
     });
+  const busy = generate.isPending || awaiting;
 
   return (
     <section aria-labelledby="draft-heading" className="flex flex-col gap-3">
@@ -226,9 +227,16 @@ export function DraftPanel({
         <h3 id="draft-heading" className="type-display flex items-center gap-3 text-2xl tracking-[-0.01em]">
           Draft reply {draft && <StatusBadge status={draft.status} />}
         </h3>
-        <Button size="sm" variant="secondary" loading={generate.isPending || awaiting} onClick={start}>
-          {draft ? 'Regenerate' : 'Generate draft'}
-        </Button>
+        <div className="flex flex-wrap justify-end gap-2">
+          {draft && (
+            <Button size="sm" variant="secondary" disabled={busy} onClick={() => start(true)}>
+              Write a better draft
+            </Button>
+          )}
+          <Button size="sm" variant="secondary" loading={busy} onClick={() => start()}>
+            {draft ? 'Regenerate' : 'Generate draft'}
+          </Button>
+        </div>
       </div>
       <p className="min-h-5 text-sm text-ink-muted" aria-live="polite">
         {awaiting ? 'Generating draft…' : !draft ? 'No draft yet.' : ''}

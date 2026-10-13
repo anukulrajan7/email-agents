@@ -16,6 +16,16 @@ export type Action =
   | { type: 'create_review'; title?: string }
   | { type: 'remind_if_no_reply'; hours: number };
 
+export interface ReplySettings {
+  auto_reply: boolean;
+  reply_instructions: string;
+  signature: string | null;
+  /** Guidance used while `reply_instructions` is empty. Only sent by GET. */
+  default_reply_style?: string;
+}
+
+export type ReplySettingsInput = Pick<ReplySettings, 'auto_reply' | 'reply_instructions' | 'signature'>;
+
 export type ConditionField = Condition['field'];
 export type ActionType = Action['type'];
 

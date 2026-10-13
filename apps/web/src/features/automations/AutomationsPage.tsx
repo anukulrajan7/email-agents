@@ -7,6 +7,7 @@ import { AutomationBuilder } from './Builder';
 import { AutomationCard } from './AutomationCard';
 import { Overlay } from './Overlay';
 import { PresetsGallery } from './PresetsGallery';
+import { ReplySettingsCard } from './ReplySettingsCard';
 import { RunsDrawer } from './RunsDrawer';
 import { useAutomations, useCreateAutomation, useDeleteAutomation, useUpdateAutomation } from './hooks';
 import type { Automation } from './types';
@@ -68,6 +69,7 @@ export function AutomationsPage() {
         description="Rules that run on every new email once the AI has read it, for example drafting a reply or reminding you when an important thread goes quiet."
         actions={isAdmin ? <Button onClick={() => setEditing('new')}>New automation</Button> : undefined}
       />
+      <ReplySettingsCard ws={ws} isAdmin={isAdmin} />
       {automations.isLoading && <Spinner />}
       <ErrorNote error={automations.error ?? update.error ?? remove.error} />
       {automations.data &&

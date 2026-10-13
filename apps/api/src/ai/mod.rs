@@ -8,13 +8,15 @@ pub mod label_suggest;
 pub mod memory_extractor;
 pub mod openrouter;
 pub mod policy;
+pub mod router;
+pub mod routing;
 
 use async_trait::async_trait;
 
 use crate::domain::{ClassificationSource, Label, Priority};
 
 pub const PROMPT_VERSION: &str = "classify-v2";
-pub const DRAFT_PROMPT_VERSION: &str = "ack-draft-v1";
+pub const DRAFT_PROMPT_VERSION: &str = "ack-draft-v2";
 /// Upper bound on email text sent to any model.
 pub const MAX_MODEL_INPUT_CHARS: usize = 6_000;
 
@@ -59,11 +61,31 @@ pub struct ClassifyOutput {
     pub model_version: Option<String>,
 }
 
+/// Which drafting model tier writes the reply. Chosen by `routing::draft_quality`, never shown in the UI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DraftQuality {
+    #[default]
+    Standard,
+    Premium,
+}
+
+impl DraftQuality {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DraftQuality::Standard => "standard",
+            DraftQuality::Premium => "premium",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct DraftInput {
     /// Label key and its human name.
     pub category: String,
     pub category_name: String,
+    /// What the team means by this label (trusted, team-written).
+    pub category_description: String,
     pub subject: String,
     pub sender: String,
     pub body_text: String,
@@ -74,6 +96,11 @@ pub struct DraftInput {
     pub insight: Option<Insight>,
     /// Up to 3 past replies to similar emails (tone and standard answers).
     pub examples: Vec<ReplyExample>,
+    pub quality: DraftQuality,
+    /// Team-written reply style for the whole workspace (trusted). Empty = none.
+    pub reply_instructions: String,
+    /// Team-written sign-off; replaces the default one when set.
+    pub signature: Option<String>,
 }
 
 /// The AI's reading of an email, produced before any reply is drafted.

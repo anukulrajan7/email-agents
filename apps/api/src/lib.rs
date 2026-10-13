@@ -15,6 +15,7 @@ pub mod labels;
 pub mod mailer;
 pub mod matching;
 pub mod replies;
+pub mod reply_settings;
 pub mod memory;
 pub mod memory_learning;
 pub mod sessions;
@@ -30,6 +31,7 @@ use tokio::sync::Notify;
 use crate::{
     ai::{
         Classifier, Drafter, fallback,
+        router::RouterDrafter,
         jev::JevClassifier,
         openrouter::{OpenRouterAnalyst, OpenRouterClassifier, OpenRouterClient, OpenRouterDrafter, OpenRouterExtractor, OpenRouterLearner},
     },
@@ -69,14 +71,24 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
             Arc::new(fallback::RulesClassifier)
         }
     };
-    let drafter: Arc<dyn Drafter> = match &openrouter {
-        Some(client) if !config.openrouter_model_id.is_empty() => {
-            tracing::info!(model = %config.openrouter_model_id, "drafting with OpenRouter");
-            Arc::new(OpenRouterDrafter::new(client.clone(), &config.openrouter_model_id))
-        }
-        _ => {
-            tracing::warn!("OPENROUTER_API_KEY/OPENROUTER_MODEL_ID not set: using template drafts");
-            Arc::new(fallback::TemplateDrafter)
+    // Two drafting tiers; with only one model configured, both tiers use it.
+    let drafter: Arc<dyn Drafter> = {
+        let standard = [&config.openrouter_draft_model_id, &config.openrouter_premium_model_id]
+            .into_iter()
+            .find(|m| !m.is_empty());
+        let premium = [&config.openrouter_premium_model_id, &config.openrouter_draft_model_id].into_iter().find(|m| !m.is_empty());
+        match (&openrouter, standard, premium) {
+            (Some(client), Some(standard), Some(premium)) => {
+                tracing::info!(standard = %standard, premium = %premium, "drafting with OpenRouter");
+                Arc::new(RouterDrafter::new(
+                    Arc::new(OpenRouterDrafter::new(client.clone(), standard)),
+                    Arc::new(OpenRouterDrafter::new(client.clone(), premium)),
+                ))
+            }
+            _ => {
+                tracing::warn!("OPENROUTER_API_KEY or a drafting model is not set: using template drafts");
+                Arc::new(fallback::TemplateDrafter)
+            }
         }
     };
 

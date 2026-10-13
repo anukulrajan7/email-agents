@@ -52,7 +52,9 @@ JobStatus         = "pending" | "running" | "succeeded" | "dead"
 | GET | `/api/v1/workspaces/:ws/messages?cursor=&category=&q=&limit=&sort=&direction=` | member | – | `{items: MessageSummary[], next_cursor: string\|null}` |
 | GET | `/api/v1/workspaces/:ws/messages/:id` | member | – | `MessageDetail` |
 | PATCH | `/api/v1/workspaces/:ws/messages/:id/classification` | member | `{category, priority?, requires_reply?}` | `Classification` |
-| POST | `/api/v1/workspaces/:ws/messages/:id/draft` | member | – | 202 `{status:"queued"}` |
+| POST | `/api/v1/workspaces/:ws/messages/:id/draft` | member | optional `{quality?: "premium"}` ("Write a better draft"); no body still works | 202 `{status:"queued"}`; 400 on an unknown `quality` |
+| GET | `/api/v1/workspaces/:ws/reply-settings` | member | – | `ReplySettings` + `default_reply_style` |
+| PUT | `/api/v1/workspaces/:ws/reply-settings` | admin | `ReplySettings` | `ReplySettings` |
 | POST | `/api/v1/workspaces/:ws/messages/:id/reprocess` | admin | – | 202 `{status:"queued"}` |
 | PATCH | `/api/v1/workspaces/:ws/drafts/:id` | member | `{body_text?, status?: "edited"\|"approved"}` | `Draft` |
 | GET | `/api/v1/workspaces/:ws/reviews?status=` | member | – | `{items: ReviewItem[]}` |
@@ -562,3 +564,35 @@ errors → 400 `bad_request`; unknown fields → 422.
 
 Config: `APP_BASE_URL` (default `https://mail.anukulraj.tech`) for links; SMTP via `SMTP_HOST`/`SMTP_PORT`/
 `SMTP_USERNAME`/`SMTP_PASSWORD`/`SMTP_FROM` (without SMTP, alerts are in-app only).
+
+## Replies: drafting tiers and workspace reply settings
+
+### Reply settings
+
+```ts
+ReplySettings = {
+  auto_reply: boolean;               // NULL in the DB = the server default (AUTO_DRAFTS)
+  reply_instructions: string;        // max 2000 chars, trimmed; "" = use the default style
+  signature: string | null;          // max 200 chars; blank -> null; replaces "HR Operations"
+}
+```
+
+`GET .../reply-settings` (operator) also returns `default_reply_style: string`, the guidance drafts use while
+`reply_instructions` is empty (a generic HR/staffing business context). `PUT` (admin) replaces all three fields;
+over-long values return 400 `bad_request`, an operator gets 403. Audited as `reply_settings.updated`.
+
+Effective automatic drafting is the workspace `auto_reply` when saved, otherwise `AUTO_DRAFTS`. It gates both the
+workflow draft step and the `draft_reply` automation action (recorded `skipped` when off). A person clicking
+Generate draft always drafts. `reply_instructions` and `signature` reach every draft as a trusted `<reply_style>` block
+(they never override the safety rules). The drafter also receives the label's name and description.
+
+### Drafting tiers
+
+Each draft is written by a standard or a premium tier (internal, never shown in the UI). `ai::routing::draft_quality`
+picks premium when the classification priority is `high`, the label is `client_requirement` or `candidate_referral`,
+the insight has 3 or more asks or any missing info, or the request sent `{"quality":"premium"}`; otherwise standard.
+The chosen tier is stored in the `draft.generated` audit metadata as `"tier": "standard" | "premium"`.
+
+Config: `OPENROUTER_DRAFT_MODEL_ID` (standard tier, default `anthropic/claude-haiku-5.5`) and
+`OPENROUTER_PREMIUM_MODEL_ID` (premium tier, default = `OPENROUTER_MODEL_ID`). If only one is set, both tiers use it.
+Without `OPENROUTER_API_KEY` the template drafter is used for both.

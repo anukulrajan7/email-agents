@@ -578,7 +578,8 @@ async fn generate_draft(state: &AppState, job: &Job, payload: &Value) -> Result<
     let run_id = payload.get("workflow_run_id").and_then(Value::as_str).map(str::to_string);
     let msg = load_message(state, &message_id).await?;
     // Automatic drafting can be switched off: then only a person's request (`:manual:`) drafts.
-    if !state.config.auto_drafts && !job.dedupe_key.contains(":manual:") {
+    let auto_reply = crate::reply_settings::load(&state.db, &state.config, &msg.workspace_id).await?.auto_reply;
+    if !auto_reply && !job.dedupe_key.contains(":manual:") {
         return finish_without_draft(state, &msg.workspace_id, &message_id, run_id.as_deref(), "automatic drafts are off").await;
     }
     let insight = analyze_message(state, &json!({ "message_id": message_id })).await?;
@@ -596,11 +597,12 @@ async fn generate_draft(state: &AppState, job: &Job, payload: &Value) -> Result<
         }
         None => None,
     };
+    let requested = (payload.get("quality").and_then(Value::as_str) == Some("premium")).then_some(ai::DraftQuality::Premium);
     let generated = match automation_draft {
         Some(_) => None,
-        None => Some(compose_draft(state, &message_id, &msg, insight, None).await?),
+        None => Some(compose_draft(state, &message_id, &msg, insight, None, requested).await?),
     };
-    if let Some((out, _)) = &generated
+    if let Some((out, _, _)) = &generated
         && out.body_text.trim().is_empty()
     {
         return finish_without_draft(state, &msg.workspace_id, &message_id, run_id.as_deref(), "model judged no reply needed").await;
@@ -609,7 +611,7 @@ async fn generate_draft(state: &AppState, job: &Job, payload: &Value) -> Result<
     let now = now_ms();
     let draft_id = new_id("drf");
     let mut tx = state.db.begin().await?;
-    if let Some((out, ctx)) = &generated {
+    if let Some((out, ctx, quality)) = &generated {
         let inserted = sqlx::query(
             "INSERT OR IGNORE INTO drafts (id, workspace_id, message_id, body_text, original_body_text, status, model_id,
                                            origin_key, memory_ids_json, unanswered_json, created_at, updated_at)
@@ -638,7 +640,7 @@ async fn generate_draft(state: &AppState, job: &Job, payload: &Value) -> Result<
                     entity_type: "draft",
                     entity_id: &draft_id,
                     message_id: Some(&message_id),
-                    metadata: json!({ "model_id": out.model_id, "prompt_version": ai::DRAFT_PROMPT_VERSION, "memories_used": ctx.ids().len() }),
+                    metadata: json!({ "model_id": out.model_id, "prompt_version": ai::DRAFT_PROMPT_VERSION, "memories_used": ctx.ids().len(), "tier": quality.as_str() }),
                 },
             )
             .await?;
@@ -684,18 +686,24 @@ async fn compose_draft(
     msg: &MessageForAi,
     insight: ai::Insight,
     extra_instructions: Option<&str>,
-) -> Result<(ai::DraftOutput, memory::MemoryContext), JobError> {
-    let category: Option<String> = sqlx::query_scalar("SELECT category FROM classifications WHERE message_id = ?1")
-        .bind(message_id)
-        .fetch_optional(&state.db)
-        .await?;
-    let category = category.unwrap_or_else(|| OTHER_LABEL.to_string());
-    let category_name = labels::active(&state.db, &msg.workspace_id)
+    requested: Option<ai::DraftQuality>,
+) -> Result<(ai::DraftOutput, memory::MemoryContext, ai::DraftQuality), JobError> {
+    let classification: Option<(String, String)> =
+        sqlx::query_as("SELECT category, priority FROM classifications WHERE message_id = ?1")
+            .bind(message_id)
+            .fetch_optional(&state.db)
+            .await?;
+    let (category, priority) = classification.unwrap_or_else(|| (OTHER_LABEL.to_string(), Priority::Normal.as_str().to_string()));
+    let (category_name, category_description) = labels::active(&state.db, &msg.workspace_id)
         .await?
         .into_iter()
         .find(|l| l.key == category)
-        .map(|l| l.name)
-        .unwrap_or_else(|| category.clone());
+        .map(|l| (l.name, l.description))
+        .unwrap_or_else(|| (category.clone(), String::new()));
+    let quality = ai::routing::draft_quality(Priority::parse(&priority).unwrap_or(Priority::Normal), &category, Some(&insight), requested);
+    let settings = crate::reply_settings::load(&state.db, &state.config, &msg.workspace_id).await?;
+    let reply_instructions =
+        if settings.reply_instructions.is_empty() { ai::routing::DEFAULT_REPLY_STYLE.to_string() } else { settings.reply_instructions };
 
     // Trusted memory (staff notes + learned sender profile), retrieved by sender and topic.
     let ctx = memory::context_for(&state.db, &msg.workspace_id, &msg.sender_address, &msg.subject).await?;
@@ -709,15 +717,19 @@ async fn compose_draft(
             examples: crate::knowledge::reply_examples(&state.db, state.embedder.as_ref(), &msg.workspace_id, message_id, &msg.subject, &msg.body_text).await,
             category,
             category_name,
+            category_description,
             subject: msg.subject.clone(),
             sender: msg.sender_address.clone(),
             body_text: msg.body_text.clone(),
             memory_notes,
             sender_history: ctx.sender_history.clone(),
             insight: Some(insight),
+            quality,
+            reply_instructions,
+            signature: settings.signature,
         })
         .await?;
-    Ok((out, ctx))
+    Ok((out, ctx, quality))
 }
 
 /// Drafts a reply for automations. Reuses the message's existing draft if there is one.
@@ -740,7 +752,7 @@ pub async fn create_draft_for_message(
     if !insight.needs_reply {
         return Ok(None);
     }
-    let (out, ctx) = compose_draft(state, message_id, &msg, insight, extra_instructions).await?;
+    let (out, ctx, quality) = compose_draft(state, message_id, &msg, insight, extra_instructions, None).await?;
     if out.body_text.trim().is_empty() {
         return Ok(None);
     }
@@ -776,7 +788,7 @@ pub async fn create_draft_for_message(
                 entity_type: "draft",
                 entity_id: &draft_id,
                 message_id: Some(message_id),
-                metadata: json!({ "model_id": out.model_id, "prompt_version": ai::DRAFT_PROMPT_VERSION, "memories_used": ctx.ids().len(), "by": "automation" }),
+                metadata: json!({ "model_id": out.model_id, "prompt_version": ai::DRAFT_PROMPT_VERSION, "memories_used": ctx.ids().len(), "by": "automation", "tier": quality.as_str() }),
             },
         )
         .await?;

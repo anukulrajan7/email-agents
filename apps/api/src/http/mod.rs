@@ -8,6 +8,7 @@ mod labels_api;
 mod matching_api;
 mod memories;
 mod messages;
+mod reply_settings_api;
 mod reviews;
 mod search_api;
 mod sources;
@@ -120,6 +121,7 @@ pub fn router(state: AppState) -> Router {
         .route("/workspaces/{ws}/alerts/{id}", patch(alerts_api::update))
         .route("/workspaces/{ws}/alert-settings", get(alerts_api::get_settings).put(alerts_api::put_settings))
         .route("/workspaces/{ws}/alert-settings/test", post(alerts_api::test))
+        .route("/workspaces/{ws}/reply-settings", get(reply_settings_api::get_settings).put(reply_settings_api::put_settings))
         .route("/workspaces/{ws}/jobs", get(jobs_api::list))
         .route("/workspaces/{ws}/jobs/{id}/retry", post(jobs_api::retry))
         .merge(automations_api::routes())

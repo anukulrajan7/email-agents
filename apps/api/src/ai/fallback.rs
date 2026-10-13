@@ -69,7 +69,8 @@ pub fn template_body(input: &DraftInput) -> String {
         "candidate_referral" => "Thank you for the referral. We have received the candidate's details and the recruiting team will review them.",
         _ => "Thank you for your email. We have received it and the HR team will get back to you.",
     };
-    format!("{greeting}\n\n{line}\n\nBest regards,\nHR Operations")
+    let sign_off = input.signature.as_deref().map(str::trim).filter(|s| !s.is_empty()).unwrap_or("HR Operations");
+    format!("{greeting}\n\n{line}\n\nBest regards,\n{sign_off}")
 }
 
 #[async_trait]

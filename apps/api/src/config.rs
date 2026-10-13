@@ -41,6 +41,10 @@ pub struct Config {
     pub openrouter_api_key: String,
     pub openrouter_api_url: String,
     pub openrouter_model_id: String,
+    /// Standard drafting tier (routine replies). Empty: the premium model drafts everything.
+    pub openrouter_draft_model_id: String,
+    /// Premium drafting tier (high priority, client mail, many asks, "Write a better draft").
+    pub openrouter_premium_model_id: String,
     pub openrouter_classifier_model_id: String,
     pub openrouter_embedding_model_id: String,
     pub email_retention_days: i64,
@@ -73,6 +77,7 @@ impl Config {
             "oidc" => AuthMode::Oidc,
             other => bail!("AUTH_MODE must be 'dev', 'password' or 'oidc', got '{other}'"),
         };
+        let openrouter_model_id = var("OPENROUTER_MODEL_ID", "");
         let config = Self {
             database_url: var("DATABASE_URL", "sqlite://data/email_ai.db"),
             bind_addr: var("API_BIND_ADDR", "127.0.0.1:8080"),
@@ -98,7 +103,9 @@ impl Config {
             jev_model_id: var("JEV_MODEL_ID", "jev-latest"),
             openrouter_api_key: var("OPENROUTER_API_KEY", ""),
             openrouter_api_url: var("OPENROUTER_API_URL", "https://openrouter.ai/api/v1"),
-            openrouter_model_id: var("OPENROUTER_MODEL_ID", ""),
+            openrouter_draft_model_id: var("OPENROUTER_DRAFT_MODEL_ID", "anthropic/claude-haiku-5.5"),
+            openrouter_premium_model_id: var("OPENROUTER_PREMIUM_MODEL_ID", &openrouter_model_id),
+            openrouter_model_id,
             openrouter_classifier_model_id: var("OPENROUTER_CLASSIFIER_MODEL_ID", ""),
             openrouter_embedding_model_id: var("OPENROUTER_EMBEDDING_MODEL_ID", "baai/bge-m3"),
             email_retention_days: var("EMAIL_RETENTION_DAYS", "30").parse().context("EMAIL_RETENTION_DAYS")?,
@@ -165,6 +172,8 @@ impl Config {
             openrouter_api_key: String::new(),
             openrouter_api_url: String::new(),
             openrouter_model_id: String::new(),
+            openrouter_draft_model_id: String::new(),
+            openrouter_premium_model_id: String::new(),
             openrouter_classifier_model_id: String::new(),
             openrouter_embedding_model_id: "baai/bge-m3".into(),
             email_retention_days: 30,

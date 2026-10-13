@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '../../api/client';
 import type { Items } from '../../api/types';
-import type { Automation, AutomationInput, AutomationRun, Preset, TestResult } from './types';
+import type { Automation, AutomationInput, AutomationRun, Preset, ReplySettings, ReplySettingsInput, TestResult } from './types';
 
 export const automationsKey = (ws: string) => ['ws', ws, 'automations'] as const;
 
@@ -63,6 +63,23 @@ export function useAutomationRuns(ws: string, id: string) {
     queryKey: [...automationsKey(ws), id, 'runs'],
     queryFn: () => api<Items<AutomationRun>>(`/workspaces/${ws}/automations/${id}/runs`, { query: { limit: 50 } }),
     refetchInterval: 10_000,
+  });
+}
+
+export const replySettingsKey = (ws: string) => ['ws', ws, 'reply-settings'] as const;
+
+export function useReplySettings(ws: string) {
+  return useQuery({
+    queryKey: replySettingsKey(ws),
+    queryFn: () => api<ReplySettings>(`/workspaces/${ws}/reply-settings`),
+  });
+}
+
+export function useSaveReplySettings(ws: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: ReplySettingsInput) => api<ReplySettings>(`/workspaces/${ws}/reply-settings`, { method: 'PUT', body }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: replySettingsKey(ws) }),
   });
 }
 

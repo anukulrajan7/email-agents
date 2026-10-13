@@ -92,6 +92,34 @@ describe('DraftPanel', () => {
     expect(await screen.findByText('Saved in your Gmail Drafts — you can finish it there too.')).toBeInTheDocument();
   });
 
+  it('Write a better draft asks for the premium writer', async () => {
+    const fetchMock = setup(message());
+    await userEvent.click(screen.getByRole('button', { name: 'Write a better draft' }));
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        '/api/v1/workspaces/w1/messages/m1/draft',
+        expect.objectContaining({ method: 'POST', body: JSON.stringify({ quality: 'premium' }) }),
+      ),
+    );
+  });
+
+  it('Regenerate sends no body', async () => {
+    const fetchMock = setup(message());
+    await userEvent.click(screen.getByRole('button', { name: 'Regenerate' }));
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        '/api/v1/workspaces/w1/messages/m1/draft',
+        expect.objectContaining({ method: 'POST', body: undefined }),
+      ),
+    );
+  });
+
+  it('offers no better-draft button before a draft exists', () => {
+    setup(message({ draft: null }));
+    expect(screen.queryByRole('button', { name: 'Write a better draft' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Generate draft' })).toBeInTheDocument();
+  });
+
   it('renders sent drafts read-only', () => {
     setup(message({ draft: { ...draft, status: 'sent' } }));
     expect(screen.getByLabelText('Draft reply')).toHaveAttribute('readonly');

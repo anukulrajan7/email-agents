@@ -193,10 +193,11 @@ async fn execute(
 ) -> Result<Vec<ActionResult>, JobError> {
     let mut results = Vec::with_capacity(automation.actions.len());
     let mut draft_id: Option<String> = None;
+    let auto_reply = crate::reply_settings::load(&state.db, &state.config, workspace_id).await?.auto_reply;
     for action in &automation.actions {
         let kind_name = action.type_name();
         let result = match action {
-            Action::DraftReply { .. } if !state.config.auto_drafts => {
+            Action::DraftReply { .. } if !auto_reply => {
                 skipped(kind_name, "automatic drafts are off: open the email and generate a draft")
             }
             Action::DraftReply { instructions } => {

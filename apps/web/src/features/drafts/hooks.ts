@@ -6,7 +6,8 @@ import { messageKey, messagesKey } from '../inbox/hooks';
 export function useGenerateDraft(ws: string, messageId: string) {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: () => api<{ status: 'queued' }>(`/workspaces/${ws}/messages/${messageId}/draft`, { method: 'POST' }),
+    mutationFn: (opts?: { quality: 'premium' }) =>
+      api<{ status: 'queued' }>(`/workspaces/${ws}/messages/${messageId}/draft`, { method: 'POST', body: opts }),
     onSuccess: () => qc.invalidateQueries({ queryKey: messageKey(ws, messageId) }),
   });
 }

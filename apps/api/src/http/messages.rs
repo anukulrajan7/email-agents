@@ -1,5 +1,6 @@
 use axum::{
     Json,
+    body::Bytes,
     extract::{Path, Query, State},
     http::StatusCode,
 };
@@ -13,7 +14,7 @@ use super::{
     dto::{Classification, ClassificationRow, Draft, DraftRow, Insight, InsightRow, draft_with_memories},
 };
 use crate::{
-    ai::{ClassifyOutput, policy},
+    ai::{ClassifyOutput, DraftQuality, policy},
     audit::{self, Actor, Entry},
     auth::{AuthUser, require_role},
     db::{iso, new_id, now_ms},
@@ -545,15 +546,47 @@ async fn enqueue_for_message(
     Ok((StatusCode::ACCEPTED, Json(json!({ "status": "queued" }))))
 }
 
+#[derive(Deserialize, Default)]
+struct DraftRequest {
+    /// `"premium"` asks for the best available writer ("Write a better draft").
+    quality: Option<DraftQuality>,
+}
+
+/// The body is optional: a bare POST drafts at the automatic tier.
 pub async fn request_draft(
     State(state): State<AppState>,
     user: AuthUser,
     Path((ws, id)): Path<(String, String)>,
+    body: Bytes,
 ) -> AppResult<(StatusCode, Json<Value>)> {
     require_role(&state.db, &ws, &user, Role::Operator).await?;
     ensure_message(&state, &ws, &id).await?;
+    let request: DraftRequest = if body.iter().all(u8::is_ascii_whitespace) {
+        DraftRequest::default()
+    } else {
+        serde_json::from_slice(&body).map_err(|_| AppError::BadRequest("invalid draft request".into()))?
+    };
+    let premium = request.quality == Some(DraftQuality::Premium);
     let key = format!("draft:{id}:manual:{}", new_id("req"));
-    enqueue_for_message(&state, &ws, &id, &user, kind::GENERATE_DRAFT, key, "draft.requested").await
+    let payload = if premium { json!({ "message_id": id, "quality": "premium" }) } else { json!({ "message_id": id }) };
+    let mut tx = state.db.begin().await?;
+    jobs::enqueue(&mut tx, kind::GENERATE_DRAFT, &key, Some(&ws), &payload).await?;
+    audit::record(
+        &mut tx,
+        Entry {
+            workspace_id: &ws,
+            actor: Actor::User(&user.id),
+            action: "draft.requested",
+            entity_type: "message",
+            entity_id: &id,
+            message_id: Some(&id),
+            metadata: json!({ "premium": premium }),
+        },
+    )
+    .await?;
+    tx.commit().await?;
+    state.jobs_notify.notify_one();
+    Ok((StatusCode::ACCEPTED, Json(json!({ "status": "queued" }))))
 }
 
 /// Reads the email right now (fast model) when its insight isn't ready yet, so the
