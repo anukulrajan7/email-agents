@@ -6,6 +6,8 @@ const tones: Record<string, Tone> = {
   pending: 'neutral',
   normalized: 'info',
   classified: 'info',
+  workflow_running: 'info',
+  processed: 'success',
   workflow_completed: 'success',
   failed: 'danger',
   running: 'info',
