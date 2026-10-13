@@ -67,6 +67,7 @@ pub async fn handle(state: &AppState, job: &Job) -> Result<(), JobError> {
         kind::EXTRACT_RECORD => super::matching_jobs::extract_record(state, &payload).await,
         kind::MATCH_RECORD => super::matching_jobs::match_record(state, &payload).await,
         kind::REGISTER_NANGO_CONNECTION => crate::sources::nango::register_from_webhook(state, &payload).await,
+        kind::INDEX_MESSAGE | kind::INDEX_REPLY | kind::BACKFILL_KNOWLEDGE => super::knowledge_jobs::handle(state, job, &payload).await,
         other => Err(JobError::Permanent(format!("unknown job kind {other}"))),
     }
 }
@@ -248,6 +249,7 @@ async fn classify_email(state: &AppState, job: &Job, payload: &Value) -> Result<
         .await?;
     let sender_history = memory::context_for(&state.db, &msg.workspace_id, &msg.sender_address, "").await?.sender_history;
     let input = ClassifyInput {
+        examples: crate::knowledge::label_examples(&state.db, state.embedder.as_ref(), &msg.workspace_id, &message_id, &msg.subject, &msg.body_text).await,
         subject: msg.subject,
         sender: msg.sender_address,
         body_text: msg.body_text,
@@ -356,6 +358,7 @@ pub async fn persist_classification(
     .await?;
     let trigger = trigger.map(str::to_string).unwrap_or_else(|| format!("{}:{}", out.category, now));
     enqueue_workflow(&mut tx, &workspace_id, message_id, &trigger).await?;
+    super::knowledge_jobs::enqueue_index_message(&mut tx, &workspace_id, message_id).await?;
     // Requirement / referral emails also become structured records for matching.
     if super::matching_jobs::is_extractable(&out.category) {
         jobs::enqueue(
@@ -535,6 +538,7 @@ async fn generate_draft(state: &AppState, job: &Job, payload: &Value) -> Result<
     let out = state
         .drafter
         .draft(&DraftInput {
+            examples: crate::knowledge::reply_examples(&state.db, state.embedder.as_ref(), &msg.workspace_id, &message_id, &msg.subject, &msg.body_text).await,
             category,
             category_name,
             subject: msg.subject,

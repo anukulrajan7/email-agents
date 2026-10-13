@@ -1,6 +1,7 @@
 //! Durable job queue on SQLite. Delivery is at-least-once: every handler must be idempotent.
 
 pub mod handlers;
+pub mod knowledge_jobs;
 pub mod matching_jobs;
 pub mod worker;
 
@@ -23,6 +24,9 @@ pub mod kind {
     pub const LEARN_FROM_DRAFT: &str = "learn_from_draft";
     pub const EXTRACT_RECORD: &str = "extract_record";
     pub const MATCH_RECORD: &str = "match_record";
+    pub const INDEX_MESSAGE: &str = "index_message";
+    pub const INDEX_REPLY: &str = "index_reply";
+    pub const BACKFILL_KNOWLEDGE: &str = "backfill_knowledge";
 }
 
 #[derive(Debug, Clone, FromRow)]

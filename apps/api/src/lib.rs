@@ -8,6 +8,7 @@ pub mod error;
 pub mod http;
 pub mod ingest;
 pub mod jobs;
+pub mod knowledge;
 pub mod labels;
 pub mod mailer;
 pub mod matching;
@@ -103,7 +104,21 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
         _ => Arc::new(ai::RulesExtractor),
     };
 
+    let embedder: Arc<dyn ai::embeddings::Embedder> =
+        if openrouter.is_some() && !config.openrouter_embedding_model_id.is_empty() {
+            Arc::new(ai::embeddings::OpenRouterEmbedder::new(
+                http.clone(),
+                &config.openrouter_api_url,
+                &config.openrouter_api_key,
+                &config.openrouter_embedding_model_id,
+            ))
+        } else {
+            tracing::warn!("no embedding model configured: using offline hash embeddings");
+            Arc::new(ai::embeddings::HashEmbedder)
+        };
+
     Ok(AppState {
+        embedder,
         extractor,
         mailer,
         learner,

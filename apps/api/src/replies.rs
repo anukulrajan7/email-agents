@@ -222,6 +222,7 @@ pub async fn send(
     let gmail_message_id = sent.get("id").and_then(Value::as_str).unwrap_or_default().to_string();
     let mut tx = state.db.begin().await?;
     sqlx::query("UPDATE drafts SET provider_message_id = ?1 WHERE id = ?2").bind(&gmail_message_id).bind(&ctx.draft_id).execute(&mut *tx).await?;
+    crate::jobs::knowledge_jobs::enqueue_index_reply(&mut tx, &ws, &ctx.draft_id, "sent").await?;
     audit::record(
         &mut tx,
         Entry {
@@ -236,6 +237,7 @@ pub async fn send(
     )
     .await?;
     tx.commit().await?;
+    state.jobs_notify.notify_one();
     Ok(Json(json!({ "status": "sent", "provider_message_id": gmail_message_id })))
 }
 

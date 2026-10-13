@@ -72,7 +72,7 @@ becomes retrievable evidence for the next decision. No retraining job is needed.
 | Labelling, extraction, learning | `qwen/qwen3.8-flash` | Cheap and fast; reasoning off |
 | Escalation (unsure / error) | `moonshotai/kimi-k2.6` | Sonnet-level; only for the uncertain minority |
 | Drafts, match reasons, Ask agent | `moonshotai/kimi-k2.6` | Quality matters more than cost here |
-| Embeddings | local `bge-small-en-v1.5` | Private, free |
+| Embeddings | `baai/bge-m3` (1024-d) via OpenRouter | Decided over a local model: simpler to run; same no-retention routing as the other calls |
 
 All calls use `data_collection: deny` routing and JSON schemas, are validated in Rust, and record the model used.
 
@@ -89,9 +89,9 @@ All calls use `data_collection: deny` routing and JSON schemas, are validated in
 | Step | Scope | Done when |
 |---|---|---|
 | **R0: Quick fixes** (ready) | Confident labels auto-approved (incl. Other); Qwen → Kimi escalation; HTML email display (sanitised, links + images in a sealed frame) | Review queue only holds genuinely unsure emails; emails render like Gmail |
-| **R1: Knowledge store** | Chunking (email body + attachment text), local embeddings, sqlite-vec, hybrid search API, backfill existing mail | `search("java spring pune")` returns the right emails/CVs in < 100 ms |
-| **R2: RAG labelling + golden set** | Few-shot examples from confirmed labels; evaluation page; calibrated threshold | Measured accuracy gain on the golden set; review rate falls |
-| **R3: RAG drafting + auto Gmail drafts** | Retrieve similar sent replies; auto-save workflow drafts to Gmail | Draft edit distance falls; drafts waiting in Gmail |
+| **R1: Knowledge store** (built, wave 2) | Chunking (email body + attachment text + approved/sent replies), `bge-m3` embeddings via OpenRouter (no-retention routing), sqlite-vec, hybrid search API (`GET /search`), backfill existing mail | `search("java spring pune")` returns the right emails/CVs; latency is now bounded by one embeddings call (~0.2–0.5 s), not < 100 ms |
+| **R2: RAG labelling + golden set** (few-shot built; evaluation open) | Few-shot examples (up to 5) from confirmed, human-set, or ≥ 0.9-confidence non-`other` labels; evaluation page; calibrated threshold | Measured accuracy gain on the golden set; review rate falls |
+| **R3: RAG drafting + auto Gmail drafts** (retrieval built) | Retrieve similar sent replies (up to 3, done); auto-save workflow drafts to Gmail | Draft edit distance falls; drafts waiting in Gmail |
 | **R4: Semantic matching** | Vector recall + score + LLM rerank with reasons; daily digest email | Synonym cases matched; digest each morning |
 | **R5: Reminders + Ask agent** | SLA rules and escalation; Ask page (RAG + metric tools, cited answers) | "Who hasn't replied to Capgemini since Monday?" answered with links |
 

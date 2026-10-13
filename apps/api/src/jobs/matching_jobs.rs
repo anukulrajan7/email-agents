@@ -110,6 +110,10 @@ pub async fn extract_record(state: &AppState, payload: &Value) -> Result<(), Job
     .ok_or_else(|| JobError::Permanent("message not found".into()))?;
 
     let attachments = read_attachments(state, message_id, &msg).await?;
+    if !attachments.is_empty() {
+        let mut conn = state.db.acquire().await?;
+        super::knowledge_jobs::enqueue_reindex_message(&mut conn, &msg.workspace_id, message_id, "attachments").await?;
+    }
     let mut text = msg.body_text.clone();
     for (name, t) in &attachments {
         text.push_str(&format!("\n\n--- Attachment: {name} ---\n{t}"));
