@@ -233,14 +233,14 @@ async fn gmail_connect_backfill_and_incremental_sync() {
                        "model":"GmailEmail","success":true,"modifiedAfter":"2026-10-13T00:00:00Z",
                        "responseResults":{"added":1,"updated":0,"deleted":0}});
     assert_eq!(h.webhook(&event, "wrong").await.0, StatusCode::UNAUTHORIZED);
-    assert_eq!(h.webhook(&event, "nango-test-secret").await.1["status"], "accepted");
-    assert_eq!(h.webhook(&event, "nango-test-secret").await.1["status"], "duplicate");
+    assert_eq!(h.webhook(&event, "unit-test-only-nango-key").await.1["status"], "accepted");
+    assert_eq!(h.webhook(&event, "unit-test-only-nango-key").await.1["status"], "duplicate");
     worker::drain(&h.state).await;
     assert_eq!(h.count("SELECT COUNT(*) FROM email_messages").await, 3, "no duplicates on re-sync");
 
     // Refresh failure marks the source degraded.
     let fail = json!({"type":"auth","operation":"refresh","connectionId":"conn_ok","providerConfigKey":"google-mail","success":false});
-    h.webhook(&fail, "nango-test-secret").await;
+    h.webhook(&fail, "unit-test-only-nango-key").await;
     let (_, sources) = h.call("GET", &base, ADMIN, None).await;
     let gmail = sources["items"].as_array().unwrap().iter().find(|s| s["kind"] == "nango_gmail").unwrap().clone();
     assert_eq!(gmail["status"], "degraded");
@@ -259,7 +259,7 @@ async fn auth_webhook_registers_connection_in_background() {
     let event = json!({"type":"auth","operation":"creation","connectionId":"conn_wh","providerConfigKey":"google-mail",
                        "provider":"google-mail","environment":"DEV","success":true,
                        "tags":{"organization_id": ws, "end_user_id": "spoofable"}});
-    assert_eq!(h.webhook(&event, "nango-test-secret").await.1["status"], "accepted");
+    assert_eq!(h.webhook(&event, "unit-test-only-nango-key").await.1["status"], "accepted");
     worker::drain(&h.state).await;
     assert_eq!(h.count("SELECT COUNT(*) FROM email_sources WHERE kind = 'nango_gmail' AND status = 'connected'").await, 1);
     assert_eq!(h.count("SELECT COUNT(*) FROM email_messages").await, 2);

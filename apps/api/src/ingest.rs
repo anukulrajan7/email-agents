@@ -142,3 +142,50 @@ pub async fn persist_message(
     .await?;
     Ok(Some(message_id))
 }
+
+/// Upgrades an already-stored message whose body was only a preview (e.g. Gmail snippet)
+/// and re-queues labelling, since the first label was judged on less text. Returns the
+/// message ID when something changed.
+pub async fn refresh_content(
+    conn: &mut SqliteConnection,
+    source_id: &str,
+    email: &NormalizedEmail,
+) -> sqlx::Result<Option<String>> {
+    let updated: Option<(String, String)> = sqlx::query_as(
+        "UPDATE email_messages SET body_text = ?1, body_html = COALESCE(?2, body_html)
+         WHERE source_id = ?3 AND source_message_id = ?4 AND length(body_text) < length(?1)
+         RETURNING id, workspace_id",
+    )
+    .bind(&email.body_text)
+    .bind(&email.body_html)
+    .bind(source_id)
+    .bind(&email.source_message_id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    let Some((message_id, workspace_id)) = updated else { return Ok(None) };
+    let has_attachments: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM attachments WHERE message_id = ?1")
+        .bind(&message_id)
+        .fetch_one(&mut *conn)
+        .await?;
+    if has_attachments == 0 {
+        for a in &email.attachments {
+            sqlx::query("INSERT INTO attachments (id, message_id, filename, media_type, size_bytes) VALUES (?1, ?2, ?3, ?4, ?5)")
+                .bind(new_id("att"))
+                .bind(&message_id)
+                .bind(&a.filename)
+                .bind(&a.media_type)
+                .bind(a.size_bytes)
+                .execute(&mut *conn)
+                .await?;
+        }
+    }
+    jobs::enqueue(
+        &mut *conn,
+        kind::CLASSIFY_EMAIL,
+        &format!("classify:{message_id}:{TAXONOMY_VERSION}:content-refresh"),
+        Some(&workspace_id),
+        &json!({ "message_id": message_id }),
+    )
+    .await?;
+    Ok(Some(message_id))
+}

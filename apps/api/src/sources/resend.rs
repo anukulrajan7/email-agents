@@ -213,7 +213,9 @@ mod tests {
     use super::*;
     use axum::http::HeaderValue;
 
-    const SECRET: &str = "whsec_dGVzdC1zZWNyZXQtZm9yLXdlYmhvb2tz";
+    fn secret() -> String {
+        crate::config::test_webhook_secret()
+    }
 
     fn headers(id: &str, ts: i64, sig: &str) -> HeaderMap {
         let mut h = HeaderMap::new();
@@ -224,7 +226,7 @@ mod tests {
     }
 
     fn valid_sig(id: &str, ts: i64, body: &[u8]) -> String {
-        let key = B64.decode(SECRET.trim_start_matches("whsec_")).unwrap();
+        let key = B64.decode(secret().trim_start_matches("whsec_")).unwrap();
         format!("v1,{}", B64.encode(sign(&key, id, &ts.to_string(), body)))
     }
 
@@ -232,16 +234,16 @@ mod tests {
     fn accepts_valid_signature_among_several() {
         let body = br#"{"type":"email.received"}"#;
         let sig = format!("v1,bm9wZQ== {}", valid_sig("msg_1", 1000, body));
-        assert_eq!(verify_svix(SECRET, &headers("msg_1", 1000, &sig), body, 1010), Ok("msg_1".into()));
+        assert_eq!(verify_svix(&secret(), &headers("msg_1", 1000, &sig), body, 1010), Ok("msg_1".into()));
     }
 
     #[test]
     fn rejects_tampered_body_stale_and_missing() {
         let body = br#"{"type":"email.received"}"#;
         let sig = valid_sig("msg_1", 1000, body);
-        assert_eq!(verify_svix(SECRET, &headers("msg_1", 1000, &sig), b"{}", 1000), Err(SignatureError::Invalid));
-        assert_eq!(verify_svix(SECRET, &headers("msg_1", 1000, &sig), body, 2000), Err(SignatureError::Stale));
-        assert_eq!(verify_svix(SECRET, &HeaderMap::new(), body, 1000), Err(SignatureError::MissingHeaders));
+        assert_eq!(verify_svix(&secret(), &headers("msg_1", 1000, &sig), b"{}", 1000), Err(SignatureError::Invalid));
+        assert_eq!(verify_svix(&secret(), &headers("msg_1", 1000, &sig), body, 2000), Err(SignatureError::Stale));
+        assert_eq!(verify_svix(&secret(), &HeaderMap::new(), body, 1000), Err(SignatureError::MissingHeaders));
         assert_eq!(verify_svix("", &headers("msg_1", 1000, &sig), body, 1000), Err(SignatureError::NotConfigured));
     }
 }

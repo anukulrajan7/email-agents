@@ -171,18 +171,56 @@ impl NangoClient {
     }
 
     /// Full Gmail message via Nango's proxy (the catalog sync only stores metadata).
+    /// Retries once: right after a connection is created the proxy can briefly 403.
     pub async fn gmail_message_full(&self, connection_id: &str, provider_config_key: &str, id: &str) -> Result<Value, NangoError> {
         if !id.chars().all(|c| c.is_ascii_alphanumeric()) {
             return Err(NangoError::Rejected("invalid message id".into()));
         }
-        self.send(
-            self.http
-                .get(format!("{}/proxy/gmail/v1/users/me/messages/{id}", self.api_url))
-                .header("Connection-Id", connection_id)
-                .header("Provider-Config-Key", provider_config_key)
-                .query(&[("format", "full")]),
-        )
-        .await
+        let call = || {
+            self.send::<Value>(
+                self.http
+                    .get(format!("{}/proxy/gmail/v1/users/me/messages/{id}", self.api_url))
+                    .header("Connection-Id", connection_id)
+                    .header("Provider-Config-Key", provider_config_key)
+                    .query(&[("format", "full")]),
+            )
+        };
+        match call().await {
+            Err(NangoError::Connection(_) | NangoError::Unavailable(_)) => {
+                tokio::time::sleep(Duration::from_millis(800)).await;
+                call().await
+            }
+            other => other,
+        }
+    }
+
+    /// One page of Gmail message IDs matching `q` (e.g. `newer_than:14d`).
+    pub async fn gmail_list_ids(
+        &self,
+        connection_id: &str,
+        provider_config_key: &str,
+        q: &str,
+        page_token: Option<&str>,
+    ) -> Result<(Vec<String>, Option<String>), NangoError> {
+        let mut query: Vec<(&str, &str)> = vec![("q", q), ("maxResults", "100")];
+        if let Some(t) = page_token {
+            query.push(("pageToken", t));
+        }
+        let page: Value = self
+            .send(
+                self.http
+                    .get(format!("{}/proxy/gmail/v1/users/me/messages", self.api_url))
+                    .header("Connection-Id", connection_id)
+                    .header("Provider-Config-Key", provider_config_key)
+                    .query(&query),
+            )
+            .await?;
+        let ids = page
+            .get("messages")
+            .and_then(Value::as_array)
+            .map(|m| m.iter().filter_map(|x| x.get("id").and_then(Value::as_str).map(str::to_string)).collect())
+            .unwrap_or_default();
+        Ok((ids, page.get("nextPageToken").and_then(Value::as_str).map(str::to_string)))
     }
 
     pub async fn list_records(
@@ -531,6 +569,7 @@ struct SourceForSync {
     external_connection_id: Option<String>,
     provider_config_key: Option<String>,
     sync_cursor: Option<String>,
+    backfilled_at: Option<i64>,
 }
 
 async fn mark_source(state: &AppState, source_id: &str, status: &str, error: Option<&str>) -> sqlx::Result<()> {
@@ -550,7 +589,7 @@ pub async fn sync_source(state: &AppState, payload: &Value) -> Result<(), JobErr
         .ok_or_else(|| JobError::Permanent("payload missing source_id".into()))?
         .to_string();
     let src: SourceForSync = sqlx::query_as(
-        "SELECT workspace_id, status, external_connection_id, provider_config_key, sync_cursor
+        "SELECT workspace_id, status, external_connection_id, provider_config_key, sync_cursor, backfilled_at
          FROM email_sources WHERE id = ?1 AND kind = ?2",
     )
     .bind(&source_id)
@@ -564,6 +603,14 @@ pub async fn sync_source(state: &AppState, payload: &Value) -> Result<(), JobErr
     let (Some(connection_id), Some(pck)) = (src.external_connection_id, src.provider_config_key) else {
         return Err(JobError::Permanent("source has no Nango connection".into()));
     };
+
+    // One-time direct backfill from Gmail (the catalog sync only keeps ~100 recent).
+    if src.backfilled_at.is_none() {
+        match backfill_from_gmail(state, &source_id, &src.workspace_id, &connection_id, &pck).await {
+            Ok(n) => tracing::info!(%source_id, imported_or_refreshed = n, "gmail backfill finished"),
+            Err(e) => tracing::warn!(%source_id, error = %e, "gmail backfill failed; will retry next sync"),
+        }
+    }
 
     // Network first, outside any transaction: page through everything new.
     let initial = src.sync_cursor.is_none();
@@ -665,6 +712,65 @@ pub async fn sync_source(state: &AppState, payload: &Value) -> Result<(), JobErr
 
 const ENRICH_CONCURRENCY: usize = 8;
 
+/// Lists the last N days of mail straight from Gmail, fetches each message in full and
+/// stores new ones / upgrades preview-only ones. Marks the source as backfilled.
+async fn backfill_from_gmail(
+    state: &AppState,
+    source_id: &str,
+    workspace_id: &str,
+    connection_id: &str,
+    pck: &str,
+) -> Result<usize, JobError> {
+    let q = format!("newer_than:{}d -in:chats", state.config.nango_backfill_days);
+    let mut ids: Vec<String> = Vec::new();
+    let mut token: Option<String> = None;
+    loop {
+        let (page, next) = state.nango.gmail_list_ids(connection_id, pck, &q, token.as_deref()).await?;
+        ids.extend(page);
+        if ids.len() >= state.config.nango_backfill_max || next.is_none() {
+            break;
+        }
+        token = next;
+    }
+    ids.truncate(state.config.nango_backfill_max);
+
+    // Reuse the enrichment path: start from bare records, fill from format=full.
+    let mut records: Vec<MappedRecord> = ids
+        .into_iter()
+        .filter_map(|id| map_gmail_record(&json!({ "id": id }), state.config.max_body_chars))
+        .collect();
+    enrich_with_full_messages(state, connection_id, pck, &mut records).await;
+    records.retain(|r| !r.email.sender_address.is_empty()); // fetch failed → skip, retry next time
+
+    let mut changed = 0usize;
+    for chunk in records.chunks(PERSIST_CHUNK) {
+        let mut tx = state.db.begin().await?;
+        sqlx::query("UPDATE email_sources SET last_synced_at = ?1 WHERE id = ?2")
+            .bind(now_ms())
+            .bind(source_id)
+            .execute(&mut *tx)
+            .await?;
+        for r in chunk {
+            let created = ingest::persist_message(
+                &mut tx,
+                source_id,
+                workspace_id,
+                &r.email,
+                r.thread_id.as_deref(),
+                json!({ "provider": GMAIL_KIND, "via": "backfill" }),
+            )
+            .await?;
+            if created.is_some() || ingest::refresh_content(&mut tx, source_id, &r.email).await?.is_some() {
+                changed += 1;
+            }
+        }
+        tx.commit().await?;
+    }
+    sqlx::query("UPDATE email_sources SET backfilled_at = ?1 WHERE id = ?2").bind(now_ms()).bind(source_id).execute(&state.db).await?;
+    state.jobs_notify.notify_one();
+    Ok(changed)
+}
+
 /// Fetches bodies + attachment metadata through Nango's proxy, 8 at a time, outside any
 /// transaction. A failed fetch keeps the snippet rather than failing the whole sync.
 async fn enrich_with_full_messages(state: &AppState, connection_id: &str, pck: &str, records: &mut [MappedRecord]) {
@@ -685,10 +791,17 @@ async fn enrich_with_full_messages(state: &AppState, connection_id: &str, pck: &
         });
     }
     while let Some(done) = tasks.join_next().await {
-        if let Ok(Some((i, full))) = done
-            && let Some(payload) = full.get("payload")
-        {
-            apply_gmail_payload(&mut records[i].email, payload, state.config.max_body_chars);
+        if let Ok(Some((i, full))) = done {
+            // A bare record (backfill) gets everything from the full message: headers,
+            // thread, date; a catalog record keeps its headers and gains body + attachments.
+            if records[i].email.sender_address.is_empty()
+                && let Some(mapped) = map_gmail_record(&full, state.config.max_body_chars)
+            {
+                let cursor = records[i].cursor.take();
+                records[i] = MappedRecord { cursor, ..mapped };
+            } else if let Some(payload) = full.get("payload") {
+                apply_gmail_payload(&mut records[i].email, payload, state.config.max_body_chars);
+            }
         }
     }
 }
