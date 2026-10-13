@@ -1,18 +1,15 @@
 import { useState } from 'react';
 import { Link } from 'react-router';
-import { Badge, Card, Spinner } from '../../components/ui';
+import { Card, Spinner } from '../../components/ui';
 import { ErrorNote } from '../../components/ErrorNote';
 import { StatusBadge } from '../../components/StatusBadges';
 import { DraftPanel } from '../drafts/DraftPanel';
-import { formatBytes, fullDate, humanize, relativeTime } from '../../lib/format';
+import { fullDate, humanize } from '../../lib/format';
 import { ClassificationPanel } from './ClassificationPanel';
 import { useMessage } from './hooks';
-import { EmailBody } from './EmailBody';
-import { Postmark } from './Postmark';
-import { RouteTracker } from './RouteTracker';
+import { EmailReader } from './EmailReader';
 import { riseStyle } from '../../lib/motion';
 import { LabelStamp } from '../labels/LabelStamp';
-import { SeeMatchesLink } from '../matching/SeeMatchesLink';
 import { MemoryForm, MemoryItem } from '../memory/MemoryParts';
 
 export function MessageDetailView({ ws, messageId }: { ws: string; messageId: string }) {
@@ -37,60 +34,13 @@ export function MessageDetailView({ ws, messageId }: { ws: string; messageId: st
   return (
     <div className="grid gap-x-12 gap-y-8 px-8 pt-6 pb-8 2xl:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
       <div className="flex min-w-0 flex-col gap-8 2xl:col-start-1">
-        <article className="rise flex flex-col gap-6" style={riseStyle(0)}>
-          <header className="flex flex-col gap-5">
-            <div className="flex items-start justify-between gap-6">
-              <div className="min-w-0">
-                <div className="flex flex-wrap items-center gap-3">
-                  {m.classification && <LabelStamp ws={ws} category={m.classification.category} size="lg" tilted />}
-                  <StatusBadge status={m.processing_status} />
-                </div>
-                {(m.classification?.category === 'client_requirement' || m.classification?.category === 'candidate_referral') && (
-                  <SeeMatchesLink ws={ws} messageId={m.id} category={m.classification.category} />
-                )}
-                <h2 className="type-display mt-4 text-4xl leading-[1.1] tracking-[-0.02em] break-words">{m.subject || '(no subject)'}</h2>
-              </div>
-              <Postmark receivedAt={m.received_at} />
-            </div>
-            <dl className="grid grid-cols-[auto_1fr] items-baseline gap-x-6 gap-y-1.5 text-sm">
-              <dt className="kicker">From</dt>
-              <dd className="font-mono text-[13px] break-all">{m.from}</dd>
-              {m.original_from && (
-                <>
-                  <dt className="kicker">Original sender (unverified)</dt>
-                  <dd className="font-mono text-[13px] break-all">{m.original_from}</dd>
-                </>
-              )}
-              <dt className="kicker">To</dt>
-              <dd className="font-mono text-[13px] break-all">{m.to.join(', ')}</dd>
-              <dt className="kicker">Received</dt>
-              <dd className="font-mono text-[13px]" title={fullDate(m.received_at)}>
-                {fullDate(m.received_at)} ({relativeTime(m.received_at)})
-              </dd>
-            </dl>
-            <RouteTracker status={m.processing_status} hasClassification={m.classification !== null} />
-          </header>
-          <div className="border-t border-rule-strong pt-6">
-            <EmailBody text={m.body_text} html={m.body_html_safe} />
-          </div>
-        </article>
+        <div className="rise" style={riseStyle(0)}>
+          <EmailReader ws={ws} message={m} />
+        </div>
 
-        {m.attachments.length > 0 && (
-          <section className="rise border-t border-rule-strong pt-6" style={riseStyle(3)}>
-            <h3 className="kicker">Attachments</h3>
-            <ul className="mt-3 divide-y divide-rule text-sm">
-              {m.attachments.map((a) => (
-                <li key={a.id} className="flex flex-wrap items-center justify-between gap-2 py-2">
-                  <span className="font-semibold break-all">{a.name}</span>
-                  <span className="flex items-center gap-2 font-mono text-xs text-ink-muted">
-                    {a.media_type ?? 'unknown type'} · {formatBytes(a.size_bytes)}
-                    <Badge tone={a.scan_status === 'clean' ? 'success' : 'neutral'}>Scan: {a.scan_status}</Badge>
-                  </span>
-                </li>
-              ))}
-            </ul>
-          </section>
-        )}
+        <Card className="rise bg-surface p-5 shadow-[0_1px_0_var(--color-rule),0_12px_24px_-16px_rgba(28,27,24,0.25)]" style={riseStyle(2)}>
+          <DraftPanel ws={ws} message={m} onAwaitingChange={setAwaitingDraft} />
+        </Card>
       </div>
 
       <div className="flex min-w-0 flex-col gap-8 2xl:col-start-2 2xl:row-span-2 2xl:row-start-1">
@@ -107,7 +57,7 @@ export function MessageDetailView({ ws, messageId }: { ws: string; messageId: st
               {m.workflow_run.error && <p className="font-mono text-xs text-danger">{m.workflow_run.error}</p>}
             </div>
           ) : (
-            <p className="text-sm text-ink-muted">No workflow run yet.</p>
+            <p className="text-sm text-ink-muted">{m.processing_status === 'processed' ? 'Nothing else needed for this email.' : 'No workflow run yet.'}</p>
           )}
           {m.review && (
             <p className="flex items-center gap-2 text-sm">
@@ -159,9 +109,6 @@ export function MessageDetailView({ ws, messageId }: { ws: string; messageId: st
             </div>
           </details>
         </section>
-        <Card className="rise bg-surface p-6 shadow-[0_1px_0_var(--color-rule),0_12px_24px_-16px_rgba(28,27,24,0.25)]" style={riseStyle(4)}>
-          <DraftPanel ws={ws} message={m} onAwaitingChange={setAwaitingDraft} />
-        </Card>
       </div>
 
       <section className="rise min-w-0 border-t border-rule-strong pt-6 2xl:col-start-1" style={riseStyle(5)}>

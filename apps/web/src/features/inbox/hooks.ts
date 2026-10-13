@@ -6,13 +6,15 @@ const PAGE_SIZE = 25;
 export const messagesKey = (ws: string) => ['ws', ws, 'messages'] as const;
 export const messageKey = (ws: string, id: string) => ['ws', ws, 'message', id] as const;
 
-export function useMessages(ws: string, filters: { category?: Category; q?: string }) {
+export type MessageSort = 'importance' | 'recent';
+
+export function useMessages(ws: string, filters: { category?: Category; q?: string; sort?: MessageSort }) {
   return useInfiniteQuery({
     queryKey: [...messagesKey(ws), filters],
     initialPageParam: undefined as string | undefined,
     queryFn: ({ pageParam }) =>
       api<Paged<MessageSummary>>(`/workspaces/${ws}/messages`, {
-        query: { cursor: pageParam, category: filters.category, q: filters.q, limit: PAGE_SIZE },
+        query: { cursor: pageParam, category: filters.category, q: filters.q, sort: filters.sort, limit: PAGE_SIZE },
       }),
     getNextPageParam: (last) => last.next_cursor ?? undefined,
     refetchInterval: 5000,
@@ -39,18 +41,6 @@ export function useUpdateClassification(ws: string, id: string) {
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: messageKey(ws, id) });
       void qc.invalidateQueries({ queryKey: messagesKey(ws) });
-    },
-  });
-}
-
-export function useApproveClassification(ws: string, id: string) {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: () => api<Classification>(`/workspaces/${ws}/messages/${id}/classification/approve`, { method: 'POST' }),
-    onSuccess: () => {
-      void qc.invalidateQueries({ queryKey: messageKey(ws, id) });
-      void qc.invalidateQueries({ queryKey: messagesKey(ws) });
-      void qc.invalidateQueries({ queryKey: ['ws', ws, 'labels'] });
     },
   });
 }

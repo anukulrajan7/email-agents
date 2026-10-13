@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -97,5 +97,47 @@ describe('DraftPanel', () => {
     expect(screen.getByLabelText('Draft reply')).toHaveAttribute('readonly');
     expect(screen.queryByRole('button', { name: 'Send reply…' })).toBeNull();
     expect(screen.getByText(/Sent from Gmail on/)).toBeInTheDocument();
+  });
+
+  describe('[NEEDS: …] placeholders', () => {
+    const needsDraft: Draft = {
+      ...draft,
+      body_text: 'Hi Sam,\nThe rate is [NEEDS: hourly rate for Q4].\nStart date: [NEEDS: start date]',
+      unanswered: ['hourly rate for Q4', 'start date'],
+    };
+
+    it('highlights placeholders, lists the checklist and disables Send but not Gmail drafts', () => {
+      setup(message({ draft: needsDraft }));
+      const marks = within(screen.getByTestId('draft-highlights')).getAllByText(/\[NEEDS:/);
+      expect(marks).toHaveLength(2);
+      expect(marks[0]?.tagName).toBe('MARK');
+      const checklist = screen.getByRole('region', { name: 'Fill these before sending' });
+      expect(within(checklist).getAllByRole('listitem')).toHaveLength(2);
+      const send = screen.getByRole('button', { name: 'Send reply…' });
+      expect(send).toBeDisabled();
+      expect(send).toHaveAccessibleDescription(/Fill every dashed/);
+      expect(screen.getByRole('button', { name: 'Save to Gmail drafts' })).toBeEnabled();
+    });
+
+    it('enables Send once every placeholder is filled and ticks the checklist', async () => {
+      setup(message({ draft: { ...needsDraft, body_text: 'Rate is [NEEDS: hourly rate for Q4]', unanswered: ['hourly rate for Q4'] } }));
+      const field = screen.getByLabelText('Draft reply');
+      await userEvent.clear(field);
+      await userEvent.type(field, 'Rate is 45 USD');
+      expect(screen.getByRole('button', { name: 'Send reply…' })).toBeEnabled();
+      expect(screen.getByText('(done)')).toBeInTheDocument();
+      expect(screen.queryByText(/Fill every dashed/)).toBeNull();
+    });
+
+    it('derives the checklist from the body when the API sends no unanswered list', () => {
+      setup(message({ draft: { ...needsDraft, unanswered: undefined } }));
+      expect(within(screen.getByRole('region', { name: 'Fill these before sending' })).getAllByRole('listitem')).toHaveLength(2);
+    });
+
+    it('does not show the checklist for a clean draft', () => {
+      setup(message());
+      expect(screen.queryByRole('region', { name: 'Fill these before sending' })).toBeNull();
+      expect(screen.getByRole('button', { name: 'Send reply…' })).toBeEnabled();
+    });
   });
 });

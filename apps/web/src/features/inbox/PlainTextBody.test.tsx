@@ -5,15 +5,12 @@ describe('PlainTextBody', () => {
   it('renders HTML-looking content as literal text without creating elements', () => {
     const body = '<img src=x onerror="alert(1)"><script>alert(2)</script>Hello';
     const { container } = render(<PlainTextBody text={body} />);
-    const pre = container.querySelector('pre');
-    expect(pre).toHaveClass('whitespace-pre-wrap');
-    expect(pre?.textContent).toBe(body);
+    expect(container.firstElementChild).toHaveClass('whitespace-pre-wrap');
+    expect(container.textContent).toBe(body);
     expect(container.querySelector('img, script')).toBeNull();
     expect(screen.getByText(/onerror/)).toBeInTheDocument();
   });
-});
 
-describe('PlainTextBody links and quotes', () => {
   it('linkifies URLs and emails without injecting HTML', () => {
     const body = 'See https://example.com/a?b=1, or mail bob@example.com. <b>x</b>';
     const { container } = render(<PlainTextBody text={body} />);
@@ -24,15 +21,14 @@ describe('PlainTextBody links and quotes', () => {
     expect(links[0]).toHaveAttribute('rel', 'noopener noreferrer nofollow');
     expect(links[1]).toHaveAttribute('href', 'mailto:bob@example.com');
     expect(container.querySelector('b')).toBeNull();
-    expect(container.querySelector('pre')?.textContent).toBe(body);
+    expect(container.textContent).toBe(body);
   });
 
-  it('collapses quoted lines into a details block', () => {
-    const { container } = render(<PlainTextBody text={'Thanks!\n> old line 1\n> old line 2\nBye'} />);
-    const details = container.querySelector('details');
-    expect(details).not.toBeNull();
-    expect(details).not.toHaveAttribute('open');
-    expect(screen.getByText('Show quoted text')).toBeInTheDocument();
-    expect(details?.textContent).toContain('> old line 2');
+  it('collapses inline quoted lines behind a button', () => {
+    render(<PlainTextBody text={'Thanks!\n> old line 1\n> old line 2\nBye'} />);
+    expect(screen.getByText('Thanks!')).toBeInTheDocument();
+    expect(screen.getByText('Bye')).toBeInTheDocument();
+    expect(screen.queryByText(/old line/)).toBeNull();
+    expect(screen.getByRole('button', { name: 'Show trimmed content' })).toBeInTheDocument();
   });
 });

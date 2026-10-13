@@ -22,7 +22,10 @@ const msg = (id: string, subject: string): MessageSummary => ({
 const page = (body: unknown) => new Response(JSON.stringify(body), { status: 200 });
 
 describe('MessageList', () => {
-  afterEach(() => vi.unstubAllGlobals());
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    localStorage.clear();
+  });
 
   it('loads the next page using next_cursor', async () => {
     const messagePages = [
@@ -49,5 +52,62 @@ describe('MessageList', () => {
     await waitFor(() => expect(screen.queryByRole('button', { name: 'Load more' })).toBeNull());
     const urls = fetchMock.mock.calls.map((c) => c[0] as string);
     expect(urls.some((u) => u.includes('cursor=c1'))).toBe(true);
+  });
+
+  function renderList(summaries: MessageSummary[]) {
+    const fetchMock = vi.fn((url: string) =>
+      Promise.resolve(url.includes('/labels') ? page({ items: [] }) : page({ items: summaries, next_cursor: null })),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    render(
+      <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+        <MemoryRouter>
+          <MessageList ws="w1" />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+    return fetchMock;
+  }
+
+  const messageUrls = (fetchMock: ReturnType<typeof vi.fn>) =>
+    fetchMock.mock.calls.map((c) => c[0] as string).filter((u) => u.includes('/messages'));
+
+  it('requests importance order by default and persists the Newest choice', async () => {
+    const fetchMock = renderList([msg('1', 'First mail')]);
+    await screen.findByText('First mail');
+    expect(messageUrls(fetchMock).every((u) => u.includes('sort=importance'))).toBe(true);
+    expect(screen.getByRole('button', { name: 'Important first' })).toHaveAttribute('aria-pressed', 'true');
+
+    await userEvent.click(screen.getByRole('button', { name: 'Newest' }));
+    await waitFor(() => expect(messageUrls(fetchMock).some((u) => u.includes('sort=recent'))).toBe(true));
+    expect(localStorage.getItem('inbox.sort')).toBe('recent');
+    expect(screen.getByRole('button', { name: 'Newest' })).toHaveAttribute('aria-pressed', 'true');
+  });
+
+  it('starts from the stored sort preference', async () => {
+    localStorage.setItem('inbox.sort', 'recent');
+    const fetchMock = renderList([msg('1', 'First mail')]);
+    await screen.findByText('First mail');
+    expect(messageUrls(fetchMock)[0]).toContain('sort=recent');
+  });
+
+  it('shows sender, subject with summary, needs-reply chip, high-priority marker and unread weight', async () => {
+    renderList([
+      {
+        ...msg('1', 'Invoice 123'),
+        from: 'Ada Lovelace <ada@x.test>',
+        priority: 'high',
+        needs_reply: true,
+        summary: 'Wants approval by Friday',
+        unread: true,
+        needs_review: true,
+      },
+    ]);
+    expect(await screen.findByText('Ada Lovelace')).toBeInTheDocument();
+    expect(screen.getByText('Invoice 123')).toHaveClass('font-bold');
+    expect(screen.getByText(/Wants approval by Friday/)).toBeInTheDocument();
+    expect(screen.getByText('Needs reply')).toBeInTheDocument();
+    expect(screen.getByRole('img', { name: 'High priority' })).toBeInTheDocument();
+    expect(screen.queryByText('Needs review')).toBeNull();
   });
 });

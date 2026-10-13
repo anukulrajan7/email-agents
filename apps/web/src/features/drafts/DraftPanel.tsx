@@ -1,15 +1,84 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { Draft, MessageDetail } from '../../api/types';
-import { Button, Textarea } from '../../components/ui';
+import { Button } from '../../components/ui';
 import { ErrorNote } from '../../components/ErrorNote';
 import { StatusBadge } from '../../components/StatusBadges';
+import { cn } from '../../lib/cn';
 import { fullDate } from '../../lib/format';
+import { extractNeeds, hasNeeds, isStillNeeded, splitNeeds } from './needs';
 import { SendDialog } from './SendDialog';
 import { useGenerateDraft, useSaveProviderDraft, useSendDraft, useUpdateDraft } from './hooks';
 
 const POLL_LIMIT_MS = 60_000;
 
 const replySubject = (subject: string) => (/^\s*re:/i.test(subject) ? subject.trim() : `Re: ${subject}`);
+
+function NeedsChecklist({ items, text }: { items: string[]; text: string }) {
+  if (items.length === 0) return null;
+  return (
+    <section aria-label="Fill these before sending" className="flex flex-col gap-2 border-l-[3px] border-review bg-review-tint px-3 py-2 text-sm text-review-ink">
+      <h4 className="font-semibold">Fill these before sending</h4>
+      <ul className="flex flex-col gap-1">
+        {items.map((item) => {
+          const pending = isStillNeeded(text, item);
+          return (
+            <li key={item} className="flex items-start gap-2">
+              <span aria-hidden="true" className="mt-px font-mono">
+                {pending ? '[ ]' : '[x]'}
+              </span>
+              <span className={cn('break-words', !pending && 'line-through')}>
+                {item}
+                <span className="sr-only">{pending ? ' (still needed)' : ' (done)'}</span>
+              </span>
+            </li>
+          );
+        })}
+      </ul>
+    </section>
+  );
+}
+
+function HighlightedTextarea({ text, onChange, readOnly }: { text: string; onChange: (value: string) => void; readOnly: boolean }) {
+  const ref = useRef<HTMLTextAreaElement>(null);
+
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    el.style.height = 'auto';
+    if (el.scrollHeight > 0) el.style.height = `${el.scrollHeight}px`;
+  }, [text]);
+
+  const parts = splitNeeds(text);
+  return (
+    <div className="relative border border-rule-strong bg-surface focus-within:border-ink focus-within:outline-2 focus-within:outline-offset-2 focus-within:outline-accent">
+      <div
+        aria-hidden="true"
+        data-testid="draft-highlights"
+        className="pointer-events-none absolute inset-0 overflow-hidden px-4 py-0 text-[15px] leading-[28px] break-words whitespace-pre-wrap text-transparent"
+      >
+        {parts.map((p, i) =>
+          p.needs ? (
+            <mark key={i} className="bg-review-tint text-transparent underline decoration-review-ink decoration-2 underline-offset-4 [text-decoration-style:dashed]">
+              {p.text}
+            </mark>
+          ) : (
+            <span key={i}>{p.text}</span>
+          ),
+        )}
+        {'\n'}
+      </div>
+      <textarea
+        ref={ref}
+        id="draft-body"
+        rows={10}
+        readOnly={readOnly}
+        value={text}
+        onChange={(e) => onChange(e.target.value)}
+        className="ruled relative block w-full resize-none overflow-hidden bg-transparent px-4 py-0 text-[15px] text-ink focus:outline-none"
+      />
+    </div>
+  );
+}
 
 function DraftEditor({
   ws,
@@ -33,6 +102,8 @@ function DraftEditor({
   const send = useSendDraft(ws, messageId, draft.id);
   const sent = draft.status === 'sent';
   const dirty = text !== draft.body_text;
+  const needsInput = hasNeeds(text);
+  const checklist = Array.from(new Set(draft.unanswered ?? extractNeeds(draft.body_text)));
 
   const copy = async () => {
     await navigator.clipboard.writeText(text);
@@ -45,14 +116,13 @@ function DraftEditor({
       <label htmlFor="draft-body" className="sr-only">
         Draft reply
       </label>
-      <Textarea
-        id="draft-body"
-        rows={10}
-        readOnly={sent}
-        className="ruled bg-surface px-4 py-0 text-[15px]"
-        value={text}
-        onChange={(e) => setText(e.target.value)}
-      />
+      {!sent && <NeedsChecklist items={checklist} text={text} />}
+      <HighlightedTextarea text={text} onChange={setText} readOnly={sent} />
+      {!sent && needsInput && (
+        <p id="draft-needs-hint" className="text-sm text-review-ink">
+          Fill every dashed [NEEDS: …] part to send. You can still save this to Gmail drafts.
+        </p>
+      )}
       {sent && (
         <p className="text-sm font-semibold text-ink-muted" aria-live="polite">
           Sent ✓ — Sent from Gmail on {fullDate(draft.updated_at)}
@@ -86,7 +156,9 @@ function DraftEditor({
               </Button>
             )}
             {message.source.can_send && (
-              <Button onClick={() => setConfirming(true)}>Send reply…</Button>
+              <Button disabled={needsInput} aria-describedby={needsInput ? 'draft-needs-hint' : undefined} onClick={() => setConfirming(true)}>
+                Send reply…
+              </Button>
             )}
           </>
         )}

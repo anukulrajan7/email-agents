@@ -1,7 +1,14 @@
 export type Role = 'admin' | 'operator';
 export type SourceKind = 'forwarding' | 'nango_gmail' | 'nango_microsoft' | 'future';
 export type SourceStatus = 'pending' | 'connected' | 'degraded' | 'disconnected';
-export type ProcessingStatus = 'pending' | 'normalized' | 'classified' | 'workflow_completed' | 'failed';
+export type ProcessingStatus =
+  | 'pending'
+  | 'normalized'
+  | 'classified'
+  | 'workflow_running'
+  | 'workflow_completed'
+  | 'processed'
+  | 'failed';
 export type Category = string;
 export type Priority = 'low' | 'normal' | 'high';
 export type ClassSource = 'jev' | 'llm' | 'manual' | 'fallback';
@@ -99,6 +106,9 @@ export type MessageSummary = {
   priority: Priority | null;
   needs_review: boolean;
   attachment_count: number;
+  needs_reply?: boolean;
+  summary?: string | null;
+  unread?: boolean;
 };
 
 export type Classification = {
@@ -147,6 +157,7 @@ export type Draft = {
   body_text: string;
   model_id: string | null;
   memories_used: { id: string; content: string }[];
+  unanswered?: string[];
   created_at: string;
   updated_at: string;
 };
@@ -169,12 +180,21 @@ export type AuditEvent = {
   created_at: string;
 };
 
+export type Insight = {
+  summary: string;
+  asks: string[];
+  deadline: string | null;
+  needs_reply: boolean;
+  missing_info: string[];
+};
+
 export type MessageDetail = {
   id: string;
   source: { id: string; kind: SourceKind; can_create_provider_draft: boolean; can_send: boolean };
   from: string;
   original_from: string | null;
   to: string[];
+  cc?: string[];
   subject: string;
   body_text: string;
   body_html_safe: string | null;
@@ -188,6 +208,7 @@ export type MessageDetail = {
   audit: AuditEvent[];
   contact: Contact | null;
   contact_memories: Memory[];
+  insight?: Insight | null;
 };
 
 export type ReviewItem = {
