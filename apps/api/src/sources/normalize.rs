@@ -10,6 +10,12 @@ pub fn address(raw: &str) -> String {
     inner.trim().trim_matches('"').to_lowercase()
 }
 
+/// `"Jane Doe" <jane@acme.com>` → `Some("Jane Doe")`; bare addresses → `None`.
+pub fn display_name(raw: &str) -> Option<String> {
+    let name = raw.split_once('<')?.0.trim().trim_matches('"').trim();
+    (!name.is_empty() && !name.contains('@')).then(|| truncate_chars(name, 120))
+}
+
 pub fn truncate_chars(s: &str, max: usize) -> String {
     match s.char_indices().nth(max) {
         Some((idx, _)) => s[..idx].to_string(),
@@ -79,6 +85,13 @@ pub fn forwarded_original_sender(body: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_display_names() {
+        assert_eq!(display_name("\"Jane Doe\" <jane@acme.com>").as_deref(), Some("Jane Doe"));
+        assert_eq!(display_name("jane@acme.com"), None);
+        assert_eq!(display_name("<jane@acme.com>"), None);
+    }
 
     #[test]
     fn parses_addresses() {

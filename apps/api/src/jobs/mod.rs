@@ -19,6 +19,7 @@ pub mod kind {
     pub const PURGE_EXPIRED_EVENTS: &str = "purge_expired_events";
     pub const SYNC_NANGO_SOURCE: &str = "sync_nango_source";
     pub const REGISTER_NANGO_CONNECTION: &str = "register_nango_connection";
+    pub const LEARN_FROM_DRAFT: &str = "learn_from_draft";
 }
 
 #[derive(Debug, Clone, FromRow)]

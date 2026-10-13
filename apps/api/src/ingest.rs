@@ -9,6 +9,7 @@ use crate::{
     db::{new_id, now_ms},
     domain::{NormalizedEmail, TAXONOMY_VERSION},
     jobs::{self, kind},
+    memory,
 };
 
 /// Inserts the message (+ thread, attachments, audit, classify job) unless
@@ -100,6 +101,9 @@ pub async fn persist_message(
     .bind(now)
     .execute(&mut *conn)
     .await?;
+
+    memory::record_contact(&mut *conn, workspace_id, &email.sender_address, email.sender_name.as_deref(), email.received_at)
+        .await?;
 
     for a in &email.attachments {
         sqlx::query("INSERT INTO attachments (id, message_id, filename, media_type, size_bytes) VALUES (?1, ?2, ?3, ?4, ?5)")

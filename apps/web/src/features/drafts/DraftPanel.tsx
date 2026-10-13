@@ -95,6 +95,20 @@ export function DraftPanel({
       {draft ? (
         <DraftEditor key={`${draft.id}:${draft.updated_at}`} ws={ws} messageId={message.id} draft={draft} />
       ) : null}
+      {draft && draft.memories_used.length > 0 && (
+        <details className="text-sm">
+          <summary className="cursor-pointer font-semibold text-ink-muted hover:text-ink focus-visible:outline-2 focus-visible:outline-accent">
+            Used {draft.memories_used.length} {draft.memories_used.length === 1 ? 'memory' : 'memories'}
+          </summary>
+          <ul className="mt-2 flex flex-col gap-1 border-l-[3px] border-rule-strong pl-3">
+            {draft.memories_used.map((u) => (
+              <li key={u.id} className="whitespace-pre-wrap break-words">
+                {u.content}
+              </li>
+            ))}
+          </ul>
+        </details>
+      )}
       {message.source.can_create_provider_draft && draft && (
         <Button variant="secondary" className="self-start" disabled title="Provider drafts are not wired up yet">
           Create draft in mailbox

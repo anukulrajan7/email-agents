@@ -121,6 +121,8 @@ pub struct Draft {
     pub model_id: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    /// What the drafter was given: `[{id, content}]`.
+    pub memories_used: Vec<serde_json::Value>,
 }
 
 #[derive(FromRow)]
@@ -130,6 +132,7 @@ pub struct DraftRow {
     pub status: String,
     pub body_text: String,
     pub model_id: Option<String>,
+    pub memory_ids_json: String,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -144,8 +147,24 @@ impl From<DraftRow> for Draft {
             model_id: r.model_id,
             created_at: iso(r.created_at),
             updated_at: iso(r.updated_at),
+            memories_used: vec![],
         }
     }
+}
+
+/// Resolves the memory IDs a draft was given (archived ones still show, for honesty).
+pub async fn draft_with_memories(db: &sqlx::SqlitePool, row: DraftRow) -> sqlx::Result<Draft> {
+    let used: Vec<(String, String)> =
+        sqlx::query_as(
+            // Join on json_each and sort by its index: keeps the order the drafter saw.
+            "SELECT m.id, m.content FROM json_each(?1) j JOIN memories m ON m.id = j.value ORDER BY j.key",
+        )
+            .bind(&row.memory_ids_json)
+            .fetch_all(db)
+            .await?;
+    let mut draft = Draft::from(row);
+    draft.memories_used = used.into_iter().map(|(id, content)| serde_json::json!({ "id": id, "content": content })).collect();
+    Ok(draft)
 }
 
 #[derive(Serialize)]

@@ -11,6 +11,7 @@ import { PlainTextBody } from './PlainTextBody';
 import { Postmark } from './Postmark';
 import { RouteTracker } from './RouteTracker';
 import { riseStyle } from '../../lib/motion';
+import { MemoryForm, MemoryItem } from '../memory/MemoryParts';
 
 export function MessageDetailView({ ws, messageId }: { ws: string; messageId: string }) {
   const [awaitingDraft, setAwaitingDraft] = useState(false);
@@ -111,6 +112,47 @@ export function MessageDetailView({ ws, messageId }: { ws: string; messageId: st
               <StatusBadge status={m.review.status} />
             </p>
           )}
+        </section>
+        <section aria-labelledby="sender-heading" className="rise flex flex-col gap-3 border-t border-rule-strong pt-6" style={riseStyle(3)}>
+          <div className="flex items-center justify-between gap-2">
+            <h3 id="sender-heading" className="kicker">
+              Sender
+            </h3>
+            <Link
+              to={`/w/${ws}/memory/contacts/${encodeURIComponent(m.from)}`}
+              className="text-sm text-accent underline underline-offset-2 hover:text-accent-hover"
+            >
+              Open profile
+            </Link>
+          </div>
+          {m.contact ? (
+            <div className="flex flex-col gap-1 text-sm">
+              <p className="font-semibold break-words">{m.contact.display_name ?? m.contact.email}</p>
+              <p className="flex flex-wrap items-center gap-2 text-ink-muted">
+                {m.contact.message_count} {m.contact.message_count === 1 ? 'email' : 'emails'}
+                {m.contact.top_categories.map((t) => (
+                  <Stamp key={t.category} category={t.category} />
+                ))}
+              </p>
+            </div>
+          ) : (
+            <p className="text-sm text-ink-muted">No profile yet.</p>
+          )}
+          {m.contact_memories.length > 0 && (
+            <ul className="divide-y divide-rule border-y border-rule">
+              {m.contact_memories.map((cm) => (
+                <MemoryItem key={cm.id} ws={ws} memory={cm} />
+              ))}
+            </ul>
+          )}
+          <details className="text-sm">
+            <summary className="cursor-pointer font-semibold text-ink-muted hover:text-ink focus-visible:outline-2 focus-visible:outline-accent">
+              Remember something about this sender
+            </summary>
+            <div className="mt-3">
+              <MemoryForm ws={ws} scope="contact" contactEmail={m.from} textareaLabel="What should we remember?" rows={2} />
+            </div>
+          </details>
         </section>
         <Card className="rise bg-surface p-6 shadow-[0_1px_0_var(--color-rule),0_12px_24px_-16px_rgba(28,27,24,0.25)]" style={riseStyle(4)}>
           <DraftPanel ws={ws} message={m} onAwaitingChange={setAwaitingDraft} />

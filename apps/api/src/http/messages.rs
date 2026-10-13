@@ -10,7 +10,7 @@ use sqlx::FromRow;
 
 use super::{
     AppState,
-    dto::{Classification, ClassificationRow, Draft, DraftRow},
+    dto::{Classification, ClassificationRow, Draft, DraftRow, draft_with_memories},
 };
 use crate::{
     ai::{ClassifyOutput, policy},
@@ -20,6 +20,7 @@ use crate::{
     domain::{Capabilities, Category, ClassificationSource, Priority, Role, TAXONOMY_VERSION},
     error::{AppError, AppResult},
     jobs::{self, handlers, kind},
+    memory,
 };
 
 // ---------------------------------------------------------------- list
@@ -211,7 +212,7 @@ pub async fn detail(
     .fetch_optional(&state.db)
     .await?;
     let draft: Option<DraftRow> = sqlx::query_as(
-        "SELECT id, message_id, status, body_text, model_id, created_at, updated_at
+        "SELECT id, message_id, status, body_text, model_id, memory_ids_json, created_at, updated_at
          FROM drafts WHERE message_id = ?1 AND workspace_id = ?2 ORDER BY created_at DESC, id DESC LIMIT 1",
     )
     .bind(&id)
@@ -241,6 +242,16 @@ pub async fn detail(
     .fetch_all(&state.db)
     .await?;
 
+    let draft = match draft {
+        Some(row) => Some(draft_with_memories(&state.db, row).await?),
+        None => None,
+    };
+    let contact = match memory::get_contact(&state.db, &ws, &m.sender_address).await? {
+        Some(c) => Some(memory::contact_json(&state.db, &ws, c).await?),
+        None => None,
+    };
+    let contact_memories = super::memories::contact_memories(&state, &ws, &m.sender_address).await?;
+
     let capabilities: Capabilities =
         serde_json::from_str(&m.capabilities_json).unwrap_or_else(|_| crate::sources::capabilities(&m.source_kind));
     let to: Vec<String> = serde_json::from_str(&m.recipients_json).unwrap_or_default();
@@ -261,7 +272,9 @@ pub async fn detail(
         "processing_status": m.processing_status,
         "attachments": attachments,
         "classification": classification.map(Classification::from),
-        "draft": draft.map(Draft::from),
+        "draft": draft,
+        "contact": contact,
+        "contact_memories": contact_memories,
         "review": review.map(|(id, status, kind)| json!({ "id": id, "status": status, "kind": kind })),
         "workflow_run": run.map(|(id, status, error)| json!({ "id": id, "status": status, "error": error })),
         "audit": audit_rows.into_iter().map(|a| json!({
@@ -413,7 +426,7 @@ pub async fn update_draft(
     let row: DraftRow = sqlx::query_as(
         "UPDATE drafts SET body_text = COALESCE(?1, body_text), status = COALESCE(?2, status), updated_at = ?3
          WHERE id = ?4 AND workspace_id = ?5 AND status != 'sent'
-         RETURNING id, message_id, status, body_text, model_id, created_at, updated_at",
+         RETURNING id, message_id, status, body_text, model_id, memory_ids_json, created_at, updated_at",
     )
     .bind(&body.body_text)
     .bind(status)
@@ -436,8 +449,20 @@ pub async fn update_draft(
         },
     )
     .await?;
+    // Learn from the operator's final version (only when they approve, and only if it changed).
+    if row.status == "approved" {
+        jobs::enqueue(
+            &mut tx,
+            kind::LEARN_FROM_DRAFT,
+            &format!("learn:{}:{}", row.id, row.updated_at),
+            Some(&ws),
+            &json!({ "draft_id": row.id }),
+        )
+        .await?;
+    }
     tx.commit().await?;
-    Ok(Json(row.into()))
+    state.jobs_notify.notify_one();
+    Ok(Json(draft_with_memories(&state.db, row).await?))
 }
 
 #[cfg(test)]

@@ -21,6 +21,8 @@ pub struct ClassifyInput {
     pub sender: String,
     pub body_text: String,
     pub attachment_names: Vec<String>,
+    /// Learned profile line for the sender (trusted, from our own data).
+    pub sender_history: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -40,6 +42,9 @@ pub struct DraftInput {
     pub subject: String,
     pub sender: String,
     pub body_text: String,
+    /// Staff-written or staff-accepted memories, already rendered one per line.
+    pub memory_notes: Vec<String>,
+    pub sender_history: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -64,6 +69,19 @@ pub trait Classifier: Send + Sync {
 #[async_trait]
 pub trait Drafter: Send + Sync {
     async fn draft(&self, input: &DraftInput) -> Result<DraftOutput, AiError>;
+}
+
+/// A reusable lesson proposed from how an operator changed a draft.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LearnedLesson {
+    pub kind: String,  // "preference" | "style"
+    pub scope: String, // "workspace" | "contact"
+    pub content: String,
+}
+
+#[async_trait]
+pub trait Learner: Send + Sync {
+    async fn learn(&self, suggested: &str, approved: &str) -> Result<Vec<LearnedLesson>, AiError>;
 }
 
 /// Minimal context for models: bounded, with obvious secrets masked.

@@ -9,7 +9,7 @@ use crate::{
     ai::{self, AiError, ClassifyInput, ClassifyOutput, DraftInput, policy},
     audit::{self, Actor, Entry},
     db::{new_id, now_ms},
-    ingest,
+    ingest, memory,
     domain::{self, Category, ClassificationSource, Priority, TAXONOMY_VERSION},
     http::AppState,
     jobs,
@@ -62,6 +62,7 @@ pub async fn handle(state: &AppState, job: &Job) -> Result<(), JobError> {
         kind::GENERATE_DRAFT => generate_draft(state, job, &payload).await,
         kind::PURGE_EXPIRED_EVENTS => purge_expired_events(state).await,
         kind::SYNC_NANGO_SOURCE => crate::sources::nango::sync_source(state, &payload).await,
+        kind::LEARN_FROM_DRAFT => learn_from_draft(state, &payload).await,
         kind::REGISTER_NANGO_CONNECTION => crate::sources::nango::register_from_webhook(state, &payload).await,
         other => Err(JobError::Permanent(format!("unknown job kind {other}"))),
     }
@@ -242,11 +243,13 @@ async fn classify_email(state: &AppState, job: &Job, payload: &Value) -> Result<
         .bind(&message_id)
         .fetch_all(&state.db)
         .await?;
+    let sender_history = memory::context_for(&state.db, &msg.workspace_id, &msg.sender_address, "").await?.sender_history;
     let input = ClassifyInput {
         subject: msg.subject,
         sender: msg.sender_address,
         body_text: msg.body_text,
         attachment_names,
+        sender_history,
     };
     let out = state.classifier.classify(&input).await?;
     persist_classification(state, &message_id, &out, Actor::System, Some(&job.id), WriteMode::Upsert).await?;
@@ -506,17 +509,27 @@ async fn generate_draft(state: &AppState, job: &Job, payload: &Value) -> Result<
         .await?;
     let category = category.as_deref().and_then(Category::parse).unwrap_or(Category::General);
 
+    // Trusted memory (staff notes + learned sender profile), retrieved by sender and topic.
+    let ctx = memory::context_for(&state.db, &msg.workspace_id, &msg.sender_address, &msg.subject).await?;
     let out = state
         .drafter
-        .draft(&DraftInput { category, subject: msg.subject, sender: msg.sender_address, body_text: msg.body_text })
+        .draft(&DraftInput {
+            category,
+            subject: msg.subject,
+            sender: msg.sender_address,
+            body_text: msg.body_text,
+            memory_notes: ctx.lines(),
+            sender_history: ctx.sender_history.clone(),
+        })
         .await?;
 
     let now = now_ms();
     let draft_id = new_id("drf");
     let mut tx = state.db.begin().await?;
     let inserted = sqlx::query(
-        "INSERT OR IGNORE INTO drafts (id, workspace_id, message_id, body_text, status, model_id, origin_key, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, 'suggested', ?5, ?6, ?7, ?7)",
+        "INSERT OR IGNORE INTO drafts (id, workspace_id, message_id, body_text, original_body_text, status, model_id,
+                                       origin_key, memory_ids_json, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?4, 'suggested', ?5, ?6, ?8, ?7, ?7)",
     )
     .bind(&draft_id)
     .bind(&msg.workspace_id)
@@ -525,6 +538,7 @@ async fn generate_draft(state: &AppState, job: &Job, payload: &Value) -> Result<
     .bind(&out.model_id)
     .bind(&job.dedupe_key)
     .bind(now)
+    .bind(json!(ctx.ids()).to_string())
     .execute(&mut *tx)
     .await?
     .rows_affected()
@@ -539,7 +553,7 @@ async fn generate_draft(state: &AppState, job: &Job, payload: &Value) -> Result<
                 entity_type: "draft",
                 entity_id: &draft_id,
                 message_id: Some(&message_id),
-                metadata: json!({ "model_id": out.model_id, "prompt_version": ai::DRAFT_PROMPT_VERSION }),
+                metadata: json!({ "model_id": out.model_id, "prompt_version": ai::DRAFT_PROMPT_VERSION, "memories_used": ctx.ids().len() }),
             },
         )
         .await?;
@@ -572,6 +586,38 @@ async fn generate_draft(state: &AppState, job: &Job, payload: &Value) -> Result<
         }
     }
     tx.commit().await?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------- learning
+
+/// Compares the suggested draft with what an operator approved and stores up to three
+/// reusable lessons as *suggestions*. Nothing is used until a person accepts it.
+async fn learn_from_draft(state: &AppState, payload: &Value) -> Result<(), JobError> {
+    let Some(learner) = state.learner.clone() else {
+        return Ok(());
+    };
+    let draft_id = str_field(payload, "draft_id")?;
+    let row: Option<(String, String, Option<String>, String, String)> = sqlx::query_as(
+        "SELECT d.workspace_id, d.message_id, d.original_body_text, d.body_text, m.sender_address
+         FROM drafts d JOIN email_messages m ON m.id = d.message_id WHERE d.id = ?1",
+    )
+    .bind(&draft_id)
+    .fetch_optional(&state.db)
+    .await?;
+    let Some((workspace_id, message_id, Some(original), approved, sender)) = row else {
+        return Ok(());
+    };
+    if memory::dedupe_key(&original) == memory::dedupe_key(&approved) {
+        return Ok(());
+    }
+    let lessons = learner.learn(&original, &approved).await?;
+    let suggestions = lessons
+        .into_iter()
+        .map(|l| memory::Suggestion { kind: l.kind, scope: l.scope, content: l.content })
+        .collect();
+    let stored = memory::store_suggestions(&state.db, &workspace_id, &sender, &message_id, suggestions).await?;
+    tracing::info!(%draft_id, stored, "learned from draft edit");
     Ok(())
 }
 

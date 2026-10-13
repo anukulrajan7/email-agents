@@ -8,6 +8,7 @@ pub mod error;
 pub mod http;
 pub mod ingest;
 pub mod jobs;
+pub mod memory;
 pub mod sources;
 
 use std::{sync::Arc, time::Duration};
@@ -18,7 +19,7 @@ use crate::{
     ai::{
         Classifier, Drafter, fallback,
         jev::JevClassifier,
-        openrouter::{OpenRouterClassifier, OpenRouterClient, OpenRouterDrafter},
+        openrouter::{OpenRouterClassifier, OpenRouterClient, OpenRouterDrafter, OpenRouterLearner},
     },
     auth::Authenticator,
     config::Config,
@@ -64,7 +65,16 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
         }
     };
 
+    // Learning uses the efficient model; it only ever produces suggestions.
+    let learner: Option<Arc<dyn ai::Learner>> = match &openrouter {
+        Some(client) if !config.openrouter_classifier_model_id.is_empty() => {
+            Some(Arc::new(OpenRouterLearner::new(client.clone(), &config.openrouter_classifier_model_id)))
+        }
+        _ => None,
+    };
+
     Ok(AppState {
+        learner,
         auth: Arc::new(Authenticator::new(&config, http.clone())),
         nango: Arc::new(NangoClient::new(http.clone(), &config.nango_api_url, &config.nango_api_key)),
         resend: Arc::new(ResendClient::new(http, &config.resend_api_url, &config.resend_api_key)),

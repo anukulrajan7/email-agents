@@ -295,6 +295,7 @@ pub fn map_gmail_record(rec: &Value, max_body_chars: usize) -> Option<MappedReco
         source_message_id: id,
         rfc_message_id: str_of(rec, &["messageId", "message_id", "rfcMessageId"]),
         sender_address: normalize::address(&str_of(rec, &["sender", "from"]).unwrap_or_default()),
+        sender_name: str_of(rec, &["sender", "from"]).as_deref().and_then(normalize::display_name),
         // A connected mailbox sees the real sender; there is no forwarded wrapper to parse.
         original_sender_address: None,
         recipients: addresses(rec.get("recipients").or_else(|| rec.get("to"))),

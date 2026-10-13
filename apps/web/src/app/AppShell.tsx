@@ -34,6 +34,7 @@ export function AppShell() {
   const items = [
     { to: 'inbox', label: 'Inbox' },
     { to: 'reviews', label: 'Reviews' },
+    { to: 'memory', label: 'Memory' },
     { to: 'workflows', label: 'Workflows' },
     { to: 'integrations', label: 'Integrations' },
     ...(isAdmin ? [{ to: 'jobs', label: 'Jobs' }] : []),

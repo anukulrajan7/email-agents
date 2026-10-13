@@ -137,6 +137,7 @@ impl ReceivedEmail {
             source_message_id: self.id.clone(),
             rfc_message_id: self.message_id.clone(),
             sender_address: normalize::address(&self.from),
+            sender_name: normalize::display_name(&self.from),
             original_sender_address: normalize::forwarded_original_sender(&body_text),
             recipients: self.to.iter().map(|a| normalize::address(a)).collect(),
             subject: normalize::truncate_chars(

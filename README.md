@@ -44,6 +44,14 @@ clippy (warnings as errors) and the TypeScript typecheck.
 | Attachments | Metadata only. No download, parsing or scanning (`scan_status='pending'`). |
 | Email HTML | Stored, never rendered. The UI shows the plain-text body inside `<pre>`. |
 
+## Agent memory
+
+- **Contacts:** a profile is learned from every email with no LLM: name, count, first and last seen, usual categories (computed from classifications).
+- **Memories:** workspace or per-contact notes of kind `fact`, `preference` or `style`, stored in SQLite with an **FTS5** index (`memories_fts`, keyed by memory ID). No vector DB, as the spec asks.
+- **Retrieval for drafts:** the sender's notes, then FTS matches on the subject, then recent team notes, within a 2,500-character budget. They go inside `<team_notes>`, kept apart from the untrusted email. Each draft stores `memory_ids_json`, and the UI shows "Used N memories".
+- **Learning:** when an operator **approves** a draft they changed, `learn_from_draft` asks the efficient model for at most 3 reusable lessons. They're stored as `status='suggested'` and deduped, and are only used after a person accepts them.
+- **Swappable:** this sits behind `memory::context_for` and the `Learner` trait. Mem0, Zep or Letta can replace it later if semantic recall is ever needed.
+
 ## Key design choices
 
 - **The webhook does no work.** It verifies the request, writes `inbound_events` and the `fetch_forwarded_email` job in one transaction, and returns 2xx. All provider and AI calls run in the worker, outside any SQLite transaction.

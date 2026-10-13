@@ -125,3 +125,49 @@ type WorkflowRun = { id: string; workflow_id: string; template_key: string; mess
 
 type Job = { id: string; kind: string; status: JobStatus; attempts: number; max_attempts: number; last_error: string | null; run_at: string; updated_at: string };
 ```
+
+## Agent memory (v1)
+
+Memory the agent uses when classifying and drafting. Two layers:
+- **Contacts** — profiles learned automatically from every ingested email (no LLM): name, counts, usual categories.
+- **Memories** — short notes. `source:"user"` = saved by a person (active immediately). `source:"learned"` =
+  proposed by the agent from operator draft edits; arrives as `status:"suggested"` and is only used after a
+  person accepts it (`PATCH status:"active"`). Archived memories are never used.
+
+```text
+MemoryScope   = "workspace" | "contact"
+MemoryKind    = "fact" | "preference" | "style"
+MemoryStatus  = "active" | "suggested" | "archived"
+MemorySource  = "user" | "learned"
+```
+
+| Method | Path | Role | Body | Response |
+|---|---|---|---|---|
+| GET | `/api/v1/workspaces/:ws/memories?status=&scope=&contact=&q=` | member | – | `{items: Memory[]}` (default `status=active`; `q` = full-text search) |
+| POST | `/api/v1/workspaces/:ws/memories` | member | `{scope, contact_email?, kind, content}` | `Memory` (201) |
+| PATCH | `/api/v1/workspaces/:ws/memories/:id` | member | `{content?, kind?, status?}` | `Memory` |
+| GET | `/api/v1/workspaces/:ws/contacts?q=` | member | – | `{items: Contact[]}` (most recent first, max 100) |
+| GET | `/api/v1/workspaces/:ws/contacts/:email` | member | – | `{contact: Contact, memories: Memory[], recent_messages: MessageSummary[]}` |
+
+`content` is 1–500 characters. `contact_email` is required when `scope="contact"` and must be absent for `"workspace"`.
+
+```ts
+type Memory = {
+  id: string; scope: MemoryScope; contact_email: string | null; kind: MemoryKind; content: string;
+  status: MemoryStatus; source: MemorySource; created_by: string | null;
+  evidence_message_id: string | null;     // learned memories: the message whose draft edit taught it
+  created_at: string; updated_at: string;
+};
+
+type Contact = {
+  email: string; display_name: string | null; message_count: number;
+  first_seen_at: string; last_seen_at: string;
+  top_categories: { category: Category; count: number }[];   // up to 3, most frequent first
+};
+```
+
+`MessageDetail` gains:
+- `contact: Contact | null` — profile of the sender (`from`)
+- `contact_memories: Memory[]` — active memories for that sender
+
+`Draft` gains `memories_used: { id: string; content: string }[]` — what the drafter was given.

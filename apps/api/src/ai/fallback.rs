@@ -75,6 +75,7 @@ mod tests {
                 sender: "a@b.co".into(),
                 body_text: "Please review".into(),
                 attachment_names: vec![],
+                sender_history: None,
             })
             .await
             .unwrap();

@@ -1,5 +1,6 @@
 mod dto;
 mod jobs_api;
+mod memories;
 mod messages;
 mod reviews;
 mod sources;
@@ -26,7 +27,7 @@ use tower_http::{
 };
 
 use crate::{
-    ai::{Classifier, Drafter},
+    ai::{Classifier, Drafter, Learner},
     auth::Authenticator,
     config::Config,
     error::{AppError, AppResult, request_id_middleware},
@@ -42,6 +43,8 @@ pub struct AppState {
     pub nango: Arc<NangoClient>,
     pub classifier: Arc<dyn Classifier>,
     pub drafter: Arc<dyn Drafter>,
+    /// Proposes memory suggestions from operator draft edits; `None` disables learning.
+    pub learner: Option<Arc<dyn Learner>>,
     pub jobs_notify: Arc<Notify>,
 }
 
@@ -68,6 +71,10 @@ pub fn router(state: AppState) -> Router {
         .route("/workspaces/{ws}/workflows", get(workflows::list))
         .route("/workspaces/{ws}/workflows/{id}", patch(workflows::update))
         .route("/workspaces/{ws}/workflow-runs", get(workflows::runs))
+        .route("/workspaces/{ws}/memories", get(memories::list).post(memories::create))
+        .route("/workspaces/{ws}/memories/{id}", patch(memories::update))
+        .route("/workspaces/{ws}/contacts", get(memories::contacts))
+        .route("/workspaces/{ws}/contacts/{email}", get(memories::contact))
         .route("/workspaces/{ws}/jobs", get(jobs_api::list))
         .route("/workspaces/{ws}/jobs/{id}/retry", post(jobs_api::retry))
         .fallback(|| async { AppError::NotFound })

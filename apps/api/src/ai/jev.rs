@@ -27,8 +27,9 @@ impl JevClassifier {
 
     fn request_body(&self, input: &ClassifyInput) -> Value {
         let criteria: BTreeMap<&str, &str> = Category::ALL.iter().map(|c| (c.as_str(), c.description())).collect();
+        let history = input.sender_history.as_deref().map(|h| format!("Sender history: {h}\n")).unwrap_or_default();
         let state = format!(
-            "Subject: {}\nAttachments: {}\n\n{}",
+            "{history}Subject: {}\nAttachments: {}\n\n{}",
             input.subject,
             input.attachment_names.join(", "),
             prepare_text(&input.body_text)

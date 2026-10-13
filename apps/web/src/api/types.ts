@@ -83,12 +83,41 @@ export type Classification = {
   updated_at: string;
 };
 
+export type MemoryScope = 'workspace' | 'contact';
+export type MemoryKind = 'fact' | 'preference' | 'style';
+export type MemoryStatus = 'active' | 'suggested' | 'archived';
+export type MemorySource = 'user' | 'learned';
+
+export type Memory = {
+  id: string;
+  scope: MemoryScope;
+  contact_email: string | null;
+  kind: MemoryKind;
+  content: string;
+  status: MemoryStatus;
+  source: MemorySource;
+  created_by: string | null;
+  evidence_message_id: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type Contact = {
+  email: string;
+  display_name: string | null;
+  message_count: number;
+  first_seen_at: string;
+  last_seen_at: string;
+  top_categories: { category: Category; count: number }[];
+};
+
 export type Draft = {
   id: string;
   message_id: string;
   status: DraftStatus;
   body_text: string;
   model_id: string | null;
+  memories_used: { id: string; content: string }[];
   created_at: string;
   updated_at: string;
 };
@@ -127,6 +156,8 @@ export type MessageDetail = {
   review: { id: string; status: ReviewStatus; kind: string } | null;
   workflow_run: { id: string; status: RunStatus; error: string | null } | null;
   audit: AuditEvent[];
+  contact: Contact | null;
+  contact_memories: Memory[];
 };
 
 export type ReviewItem = {
@@ -182,3 +213,12 @@ export type ClassificationPatch = {
 };
 export type DraftPatch = { body_text?: string; status?: 'edited' | 'approved' };
 export type TestEmailBody = { from?: string; subject?: string; body_text?: string };
+
+export type MemoryCreateBody = {
+  scope: MemoryScope;
+  contact_email?: string;
+  kind: MemoryKind;
+  content: string;
+};
+export type MemoryPatch = { content?: string; kind?: MemoryKind; status?: MemoryStatus };
+export type ContactDetail = { contact: Contact; memories: Memory[]; recent_messages: MessageSummary[] };

@@ -71,6 +71,8 @@ pub struct NormalizedEmail {
     pub source_message_id: String,
     pub rfc_message_id: Option<String>,
     pub sender_address: String,
+    /// Display name from the From header, when present ("Priya Sharma").
+    pub sender_name: Option<String>,
     pub original_sender_address: Option<String>,
     pub recipients: Vec<String>,
     pub subject: String,
