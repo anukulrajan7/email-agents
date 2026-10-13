@@ -95,6 +95,7 @@ jobs:
           SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
           SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
           SIGNUP_ALLOWED_DOMAINS: ${{ vars.SIGNUP_ALLOWED_DOMAINS }}
+          NANGO_GMAIL_MODEL: ${{ vars.NANGO_GMAIL_MODEL || 'GmailEmail' }}
         run: |
           umask 077
           cat > deploy.env <<ENV
@@ -118,6 +119,7 @@ jobs:
           NANGO_API_KEY=${NANGO_API_KEY}
           NANGO_WEBHOOK_SECRET=${NANGO_WEBHOOK_SECRET}
           NANGO_GMAIL_INTEGRATION_ID=google-mail
+          NANGO_GMAIL_MODEL=${NANGO_GMAIL_MODEL}
           TYPESAFE_API_KEY=${TYPESAFE_API_KEY}
           OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
           OPENROUTER_MODEL_ID=${OPENROUTER_MODEL_ID}
