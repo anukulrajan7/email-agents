@@ -1,18 +1,20 @@
 import { useState } from 'react';
 import { Link } from 'react-router';
 import { Button, Card, CardTitle } from '../../components/ui';
+import { ErrorNote } from '../../components/ErrorNote';
 import { cn } from '../../lib/cn';
 import { riseStyle } from '../../lib/motion';
 import { useMessages } from '../inbox/hooks';
-import { useSources } from '../sources/hooks';
+import { useSendTestEmailEnsuringSource, useSources } from '../sources/hooks';
 import { dismiss, hasVisitedLabels, isDismissed } from './storage';
 
-type Step = { title: string; why: string; done: boolean; to: string; cta: string };
+type Step = { title: string; why: string; done: boolean; to: string; cta: string; action?: 'test-email' };
 
 export function GettingStarted({ ws }: { ws: string }) {
   const [hidden, setHidden] = useState(() => isDismissed(ws));
   const messages = useMessages(ws, {});
   const sources = useSources(ws);
+  const testEmail = useSendTestEmailEnsuringSource(ws);
 
   if (hidden || !messages.data) return null;
   if (messages.data.pages.some((p) => p.items.length > 0)) return null;
@@ -38,6 +40,7 @@ export function GettingStarted({ ws }: { ws: string }) {
       done: false,
       to: `/w/${ws}/integrations`,
       cta: 'Send a test email',
+      action: 'test-email',
     },
     {
       title: 'Teach it',
@@ -84,9 +87,23 @@ export function GettingStarted({ ws }: { ws: string }) {
                 {s.done && <span className="sr-only"> (done)</span>}
               </p>
               <p className="text-sm text-ink-muted">{s.why}</p>
-              <Link to={s.to} className="text-sm font-semibold text-accent underline underline-offset-2 hover:text-accent-hover">
-                {s.cta}
-              </Link>
+              {s.action === 'test-email' ? (
+                <div className="mt-1 flex flex-col items-start gap-1">
+                  <Button variant="secondary" size="sm" onClick={() => testEmail.mutate()} loading={testEmail.isPending}>
+                    {s.cta}
+                  </Button>
+                  {testEmail.isSuccess && (
+                    <p role="status" className="text-sm text-success">
+                      Test email queued — it appears in the Inbox in a few seconds
+                    </p>
+                  )}
+                  <ErrorNote error={testEmail.error} />
+                </div>
+              ) : (
+                <Link to={s.to} className="text-sm font-semibold text-accent underline underline-offset-2 hover:text-accent-hover">
+                  {s.cta}
+                </Link>
+              )}
             </div>
           </li>
         ))}

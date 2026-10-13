@@ -163,3 +163,58 @@ pub async fn runs(State(state): State<AppState>, user: AuthUser, Path(ws): Path<
         .collect();
     Ok(Json(json!({ "items": items })))
 }
+
+/// One click from "Needs label" to running: create (or restore) the workflow's label
+/// from the built-in templates, then enable the workflow.
+pub async fn setup(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Path((ws, id)): Path<(String, String)>,
+) -> AppResult<Json<Workflow>> {
+    require_role(&state.db, &ws, &user, Role::Admin).await?;
+    let key: String = sqlx::query_scalar("SELECT template_key FROM workflows WHERE id = ?1 AND workspace_id = ?2")
+        .bind(&id)
+        .bind(&ws)
+        .fetch_optional(&state.db)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    let t = template(&key).filter(|t| t.available).ok_or_else(|| AppError::Conflict("this workflow is not available".into()))?;
+    let seed = crate::domain::LABEL_TEMPLATES
+        .iter()
+        .flat_map(|tpl| tpl.labels.iter())
+        .find(|l| l.key == t.label_key)
+        .ok_or_else(|| AppError::Internal(anyhow::anyhow!("no seed for label {}", t.label_key)))?;
+    let mut tx = state.db.begin().await?;
+    sqlx::query(
+        "INSERT INTO labels (id, workspace_id, key, name, description, color, position, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, (SELECT COALESCE(MAX(position), 0) + 1 FROM labels WHERE workspace_id = ?2), ?7)
+         ON CONFLICT(workspace_id, key) DO UPDATE SET archived = 0",
+    )
+    .bind(crate::db::new_id("lbl"))
+    .bind(&ws)
+    .bind(seed.key)
+    .bind(seed.name)
+    .bind(seed.description)
+    .bind(seed.color)
+    .bind(crate::db::now_ms())
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query("UPDATE workflows SET enabled = 1 WHERE id = ?1 AND workspace_id = ?2").bind(&id).bind(&ws).execute(&mut *tx).await?;
+    audit::record(
+        &mut tx,
+        Entry {
+            workspace_id: &ws,
+            actor: Actor::User(&user.id),
+            action: "workflow.set_up",
+            entity_type: "workflow",
+            entity_id: &id,
+            message_id: None,
+            metadata: json!({ "template_key": key, "label_key": t.label_key }),
+        },
+    )
+    .await?;
+    let row: WorkflowRow = sqlx::query_as(&format!("{WORKFLOW_SELECT} WHERE w.id = ?1")).bind(&id).fetch_one(&mut *tx).await?;
+    tx.commit().await?;
+    let active = active_label_keys(&state, &ws).await?;
+    Ok(Json(to_dto(row, &active)))
+}

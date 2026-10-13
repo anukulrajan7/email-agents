@@ -29,6 +29,21 @@ export function useSendTestEmail(ws: string, sourceId: string) {
   });
 }
 
+export function useSendTestEmailEnsuringSource(ws: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async () => {
+      const { items } = await api<Items<Source>>(`/workspaces/${ws}/sources`);
+      const source = items.find((s) => s.kind === 'forwarding') ?? (await api<Source>(`/workspaces/${ws}/sources/forwarding`, { method: 'POST' }));
+      return api<{ status: 'queued' }>(`/workspaces/${ws}/sources/${source.id}/test-email`, { method: 'POST', body: {} });
+    },
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: key(ws) });
+      void qc.invalidateQueries({ queryKey: ['ws', ws, 'messages'] });
+    },
+  });
+}
+
 export function useNangoSession(ws: string) {
   return useMutation({
     mutationFn: (provider: NangoProvider) =>

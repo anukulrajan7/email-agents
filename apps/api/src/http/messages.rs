@@ -349,6 +349,41 @@ pub async fn override_classification(
     Ok(Json(row.into()))
 }
 
+/// "The AI got it right": keep the label, clear needs_review. No re-picking.
+pub async fn approve_classification(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Path((ws, id)): Path<(String, String)>,
+) -> AppResult<Json<Classification>> {
+    require_role(&state.db, &ws, &user, Role::Operator).await?;
+    ensure_message(&state, &ws, &id).await?;
+    let mut tx = state.db.begin().await?;
+    let row: ClassificationRow = sqlx::query_as(
+        "UPDATE classifications SET needs_review = 0, updated_at = ?1 WHERE message_id = ?2
+         RETURNING category, priority, requires_reply, confidence, needs_review, source, model_id, updated_at",
+    )
+    .bind(now_ms())
+    .bind(&id)
+    .fetch_optional(&mut *tx)
+    .await?
+    .ok_or_else(|| AppError::Conflict("this email has not been labelled yet".into()))?;
+    audit::record(
+        &mut tx,
+        Entry {
+            workspace_id: &ws,
+            actor: Actor::User(&user.id),
+            action: "classification.approved",
+            entity_type: "classification",
+            entity_id: &id,
+            message_id: Some(&id),
+            metadata: json!({ "category": row.category, "source": row.source }),
+        },
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(Json(row.into()))
+}
+
 // ---------------------------------------------------------------- drafts
 
 async fn enqueue_for_message(

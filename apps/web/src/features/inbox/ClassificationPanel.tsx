@@ -5,7 +5,7 @@ import { ErrorNote } from '../../components/ErrorNote';
 import { humanize } from '../../lib/format';
 import { LabelStamp } from '../labels/LabelStamp';
 import { useLabelMap, useLabels } from '../labels/hooks';
-import { useUpdateClassification } from './hooks';
+import { useApproveClassification, useUpdateClassification } from './hooks';
 
 const priorities: Priority[] = ['low', 'normal', 'high'];
 
@@ -17,7 +17,7 @@ function Editor({ ws, messageId, classification }: { ws: string; messageId: stri
   const items = labels.data?.items ?? [];
 
   return (
-    <div className="mt-4 flex flex-wrap items-end gap-3">
+    <div className="mt-3 flex flex-wrap items-end gap-3">
       <div className="flex flex-col gap-1">
         <Label htmlFor="cls-category">Label</Label>
         <Select id="cls-category" value={category} onChange={(e) => setCategory(e.target.value)} className="w-48">
@@ -76,8 +76,30 @@ function Explanation({ classification, labelName }: { classification: Classifica
   );
 }
 
+function Approve({ approve }: { approve: ReturnType<typeof useApproveClassification> }) {
+  return (
+    <div className="flex flex-wrap items-center gap-3">
+      {approve.isSuccess ? (
+        <span role="status" className="text-sm font-semibold text-success">
+          Approved ✓
+        </span>
+      ) : (
+        <Button loading={approve.isPending} onClick={() => approve.mutate()}>
+          Approve label
+        </Button>
+      )}
+      <div className="basis-full">
+        <ErrorNote error={approve.error} />
+      </div>
+    </div>
+  );
+}
+
 export function ClassificationPanel({ ws, messageId, classification }: { ws: string; messageId: string; classification: Classification | null }) {
   const label = useLabelMap(ws).get(classification?.category ?? '');
+  const [editing, setEditing] = useState(false);
+  const approve = useApproveClassification(ws, messageId);
+  const canApprove = classification?.needs_review === true && classification.source !== 'manual';
   return (
     <section aria-labelledby="cls-heading">
       <h3 id="cls-heading" className="kicker">
@@ -99,7 +121,28 @@ export function ClassificationPanel({ ws, messageId, classification }: { ws: str
       ) : (
         <p className="mt-2 text-sm text-ink-muted">Not labelled yet. The AI labels each email shortly after it arrives, or you can pick a label yourself.</p>
       )}
-      <Editor key={classification?.updated_at ?? 'none'} ws={ws} messageId={messageId} classification={classification} />
+      {(canApprove || approve.isSuccess) && (
+        <div className="mt-3">
+          <Approve approve={approve} />
+        </div>
+      )}
+      <div className="mt-3">
+        <Button
+          variant="ghost"
+          size="sm"
+          className="-ml-3 underline underline-offset-2"
+          aria-expanded={editing}
+          aria-controls="cls-editor"
+          onClick={() => setEditing((v) => !v)}
+        >
+          {editing ? 'Hide label options' : 'Change label'}
+        </Button>
+      </div>
+      {editing && (
+        <div id="cls-editor">
+          <Editor key={classification?.updated_at ?? 'none'} ws={ws} messageId={messageId} classification={classification} />
+        </div>
+      )}
     </section>
   );
 }

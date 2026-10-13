@@ -106,3 +106,35 @@ async fn label_guards_and_reordering() {
     let (_, after) = call(&app, "GET", &format!("{base}/labels"), ADMIN, None).await;
     assert_eq!(&keys(&after)[..2], ["leave", "timesheet"]);
 }
+
+#[tokio::test]
+async fn workflow_setup_adds_label_and_approve_clears_review() {
+    let (state, app, _d) = setup().await;
+    let (_, ws) = call(&app, "POST", "/api/v1/workspaces", ADMIN, Some(json!({"name":"Ops","template":"general"}))).await;
+    let base = format!("/api/v1/workspaces/{}", ws["id"].as_str().unwrap());
+
+    // "Needs label" → one click: label created from the HR seed, workflow enabled.
+    let (_, wfs) = call(&app, "GET", &format!("{base}/workflows"), ADMIN, None).await;
+    let ts_id = wfs["items"].as_array().unwrap().iter().find(|w| w["template_key"] == "timesheet_review").unwrap()["id"]
+        .as_str().unwrap().to_string();
+    assert_eq!(call(&app, "POST", &format!("{base}/workflows/{ts_id}/setup"), "dev:op@acme.test", None).await.0, StatusCode::FORBIDDEN);
+    let (s, wf) = call(&app, "POST", &format!("{base}/workflows/{ts_id}/setup"), ADMIN, None).await;
+    assert_eq!((s, wf["available"].as_bool(), wf["enabled"].as_bool()), (StatusCode::OK, Some(true), Some(true)));
+    let (_, labels) = call(&app, "GET", &format!("{base}/labels"), ADMIN, None).await;
+    assert!(keys(&labels).contains(&"timesheet".to_string()));
+
+    // A timesheet email now runs the workflow; approving keeps the AI label.
+    let (_, src) = call(&app, "POST", &format!("{base}/sources/forwarding"), ADMIN, None).await;
+    call(&app, "POST", &format!("{base}/sources/{}/test-email", src["id"].as_str().unwrap()), ADMIN, None).await;
+    worker::drain(&state).await;
+    let (_, msgs) = call(&app, "GET", &format!("{base}/messages"), ADMIN, None).await;
+    let m = &msgs["items"][0];
+    assert_eq!((m["category"].as_str(), m["needs_review"].as_bool()), (Some("timesheet"), Some(true)));
+    let id = m["id"].as_str().unwrap();
+    let (s, c) = call(&app, "POST", &format!("{base}/messages/{id}/classification/approve"), ADMIN, None).await;
+    assert_eq!((s, c["category"].as_str(), c["needs_review"].as_bool(), c["source"].as_str()), (StatusCode::OK, Some("timesheet"), Some(false), Some("fallback")));
+    let (_, msgs) = call(&app, "GET", &format!("{base}/messages"), ADMIN, None).await;
+    assert_eq!(msgs["items"][0]["needs_review"], false);
+    let (_, runs) = call(&app, "GET", &format!("{base}/workflow-runs"), ADMIN, None).await;
+    assert_eq!(runs["items"].as_array().unwrap().len(), 1);
+}

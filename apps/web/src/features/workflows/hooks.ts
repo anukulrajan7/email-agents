@@ -22,3 +22,14 @@ export function useToggleWorkflow(ws: string) {
     onSuccess: () => qc.invalidateQueries({ queryKey: ['ws', ws, 'workflows'] }),
   });
 }
+
+export function useSetupWorkflow(ws: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => api<Workflow>(`/workspaces/${ws}/workflows/${id}/setup`, { method: 'POST' }),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ['ws', ws, 'workflows'] });
+      void qc.invalidateQueries({ queryKey: ['ws', ws, 'labels'] });
+    },
+  });
+}

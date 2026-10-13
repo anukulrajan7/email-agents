@@ -9,7 +9,7 @@ import { relativeTime } from '../../lib/format';
 import { cn } from '../../lib/cn';
 import { useLabelMap } from '../labels/hooks';
 import { useReprocess } from '../inbox/hooks';
-import { useToggleWorkflow, useWorkflowRuns, useWorkflows } from './hooks';
+import { useSetupWorkflow, useToggleWorkflow, useWorkflowRuns, useWorkflows } from './hooks';
 
 function Toggle({ workflow, canEdit, onChange, busy }: { workflow: Workflow; canEdit: boolean; onChange: (v: boolean) => void; busy: boolean }) {
   const disabled = !canEdit || !workflow.available || busy;
@@ -32,6 +32,11 @@ function Toggle({ workflow, canEdit, onChange, busy }: { workflow: Workflow; can
   );
 }
 
+function setupLabelName(w: Workflow): string {
+  const names: Record<string, string> = { timesheet: 'Timesheet', leave: 'Leave', candidate_referral: 'Candidate referral' };
+  return names[w.label_key] ?? names[w.template_key.replace(/_(review|request)$/, '')] ?? w.label_key;
+}
+
 export function WorkflowsPage() {
   const { ws, isAdmin } = useWorkspace();
   const workflows = useWorkflows(ws);
@@ -39,12 +44,13 @@ export function WorkflowsPage() {
   const runs = useWorkflowRuns(ws);
   const toggle = useToggleWorkflow(ws);
   const reprocess = useReprocess(ws);
+  const setup = useSetupWorkflow(ws);
 
   return (
     <Page>
       <PageHeader kicker="Automation" title="Workflows" description="Automations that run when an email gets a certain label — for example, creating a review task." />
       {workflows.isLoading && <Spinner />}
-      <ErrorNote error={workflows.error ?? toggle.error ?? reprocess.error} />
+      <ErrorNote error={workflows.error ?? toggle.error ?? reprocess.error ?? setup.error} />
       <div className="grid gap-4 md:grid-cols-3 2xl:grid-cols-4">
         {workflows.data?.items.map((w, i) => (
           <Card key={w.id} className="rise flex flex-col gap-3" style={riseStyle(i + 1)}>
@@ -57,11 +63,17 @@ export function WorkflowsPage() {
               <p>
                 <span className="font-semibold">Runs on label:</span> {labelMap.get(w.label_key)?.name ?? w.label_key}
               </p>
-              {!w.available && (
-                <p className="mt-1 text-ink-muted">
-                  Add a label with key <code className="font-mono">{w.label_key}</code> to enable this workflow.
-                </p>
-              )}
+              {!w.available &&
+                (isAdmin ? (
+                  <div className="mt-2 flex flex-col items-start gap-1">
+                    <Button size="sm" loading={setup.isPending && setup.variables === w.id} onClick={() => setup.mutate(w.id)}>
+                      Add “{setupLabelName(w)}” label &amp; enable
+                    </Button>
+                    <p className="text-ink-muted">Creates the label the AI uses to spot these emails, then turns the workflow on.</p>
+                  </div>
+                ) : (
+                  <p className="mt-1 text-ink-muted">Ask a workspace admin to add the label for this workflow.</p>
+                ))}
             </div>
             <div className="flex items-center justify-between gap-2 border-t border-rule pt-3">
               <div className="flex items-center gap-2 text-sm">

@@ -43,6 +43,18 @@ export function useUpdateClassification(ws: string, id: string) {
   });
 }
 
+export function useApproveClassification(ws: string, id: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => api<Classification>(`/workspaces/${ws}/messages/${id}/classification/approve`, { method: 'POST' }),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: messageKey(ws, id) });
+      void qc.invalidateQueries({ queryKey: messagesKey(ws) });
+      void qc.invalidateQueries({ queryKey: ['ws', ws, 'labels'] });
+    },
+  });
+}
+
 export function useReprocess(ws: string) {
   const qc = useQueryClient();
   return useMutation({

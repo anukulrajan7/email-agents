@@ -15,9 +15,12 @@ import {
   useNangoSession,
   useRegisterNangoConnection,
   useSendTestEmail,
+  useSendTestEmailEnsuringSource,
   useSources,
   useSyncSource,
 } from './hooks';
+
+const TEST_QUEUED = 'Test email queued — it appears in the Inbox in a few seconds';
 
 function capabilityLabel(source: Source): string {
   return source.capabilities.provider_drafts ? 'Draft capable' : 'Read only';
@@ -58,6 +61,7 @@ function Ticket({
 
 function ForwardingCard({ ws, source, isAdmin, style }: { ws: string; source: Source | undefined; isAdmin: boolean; style?: CSSProperties }) {
   const create = useCreateForwardingSource(ws);
+  const test = useSendTestEmailEnsuringSource(ws);
   return (
     <Ticket
       number="01"
@@ -79,10 +83,16 @@ function ForwardingCard({ ws, source, isAdmin, style }: { ws: string; source: So
         <ForwardingDetails ws={ws} source={source} isAdmin={isAdmin} />
       ) : isAdmin ? (
         <div className="flex flex-col gap-2">
-          <Button onClick={() => create.mutate()} loading={create.isPending} className="self-start">
-            Create forwarding address
-          </Button>
-          <ErrorNote error={create.error} />
+          <div className="flex flex-wrap items-center gap-3">
+            <Button onClick={() => create.mutate()} loading={create.isPending}>
+              Create forwarding address
+            </Button>
+            <Button variant="secondary" onClick={() => test.mutate()} loading={test.isPending}>
+              Send test email
+            </Button>
+          </div>
+          {test.isSuccess && <span role="status" className="text-sm text-success">{TEST_QUEUED}</span>}
+          <ErrorNote error={create.error ?? test.error} />
         </div>
       ) : (
         <p className="text-sm text-ink-muted">Ask a workspace admin to set up forwarding.</p>
@@ -138,7 +148,7 @@ function ForwardingDetails({ ws, source, isAdmin }: { ws: string; source: Source
           <Button variant="secondary" size="sm" onClick={sendTest} loading={test.isPending}>
             Send test email
           </Button>
-          {test.isSuccess && <span className="text-sm text-success">Test email queued. Check the inbox.</span>}
+          {test.isSuccess && <span role="status" className="text-sm text-success">{TEST_QUEUED}</span>}
         </div>
       )}
       {test.error && !testUnavailable && <ErrorNote error={test.error} />}
