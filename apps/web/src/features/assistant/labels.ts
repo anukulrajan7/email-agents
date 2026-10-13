@@ -25,3 +25,19 @@ export function linkTarget(ws: string, link: ConfirmLink): { to: string; label: 
       return { to: `/w/${ws}/alerts`, label: 'Open Alerts' };
   }
 }
+
+const DAY_MS = 86_400_000;
+
+/** "Today", "Yesterday" or a short date, for the dividers between days of conversation. */
+export function dayLabel(iso: string, now = new Date()): string {
+  const then = new Date(iso);
+  if (Number.isNaN(then.getTime())) return '';
+  const startOf = (d: Date) => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+  const days = Math.round((startOf(now) - startOf(then)) / DAY_MS);
+  if (days === 0) return 'Today';
+  if (days === 1) return 'Yesterday';
+  const sameYear = then.getFullYear() === now.getFullYear();
+  return then.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', ...(sameYear ? {} : { year: 'numeric' }) });
+}
+
+export const dayKey = (iso: string) => new Date(iso).toDateString();

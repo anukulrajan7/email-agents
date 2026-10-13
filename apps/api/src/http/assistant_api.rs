@@ -3,8 +3,8 @@
 
 use axum::{
     Json, Router,
-    extract::{DefaultBodyLimit, Multipart, Path, State},
-    routing::post,
+    extract::{DefaultBodyLimit, Multipart, Path, Query, State},
+    routing::{get, post},
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -14,6 +14,8 @@ use crate::{
     ai_ledger,
     assistant::{
         MAX_COMMAND_CHARS, command, confirm,
+        context::{self, PageContext},
+        history,
         transcribe::{AudioClip, MAX_AUDIO_BYTES, MAX_AUDIO_SECONDS},
     },
     auth::{AuthUser, require_role},
@@ -31,6 +33,7 @@ pub fn routes() -> Router<AppState> {
         .route("/workspaces/{ws}/assistant/transcribe", post(transcribe).layer(DefaultBodyLimit::max(UPLOAD_LIMIT)))
         .route("/workspaces/{ws}/assistant/command", post(run_command))
         .route("/workspaces/{ws}/assistant/confirm", post(confirm_plan))
+        .route("/workspaces/{ws}/assistant/history", get(conversation))
 }
 
 fn bad_upload(_: axum::extract::multipart::MultipartError) -> AppError {
@@ -86,6 +89,8 @@ async fn transcribe(
 #[serde(deny_unknown_fields)]
 pub struct CommandBody {
     text: String,
+    /// What the person is looking at; every id in it is checked against the workspace.
+    context: Option<PageContext>,
 }
 
 async fn run_command(
@@ -103,13 +108,38 @@ async fn run_command(
         return Err(AppError::BadRequest(format!("keep the request under {MAX_COMMAND_CHARS} characters")));
     }
     if !state.assistant_planner.enabled() {
-        return Err(AppError::Conflict("the assistant is not set up yet; ask an admin to configure the AI service".into()));
+        return Err(AppError::Conflict(
+            "I can't answer because the AI service isn't set up yet. Ask an admin to configure it, then try again.".into(),
+        ));
     }
+    let viewing = context::resolve(&state.db, &ws, &body.context.unwrap_or_default()).await?;
+    let extras = command::Extras { viewing, history: history::planner_block(&state.db, &ws, &user.id).await? };
     // A person asked, so this always runs; the cost is recorded either way and the UI can say so.
     let over_budget = !ai_ledger::within_budget(&state.db, state.config.ai_daily_budget_usd, &ws).await;
-    let mut outcome = command::run(&state, &ws, &user, role, &text).await?;
+    let mut outcome = command::run(&state, &ws, &user, role, &text, &extras).await?;
     outcome.over_budget = over_budget;
+    history::append(&state.db, &ws, &user.id, "user", &text, &[], &[]).await?;
+    history::append(&state.db, &ws, &user.id, "assistant", &outcome.answer, &outcome.citations, &outcome.plan).await?;
     Ok(Json(outcome))
+}
+
+#[derive(Deserialize)]
+pub struct HistoryQuery {
+    before: Option<i64>,
+    limit: Option<i64>,
+}
+
+/// The caller's own conversation with the assistant in this workspace, newest page first;
+/// `next_before` pages back to older messages.
+async fn conversation(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Path(ws): Path<String>,
+    Query(q): Query<HistoryQuery>,
+) -> AppResult<Json<Value>> {
+    require_role(&state.db, &ws, &user, Role::Operator).await?;
+    let (items, next_before) = history::page(&state.db, &ws, &user.id, q.before, q.limit.unwrap_or(history::PAGE_DEFAULT)).await?;
+    Ok(Json(json!({ "items": items, "next_before": next_before })))
 }
 
 #[derive(Deserialize)]

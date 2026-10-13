@@ -1,12 +1,26 @@
 import { useAgent } from '../agents/hooks';
 import { ASSISTANT_NAME } from './labels';
-import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { useInfiniteQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '../../api/client';
-import type { CommandResponse, ConfirmResponse } from './types';
+import type { CommandResponse, ConfirmResponse, HistoryPage, PageContext } from './types';
 
 export function useCommand(ws: string) {
   return useMutation({
-    mutationFn: (text: string) => api<CommandResponse>(`/workspaces/${ws}/assistant/command`, { method: 'POST', body: { text } }),
+    mutationFn: ({ text, context }: { text: string; context: PageContext }) =>
+      api<CommandResponse>(`/workspaces/${ws}/assistant/command`, { method: 'POST', body: { text, context } }),
+  });
+}
+
+/** The person's one running conversation, newest page first; `fetchNextPage` loads older messages. */
+export function useConversation(ws: string) {
+  return useInfiniteQuery({
+    queryKey: ['assistant', ws, 'history'],
+    initialPageParam: undefined as number | undefined,
+    queryFn: ({ pageParam }) =>
+      api<HistoryPage>(`/workspaces/${ws}/assistant/history`, { query: { limit: 20, before: pageParam } }),
+    getNextPageParam: (last) => last.next_before ?? undefined,
+    staleTime: Infinity,
+    refetchOnWindowFocus: false,
   });
 }
 
