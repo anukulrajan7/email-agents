@@ -53,6 +53,7 @@ pub struct AppState {
     pub extractor: Arc<dyn crate::ai::Extractor>,
     pub analyst: Arc<dyn crate::ai::Analyst>,
     pub embedder: Arc<dyn crate::ai::embeddings::Embedder>,
+    pub label_suggester: Arc<dyn crate::ai::label_suggest::LabelSuggester>,
     pub login_limiter: Arc<crate::sessions::LoginLimiter>,
     /// Sends verification codes; `None` = verification disabled.
     pub mailer: Option<Arc<dyn crate::mailer::Mailer>>,
@@ -71,6 +72,7 @@ pub fn router(state: AppState) -> Router {
         .route("/workspaces", get(workspaces::list).post(workspaces::create))
         .route("/label-templates", get(labels_api::templates))
         .route("/workspaces/{ws}/labels", get(labels_api::list).post(labels_api::create))
+        .route("/workspaces/{ws}/labels/suggest", post(labels_api::suggest))
         .route("/workspaces/{ws}/labels/{id}", patch(labels_api::update))
         .route("/workspaces/{ws}/members", post(workspaces::add_member))
         .route("/workspaces/{ws}/sources", get(sources::list))

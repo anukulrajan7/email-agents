@@ -123,6 +123,8 @@ pub struct Draft {
     pub updated_at: String,
     /// What the drafter was given: `[{id, content}]`.
     pub memories_used: Vec<serde_json::Value>,
+    /// Asks the draft could not answer; each appears in the body as `[NEEDS: …]`.
+    pub unanswered: Vec<String>,
 }
 
 #[derive(FromRow)]
@@ -133,6 +135,7 @@ pub struct DraftRow {
     pub body_text: String,
     pub model_id: Option<String>,
     pub memory_ids_json: String,
+    pub unanswered_json: String,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -148,6 +151,7 @@ impl From<DraftRow> for Draft {
             created_at: iso(r.created_at),
             updated_at: iso(r.updated_at),
             memories_used: vec![],
+            unanswered: serde_json::from_str(&r.unanswered_json).unwrap_or_default(),
         }
     }
 }
@@ -165,6 +169,37 @@ pub async fn draft_with_memories(db: &sqlx::SqlitePool, row: DraftRow) -> sqlx::
     let mut draft = Draft::from(row);
     draft.memories_used = used.into_iter().map(|(id, content)| serde_json::json!({ "id": id, "content": content })).collect();
     Ok(draft)
+}
+
+/// The AI's reading of an email (`message_insights`), as returned in message detail.
+#[derive(Serialize)]
+pub struct Insight {
+    pub summary: String,
+    pub asks: Vec<String>,
+    pub deadline: Option<String>,
+    pub needs_reply: bool,
+    pub missing_info: Vec<String>,
+}
+
+#[derive(FromRow)]
+pub struct InsightRow {
+    pub summary: String,
+    pub asks_json: String,
+    pub deadline: Option<String>,
+    pub needs_reply: bool,
+    pub missing_json: String,
+}
+
+impl From<InsightRow> for Insight {
+    fn from(r: InsightRow) -> Self {
+        Self {
+            summary: r.summary,
+            asks: serde_json::from_str(&r.asks_json).unwrap_or_default(),
+            deadline: r.deadline,
+            needs_reply: r.needs_reply,
+            missing_info: serde_json::from_str(&r.missing_json).unwrap_or_default(),
+        }
+    }
 }
 
 #[derive(Serialize)]

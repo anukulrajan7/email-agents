@@ -383,6 +383,11 @@ pub fn map_gmail_record(rec: &Value, max_body_chars: usize) -> Option<MappedReco
                 .flat_map(|h| addresses(Some(&Value::String(h))))
                 .collect(),
         },
+        cc: match rec.get("cc") {
+            Some(v) => addresses(Some(v)),
+            None => header("Cc").map(|h| addresses(Some(&Value::String(h)))).unwrap_or_default(),
+        },
+        outbound: has_sent_label(rec),
         subject: normalize::truncate_chars(
             str_of(rec, &["subject"])
                 .or_else(|| header("Subject"))
@@ -407,6 +412,11 @@ pub fn map_gmail_record(rec: &Value, max_body_chars: usize) -> Option<MappedReco
         apply_gmail_payload(&mut mapped.email, payload, max_body_chars);
     }
     Some(mapped)
+}
+
+/// Gmail marks mail the mailbox itself sent with the SENT label.
+fn has_sent_label(rec: &Value) -> bool {
+    rec.get("labelIds").and_then(Value::as_array).is_some_and(|l| l.iter().any(|x| x.as_str() == Some("SENT")))
 }
 
 fn gmail_header(payload: Option<&Value>, name: &str) -> Option<String> {
@@ -630,6 +640,9 @@ pub async fn sync_source(state: &AppState, payload: &Value) -> Result<(), JobErr
         return Err(JobError::Permanent("source has no Nango connection".into()));
     };
 
+    // Learn the mailbox's own address first, so mail it sent is stored as outbound.
+    jobs::message_jobs::learn_mailbox_address(state, &source_id, &connection_id, &pck).await;
+
     // One-time direct backfill from Gmail (the catalog sync only keeps ~100 recent).
     if src.backfilled_at.is_none() {
         match backfill_from_gmail(state, &source_id, &src.workspace_id, &connection_id, &pck).await {
@@ -736,6 +749,7 @@ pub async fn sync_source(state: &AppState, payload: &Value) -> Result<(), JobErr
         tx.commit().await?;
     }
     mark_source(state, &source_id, "connected", None).await?;
+    jobs::message_jobs::enqueue_html_refetch(state, &src.workspace_id, &source_id).await?;
     if more_pages {
         let mut conn = state.db.acquire().await?;
         enqueue_sync(&mut conn, &src.workspace_id, &source_id, "continue").await?;
@@ -882,6 +896,7 @@ async fn enrich_with_full_messages(state: &AppState, connection_id: &str, pck: &
                 records[i] = MappedRecord { cursor, ..mapped };
             } else if let Some(payload) = full.get("payload") {
                 apply_gmail_payload(&mut records[i].email, payload, state.config.max_body_chars);
+                records[i].email.outbound |= has_sent_label(&full);
             }
         }
     }

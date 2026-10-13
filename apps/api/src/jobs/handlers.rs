@@ -65,6 +65,8 @@ pub async fn handle(state: &AppState, job: &Job) -> Result<(), JobError> {
         kind::SYNC_NANGO_SOURCE => crate::sources::nango::sync_source(state, &payload).await,
         kind::LEARN_FROM_DRAFT => learn_from_draft(state, &payload).await,
         kind::ANALYZE_MESSAGE => analyze_message(state, &payload).await.map(|_| ()),
+        kind::CLEAN_STORED_TEXT => super::message_jobs::clean_stored_text(state).await,
+        kind::REFETCH_GMAIL_HTML => super::message_jobs::refetch_gmail_html(state, &payload).await,
         kind::EXTRACT_RECORD => super::matching_jobs::extract_record(state, &payload).await,
         kind::MATCH_RECORD => super::matching_jobs::match_record(state, &payload).await,
         kind::RUN_AUTOMATIONS => super::automation_jobs::run_automations(state, &payload).await,
@@ -233,6 +235,9 @@ async fn load_message(state: &AppState, message_id: &str) -> Result<MessageForAi
 
 async fn classify_email(state: &AppState, job: &Job, payload: &Value) -> Result<(), JobError> {
     let message_id = str_field(payload, "message_id")?;
+    if super::message_jobs::is_outbound(state, &message_id).await? {
+        return Ok(());
+    }
     let msg = load_message(state, &message_id).await?;
 
     let existing: Option<String> = sqlx::query_scalar("SELECT source FROM classifications WHERE message_id = ?1")
@@ -400,6 +405,15 @@ async fn enqueue_workflow(
 
 // ---------------------------------------------------------------- workflow
 
+/// Terminal state for a classified message that no workflow picked up (`classified` → `processed`).
+async fn mark_processed_if_classified(state: &AppState, message_id: &str) -> Result<(), JobError> {
+    sqlx::query("UPDATE email_messages SET processing_status = 'processed' WHERE id = ?1 AND processing_status = 'classified'")
+        .bind(message_id)
+        .execute(&state.db)
+        .await?;
+    Ok(())
+}
+
 async fn execute_workflow(state: &AppState, payload: &Value) -> Result<(), JobError> {
     let message_id = str_field(payload, "message_id")?;
     let row: Option<(String, String, String)> = sqlx::query_as(
@@ -420,8 +434,8 @@ async fn execute_workflow(state: &AppState, payload: &Value) -> Result<(), JobEr
     }
     let Some(template) = domain::WORKFLOW_TEMPLATES.iter().find(|t| t.label_key == category && t.available)
     else {
-        // No automation for this category: stays in the inbox for a human.
-        return Ok(());
+        // No workflow for this category: classified is the end of the line.
+        return mark_processed_if_classified(state, &message_id).await;
     };
     let workflow: Option<(String, bool)> =
         sqlx::query_as("SELECT id, enabled FROM workflows WHERE workspace_id = ?1 AND template_key = ?2")
@@ -430,7 +444,7 @@ async fn execute_workflow(state: &AppState, payload: &Value) -> Result<(), JobEr
             .fetch_optional(&state.db)
             .await?;
     let Some((workflow_id, true)) = workflow else {
-        return Ok(());
+        return mark_processed_if_classified(state, &message_id).await;
     };
 
     let now = now_ms();

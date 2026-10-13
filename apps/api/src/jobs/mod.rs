@@ -4,6 +4,7 @@ pub mod automation_jobs;
 pub mod handlers;
 pub mod knowledge_jobs;
 pub mod matching_jobs;
+pub mod message_jobs;
 pub mod worker;
 
 use rand::Rng;
@@ -31,6 +32,8 @@ pub mod kind {
     pub const INDEX_MESSAGE: &str = "index_message";
     pub const INDEX_REPLY: &str = "index_reply";
     pub const BACKFILL_KNOWLEDGE: &str = "backfill_knowledge";
+    pub const CLEAN_STORED_TEXT: &str = "clean_stored_text";
+    pub const REFETCH_GMAIL_HTML: &str = "refetch_gmail_html";
 }
 
 #[derive(Debug, Clone, FromRow)]

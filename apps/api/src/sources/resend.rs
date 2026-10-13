@@ -140,6 +140,8 @@ impl ReceivedEmail {
             sender_name: normalize::display_name(&self.from),
             original_sender_address: normalize::forwarded_original_sender(&body_text),
             recipients: self.to.iter().map(|a| normalize::address(a)).collect(),
+            cc: self.cc.iter().flatten().map(|a| normalize::address(a)).collect(),
+            outbound: false,
             subject: normalize::truncate_chars(
                 self.subject.as_deref().map(str::trim).filter(|s| !s.is_empty()).unwrap_or("(no subject)"),
                 998,

@@ -146,4 +146,7 @@ async fn maintenance(state: &AppState) {
     if let Err(e) = enqueued {
         tracing::warn!(error = %e, "failed to schedule purge");
     }
+    if let Err(e) = jobs::message_jobs::schedule_text_clean(state).await {
+        tracing::warn!(error = %e, "failed to schedule text clean-up");
+    }
 }

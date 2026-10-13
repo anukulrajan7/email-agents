@@ -10,7 +10,7 @@ use sqlx::FromRow;
 
 use super::{
     AppState,
-    dto::{Classification, ClassificationRow, Draft, DraftRow, draft_with_memories},
+    dto::{Classification, ClassificationRow, Draft, DraftRow, Insight, InsightRow, draft_with_memories},
 };
 use crate::{
     ai::{ClassifyOutput, policy},
@@ -32,6 +32,10 @@ pub struct ListQuery {
     category: Option<String>,
     q: Option<String>,
     limit: Option<i64>,
+    /// `recent` (default) or `importance`.
+    sort: Option<String>,
+    /// `inbound` (default), `outbound` or `all`.
+    direction: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -46,6 +50,9 @@ pub struct MessageSummary {
     priority: Option<String>,
     needs_review: bool,
     attachment_count: i64,
+    direction: String,
+    needs_reply: Option<bool>,
+    summary: Option<String>,
 }
 
 #[derive(FromRow)]
@@ -60,7 +67,38 @@ struct SummaryRow {
     priority: Option<String>,
     needs_review: Option<bool>,
     attachment_count: i64,
+    direction: String,
+    needs_reply: Option<bool>,
+    insight_summary: Option<String>,
 }
+
+const SUMMARY_MAX_CHARS: usize = 140;
+
+fn short_summary(s: String) -> String {
+    let s = s.trim();
+    if s.chars().count() <= SUMMARY_MAX_CHARS {
+        return s.to_string();
+    }
+    format!("{}…", crate::sources::normalize::truncate_chars(s, SUMMARY_MAX_CHARS - 1).trim_end())
+}
+
+fn encode_offset_cursor(offset: i64) -> String {
+    URL_SAFE_NO_PAD.encode(format!("offset:{offset}"))
+}
+
+fn decode_offset_cursor(cursor: &str) -> AppResult<i64> {
+    let bad = || AppError::BadRequest("invalid cursor".into());
+    let raw = String::from_utf8(URL_SAFE_NO_PAD.decode(cursor).map_err(|_| bad())?).map_err(|_| bad())?;
+    raw.strip_prefix("offset:").and_then(|n| n.parse::<i64>().ok()).filter(|n| *n >= 0).ok_or_else(bad)
+}
+
+const SUMMARY_SELECT: &str = "SELECT m.id, m.subject, m.sender_address, m.original_sender_address, m.received_at, m.processing_status,
+                c.category, c.priority, c.needs_review, m.direction,
+                COALESCE(i.needs_reply, c.requires_reply) AS needs_reply, i.summary AS insight_summary,
+                (SELECT COUNT(*) FROM attachments a WHERE a.message_id = m.id) AS attachment_count
+         FROM email_messages m
+         LEFT JOIN classifications c ON c.message_id = m.id
+         LEFT JOIN message_insights i ON i.message_id = m.id";
 
 fn encode_cursor(received_at: i64, id: &str) -> String {
     URL_SAFE_NO_PAD.encode(format!("{received_at}:{id}"))
@@ -92,41 +130,75 @@ pub async fn list(
         None => None,
     };
     let search = query.q.as_deref().map(str::trim).filter(|q| !q.is_empty()).map(like_pattern);
-    let (cursor_ts, cursor_id) = match query.cursor.as_deref().filter(|c| !c.is_empty()) {
-        Some(c) => {
-            let (ts, id) = decode_cursor(c)?;
-            (Some(ts), Some(id))
-        }
-        None => (None, None),
+    let direction = match query.direction.as_deref().filter(|d| !d.is_empty()).unwrap_or("inbound") {
+        d @ ("inbound" | "outbound" | "all") => d,
+        _ => return Err(AppError::BadRequest("direction must be inbound, outbound or all".into())),
     };
+    let by_importance = match query.sort.as_deref().filter(|s| !s.is_empty()).unwrap_or("recent") {
+        "recent" => false,
+        "importance" => true,
+        _ => return Err(AppError::BadRequest("sort must be recent or importance".into())),
+    };
+    let cursor = query.cursor.as_deref().filter(|c| !c.is_empty());
 
-    // Keyset pagination on (received_at DESC, id DESC), backed by idx_inbox.
-    let rows: Vec<SummaryRow> = sqlx::query_as(
-        "SELECT m.id, m.subject, m.sender_address, m.original_sender_address, m.received_at, m.processing_status,
-                c.category, c.priority, c.needs_review,
-                (SELECT COUNT(*) FROM attachments a WHERE a.message_id = m.id) AS attachment_count
-         FROM email_messages m
-         LEFT JOIN classifications c ON c.message_id = m.id
-         WHERE m.workspace_id = ?1
+    let filters = "WHERE m.workspace_id = ?1
            AND (?2 IS NULL OR c.category = ?2)
            AND (?3 IS NULL OR m.subject LIKE ?3 ESCAPE '\\' OR m.sender_address LIKE ?3 ESCAPE '\\'
                 OR m.original_sender_address LIKE ?3 ESCAPE '\\')
-           AND (?4 IS NULL OR m.received_at < ?4 OR (m.received_at = ?4 AND m.id < ?5))
-         ORDER BY m.received_at DESC, m.id DESC
-         LIMIT ?6",
-    )
-    .bind(&ws)
-    .bind(category)
-    .bind(search)
-    .bind(cursor_ts)
-    .bind(cursor_id)
-    .bind(limit + 1)
-    .fetch_all(&state.db)
-    .await?;
-
-    let has_more = rows.len() as i64 > limit;
-    let rows: Vec<SummaryRow> = rows.into_iter().take(limit as usize).collect();
-    let next_cursor = if has_more { rows.last().map(|r| encode_cursor(r.received_at, &r.id)) } else { None };
+           AND (?4 = 'all' OR m.direction = ?4)";
+    let (rows, next_cursor): (Vec<SummaryRow>, Option<String>) = if by_importance {
+        // Offset pagination: the importance order has no stable keyset. Needs-reply first, then
+        // priority (high > normal > low), then newest.
+        let offset = cursor.map(decode_offset_cursor).transpose()?.unwrap_or(0);
+        let mut rows: Vec<SummaryRow> = sqlx::query_as(&format!(
+            "{SUMMARY_SELECT}
+             {filters}
+             ORDER BY COALESCE(i.needs_reply, c.requires_reply, 0) DESC,
+                      CASE c.priority WHEN 'high' THEN 2 WHEN 'low' THEN 0 ELSE 1 END DESC,
+                      m.received_at DESC, m.id DESC
+             LIMIT ?5 OFFSET ?6"
+        ))
+        .bind(&ws)
+        .bind(category)
+        .bind(search)
+        .bind(direction)
+        .bind(limit + 1)
+        .bind(offset)
+        .fetch_all(&state.db)
+        .await?;
+        let has_more = rows.len() as i64 > limit;
+        rows.truncate(limit as usize);
+        (rows, has_more.then(|| encode_offset_cursor(offset + limit)))
+    } else {
+        let (cursor_ts, cursor_id) = match cursor {
+            Some(c) => {
+                let (ts, id) = decode_cursor(c)?;
+                (Some(ts), Some(id))
+            }
+            None => (None, None),
+        };
+        // Keyset pagination on (received_at DESC, id DESC), backed by idx_inbox.
+        let mut rows: Vec<SummaryRow> = sqlx::query_as(&format!(
+            "{SUMMARY_SELECT}
+             {filters}
+               AND (?5 IS NULL OR m.received_at < ?5 OR (m.received_at = ?5 AND m.id < ?6))
+             ORDER BY m.received_at DESC, m.id DESC
+             LIMIT ?7"
+        ))
+        .bind(&ws)
+        .bind(category)
+        .bind(search)
+        .bind(direction)
+        .bind(cursor_ts)
+        .bind(cursor_id)
+        .bind(limit + 1)
+        .fetch_all(&state.db)
+        .await?;
+        let has_more = rows.len() as i64 > limit;
+        rows.truncate(limit as usize);
+        let next = if has_more { rows.last().map(|r| encode_cursor(r.received_at, &r.id)) } else { None };
+        (rows, next)
+    };
     let items: Vec<MessageSummary> = rows
         .into_iter()
         .map(|r| MessageSummary {
@@ -140,6 +212,9 @@ pub async fn list(
             priority: r.priority,
             needs_review: r.needs_review.unwrap_or(true),
             attachment_count: r.attachment_count,
+            direction: r.direction,
+            needs_reply: r.needs_reply,
+            summary: r.insight_summary.map(short_summary),
         })
         .collect();
     Ok(Json(json!({ "items": items, "next_cursor": next_cursor })))
@@ -161,6 +236,9 @@ struct DetailRow {
     body_html: Option<String>,
     received_at: i64,
     processing_status: String,
+    direction: String,
+    sender_name: Option<String>,
+    cc_json: String,
 }
 
 #[derive(FromRow, Serialize)]
@@ -191,8 +269,11 @@ pub async fn detail(
     require_role(&state.db, &ws, &user, Role::Operator).await?;
     let m: DetailRow = sqlx::query_as(
         "SELECT m.id, m.source_id, s.kind AS source_kind, s.capabilities_json, m.sender_address, m.original_sender_address,
-                m.recipients_json, m.subject, m.body_text, m.body_html, m.received_at, m.processing_status
-         FROM email_messages m JOIN email_sources s ON s.id = m.source_id
+                m.recipients_json, m.subject, m.body_text, m.body_html, m.received_at, m.processing_status,
+                m.direction, COALESCE(m.sender_name, ct.display_name) AS sender_name, m.cc_json
+         FROM email_messages m
+         LEFT JOIN contacts ct ON ct.workspace_id = m.workspace_id AND ct.email = m.sender_address
+         JOIN email_sources s ON s.id = m.source_id
          WHERE m.id = ?1 AND m.workspace_id = ?2",
     )
     .bind(&id)
@@ -214,8 +295,14 @@ pub async fn detail(
     .bind(&id)
     .fetch_optional(&state.db)
     .await?;
+    let insight: Option<InsightRow> = sqlx::query_as(
+        "SELECT summary, asks_json, deadline, needs_reply, missing_json FROM message_insights WHERE message_id = ?1",
+    )
+    .bind(&id)
+    .fetch_optional(&state.db)
+    .await?;
     let draft: Option<DraftRow> = sqlx::query_as(
-        "SELECT id, message_id, status, body_text, model_id, memory_ids_json, created_at, updated_at
+        "SELECT id, message_id, status, body_text, model_id, memory_ids_json, unanswered_json, created_at, updated_at
          FROM drafts WHERE message_id = ?1 AND workspace_id = ?2 ORDER BY created_at DESC, id DESC LIMIT 1",
     )
     .bind(&id)
@@ -257,7 +344,10 @@ pub async fn detail(
 
     let capabilities: Capabilities =
         serde_json::from_str(&m.capabilities_json).unwrap_or_else(|_| crate::sources::capabilities(&m.source_kind));
-    let to: Vec<String> = serde_json::from_str(&m.recipients_json).unwrap_or_default();
+    let cc: Vec<String> = serde_json::from_str(&m.cc_json).unwrap_or_default();
+    // `recipients_json` holds To and Cc together for mail stored before Cc was kept separately.
+    let to: Vec<String> =
+        serde_json::from_str::<Vec<String>>(&m.recipients_json).unwrap_or_default().into_iter().filter(|a| !cc.contains(a)).collect();
 
     Ok(Json(json!({
         "id": m.id,
@@ -268,8 +358,11 @@ pub async fn detail(
             "can_send": policy::can_send(&capabilities),
         },
         "from": m.sender_address,
+        "from_name": m.sender_name,
         "original_from": m.original_sender_address,
         "to": to,
+        "cc": cc,
+        "direction": m.direction,
         "subject": m.subject,
         "body_text": m.body_text,
         // Sanitised server-side; the UI renders it only inside a sandboxed iframe.
@@ -278,6 +371,7 @@ pub async fn detail(
         "processing_status": m.processing_status,
         "attachments": attachments,
         "classification": classification.map(Classification::from),
+        "insight": insight.map(Insight::from),
         "draft": draft,
         "contact": contact,
         "contact_memories": contact_memories,
@@ -470,7 +564,7 @@ pub async fn update_draft(
     let row: DraftRow = sqlx::query_as(
         "UPDATE drafts SET body_text = COALESCE(?1, body_text), status = COALESCE(?2, status), updated_at = ?3
          WHERE id = ?4 AND workspace_id = ?5 AND status != 'sent'
-         RETURNING id, message_id, status, body_text, model_id, memory_ids_json, created_at, updated_at",
+         RETURNING id, message_id, status, body_text, model_id, memory_ids_json, unanswered_json, created_at, updated_at",
     )
     .bind(&body.body_text)
     .bind(status)
