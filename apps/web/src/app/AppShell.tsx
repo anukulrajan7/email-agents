@@ -1,6 +1,7 @@
 import { NavLink, Outlet, useNavigate } from 'react-router';
 import { useLogout, useMe } from '../features/auth/hooks';
 import { AlertsBadge } from '../features/alerts/AlertsBadge';
+import { AgentsBadge } from '../features/agents/AgentsBadge';
 import { Button, EmptyState, Label, Select, Spinner } from '../components/ui';
 import { cn } from '../lib/cn';
 import { riseStyle } from '../lib/motion';
@@ -32,6 +33,7 @@ export function AppShell() {
 
   const items = [
     { to: 'inbox', label: 'Inbox' },
+    { to: 'agents', label: 'Agents' },
     { to: 'matching', label: 'Matching' },
     { to: 'labels', label: 'Labels' },
     { to: 'reviews', label: 'Reviews' },
@@ -85,6 +87,7 @@ export function AppShell() {
               >
                 {item.label}
                 {item.to === 'alerts' && <AlertsBadge ws={ws} />}
+                {item.to === 'agents' && <AgentsBadge ws={ws} />}
               </NavLink>
             ))}
           </nav>

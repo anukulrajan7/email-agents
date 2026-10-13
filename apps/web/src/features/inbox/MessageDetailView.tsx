@@ -11,6 +11,7 @@ import { EmailReader } from './EmailReader';
 import { riseStyle } from '../../lib/motion';
 import { LabelStamp } from '../labels/LabelStamp';
 import { MemoryForm, MemoryItem } from '../memory/MemoryParts';
+import { StartAgentButton } from '../agents/StartAgentButton';
 
 export function MessageDetailView({ ws, messageId }: { ws: string; messageId: string }) {
   const [awaitingDraft, setAwaitingDraft] = useState(false);
@@ -67,6 +68,7 @@ export function MessageDetailView({ ws, messageId }: { ws: string; messageId: st
               <StatusBadge status={m.review.status} />
             </p>
           )}
+          <StartAgentButton ws={ws} target={{ kind: 'inbox', message_id: m.id }} label="Let the agent handle it" />
         </section>
         <section aria-labelledby="sender-heading" className="rise flex flex-col gap-3 border-t border-rule-strong pt-6" style={riseStyle(3)}>
           <div className="flex items-center justify-between gap-2">

@@ -13,6 +13,8 @@ import { MemoryPage } from '../features/memory/MemoryPage';
 import { ContactPage } from '../features/memory/ContactPage';
 import { AlertsPage } from '../features/alerts/AlertsPage';
 import { AutomationsPage } from '../features/automations/AutomationsPage';
+import { AgentsPage } from '../features/agents/AgentsPage';
+import { CaseDetailPage } from '../features/agents/CaseDetailPage';
 import { AppShell } from './AppShell';
 
 export function AppRoutes() {
@@ -26,6 +28,8 @@ export function AppRoutes() {
           <Route index element={<Navigate to="inbox" replace />} />
           <Route path="inbox" element={<InboxPage />} />
           <Route path="inbox/:messageId" element={<InboxPage />} />
+          <Route path="agents" element={<AgentsPage />} />
+          <Route path="agents/:caseId" element={<CaseDetailPage />} />
           <Route path="matching" element={<MatchingPage />} />
           <Route path="labels" element={<LabelsPage />} />
           <Route path="reviews" element={<ReviewsPage />} />

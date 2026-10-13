@@ -6,6 +6,7 @@ import { Badge, Button, Card, EmptyState, Mono, Page, PageHeader, Spinner, Table
 import { useWorkspace } from '../../app/useWorkspace';
 import { cn } from '../../lib/cn';
 import { riseStyle } from '../../lib/motion';
+import { StartAgentButton } from '../agents/StartAgentButton';
 import { useCandidates, useCloseRequirement, useMatches, useRequirements, useSetupMatching } from './hooks';
 import { experienceBand, MatchCard, noticeText, ScoreBadge, SkillChips, SourceEmailLink, SourceNote } from './MatchingParts';
 
@@ -78,15 +79,23 @@ function RequirementItem({ ws, req, selected, onSelect }: { ws: string; req: Req
             <SourceEmailLink ws={ws} messageId={req.message_id} />
             <SourceNote source={req.source} />
           </span>
-          <Button
-            size="sm"
-            variant="ghost"
-            loading={close.isPending}
-            onClick={() => close.mutate(req.id)}
-            aria-label={`Close requirement ${req.role_title}`}
-          >
-            Close
-          </Button>
+          <div className="flex items-center gap-2">
+            <StartAgentButton
+              ws={ws}
+              target={{ kind: 'requirement', requirement_id: req.id }}
+              label="Start agent"
+              ariaLabel={`Start agent for ${req.role_title}`}
+            />
+            <Button
+              size="sm"
+              variant="ghost"
+              loading={close.isPending}
+              onClick={() => close.mutate(req.id)}
+              aria-label={`Close requirement ${req.role_title}`}
+            >
+              Close
+            </Button>
+          </div>
         </div>
       </div>
       <ErrorNote error={close.error} />
