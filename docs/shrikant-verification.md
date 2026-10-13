@@ -1,41 +1,50 @@
 # Shrikant requirements: verification audit (14 Oct 2026)
 
-Checked at `dbf45f8` on branch `wp-verify` (main plus Packs M1). Method: read code and migrations, then ran the tests that
+Original audit checked at `dbf45f8` on branch `wp-verify` (main plus Packs M1). Method: read code and migrations, then ran the tests that
 claim to cover each item. Strict rule: code with no test and no UI is **Partial**; nothing at all is **Missing**.
 
-Tests run (all green):
-- API: `cargo test --test agent_profiles --test agents --test alerts --test assistant --test attachments --test gmail_backfill --test inbox_insights --test knowledge --test matching --test matching_semantic --test packs --test pipeline` (84 tests, 0 failed).
-- Web: `vitest run src/features/{alerts,matching,assistant,inbox,agents,packs}` (15 files, 96 tests, 0 failed).
-- Not run: golden/live-LLM evals (`tests/golden/` does not exist in this tree; the offline stubs are the only AI in tests, so no test proves real model quality).
+**Update after WP-G (branch `wp-g`, migration 0038).** The people / performance / billable / portal work is now built and each
+requirement was run end to end through the HTTP API and the real job pipeline in `apps/api/tests/staffing_e2e.rs`
+(`r1_…` to `r7_…`, one test per requirement: seeded people from a CSV, mail with attachments, portal CSVs, the matching
+pipeline). Section 1 shows the new verdicts; the sections after it keep the original evidence and now mark what changed.
+Tests behind the new verdicts: `staffing_people`, `staffing_submissions`, `staffing_metrics`, `staffing_policy`,
+`staffing_portal`, `staffing_escalation`, `staffing_scope`, `staffing_roles`, `staffing_packs`, `staffing_e2e` (all green), web
+`team.test.tsx`, `hrms.test.tsx`, `AppShell.test.tsx`. Everything still uses the offline stubs for AI, and Gmail is simulated
+by storing mail through `ingest::persist_message` (the path every mailbox adapter uses); nothing here proves real-model quality
+or live Gmail behaviour.
+
+Original run (all green): API `agent_profiles, agents, alerts, assistant, attachments, gmail_backfill, inbox_insights,
+knowledge, matching, matching_semantic, packs, pipeline` (84 tests), web `alerts, matching, assistant, inbox, agents, packs`
+(96 tests). Golden/live-LLM evals were not run.
 
 ## 1. Verdict table
 
-| Req | Client ask | Verdict | One-line reason |
-|---|---|---|---|
-| R1 | Individual performance widget: today, this week, target vs achieved | **Missing** | No people, targets, submission counts, metrics endpoint or widget exist anywhere in code or UI. |
-| R2 | Billable vs non-billable employees; billable = important mail + monthly timesheets only | **Missing** | No employee type, no client-email-ID concept, no mail filtering by type. Only a generic `timesheet` label exists. |
-| R3 | Match email data with portal data; reminders/approvals escalate by level | **Partial** (alerts) / **Missing** (portal match) | Alert escalation engine is built and tested, but it is one workspace-wide chain, and there is no portal data or comparison at all. |
-| R4 | Read all emails and attachments first, produce outputs later | **Partial** | Attachments of every kind become text (tested). But default backfill is only 14 days / 100 mails per mailbox, and AI is deliberately skipped for mail older than 2 h (`AI_AUTO_HOURS`) until someone opens it. |
-| R5 | Agent reads all team members' company email | **Partial** | Several Gmail mailboxes can be connected (admin-only), all land in one shared inbox, and the agent knows the mailbox owner. No people directory, no per-person scoping or consent flow, no test of two real mailboxes. |
-| R6 | Agent answers questions on all data; monitors submissions + quality since joining | **Partial** (Q&A) / **Missing** (monitoring) | Ask Meera answers cited questions from mail search (tested). It has no counts/metric tools, no submissions data, no joining date, no quality metric. |
-| R7 | Daily referral profiles matched against client requirements (Capgemini, TCS) | **Working** (matching) / **Partial** (daily) | Explainable matching, synonyms, vector recall and a once-a-day digest email are built and tested end to end. Gaps below: only two fixed labels feed it, 5-attachment cap, no UI for the digest, LLM rerank not built. |
+| Req | Client ask | Before | Now | Why (end-to-end test in `staffing_e2e.rs`) |
+|---|---|---|---|---|
+| R1 | Individual performance widget: today, this week, target vs achieved | Missing | **Working** | `r1_…`: people CSV with targets, three CVs sent to a client are detected from sent mail, the recruiter's `metrics/me` shows 3 of 5 today, interview rate moves when the client replies, the team lead sees the team, a person outside the directory sees no widget, below-target alert at 4 pm. Needs each recruiter's mailbox connected (admin action). Outcomes are read by plain phrases, not by a model. |
+| R2 | Billable vs non-billable; billable = important mail + monthly timesheets only | Missing | **Working** (as specified) | `r2_…`: billable Ravi's client mail is never stored from a personal mailbox, his timesheet is read through the HR mailbox, non-billable keeps the full mailbox, and a missing September timesheet alerts him three days after month end. "Important mail" is not filtered further: the rule is "billable mail only through the HR mailbox". |
+| R3 | Match email data with portal data; reminders/approvals escalate by level | Partial / Missing | **Working** | `r3_…`: portal hours CSV (with a validation report) is joined exactly against the timesheet mail, the 160 vs 152 h difference raises `portal_mismatch`, and it goes employee, then manager, then HR on configurable delays, and closes when the portal is corrected. Hours are read from the mail by pattern ("Total hours: N"); a mail without a readable number is counted as unverified, not as a mismatch. No "correction needed" alert kind. |
+| R4 | Read all emails and attachments first, produce outputs later | Partial | **Partial** (unchanged) | `r4_…` pins the gap: every mail is labelled on arrival, but summaries of mail older than `AI_AUTO_HOURS` wait until someone opens it; backfill is still 14 days / 100 mails by default. Not in WP-G scope. |
+| R5 | Agent reads all team members' company email | Partial | **Partial** (improved) | `r5_…` and `staffing_scope.rs`: mailbox-to-person link, inbox filter by mailbox or person, two-mailbox isolation test, managers may scope to their reports and not upward. Still open: only admins can connect a mailbox (no per-person consent flow), and scoping is a view filter, not an access wall (every member can still open the shared inbox). |
+| R6 | Agent answers questions on all data; monitors submissions + quality since joining | Partial / Missing | **Partial** | Monitoring is **Working**: submissions, outcomes, joining date and interview rate are exact SQL, in the API and the Performance page (`r6_…` computes "4 submissions since joining, 50% interviewed" for Priya). Q&A is **not wired**: `staffing::metrics::{find_people, person_metrics, team_metrics}` are the read-only hook documented in `docs/api.md`, but `src/assistant/*` belongs to another package and was not touched, so Ask Meera cannot yet say these numbers. No scheduled performance summary. |
+| R7 | Daily referral profiles matched against client requirements | Working / Partial | **Working** (unchanged) | `r7_…`: the existing pipeline produces the explained 90-point match, and now a CV the recruiter sends is linked to that same candidate and requirement. Matching gaps below still stand. |
 
 ## 2. Evidence per requirement
 
-### R1 Performance widget: Missing
+### R1 Performance widget: Missing (original audit; now Working, see section 1)
 - Searched `apps/api/src`, `migrations`, `apps/web/src` for people/performance/target/billable/joining: no hits beyond unrelated words. No migration has a `people`, `targets` or `submissions` table. `nav.ts` has no dashboard; no corner widget in `AppShell.tsx`.
 - Closest thing: `submit_candidate` agent tool (`agents/tools.rs:824`) and `cases` rows, tested in `agents.rs::requirement_case_runs_to_an_interview`. That is an approval-gated agent action, not a count of a recruiter's submissions, and it ignores submissions that recruiters send by hand from Gmail.
 - A user can do today: nothing for this. They can only open Agents and read cases one by one.
 - Gap: people directory (joining date, role, daily/weekly target), submission detection from sent mail with CV attached, outcome tracking, metric endpoint, corner widget.
 
-### R2 Billable / non-billable: Missing
+### R2 Billable / non-billable: Missing (original audit; now Working, see section 1)
 - No `billable` or employee-type concept in code. Mailbox ownership exists only as `email_sources.connected_by_user_id` (`migrations/0002`), which links a mailbox to a login user, not to an employee with a type or client.
 - Nothing recognises "client email ID" or filters which mail reaches the HR/timesheet mailbox. Billable staff would simply connect Gmail like anyone and all their client mail would be read.
 - Partial building blocks: `timesheet` label and `timesheet_review` workflow (`domain.rs:63,171`), asserted by `pipeline.rs::timesheet_vertical_slice_end_to_end`; preset `acknowledge_timesheets` (`automations.rs:335`). These treat timesheet as one label for everyone.
 - User can do today: label/auto-acknowledge timesheet mail and open a review item. They cannot say who is billable, nor expect monthly timesheet or missing-timesheet tracking.
 - Gap: employee type + client mapping, mailbox policy ("billable: only important + timesheet leave the person's mailbox"), month-end timesheet-missing alert.
 
-### R3 Reconcile with portal; escalate by layer: Partial
+### R3 Reconcile with portal; escalate by layer: Partial (original audit; now Working, see section 1)
 Built and tested (alerts):
 - `alerts.rs` rules `important_unanswered` and `approval_pending` (`alerts.rs:33-34`, `evaluate_workspace` at `:449`), 15-minute job, dedupe, snooze, auto-resolve when the team replies, daily digest, email delivery.
 - API `GET /workspaces/{ws}/alerts`, `PATCH .../alerts/{id}`, `GET/PUT .../alert-settings`, `POST .../alert-settings/test` (`http/mod.rs:148-151`). UI: Alerts page, settings panel, nav badge (`features/alerts/*`).
@@ -60,12 +69,12 @@ Gaps:
 - Matching extraction still reads at most 5 attachments (`matching_jobs.rs`, `LIMIT 5`).
 - No UI shows "N of M mails read" for the workspace (only per-attachment status).
 
-### R5 Agent reads all team members' mail: Partial
+### R5 Agent reads all team members' mail: Partial (original audit; improved, still Partial)
 - Connecting: `POST /workspaces/{ws}/sources/nango-session` and `nango-connections` (Admin only, `http/sources.rs:171,200`), so an admin must connect each mailbox, or each person must be made admin. Not a per-person consent flow.
 - Many Gmail sources per workspace are supported (`UNIQUE(kind, external_connection_id)`); `connected_by_user_id` identifies the owner, used in `alerts.rs:276`, `send_safety.rs:339`, `memory_learning.rs:340`, and per-case `agent_user_id` (`migrations/0026`, `agents/triggers.rs:91`) so the agent adapts to the mailbox owner's profile. Profiles tested in `agent_profiles.rs` (8 tests) and `agentProfiles.test.tsx`.
 - Gaps: no test connects two mailboxes and checks isolation; inbox has no per-mailbox/per-person filter in the list API (`http/messages.rs`); no people directory; admin-only connect; everyone with workspace access sees all mail (no scoping). Wave3 item 5 (people + per-person mailboxes) is not built.
 
-### R6 Agent answers questions and monitors performance: Partial / Missing
+### R6 Agent answers questions and monitors performance: Partial / Missing (original audit; monitoring now Working, Q&A still not wired)
 - Working: `POST /workspaces/{ws}/assistant/command` (Ask Meera, Ctrl+K, voice or text, cited answers, actions only after Confirm). Tools: `search_mail`, `list_inbox`, `summarize_email`, `list_approvals`, `list_alerts`, `get_case`, `list_matches`, plus action cards (`assistant/command.rs`, tool_specs). Tests: `assistant.rs::read_only_query_is_answered_with_citations_and_the_planner_never_sees_bodies`, `inbox_filters_return_typed_summaries`, `the_loop_is_bounded_to_six_turns`, 13 tests green; web `assistant.test.tsx` 9 tests green.
 - User can ask: "Which mail needs a reply?", "What did Capgemini send about Java?", "What is waiting for my approval?".
 - Gaps: no exact-count/SQL tool, so "How many submissions did Priya do since joining" cannot be answered (an LLM over search results would guess). No submissions or outcomes model, no joining date, no quality (interview rate) metric, no per-person view, no scheduled performance summary. Answers are capped at 120 words and 8 search hits. The "monitor" half of R6 is Missing.
@@ -117,25 +126,27 @@ Wave 3 task status (code-checked, not all re-run): 1 send/injection safety built
 
 ## 4. Gap list, ordered by client value
 
-`docs/product-v1-plan.md` WP-A..F cover agents, learning, evals, designer, hardening and UI polish. None of them includes people, performance, billable policy or portal data; those need a new package ("WP-G Staffing operations": people directory, submissions/metrics, reconciliation) that depends on WP-B (agent registry) for the `hrms.*` agents.
+Status column added after WP-G. Numbers 1-8 were the "WP-G Staffing operations" package.
 
-| # | Gap | Req | Why it matters | Suggested owner |
-|---|---|---|---|---|
-| 1 | People directory: employee, emails, billable/non-billable, client, manager, joining date, role, daily/weekly targets (CSV import + UI) | R1 R2 R3 R5 R6 | Prerequisite for 2-8. Today nothing knows who is billable, who reports to whom, or when someone joined. | **new** (WP-G) |
-| 2 | Submissions model: detect a recruiter's sent mail with CV attached, link to requirement and candidate, track outcome (interview/rejected/joined) | R1 R6 | Source of every performance number; only agent-driven submissions are recorded now. | **new** (WP-G), uses WP-B cases |
-| 3 | Metrics API + corner widget (today, week, target vs achieved, interview rate), team view for managers | R1 R6 | The client's first headline ask; zero code today. | **new** (WP-G) backend; WP-F for widget |
-| 4 | Ask Meera metric tools: exact counts per person/date range/since joining, quality (interview rate), cited | R6 | Makes "how many submissions since joining" answerable without guessing. | **new** (WP-G) + WP-B tool allowlist |
-| 5 | Billable policy: client-domain/mailbox rule so only important mail and monthly timesheets reach the HR mailbox; month-end "timesheet missing" alert | R2 | Core business model of the client; privacy of client mail. | **new** (WP-G) + WP-B `hrms.timesheets` agent |
-| 6 | Portal reconciliation: CSV import of portal hours/submissions, exact joins against timesheet mails and submissions, mismatch alerts | R3 | Whole second half of R3 is absent. | **new** (WP-G) |
-| 7 | Layered escalation: first alert to the mailbox owner, then manager, then HR from the directory; new alert kinds (timesheet missing, below target, mismatch, correction needed) | R3 | Current chain is one flat workspace list, so alerts cannot reach "respective levels". | **new** (WP-G) on top of existing `alerts.rs`; UI in WP-F |
-| 8 | Per-person mailboxes: non-admin members connect their own Gmail, inbox filter by mailbox/person, scoping rules, two-mailbox isolation test | R5 | Needed for "agent reads all team members' mail" at scale and for consent. | **new** (WP-G); isolation tests in WP-E |
-| 9 | Read-everything mode: configurable full-history backfill (not 14 days / 100 mails), a budgeted "read all" background pass that runs insight + attachments + embeddings on old mail, and a "N of M read" progress indicator | R4 | Today most history is stored but not understood. | WP-E (hardening/jobs) with WP-F progress UI |
-| 10 | Real-model quality proof: golden set for labels and matching, run in CI | R7 R4 | All tests use offline stubs; matching depends on correct labelling of `client_requirement` / `candidate_referral`. | WP-D |
-| 11 | Matching extras: LLM rerank, matching-specific digest settings and UI preview, attachment cap above 5, referral review-path test | R7 | Polish for the one capability already working. | WP-A (context) / WP-F (UI) |
-| 12 | Doc drift: roadmap and wave3 status tables are stale (alerts, Ask Meera, attachments shown wrong) | all | Misleads planning. | WP-E (docs) |
+| # | Gap | Req | Status after WP-G |
+|---|---|---|---|
+| 1 | People directory: employee, emails, billable/non-billable, client, manager, joining date, role, daily/weekly targets (CSV import + UI) | R1 R2 R3 R5 R6 | **Done.** Generic for every workspace (billable and client only with the staffing pack). Super admin writes, others see themselves and their reports. CSV import with dry run and a row-by-row report. `staffing_people.rs`, `staffing_roles.rs`. |
+| 2 | Submissions model: detect a recruiter's sent mail with CV attached, link to requirement and candidate, track outcome | R1 R6 | **Done.** Scan every 15 min plus on demand; ambiguous links wait for a person (`needs_confirm`), false positives can be dismissed, outcomes read from the thread or `submission_update` replies. `staffing_submissions.rs`. Not done: the `submit_candidate` agent action does not write to this table yet (it is another package's code), so agent-made submissions are only counted once they appear in the sent mailbox. |
+| 3 | Metrics API + corner widget (today, week, target vs achieved, interview rate), team view for managers | R1 R6 | **Done.** Pluggable exact-SQL metric definitions; generic metrics for other packs. `staffing_metrics.rs`, web `team.test.tsx`. No per-person history page. |
+| 4 | Ask Meera metric tools | R6 | **Hook only.** `staffing/metrics.rs` exposes the read-only functions and `docs/api.md` documents them; wiring the assistant tool allowlist is the assistant package's job. |
+| 5 | Billable policy and month-end timesheet-missing alert | R2 | **Done.** `staffing_policy.rs`. Needs `hr_source_id` set (Timesheets page); until then the policy is off. |
+| 6 | Portal reconciliation | R3 | **Done.** `staffing_portal.rs`. CSV column names are assumed (`email,month,hours` and `email,date,candidate,client`); the real portal export format has not been seen. |
+| 7 | Layered escalation and new alert kinds | R3 | **Done** for `timesheet_missing`, `below_target`, `portal_mismatch` and owner-first routing of the existing alerts. `staffing_escalation.rs`. Not done: "correction needed"; reassigning an alert to another person. |
+| 8 | Per-person mailboxes: inbox filter by mailbox/person, two-mailbox isolation test | R5 | **Partly done.** Filter and isolation test done. Not done: non-admin members connecting their own Gmail (consent flow), and scoping as an access wall. |
+| 9 | Read-everything mode: full-history backfill, budgeted "read all" pass, "N of M read" indicator | R4 | Open (WP-E / WP-F). |
+| 10 | Real-model quality proof: golden set for labels and matching in CI | R7 R4 | Open (WP-D). Note: submission outcomes use phrase rules; a golden set for `submission_update` replies is needed before trusting them on real mail. |
+| 11 | Matching extras: LLM rerank, matching digest settings, attachment cap above 5, referral review-path test | R7 | Open. |
+| 12 | Doc drift: roadmap and wave3 status tables are stale | all | Open. |
 
 ## 5. Bottom line
 
-Of Shrikant's seven asks, one is Working (R7 matching), four are Partial (R3 alerts only, R4, R5, R6 Q&A only) and two are
-entirely Missing (R1 performance widget, R2 billable/non-billable). The missing items share one root: there is no people
-and submissions data model. Build gap 1 and gap 2 first; most of the rest follow.
+After WP-G, of Shrikant's seven asks four are **Working** (R1 performance widget, R2 billable policy, R3 portal reconciliation
+and layered escalation, R7 matching) and three are **Partial** (R4 read-everything depth, R5 per-person mailboxes without a
+consent flow, R6 monitoring done but Ask Meera not yet using the metric functions). The biggest remaining risks are not in
+code structure but in unproven inputs: real portal CSV layouts, real timesheet wording, and the phrase rules that read client
+replies, none of which has been tried on real mail.
