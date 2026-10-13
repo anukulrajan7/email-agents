@@ -15,6 +15,8 @@ pub mod replies;
 pub mod memory;
 pub mod sessions;
 pub mod sources;
+pub mod text_clean;
+pub mod threads;
 
 use std::{sync::Arc, time::Duration};
 
@@ -109,7 +111,16 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
         _ => Arc::new(ai::RulesAnalyst),
     };
 
+    // Label suggestions read many emails at once and feed the taxonomy: use the drafting model.
+    let label_suggester: Arc<dyn ai::label_suggest::LabelSuggester> = match &openrouter {
+        Some(client) if !config.openrouter_model_id.is_empty() => {
+            Arc::new(ai::label_suggest::OpenRouterLabelSuggester::new(client.clone(), &config.openrouter_model_id))
+        }
+        _ => Arc::new(ai::label_suggest::RulesLabelSuggester),
+    };
+
     Ok(AppState {
+        label_suggester,
         analyst,
         extractor,
         mailer,

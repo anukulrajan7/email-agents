@@ -9,8 +9,19 @@ use crate::{
     db::{new_id, now_ms},
     domain::{NormalizedEmail, TAXONOMY_VERSION},
     jobs::{self, kind},
-    memory,
+    memory, text_clean,
 };
+
+/// True for mail the connected mailbox itself sent: Gmail's SENT label, or a sender that is the
+/// source's own mailbox address.
+async fn is_outbound(conn: &mut SqliteConnection, source_id: &str, email: &NormalizedEmail) -> sqlx::Result<bool> {
+    if email.outbound {
+        return Ok(true);
+    }
+    let mailbox: Option<String> =
+        sqlx::query_scalar("SELECT mailbox_address FROM email_sources WHERE id = ?1").bind(source_id).fetch_optional(&mut *conn).await?.flatten();
+    Ok(mailbox.is_some_and(|m| !m.is_empty() && m.eq_ignore_ascii_case(&email.sender_address)))
+}
 
 /// Inserts the message (+ thread, attachments, audit, classify job) unless
 /// `(source_id, source_message_id)` already exists. Returns the new message ID.
@@ -78,13 +89,15 @@ pub async fn persist_message(
         }
     };
 
+    let outbound = is_outbound(&mut *conn, source_id, email).await?;
+    let body_text = text_clean::clean_body(&email.body_text, email.body_html.as_deref());
     let message_id = new_id("msg");
     sqlx::query(
         "INSERT INTO email_messages
            (id, workspace_id, source_id, thread_id, source_message_id, rfc_message_id, sender_address,
             original_sender_address, recipients_json, subject, body_text, body_html, received_at, created_at, processing_status,
-            content_complete)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, 'normalized', ?15)",
+            content_complete, sender_name, cc_json, direction)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?18, ?15, ?16, ?17, ?19)",
     )
     .bind(&message_id)
     .bind(workspace_id)
@@ -96,16 +109,22 @@ pub async fn persist_message(
     .bind(&email.original_sender_address)
     .bind(json!(email.recipients).to_string())
     .bind(&email.subject)
-    .bind(&email.body_text)
+    .bind(&body_text)
     .bind(&email.body_html)
     .bind(email.received_at)
     .bind(now)
     .bind(!email.preview_only)
+    .bind(&email.sender_name)
+    .bind(json!(email.cc).to_string())
+    .bind(if outbound { "processed" } else { "normalized" })
+    .bind(if outbound { "outbound" } else { "inbound" })
     .execute(&mut *conn)
     .await?;
 
-    memory::record_contact(&mut *conn, workspace_id, &email.sender_address, email.sender_name.as_deref(), email.received_at)
-        .await?;
+    if !outbound {
+        memory::record_contact(&mut *conn, workspace_id, &email.sender_address, email.sender_name.as_deref(), email.received_at)
+            .await?;
+    }
 
     for a in &email.attachments {
         sqlx::query(
@@ -138,14 +157,17 @@ pub async fn persist_message(
         },
     )
     .await?;
-    jobs::enqueue(
-        &mut *conn,
-        kind::CLASSIFY_EMAIL,
-        &format!("classify:{message_id}:{TAXONOMY_VERSION}"),
-        Some(workspace_id),
-        &json!({ "message_id": message_id }),
-    )
-    .await?;
+    // Our own sent mail is kept as evidence of replies; it is never triaged, analysed or drafted against.
+    if !outbound {
+        jobs::enqueue(
+            &mut *conn,
+            kind::CLASSIFY_EMAIL,
+            &format!("classify:{message_id}:{TAXONOMY_VERSION}"),
+            Some(workspace_id),
+            &json!({ "message_id": message_id }),
+        )
+        .await?;
+    }
     Ok(Some(message_id))
 }
 
@@ -160,18 +182,26 @@ pub async fn refresh_content(
     if email.preview_only {
         return Ok(None);
     }
-    let updated: Option<(String, String)> = sqlx::query_as(
-        "UPDATE email_messages SET body_text = ?1, body_html = COALESCE(?2, body_html), content_complete = 1
+    let outbound = is_outbound(&mut *conn, source_id, email).await?;
+    let body_text = text_clean::clean_body(&email.body_text, email.body_html.as_deref());
+    let updated: Option<(String, String, String)> = sqlx::query_as(
+        "UPDATE email_messages SET body_text = ?1, body_html = COALESCE(?2, body_html), content_complete = 1, text_clean_v = 1,
+                sender_name = COALESCE(?5, sender_name), cc_json = ?6,
+                direction = CASE WHEN ?7 THEN 'outbound' ELSE direction END,
+                processing_status = CASE WHEN ?7 THEN 'processed' ELSE processing_status END
          WHERE source_id = ?3 AND source_message_id = ?4 AND content_complete = 0
-         RETURNING id, workspace_id",
+         RETURNING id, workspace_id, direction",
     )
-    .bind(&email.body_text)
+    .bind(&body_text)
     .bind(&email.body_html)
     .bind(source_id)
     .bind(&email.source_message_id)
+    .bind(&email.sender_name)
+    .bind(json!(email.cc).to_string())
+    .bind(outbound)
     .fetch_optional(&mut *conn)
     .await?;
-    let Some((message_id, workspace_id)) = updated else { return Ok(None) };
+    let Some((message_id, workspace_id, direction)) = updated else { return Ok(None) };
     let has_attachments: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM attachments WHERE message_id = ?1")
         .bind(&message_id)
         .fetch_one(&mut *conn)
@@ -192,13 +222,15 @@ pub async fn refresh_content(
                 .await?;
         }
     }
-    jobs::enqueue(
-        &mut *conn,
-        kind::CLASSIFY_EMAIL,
-        &format!("classify:{message_id}:{TAXONOMY_VERSION}:content-refresh"),
-        Some(&workspace_id),
-        &json!({ "message_id": message_id }),
-    )
-    .await?;
+    if direction == "inbound" {
+        jobs::enqueue(
+            &mut *conn,
+            kind::CLASSIFY_EMAIL,
+            &format!("classify:{message_id}:{TAXONOMY_VERSION}:content-refresh"),
+            Some(&workspace_id),
+            &json!({ "message_id": message_id }),
+        )
+        .await?;
+    }
     Ok(Some(message_id))
 }

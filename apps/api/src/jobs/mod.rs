@@ -2,6 +2,7 @@
 
 pub mod handlers;
 pub mod matching_jobs;
+pub mod message_jobs;
 pub mod worker;
 
 use rand::Rng;
@@ -24,6 +25,8 @@ pub mod kind {
     pub const EXTRACT_RECORD: &str = "extract_record";
     pub const MATCH_RECORD: &str = "match_record";
     pub const ANALYZE_MESSAGE: &str = "analyze_message";
+    pub const CLEAN_STORED_TEXT: &str = "clean_stored_text";
+    pub const REFETCH_GMAIL_HTML: &str = "refetch_gmail_html";
 }
 
 #[derive(Debug, Clone, FromRow)]

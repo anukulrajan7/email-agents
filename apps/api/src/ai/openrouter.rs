@@ -57,7 +57,7 @@ impl OpenRouterClient {
     }
 
     /// One structured chat call. Returns (JSON content string, model that answered).
-    async fn chat_json(
+    pub(crate) async fn chat_json(
         &self,
         model: &str,
         system: &str,

@@ -7,14 +7,18 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sqlx::FromRow;
 
+use std::collections::HashSet;
+
 use super::AppState;
 use crate::{
+    ai::label_suggest::{MAX_SAMPLES, SampleMail, finalize},
     audit::{self, Actor, Entry},
     auth::{AuthUser, require_role},
     db::{new_id, now_ms},
     domain::{LABEL_TEMPLATES, OTHER_LABEL, Role, WORKFLOW_TEMPLATES},
     error::{AppError, AppResult},
     labels::{COLORS, MAX_ACTIVE_LABELS, slugify},
+    sources::normalize::truncate_chars,
 };
 
 const LABEL_SELECT: &str = "SELECT l.id, l.key, l.name, l.description, l.color, l.position, l.system, l.archived,
@@ -245,4 +249,53 @@ pub async fn update(
     let row: Label = sqlx::query_as(&format!("{LABEL_SELECT} WHERE l.id = ?1")).bind(&id).fetch_one(&mut *tx).await?;
     tx.commit().await?;
     Ok(Json(row))
+}
+
+// ---------------------------------------------------------------- AI suggestions
+
+#[derive(FromRow)]
+struct SampleRow {
+    subject: String,
+    body_text: String,
+}
+
+/// Admin: the AI reads up to 60 recent emails (unlabelled `other` first) and proposes up to 5 new labels.
+pub async fn suggest(State(state): State<AppState>, user: AuthUser, Path(ws): Path<String>) -> AppResult<Json<Value>> {
+    require_role(&state.db, &ws, &user, Role::Admin).await?;
+    let rows: Vec<SampleRow> = sqlx::query_as(
+        "SELECT m.subject, m.body_text FROM email_messages m
+         LEFT JOIN classifications c ON c.message_id = m.id
+         WHERE m.workspace_id = ?1 AND m.direction = 'inbound'
+         ORDER BY CASE WHEN c.category IS NULL OR c.category = ?2 THEN 0 ELSE 1 END, m.received_at DESC
+         LIMIT ?3",
+    )
+    .bind(&ws)
+    .bind(OTHER_LABEL)
+    .bind(MAX_SAMPLES as i64)
+    .fetch_all(&state.db)
+    .await?;
+    if rows.is_empty() {
+        return Ok(Json(json!({ "items": [] })));
+    }
+    let samples: Vec<SampleMail> = rows
+        .iter()
+        .map(|r| SampleMail {
+            subject: r.subject.clone(),
+            snippet: truncate_chars(&r.body_text.split_whitespace().collect::<Vec<_>>().join(" "), 200),
+        })
+        .collect();
+    let existing = crate::labels::active(&state.db, &ws).await?;
+    // Archived labels keep their key too, so a suggestion can never collide with one.
+    let taken: HashSet<String> = sqlx::query_scalar::<_, String>("SELECT key FROM labels WHERE workspace_id = ?1")
+        .bind(&ws)
+        .fetch_all(&state.db)
+        .await?
+        .into_iter()
+        .chain(existing.iter().map(|l| l.key.clone()))
+        .collect();
+    let proposals = state.label_suggester.suggest(&samples, &existing).await.map_err(|e| {
+        tracing::warn!(error = %e, "label suggestion failed");
+        AppError::AiUnavailable
+    })?;
+    Ok(Json(json!({ "items": finalize(proposals, &taken, samples.len()) })))
 }

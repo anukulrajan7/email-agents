@@ -50,6 +50,8 @@ pub enum AppError {
     NotImplemented(String),
     #[error("dependency unavailable")]
     Unavailable,
+    #[error("the AI service is unavailable right now; try again shortly")]
+    AiUnavailable,
     #[error("too many attempts; try again later")]
     RateLimited,
     #[error("verify your email first; we sent you a new code")]
@@ -77,6 +79,7 @@ impl IntoResponse for AppError {
             AppError::Conflict(_) => (StatusCode::CONFLICT, "conflict"),
             AppError::NotImplemented(_) => (StatusCode::NOT_IMPLEMENTED, "not_implemented"),
             AppError::Unavailable => (StatusCode::SERVICE_UNAVAILABLE, "unavailable"),
+            AppError::AiUnavailable => (StatusCode::SERVICE_UNAVAILABLE, "ai_unavailable"),
             AppError::RateLimited => (StatusCode::TOO_MANY_REQUESTS, "rate_limited"),
             AppError::EmailNotVerified => (StatusCode::FORBIDDEN, "email_not_verified"),
             AppError::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal"),

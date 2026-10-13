@@ -13,7 +13,8 @@ The TypeScript mirror lives in `apps/web/src/api/types.ts` — change both toget
 - Timestamps: RFC 3339 strings (UTC). IDs: opaque strings.
 - Errors: `{ "error": { "code": string, "message": string, "request_id": string } }`.
   Codes: `unauthorized` (401), `forbidden` (403), `not_found` (404), `bad_request` (400), `conflict` (409),
-  `not_implemented` (501), `email_not_verified` (403), `rate_limited` (429), `internal` (500).
+  `not_implemented` (501), `email_not_verified` (403), `rate_limited` (429), `ai_unavailable` (503, the AI call failed),
+  `internal` (500).
 
 ## Enums
 
@@ -21,7 +22,7 @@ The TypeScript mirror lives in `apps/web/src/api/types.ts` — change both toget
 Role              = "admin" | "operator"
 SourceKind        = "forwarding" | "nango_gmail" | "nango_microsoft" | "future"
 SourceStatus      = "pending" | "connected" | "degraded" | "disconnected"
-ProcessingStatus  = "pending" | "normalized" | "classified" | "workflow_completed" | "failed"
+ProcessingStatus  = "pending" | "normalized" | "classified" | "workflow_running" | "workflow_completed" | "processed" | "failed"
 Category          = "timesheet" | "leave" | "candidate_referral" | "approval" | "payroll" | "general" | "other"
 Priority          = "low" | "normal" | "high"
 ClassSource       = "jev" | "llm" | "manual" | "fallback"
@@ -48,7 +49,7 @@ JobStatus         = "pending" | "running" | "succeeded" | "dead"
 | POST | `/api/v1/workspaces/:ws/sources/nango-connections` | admin | `{connection_id, provider_config_key}` | `Source` (server re-verifies connection tags with Nango; 403 if not this workspace/user) |
 | POST | `/api/v1/workspaces/:ws/sources/:id/sync` | admin | – | 202 `{status:"queued"}`; 409 for forwarding or disconnected sources |
 | POST | `/api/v1/workspaces/:ws/sources/:id/disconnect` | admin | – | `Source` (status `disconnected`; Nango connection revoked best-effort) |
-| GET | `/api/v1/workspaces/:ws/messages?cursor=&category=&q=&limit=` | member | – | `{items: MessageSummary[], next_cursor: string\|null}` |
+| GET | `/api/v1/workspaces/:ws/messages?cursor=&category=&q=&limit=&sort=&direction=` | member | – | `{items: MessageSummary[], next_cursor: string\|null}` |
 | GET | `/api/v1/workspaces/:ws/messages/:id` | member | – | `MessageDetail` |
 | PATCH | `/api/v1/workspaces/:ws/messages/:id/classification` | member | `{category, priority?, requires_reply?}` | `Classification` |
 | POST | `/api/v1/workspaces/:ws/messages/:id/draft` | member | – | 202 `{status:"queued"}` |
@@ -276,3 +277,71 @@ type Match = {
   created_at: string; updated_at: string;
 };
 ```
+
+## Wave 2: understanding, ordering, clean text, direction
+
+### Processing status
+`processed` is the terminal state for a message that was classified and that no workflow matched (nothing else
+to do). `workflow_completed` is kept for workflow runs. Mail the connected mailbox itself sent (see Direction)
+is stored as `processed` straight away. `workflow_running` is reserved.
+
+### Message list: `GET .../messages`
+Query additions: `sort=recent|importance` (default `recent`) and `direction=inbound|outbound|all` (default
+`inbound`; anything else is 400). `sort=importance` orders by needs-reply first, then priority
+(high, normal, low), then newest. Its `cursor` is an opaque offset token (`next_cursor` as before); a cursor from
+one sort is not valid for the other. `category` and `q` filters work with both sorts.
+
+`MessageSummary` adds (all additive):
+```ts
+{ direction: "inbound" | "outbound";
+  needs_reply: boolean | null;   // insight.needs_reply, else classification.requires_reply, else null
+  summary: string | null }       // insight summary, cut to 140 chars (last char "…" when cut)
+```
+`priority` (existing) is `"high"|"normal"|"low"|null`.
+
+### Message detail: `GET .../messages/:id`
+Adds:
+```ts
+{ insight: { summary: string; asks: string[]; deadline: string | null; needs_reply: boolean; missing_info: string[] } | null;
+  from_name: string | null;        // sender display name ("Priya Sharma"); `from` stays the address
+  cc: string[];                    // `to` lists To recipients only (older rows may still hold To+Cc, Cc is removed)
+  direction: "inbound" | "outbound";
+  draft: { ...; unanswered: string[] } | null }   // asks the draft could not answer; each is "[NEEDS: ...]" in body_text
+```
+Already present and used for the Gmail-style header: `from`, `to`, `received_at` (ISO 8601).
+`body_html_safe` is filled for every Gmail message whose original has an HTML part (older rows are re-fetched, see below).
+`model_id` fields stay in the API; the UI never shows them.
+
+### Text cleaning
+`body_text` is cleaned at ingest for every source (forwarding, Gmail): HTML comments (including Outlook conditional
+comments) and stray tags are removed, `<https://...>` wrappers become bare URLs on the same line as their anchor
+text, runs of blank lines collapse to one, trailing spaces are trimmed, an immediately repeated block is dropped,
+and when the text part is empty or junk it is derived from the HTML part. Stored rows are re-cleaned once by the
+`clean_stored_text` job (queued by the worker's maintenance tick while any row has `text_clean_v = 0`).
+
+### Gmail HTML re-fetch
+Legacy Gmail rows stored without HTML are re-fetched once in full format (up to 200 per run, at most 3 tries per
+message, enqueued after each sync as `refetch_gmail_html`). It fills `body_html`, re-cleans the text and refreshes
+sender name and Cc. The Gmail MIME walk is recursive (multipart/alternative, related, mixed).
+
+### Direction (inbound / outbound)
+The Gmail queries also return the mailbox's own sent mail. A message is `outbound` when Gmail's `SENT` label is
+present or its sender is the connected mailbox address (`email_sources.mailbox_address`, learned from the Gmail
+profile at sync; rows stored earlier are marked on that sync). Outbound messages are stored as evidence of
+replies but never classified, analysed, drafted against or run through workflows, do not create contacts, and are
+hidden from the default list. Server helper for other features:
+`threads::thread_has_reply_after(db, workspace_id, thread_key, after_ms) -> bool` is true when the thread
+(`thread_key` = our thread id or the provider thread id) has an outbound message after `after_ms`, or a sent draft
+for a message in it.
+
+### Label suggestions: `POST /api/v1/workspaces/:ws/labels/suggest` (admin)
+The AI reads up to 60 recent inbound emails (subject + snippet, unlabelled `other` first) and proposes up to 5 new labels.
+```ts
+{ items: { key: string; name: string; description: string;
+           color: "slate" | "sage" | "plum" | "ochre" | "teal" | "postmark" | "ink";   // palette name, valid for POST /labels
+           example_subjects: string[]; estimated_count: number }[] }
+```
+`key` is the slug of `name`, never equals an existing key (archived labels included). Accepting a suggestion is
+`POST .../labels {name, description, color}`. No mail returns `{items: []}`. If the AI call fails: 503
+`ai_unavailable`. Contract note: the original sketch used a hex colour; a palette name is returned so the result
+can be sent to `POST /labels` unchanged.

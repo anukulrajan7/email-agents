@@ -126,6 +126,10 @@ pub struct NormalizedEmail {
     pub sender_name: Option<String>,
     pub original_sender_address: Option<String>,
     pub recipients: Vec<String>,
+    /// Cc addresses. For Gmail they are also part of `recipients`.
+    pub cc: Vec<String>,
+    /// Sent by the connected mailbox itself (Gmail SENT label): stored, never triaged.
+    pub outbound: bool,
     pub subject: String,
     pub body_text: String,
     pub body_html: Option<String>,
