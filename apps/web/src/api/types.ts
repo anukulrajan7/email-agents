@@ -174,12 +174,38 @@ export type SafetyIssue = { code: string; message: string; fix: string | null };
 export type SafetyReport = { blocking: SafetyIssue[]; warnings: SafetyIssue[] };
 export type ScheduledSend = { status: 'scheduled'; draft_id: string; send_at: string };
 
+export type ExtractKind = 'sheet' | 'office' | 'pdf' | 'docx' | 'image' | 'audio' | 'unsupported';
+export type ExtractStatus = 'done' | 'failed' | 'skipped';
+
+/** Small facts the reader found, for the expanded attachment view. Fields depend on the kind. */
+export type ExtractMeta = {
+  summary?: string;
+  /** sheet: a few rows per sheet (first row is the header). */
+  sheets?: { name: string; rows: number; columns: number; truncated: boolean; sample: string[][] }[];
+  /** image */
+  image_kind?: string;
+  text?: string;
+  fields?: Record<string, string>;
+  /** audio */
+  action_items?: string[];
+  transcript_excerpt?: string;
+  truncated?: boolean;
+};
+
 export type Attachment = {
   id: string;
   name: string;
   media_type: string | null;
   size_bytes: number | null;
   scan_status: string;
+  /** Absent or null until the attachment has been looked at. */
+  extract_kind?: ExtractKind | null;
+  extract_status?: ExtractStatus | null;
+  /** Why a file was skipped or failed, in plain words. */
+  extract_note?: string | null;
+  /** Up to 300 characters: summary, description or the first words. */
+  preview?: string | null;
+  extract_meta?: ExtractMeta | null;
 };
 
 export type AuditEvent = {

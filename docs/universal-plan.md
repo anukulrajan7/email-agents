@@ -24,3 +24,10 @@ Inputs: architecture audit (main @ 9775695), specialist-agents design, research 
 7. M7 goal-first onboarding (end-to-end MVP test).
 8. M8 agent-proposed automations, manual/scheduled triggers, signed webhooks.
 Parallel: prompt library M0 (snapshot-tested), specialist tables + shadow routing, attachments (Excel/PPT/image/audio), voice agent.
+
+## Attachments as text (`src/attachments/`, job `extract_attachments`)
+- Readers: spreadsheets (calamine + csv: per sheet a markdown table of the header and first 200 rows, ≤ 50 columns, cells ≤ 200 chars, plus row/column counts), PPTX / DOCX (hidden `w:vanish` runs and tracked deletions dropped) / TXT / MD / HTML / RTF, PDF via `matching::attachment_text`, images (`VisionReader`, ≤ 8 MB, ID numbers masked to the last 4), audio (`AudioReader`, ≤ 25 MB; WAV and MP3 are cut into ~45 s pieces because the upstream times out near 60 s, other containers are sent whole).
+- Stored on `attachments`: `text_content` (also feeds search and matching), `extract_kind`, `extract_status` (done|failed|skipped), `extract_error` (plain words, never a provider message), `extract_meta_json` (UI facts).
+- Job `attachments:<message_id>` runs on ingest; readers that need no model always run. Images and audio follow the AI rule (new mail, within `AI_DAILY_BUDGET_USD`); old mail is read when opened (`attachments:<id>:open` from `POST /messages/{id}/insight`). After new text: re-index, and the insight is refreshed once (`message_insights.attachments_hash`) with attachment text fenced as untrusted (≤ 3,000 chars each, ≤ 8,000 total).
+- Config: `OPENROUTER_VISION_MODEL_ID` (default `qwen/qwen3-vl-30b-a3b-instruct`), `OPENROUTER_AUDIO_MODEL_ID` (default `qwen/qwen3-asr-1.7b`); the audio summary uses the classifier model. Empty id or no `OPENROUTER_API_KEY` = those files are skipped.
+- Gap: attachments of forwarded (Resend) mail have no download handle in our model (`provider_ref` is empty), so they are recorded as skipped ("Files on forwarded mail can't be read yet"). Resend's receiving API can fetch them (`GET /emails/receiving/{id}/attachments/{attachment_id}`); wiring that is the follow-up.

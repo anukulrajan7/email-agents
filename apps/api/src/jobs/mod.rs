@@ -1,6 +1,7 @@
 //! Durable job queue on SQLite. Delivery is at-least-once: every handler must be idempotent.
 
 pub mod agent_jobs;
+pub mod attachment_jobs;
 pub mod automation_jobs;
 pub mod handlers;
 pub mod knowledge_jobs;
@@ -28,6 +29,7 @@ pub mod kind {
     pub const REGISTER_NANGO_CONNECTION: &str = "register_nango_connection";
     pub const LEARN_FROM_DRAFT: &str = "learn_from_draft";
     pub const EXTRACT_RECORD: &str = "extract_record";
+    pub const EXTRACT_ATTACHMENTS: &str = "extract_attachments";
     pub const MATCH_RECORD: &str = "match_record";
     pub const RUN_AUTOMATIONS: &str = "run_automations";
     pub const REMIND_NO_REPLY: &str = "remind_no_reply";

@@ -6,6 +6,7 @@ pub mod alerts;
 pub mod assistant;
 pub mod audit;
 pub mod automations;
+pub mod attachments;
 pub mod auth;
 pub mod backup;
 pub mod config;
@@ -234,9 +235,25 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
         }
     };
 
+    // Images and audio need OpenRouter; without it (or without a model id) they are skipped, not failed.
+    let vision: Option<Arc<dyn attachments::vision::VisionReader>> = match &openrouter {
+        Some(client) if !config.openrouter_vision_model_id.is_empty() => {
+            Some(Arc::new(attachments::vision::OpenRouterVision::new(client.clone(), &config.openrouter_vision_model_id)))
+        }
+        _ => None,
+    };
+    let audio: Option<Arc<dyn attachments::audio::AudioReader>> = match &openrouter {
+        Some(client) if !config.openrouter_audio_model_id.is_empty() => {
+            Some(Arc::new(attachments::audio::OpenRouterAudio::new(client.clone(), &config.openrouter_audio_model_id, analyst_model)))
+        }
+        _ => None,
+    };
+
     Ok(AppState {
         assistant_planner,
         transcriber,
+        vision,
+        audio,
         planner,
         critic,
         judge,

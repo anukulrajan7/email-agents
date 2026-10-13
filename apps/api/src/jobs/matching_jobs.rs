@@ -52,6 +52,26 @@ struct AttachmentRow {
     text_content: Option<String>,
 }
 
+/// Downloads one Gmail attachment through Nango. `Ok(None)` is a permanent failure for this attachment
+/// (logged); a provider outage is `Err(Retry)` so the job is retried.
+pub async fn download_gmail_attachment(
+    state: &AppState,
+    source_message_id: &str,
+    connection_id: &str,
+    provider_config_key: &str,
+    provider_attachment_id: &str,
+) -> Result<Option<Vec<u8>>, JobError> {
+    let path = format!("messages/{source_message_id}/attachments/{provider_attachment_id}");
+    match state.nango.gmail_call(Method::GET, connection_id, provider_config_key, &path, None).await {
+        Ok(v) => Ok(v.get("data").and_then(Value::as_str).and_then(|d| URL_SAFE_NO_PAD.decode(d.trim_end_matches('=')).ok())),
+        Err(crate::sources::nango::NangoError::Unavailable(m)) => Err(JobError::Retry(m)),
+        Err(e) => {
+            tracing::warn!(error = %e, "attachment download failed");
+            Ok(None)
+        }
+    }
+}
+
 /// Downloads (Gmail) and reads PDF/DOCX/TXT attachments once; failures are recorded,
 /// never fatal. Attachment bytes are not stored.
 async fn read_attachments(state: &AppState, message_id: &str, msg: &MessageRow) -> Result<Vec<(String, String)>, JobError> {
@@ -73,24 +93,16 @@ async fn read_attachments(state: &AppState, message_id: &str, msg: &MessageRow) 
         }
         let (status, text) = match (msg.source_kind.as_str(), &a.provider_attachment_id, &msg.connection_id, &msg.provider_config_key) {
             ("nango_gmail", Some(att), Some(conn), Some(pck)) => {
-                let path = format!("messages/{}/attachments/{att}", msg.source_message_id);
-                match state.nango.gmail_call(Method::GET, conn, pck, &path, None).await {
-                    Ok(v) => match v.get("data").and_then(Value::as_str).and_then(|d| URL_SAFE_NO_PAD.decode(d.trim_end_matches('=')).ok()) {
-                        Some(bytes) => match matching::attachment_text_isolated(a.filename.clone(), a.media_type.clone(), bytes).await {
-                            TextResult::Text(t) => ("extracted", Some(t)),
-                            TextResult::Unsupported => ("unsupported", None),
-                            TextResult::Failed(e) => {
-                                tracing::warn!(attachment = %a.id, error = %e, "could not read attachment");
-                                ("failed", None)
-                            }
-                        },
-                        None => ("failed", None),
+                match download_gmail_attachment(state, &msg.source_message_id, conn, pck, att).await? {
+                    Some(bytes) => match matching::attachment_text_isolated(a.filename.clone(), a.media_type.clone(), bytes).await {
+                        TextResult::Text(t) => ("extracted", Some(t)),
+                        TextResult::Unsupported => ("unsupported", None),
+                        TextResult::Failed(e) => {
+                            tracing::warn!(attachment = %a.id, error = %e, "could not read attachment");
+                            ("failed", None)
+                        }
                     },
-                    Err(crate::sources::nango::NangoError::Unavailable(m)) => return Err(JobError::Retry(m)),
-                    Err(e) => {
-                        tracing::warn!(attachment = %a.id, error = %e, "attachment download failed");
-                        ("failed", None)
-                    }
+                    None => ("failed", None),
                 }
             }
             _ => ("unsupported", None),

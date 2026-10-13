@@ -79,6 +79,10 @@ pub struct AppState {
     pub assistant_planner: Arc<dyn crate::assistant::CommandPlanner>,
     /// Speech to text for the assistant's push-to-talk.
     pub transcriber: Arc<dyn crate::assistant::transcribe::Transcriber>,
+    /// Reads image attachments; `None` (no OpenRouter key or vision model) skips them.
+    pub vision: Option<Arc<dyn crate::attachments::vision::VisionReader>>,
+    /// Transcribes audio attachments; `None` skips them.
+    pub audio: Option<Arc<dyn crate::attachments::audio::AudioReader>>,
 }
 
 pub fn router(state: AppState) -> Router {

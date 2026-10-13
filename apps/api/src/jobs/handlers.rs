@@ -3,6 +3,7 @@
 //! first statement is a write (so SQLite takes the write lock up front).
 
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 
 use super::{Job, kind};
 use crate::{
@@ -66,13 +67,29 @@ async fn deferred_until_opened(state: &AppState, job: &Job, payload: &Value) -> 
         kind::CLASSIFY_EMAIL => job.dedupe_key.contains(":recheck:") || job.dedupe_key.contains(":label:"),
         _ => false,
     };
-    if !deferrable || (job.dedupe_key.contains(":open:") || job.dedupe_key.ends_with(":open")) || job.dedupe_key.contains(":manual:") {
+    if !deferrable {
         return Ok(false);
     }
     let costs_tokens = matches!(
         job.kind.as_str(),
         kind::ANALYZE_MESSAGE | kind::LEARN_FROM_MESSAGE | kind::EXTRACT_RECORD | kind::RUN_AUTOMATIONS
     );
+    ai_deferred(state, job, payload, costs_tokens).await
+}
+
+/// A person opened the email (`:open`) or asked for the work (`:manual`).
+pub fn person_initiated(dedupe_key: &str) -> bool {
+    [":open", ":manual"].iter().any(|m| dedupe_key.ends_with(m) || dedupe_key.contains(&format!("{m}:")))
+}
+
+/// True when AI work for this job's email should wait for a person: the email is older than
+/// `AI_AUTO_HOURS`, or (for token-costing work) the workspace's daily budget is spent. Work a
+/// person asked for is never deferred. Jobs that mix AI and non-AI work (attachments) call this
+/// directly and skip only the AI part.
+pub async fn ai_deferred(state: &AppState, job: &Job, payload: &Value, costs_tokens: bool) -> Result<bool, JobError> {
+    if person_initiated(&job.dedupe_key) {
+        return Ok(false);
+    }
     if costs_tokens
         && let Some(ws) = &job.workspace_id
         && !ai_ledger::within_budget(&state.db, state.config.ai_daily_budget_usd, ws).await
@@ -115,6 +132,7 @@ pub async fn handle(state: &AppState, job: &Job) -> Result<(), JobError> {
         kind::CLEAN_STORED_TEXT => super::message_jobs::clean_stored_text(state).await,
         kind::REFETCH_GMAIL_HTML => super::message_jobs::refetch_gmail_html(state, &payload).await,
         kind::EXTRACT_RECORD => super::matching_jobs::extract_record(state, &payload).await,
+        kind::EXTRACT_ATTACHMENTS => super::attachment_jobs::extract_attachments(state, job, &payload).await,
         kind::MATCH_RECORD => super::matching_jobs::match_record(state, job, &payload).await,
         kind::RUN_AUTOMATIONS => super::automation_jobs::run_automations(state, &payload).await,
         kind::REMIND_NO_REPLY => super::automation_jobs::remind_no_reply(state, &payload).await,
@@ -934,15 +952,25 @@ pub async fn preview_draft(state: &AppState, message_id: &str, requested: Option
 // ---------------------------------------------------------------- understanding
 
 /// Returns the stored insight, computing and storing it on first use (idempotent).
+/// `summary, asks_json, deadline, needs_reply, missing_json, attachments_hash` of a stored insight.
+type StoredInsight = (String, String, Option<String>, bool, String, Option<String>);
+
 pub async fn analyze_message(state: &AppState, payload: &Value) -> Result<ai::Insight, JobError> {
     let message_id = str_field(payload, "message_id")?;
-    let stored: Option<(String, String, Option<String>, bool, String)> = sqlx::query_as(
-        "SELECT summary, asks_json, deadline, needs_reply, missing_json FROM message_insights WHERE message_id = ?1",
+    // Set when attachment text arrived after the first reading: read the email again with it, once per change.
+    let refresh = payload.get("refresh_attachments").and_then(Value::as_bool).unwrap_or(false);
+    let items = crate::attachments::load_prompt_items(&state.db, &message_id).await?;
+    let attachments_block = crate::attachments::prompt_block(&items);
+    let attachments_hash = (!attachments_block.is_empty()).then(|| format!("{:x}", Sha256::digest(attachments_block.as_bytes())));
+    let stored: Option<StoredInsight> = sqlx::query_as(
+        "SELECT summary, asks_json, deadline, needs_reply, missing_json, attachments_hash FROM message_insights WHERE message_id = ?1",
     )
     .bind(&message_id)
     .fetch_optional(&state.db)
     .await?;
-    if let Some((summary, asks, deadline, needs_reply, missing)) = stored {
+    if let Some((summary, asks, deadline, needs_reply, missing, stored_hash)) = stored
+        && (!refresh || attachments_hash.is_none() || stored_hash == attachments_hash)
+    {
         return Ok(ai::Insight {
             summary,
             asks: serde_json::from_str(&asks).unwrap_or_default(),
@@ -956,7 +984,12 @@ pub async fn analyze_message(state: &AppState, payload: &Value) -> Result<ai::In
         .bind(&message_id)
         .fetch_optional(&state.db)
         .await?;
-    let (mut insight, model_id) = state.analyst.analyze(&msg.subject, &msg.sender_address, &msg.body_text).await?;
+    let analyst_body = if attachments_block.is_empty() {
+        msg.body_text.clone()
+    } else {
+        format!("{}{attachments_block}", crate::sources::normalize::truncate_chars(&msg.body_text, ai::MAX_MODEL_INPUT_CHARS))
+    };
+    let (mut insight, model_id) = state.analyst.analyze(&msg.subject, &msg.sender_address, &analyst_body).await?;
     // Two independent signals must agree before we skip a reply; a cheap judge breaks real ties.
     let has_asks = !insight.asks.is_empty();
     let judge_says = if ai::judge::needs_reply_disputed(insight.needs_reply, requires_reply, has_asks) {
@@ -974,8 +1007,14 @@ pub async fn analyze_message(state: &AppState, payload: &Value) -> Result<ai::In
     insight.needs_reply = ai::judge::settle_needs_reply(insight.needs_reply, requires_reply, has_asks, judge_says);
     let source = if model_id == "rules-v1" { "rules" } else { "llm" };
     sqlx::query(
-        "INSERT INTO message_insights (message_id, summary, asks_json, deadline, needs_reply, missing_json, source, model_id, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) ON CONFLICT(message_id) DO NOTHING",
+        "INSERT INTO message_insights (message_id, summary, asks_json, deadline, needs_reply, missing_json, source, model_id, created_at,
+                                      attachments_hash)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+         ON CONFLICT(message_id) DO UPDATE SET summary = excluded.summary, asks_json = excluded.asks_json,
+           deadline = excluded.deadline, needs_reply = excluded.needs_reply, missing_json = excluded.missing_json,
+           source = excluded.source, model_id = excluded.model_id, created_at = excluded.created_at,
+           attachments_hash = excluded.attachments_hash
+         WHERE ?11",
     )
     .bind(&message_id)
     .bind(&insight.summary)
@@ -986,6 +1025,8 @@ pub async fn analyze_message(state: &AppState, payload: &Value) -> Result<ai::In
     .bind(source)
     .bind(&model_id)
     .bind(now_ms())
+    .bind(&attachments_hash)
+    .bind(refresh)
     .execute(&state.db)
     .await?;
     Ok(insight)

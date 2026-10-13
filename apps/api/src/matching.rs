@@ -364,7 +364,7 @@ pub fn attachment_text(filename: &str, media_type: Option<&str>, bytes: &[u8]) -
     } else if lower.ends_with(".txt") || mt.starts_with("text/plain") {
         Ok(String::from_utf8_lossy(bytes).into_owned())
     } else {
-        return TextResult::Unsupported;
+        return crate::attachments::text_result(filename, media_type, bytes);
     };
     match text {
         Ok(t) => TextResult::Text(crate::sources::normalize::truncate_chars(t.trim(), MAX_TEXT_CHARS)),

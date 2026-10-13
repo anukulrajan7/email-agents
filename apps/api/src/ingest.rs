@@ -141,6 +141,9 @@ pub async fn persist_message(
             .execute(&mut *conn)
             .await?;
     }
+    if !outbound && !email.attachments.is_empty() {
+        jobs::attachment_jobs::enqueue_extract(&mut *conn, workspace_id, &message_id, false).await?;
+    }
 
     let mut metadata = origin;
     metadata["source_id"] = json!(source_id);
@@ -221,6 +224,9 @@ pub async fn refresh_content(
                 .bind(&a.provider_ref)
                 .execute(&mut *conn)
                 .await?;
+        }
+        if direction == "inbound" && !email.attachments.is_empty() {
+            jobs::attachment_jobs::enqueue_extract(&mut *conn, &workspace_id, &message_id, false).await?;
         }
     }
     if direction == "inbound" {

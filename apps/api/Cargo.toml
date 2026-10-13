@@ -18,6 +18,8 @@ argon2 = { version = "0.5", features = ["std"] }
 async-trait = "0.1"
 axum = { version = "0.8", features = ["macros", "multipart"] }
 base64 = "0.22"
+calamine = { version = "0.36.1", features = ["dates"] }
+csv = "1.4.0"
 dotenvy = "0.15"
 hmac = "0.12"
 jsonwebtoken = "9"
@@ -44,5 +46,6 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
 http-body-util = "0.1"
+rust_xlsxwriter = "0.99.1"
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }

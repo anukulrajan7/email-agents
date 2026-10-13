@@ -211,7 +211,12 @@ pub trait Learner: Send + Sync {
 
 /// Minimal context for models: bounded, with obvious secrets masked.
 pub fn prepare_text(input: &str) -> String {
-    let truncated = crate::sources::normalize::truncate_chars(input, MAX_MODEL_INPUT_CHARS);
+    prepare_text_up_to(input, MAX_MODEL_INPUT_CHARS)
+}
+
+/// Like `prepare_text` with a caller-chosen bound.
+pub fn prepare_text_up_to(input: &str, max_chars: usize) -> String {
+    let truncated = crate::sources::normalize::truncate_chars(input, max_chars);
     truncated
         .lines()
         .map(|line| {

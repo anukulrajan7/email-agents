@@ -49,10 +49,13 @@ pub struct Config {
     pub openrouter_premium_model_id: String,
     pub openrouter_classifier_model_id: String,
     pub openrouter_embedding_model_id: String,
+    /// Reads images (OCR, description, fields). Empty disables image reading.
+    pub openrouter_vision_model_id: String,
+    /// Transcribes audio attachments (`/audio/transcriptions`). Empty disables audio reading.
+    pub openrouter_audio_model_id: String,
     /// Agent planner (tool calling). Premium cases use `openrouter_premium_model_id`.
     pub openrouter_planner_model_id: String,
     /// Speech to text for the assistant's voice input. Empty: voice input is off.
-    pub openrouter_audio_model_id: String,
     /// Planner turns per agent case before it fails.
     pub agent_max_steps: i64,
     /// AI spend per agent case (USD) before it fails.
@@ -133,8 +136,9 @@ impl Config {
             openrouter_model_id,
             openrouter_classifier_model_id: var("OPENROUTER_CLASSIFIER_MODEL_ID", ""),
             openrouter_embedding_model_id: var("OPENROUTER_EMBEDDING_MODEL_ID", "baai/bge-m3"),
-            openrouter_planner_model_id: var("OPENROUTER_PLANNER_MODEL_ID", "deepseek/deepseek-v4-pro"),
+            openrouter_vision_model_id: var("OPENROUTER_VISION_MODEL_ID", "qwen/qwen3-vl-30b-a3b-instruct"),
             openrouter_audio_model_id: var("OPENROUTER_AUDIO_MODEL_ID", "qwen/qwen3-asr-1.7b"),
+            openrouter_planner_model_id: var("OPENROUTER_PLANNER_MODEL_ID", "deepseek/deepseek-v4-pro"),
             agent_max_steps: var("AGENT_MAX_STEPS", "15").parse().context("AGENT_MAX_STEPS")?,
             agent_budget_usd: var("AGENT_BUDGET_USD", "0.10").parse().context("AGENT_BUDGET_USD")?,
             agent_fast_model_id: var("AGENT_FAST_MODEL_ID", "qwen/qwen3.8-flash"),
@@ -204,8 +208,9 @@ impl Config {
             openrouter_premium_model_id: String::new(),
             openrouter_classifier_model_id: String::new(),
             openrouter_embedding_model_id: "baai/bge-m3".into(),
-            openrouter_planner_model_id: String::new(),
+            openrouter_vision_model_id: "qwen/qwen3-vl-30b-a3b-instruct".into(),
             openrouter_audio_model_id: String::new(),
+            openrouter_planner_model_id: String::new(),
             agent_max_steps: 15,
             agent_budget_usd: 0.10,
             agent_fast_model_id: String::new(),

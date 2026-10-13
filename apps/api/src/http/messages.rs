@@ -269,13 +269,58 @@ struct DetailRow {
     cc_json: String,
 }
 
-#[derive(FromRow, Serialize)]
+#[derive(FromRow)]
+struct AttachmentRow {
+    id: String,
+    name: String,
+    media_type: Option<String>,
+    size_bytes: Option<i64>,
+    scan_status: String,
+    extract_kind: Option<String>,
+    extract_status: Option<String>,
+    extract_error: Option<String>,
+    extract_meta_json: Option<String>,
+    text_head: Option<String>,
+}
+
+/// What the web app shows for one attachment. Never names a model.
+#[derive(Serialize)]
 struct AttachmentDto {
     id: String,
     name: String,
     media_type: Option<String>,
     size_bytes: Option<i64>,
     scan_status: String,
+    /// sheet | office | pdf | docx | image | audio | unsupported, once read.
+    extract_kind: Option<String>,
+    /// done | failed | skipped, or absent while not read yet.
+    extract_status: Option<String>,
+    /// Why a file was skipped or failed, in plain words.
+    extract_note: Option<String>,
+    /// Up to 300 characters: summary, description or the first words.
+    preview: Option<String>,
+    /// Small structured facts for the expanded view (sheet sample, image fields, audio action items).
+    extract_meta: Option<Value>,
+}
+
+impl From<AttachmentRow> for AttachmentDto {
+    fn from(r: AttachmentRow) -> Self {
+        let done = r.extract_status.as_deref() == Some("done");
+        let meta: Option<Value> = r.extract_meta_json.as_deref().and_then(|m| serde_json::from_str(m).ok());
+        let preview = done.then(|| crate::attachments::preview(meta.as_ref().unwrap_or(&Value::Null), r.text_head.as_deref().unwrap_or_default())).flatten();
+        Self {
+            id: r.id,
+            name: r.name,
+            media_type: r.media_type,
+            size_bytes: r.size_bytes,
+            scan_status: r.scan_status,
+            extract_kind: r.extract_kind,
+            extract_status: r.extract_status,
+            extract_note: r.extract_error,
+            preview,
+            extract_meta: meta.filter(|_| done),
+        }
+    }
 }
 
 #[derive(FromRow)]
@@ -310,12 +355,17 @@ pub async fn detail(
     .await?
     .ok_or(AppError::NotFound)?;
 
-    let attachments: Vec<AttachmentDto> = sqlx::query_as(
-        "SELECT id, filename AS name, media_type, size_bytes, scan_status FROM attachments WHERE message_id = ?1 ORDER BY filename",
+    let attachments: Vec<AttachmentDto> = sqlx::query_as::<_, AttachmentRow>(
+        "SELECT id, filename AS name, media_type, size_bytes, scan_status, extract_kind, extract_status, extract_error,
+                extract_meta_json, substr(text_content, 1, 400) AS text_head
+         FROM attachments WHERE message_id = ?1 ORDER BY filename",
     )
     .bind(&id)
     .fetch_all(&state.db)
-    .await?;
+    .await?
+    .into_iter()
+    .map(AttachmentDto::from)
+    .collect();
     let classification: Option<ClassificationRow> = sqlx::query_as(
         "SELECT category, priority, requires_reply, confidence, needs_review, source, model_id, updated_at
          FROM classifications WHERE message_id = ?1",
@@ -609,7 +659,14 @@ pub async fn understand_now(
         .fetch_optional(&state.db)
         .await?;
     let payload = json!({ "message_id": id });
+    let has_attachments: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM attachments WHERE message_id = ?1)")
+        .bind(&id)
+        .fetch_one(&state.db)
+        .await?;
     let mut tx = state.db.begin().await?;
+    if has_attachments {
+        jobs::attachment_jobs::enqueue_extract(&mut tx, &ws, &id, true).await?;
+    }
     jobs::enqueue(&mut tx, kind::INDEX_MESSAGE, &format!("index:{id}:open"), Some(&ws), &payload).await?;
     jobs::enqueue(&mut tx, kind::LEARN_FROM_MESSAGE, &format!("learn:{id}:open"), Some(&ws), &payload).await?;
     if let Some(label) = category.filter(|c| crate::jobs::matching_jobs::is_extractable(c)) {
