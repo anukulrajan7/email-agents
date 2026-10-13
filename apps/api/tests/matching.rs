@@ -75,10 +75,12 @@ async fn referral_and_requirement_emails_become_explained_matches() {
     let items = matches["items"].as_array().unwrap();
     assert_eq!(items.len(), 1, "weak candidate filtered out");
     let m = &items[0];
-    assert_eq!((m["candidate"]["name"].as_str(), m["score"].as_i64()), (Some("Rahul Verma"), Some(100)));
+    // 50 skills + 20 experience + 15 location + 5 semantic fit (offline hash embeddings, similarity ~0.53).
+    assert_eq!((m["candidate"]["name"].as_str(), m["score"].as_i64()), (Some("Rahul Verma"), Some(90)));
     let reasons: Vec<&str> = m["reasons"].as_array().unwrap().iter().map(|r| r["text"].as_str().unwrap()).collect();
     assert!(reasons.iter().any(|r| r.starts_with("Has 3/3 must-have skills")), "{reasons:?}");
     assert!(reasons.contains(&"6 yrs fits 5–8 yrs"), "{reasons:?}");
+    assert!(reasons.iter().any(|r| r.contains("(similarity 0.")), "{reasons:?}");
 
     // Recruiter shortlists; a later re-score keeps the decision.
     let mid = m["id"].as_str().unwrap();

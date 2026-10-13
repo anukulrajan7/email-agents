@@ -4,6 +4,7 @@ pub mod automation_jobs;
 pub mod handlers;
 pub mod knowledge_jobs;
 pub mod learning_jobs;
+pub mod match_digest;
 pub mod matching_jobs;
 pub mod message_jobs;
 pub mod worker;
@@ -38,6 +39,7 @@ pub mod kind {
     pub const LEARN_FROM_MESSAGE: &str = "learn_from_message";
     pub const LEARN_FROM_REPLY: &str = "learn_from_reply";
     pub const EVALUATE_ALERTS: &str = "evaluate_alerts";
+    pub const SEND_MATCH_DIGEST: &str = "send_match_digest";
 }
 
 #[derive(Debug, Clone, FromRow)]

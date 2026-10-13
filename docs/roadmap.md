@@ -12,7 +12,7 @@ routing) · ~100-email golden set labelled by the team · humans send; drafts au
 |---|---|---|---|---|
 | R1 | Leave + referral handling | Workflows on labels | – | ✅ Live |
 | R6 | Read all emails **and attachments** | Gmail backfill + PDF/DOCX text | – | ✅ Live (bodies, CV/JD text) |
-| R9 | Referral profiles ↔ client requirements | Extraction + explainable score → **+ vector recall + LLM rerank** | M1 → M4 | ✅ v1 live · RAG in M4 |
+| R9 | Referral profiles ↔ client requirements | Extraction + skill taxonomy + explainable score + **vector recall** + daily digest → LLM rerank | M1 → M4 | ✅ Semantic matching + digest built (M4) · LLM rerank next |
 | – | Labels that learn the team's meaning | **RAG few-shot** from confirmed labels; Qwen → Kimi escalation | M0 → M2 | Fix ready · RAG in M2 |
 | – | Replies in the team's style, saved to Gmail | **RAG** over sent/approved replies; auto-save drafts | M3 | ✅ manual save/send live |
 | R2 | **Alerts:** important email missed; trigger events | **Rules engine** (not RAG) + LLM "needs reply?" judgement | M5 | Planned |
@@ -62,7 +62,7 @@ Escalation levels come from the people directory (`manager_id` chain).
 | **M1** ✅ | Matching v1 (extraction + explainable score + shortlist) | Done |
 | **M2** | Knowledge store (chunks + bge-m3 embeddings in SQLite + hybrid search) · RAG labelling · golden set (~100) + accuracy page | "Labels improved from X% → Y% on our own emails" |
 | **M3** | RAG drafting + auto-save workflow drafts to Gmail | Drafts waiting in Gmail, in the team's voice |
-| **M4** | Semantic matching (vector recall + rerank) + daily match digest | Synonym matches found; morning email |
+| **M4** ✅ | Semantic matching (skill taxonomy, vector recall, semantic-fit score) + daily match digest · LLM rerank hook left open | Synonym matches found; morning email |
 | **M5** | People directory · rules engine · **alerts** (missed email, approval pending, timesheet missing) + escalation + Alerts inbox | Unanswered Capgemini email escalates to the manager |
 | **M6** | Submissions + outcomes → **performance** dashboard + corner widget | Recruiter sees today vs target; manager sees the team |
 | **M7** | Portal CSV import → reconciliation → **mismatch alerts** by level | Hours mismatch flagged to employee, then manager |

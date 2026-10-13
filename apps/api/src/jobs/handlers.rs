@@ -68,7 +68,7 @@ pub async fn handle(state: &AppState, job: &Job) -> Result<(), JobError> {
         kind::CLEAN_STORED_TEXT => super::message_jobs::clean_stored_text(state).await,
         kind::REFETCH_GMAIL_HTML => super::message_jobs::refetch_gmail_html(state, &payload).await,
         kind::EXTRACT_RECORD => super::matching_jobs::extract_record(state, &payload).await,
-        kind::MATCH_RECORD => super::matching_jobs::match_record(state, &payload).await,
+        kind::MATCH_RECORD => super::matching_jobs::match_record(state, job, &payload).await,
         kind::RUN_AUTOMATIONS => super::automation_jobs::run_automations(state, &payload).await,
         kind::REMIND_NO_REPLY => super::automation_jobs::remind_no_reply(state, &payload).await,
         kind::REGISTER_NANGO_CONNECTION => crate::sources::nango::register_from_webhook(state, &payload).await,
@@ -76,6 +76,7 @@ pub async fn handle(state: &AppState, job: &Job) -> Result<(), JobError> {
         kind::LEARN_FROM_MESSAGE => super::learning_jobs::learn_from_message(state, &payload).await,
         kind::LEARN_FROM_REPLY => super::learning_jobs::learn_from_reply(state, &payload).await,
         kind::EVALUATE_ALERTS => crate::alerts::evaluate_job(state, &payload).await,
+        kind::SEND_MATCH_DIGEST => super::match_digest::digest_job(state, &payload).await,
         other => Err(JobError::Permanent(format!("unknown job kind {other}"))),
     }
 }

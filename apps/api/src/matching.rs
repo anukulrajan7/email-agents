@@ -34,38 +34,8 @@ pub struct CandidateFields {
 
 // ---------------------------------------------------------------- normalisation
 
-/// Skills we recognise in free text (rules fallback) and canonical names for aliases.
-const SKILLS: &[(&str, &[&str])] = &[
-    ("java", &["java", "core java", "j2ee"]),
-    ("spring boot", &["spring boot", "springboot", "spring"]),
-    ("microservices", &["microservices", "micro services"]),
-    ("python", &["python", "django", "flask"]),
-    ("javascript", &["javascript", "js", "es6"]),
-    ("typescript", &["typescript"]),
-    ("react", &["react", "reactjs", "react.js"]),
-    ("angular", &["angular", "angularjs"]),
-    ("node", &["node", "nodejs", "node.js"]),
-    (".net", &[".net", "dotnet", "c#", "asp.net"]),
-    ("sql", &["sql", "mysql", "postgres", "postgresql", "oracle", "pl/sql"]),
-    ("aws", &["aws", "amazon web services"]),
-    ("azure", &["azure"]),
-    ("gcp", &["gcp", "google cloud"]),
-    ("devops", &["devops", "ci/cd", "jenkins"]),
-    ("kubernetes", &["kubernetes", "k8s"]),
-    ("docker", &["docker"]),
-    ("salesforce", &["salesforce", "sfdc"]),
-    ("sap", &["sap", "sap abap", "sap fico", "sap mm"]),
-    ("testing", &["testing", "qa", "manual testing"]),
-    ("selenium", &["selenium", "automation testing"]),
-    ("data engineering", &["data engineer", "data engineering", "etl", "spark", "pyspark"]),
-    ("power bi", &["power bi", "powerbi", "tableau"]),
-    ("golang", &["golang", "go lang"]),
-    ("rust", &["rust"]),
-    ("android", &["android", "kotlin"]),
-    ("ios", &["ios", "swift"]),
-    ("flutter", &["flutter", "dart"]),
-    ("machine learning", &["machine learning", "ml", "deep learning", "ai/ml"]),
-];
+pub use crate::skills::{canonical_skill, canonical_skills};
+use crate::skills::skills_in;
 
 const CITIES: &[(&str, &[&str])] = &[
     ("Bengaluru", &["bengaluru", "bangalore"]),
@@ -78,21 +48,6 @@ const CITIES: &[(&str, &[&str])] = &[
     ("Remote", &["remote", "work from home", "wfh"]),
 ];
 
-/// Lowercase canonical skill name ("ReactJS" → "react", "k8s" → "kubernetes").
-pub fn canonical_skill(raw: &str) -> String {
-    let s = raw.trim().to_lowercase();
-    SKILLS
-        .iter()
-        .find(|(_, aliases)| aliases.contains(&s.as_str()))
-        .map(|(canon, _)| canon.to_string())
-        .unwrap_or(s)
-}
-
-pub fn canonical_skills(list: &[String]) -> Vec<String> {
-    let set: BTreeSet<String> = list.iter().map(|s| canonical_skill(s)).filter(|s| !s.is_empty()).collect();
-    set.into_iter().collect()
-}
-
 pub fn canonical_city(raw: &str) -> String {
     let s = raw.trim().to_lowercase();
     CITIES
@@ -103,27 +58,7 @@ pub fn canonical_city(raw: &str) -> String {
 }
 
 fn contains_word(haystack: &str, needle: &str) -> bool {
-    // Word-boundary match that also works for tokens like ".net" or "c#".
-    let mut start = 0;
-    while let Some(pos) = haystack[start..].find(needle) {
-        let i = start + pos;
-        let before = haystack[..i].chars().next_back().is_none_or(|c| !c.is_alphanumeric());
-        let after = haystack[i + needle.len()..].chars().next().is_none_or(|c| !c.is_alphanumeric());
-        if before && after {
-            return true;
-        }
-        start = i + needle.len();
-    }
-    false
-}
-
-fn skills_in(text: &str) -> Vec<String> {
-    let lower = text.to_lowercase();
-    SKILLS
-        .iter()
-        .filter(|(_, aliases)| aliases.iter().any(|a| contains_word(&lower, a)))
-        .map(|(c, _)| c.to_string())
-        .collect()
+    crate::skills::find_word(haystack, needle).is_some()
 }
 
 fn city_in(text: &str) -> Option<String> {
@@ -227,55 +162,86 @@ pub struct Reason {
     pub text: String,
 }
 
-/// 0–100: must-have skill coverage (60), experience fit (25), location (15).
-/// Every point comes with a reason a recruiter can check.
-pub fn score(req: &RequirementFields, cand: &CandidateFields) -> (u8, Vec<Reason>) {
+/// Points per component; they add up to 100.
+pub const SKILL_WEIGHT: f64 = 50.0;
+pub const EXPERIENCE_WEIGHT: f64 = 20.0;
+pub const LOCATION_WEIGHT: f64 = 15.0;
+pub const SEMANTIC_WEIGHT: f64 = 15.0;
+/// Cosine similarity (profile embeddings) at or below which semantic fit earns nothing, and at or above which
+/// it earns full points; linear in between.
+pub const SIMILARITY_FLOOR: f32 = 0.40;
+pub const SIMILARITY_FULL: f32 = 0.80;
+/// Reason wording thresholds.
+pub const SIMILARITY_CLOSE: f32 = 0.65;
+pub const SIMILARITY_SOME: f32 = 0.50;
+
+/// Semantic-fit points for a cosine similarity; `None` (no embedding available) earns half, like other unknowns.
+pub fn semantic_points(similarity: Option<f32>) -> f64 {
+    match similarity {
+        Some(s) => SEMANTIC_WEIGHT * ((s - SIMILARITY_FLOOR) / (SIMILARITY_FULL - SIMILARITY_FLOOR)).clamp(0.0, 1.0) as f64,
+        None => SEMANTIC_WEIGHT / 2.0,
+    }
+}
+
+/// 0–100: must-have skills (50, related skills count half), experience fit (20), location (15) and semantic fit
+/// (15, cosine similarity of the two profile embeddings). Every point comes with a reason a recruiter can check.
+pub fn score(req: &RequirementFields, cand: &CandidateFields, similarity: Option<f32>) -> (u8, Vec<Reason>) {
     let mut reasons = Vec::new();
     let must = canonical_skills(&req.must_have_skills);
     let have: BTreeSet<String> = canonical_skills(&cand.skills).into_iter().collect();
     let skill_points = if must.is_empty() {
         reasons.push(Reason { ok: true, text: "Requirement lists no specific skills".into() });
-        30.0
+        SKILL_WEIGHT / 2.0
     } else {
         let matched: Vec<&String> = must.iter().filter(|s| have.contains(*s)).collect();
-        let missing: Vec<&String> = must.iter().filter(|s| !have.contains(*s)).collect();
+        let mut related: Vec<(&String, &str)> = vec![];
+        let mut missing: Vec<&String> = vec![];
+        for s in must.iter().filter(|s| !have.contains(*s)) {
+            match crate::skills::related(s).iter().find(|r| have.contains(**r)) {
+                Some(r) => related.push((s, r)),
+                None => missing.push(s),
+            }
+        }
         if !matched.is_empty() {
             reasons.push(Reason {
                 ok: true,
                 text: format!("Has {}/{} must-have skills: {}", matched.len(), must.len(), join(&matched)),
             });
         }
+        for (wanted, r) in &related {
+            reasons.push(Reason { ok: true, text: format!("Has related skill: {r} (for {wanted})") });
+        }
         if !missing.is_empty() {
             reasons.push(Reason { ok: false, text: format!("Missing: {}", join(&missing)) });
         }
-        60.0 * matched.len() as f64 / must.len() as f64
+        SKILL_WEIGHT * (matched.len() as f64 + 0.5 * related.len() as f64) / must.len() as f64
     };
 
     let exp_points = match (cand.total_experience, req.min_experience, req.max_experience) {
         (Some(y), Some(min), max) if y >= min && max.is_none_or(|m| y <= m) => {
             reasons.push(Reason { ok: true, text: format!("{y} yrs fits {}", band(min, max)) });
-            25.0
+            EXPERIENCE_WEIGHT
         }
         (Some(y), Some(min), _) if y < min => {
             let gap = min - y;
             reasons.push(Reason { ok: false, text: format!("{y} yrs is below {}", band(min, req.max_experience)) });
-            if gap <= 1.0 { 12.0 } else { 0.0 }
+            if gap <= 1.0 { EXPERIENCE_WEIGHT / 2.0 } else { 0.0 }
         }
         (Some(y), Some(min), Some(max)) => {
             reasons.push(Reason { ok: false, text: format!("{y} yrs is above {}", band(min, Some(max))) });
-            12.0
+            EXPERIENCE_WEIGHT / 2.0
         }
         (None, Some(_), _) => {
             reasons.push(Reason { ok: false, text: "Candidate's experience unknown".into() });
-            8.0
+            6.0
         }
-        _ => 15.0,
+        _ => 12.0,
     };
 
     let loc_points = match (req.location.as_deref(), cand.location.as_deref()) {
         (Some(r), Some(c)) if canonical_city(r) == canonical_city(c) || canonical_city(r) == "Remote" => {
             reasons.push(Reason { ok: true, text: format!("Location {} matches", canonical_city(c)) });
-            15.0
+            LOCATION_WEIGHT
         }
         (Some(r), Some(c)) => {
             reasons.push(Reason { ok: false, text: format!("Based in {}, role is in {}", canonical_city(c), canonical_city(r)) });
@@ -283,13 +249,26 @@ pub fn score(req: &RequirementFields, cand: &CandidateFields) -> (u8, Vec<Reason
         }
         _ => 8.0,
     };
+
+    if let Some(s) = similarity {
+        let (ok, text) = if s >= SIMILARITY_CLOSE {
+            (true, format!("Profile closely matches the role (similarity {s:.2})"))
+        } else if s >= SIMILARITY_SOME {
+            (true, format!("Profile is somewhat similar to the role (similarity {s:.2})"))
+        } else {
+            (false, format!("Profile is not much like the role (similarity {s:.2})"))
+        };
+        reasons.push(Reason { ok, text });
+    }
+    let sem_points = semantic_points(similarity);
+
     if let Some(days) = cand.notice_days {
         reasons.push(Reason {
             ok: days <= 30,
             text: if days == 0 { "Immediate joiner".into() } else { format!("Notice period {days} days") },
         });
     }
-    let total = (skill_points + exp_points + loc_points).round().clamp(0.0, 100.0) as u8;
+    let total = (skill_points + exp_points + loc_points + sem_points).round().clamp(0.0, 100.0) as u8;
     (total, reasons)
 }
 
@@ -306,6 +285,59 @@ fn band(min: f64, max: Option<f64>) -> String {
 
 /// Matches below this are not worth a recruiter's attention.
 pub const MIN_MATCH_SCORE: u8 = 40;
+/// Suggested matches at or above this go in the daily match digest.
+pub const STRONG_MATCH_SCORE: u8 = 70;
+
+// ---------------------------------------------------------------- profiles (semantic recall)
+
+/// Characters of source email / attachment text appended to a profile.
+pub const PROFILE_SOURCE_CHARS: usize = 1_500;
+
+fn experience_line(min: Option<f64>, max: Option<f64>) -> Option<String> {
+    match (min, max) {
+        (Some(a), Some(b)) => Some(format!("{a}–{b} years experience")),
+        (Some(a), None) => Some(format!("{a}+ years experience")),
+        (None, Some(b)) => Some(format!("up to {b} years experience")),
+        (None, None) => None,
+    }
+}
+
+fn profile(lines: Vec<Option<String>>, source: &str) -> String {
+    let mut out: Vec<String> = lines.into_iter().flatten().filter(|l| !l.trim().is_empty()).collect();
+    let source = crate::sources::normalize::truncate_chars(source.trim(), PROFILE_SOURCE_CHARS);
+    if !source.is_empty() {
+        out.push(source);
+    }
+    out.join("\n")
+}
+
+/// What gets embedded for a requirement: role, skills, experience, location, then the JD text.
+pub fn requirement_profile(r: &RequirementFields, source: &str) -> String {
+    let skills = canonical_skills(&[r.must_have_skills.clone(), r.nice_to_have_skills.clone()].concat());
+    profile(
+        vec![
+            Some(r.role_title.trim().to_string()),
+            (!skills.is_empty()).then(|| format!("Skills: {}", skills.join(", "))),
+            experience_line(r.min_experience, r.max_experience),
+            r.location.as_deref().map(|l| format!("Location: {}", canonical_city(l))),
+        ],
+        source,
+    )
+}
+
+/// What gets embedded for a candidate: summary, skills, experience, location, then the referral / CV text.
+pub fn candidate_profile(c: &CandidateFields, source: &str) -> String {
+    let skills = canonical_skills(&c.skills);
+    profile(
+        vec![
+            c.summary.clone(),
+            (!skills.is_empty()).then(|| format!("Skills: {}", skills.join(", "))),
+            c.total_experience.map(|y| format!("{y} years experience")),
+            c.location.as_deref().map(|l| format!("Location: {}", canonical_city(l))),
+        ],
+        source,
+    )
+}
 
 // ---------------------------------------------------------------- attachment text
 
@@ -400,13 +432,65 @@ mod tests {
             notice_days: Some(15),
             ..Default::default()
         };
-        let (s, reasons) = score(&req, &good);
-        assert_eq!(s, 80); // 40 skills + 25 exp + 15 loc
+        let (s, reasons) = score(&req, &good, Some(0.8));
+        assert_eq!(s, 83); // 33.3 skills + 20 exp + 15 loc + 15 semantic
         assert!(reasons.iter().any(|r| r.ok && r.text.starts_with("Has 2/3")));
         assert!(reasons.iter().any(|r| !r.ok && r.text == "Missing: kafka"));
+        assert!(reasons.iter().any(|r| r.ok && r.text == "Profile closely matches the role (similarity 0.80)"));
+        assert_eq!(score(&req, &good, None).0, 76, "no embedding: half the semantic points, no reason");
+        assert!(!score(&req, &good, None).1.iter().any(|r| r.text.contains("similarity")));
 
         let weak = CandidateFields { skills: vec!["python".into()], total_experience: Some(2.0), location: Some("Chennai".into()), ..good };
-        assert!(score(&req, &weak).0 < MIN_MATCH_SCORE);
+        assert!(score(&req, &weak, Some(1.0)).0 < MIN_MATCH_SCORE);
+    }
+
+    #[test]
+    fn synonyms_match_and_related_skills_earn_half() {
+        let req = RequirementFields {
+            role_title: "Full-stack developer".into(),
+            must_have_skills: vec!["React".into(), "Spring Boot".into()],
+            ..Default::default()
+        };
+        let synonyms = CandidateFields { skills: vec!["ReactJS".into(), "SpringBoot".into()], ..Default::default() };
+        let (s, reasons) = score(&req, &synonyms, Some(0.4));
+        assert_eq!(s, 70); // 50 skills + 12 exp (not specified) + 8 loc (unknown) + 0 semantic
+        assert!(reasons.iter().any(|r| r.ok && r.text == "Has 2/2 must-have skills: react, spring boot"), "{reasons:?}");
+        assert!(reasons.iter().any(|r| !r.ok && r.text.starts_with("Profile is not much like")));
+
+        let related = CandidateFields { skills: vec!["Next.js".into(), "Spring".into()], ..Default::default() };
+        let (s, reasons) = score(&req, &related, Some(0.4));
+        assert_eq!(s, 45); // 2 × half credit = 25 skills + 12 + 8
+        assert!(reasons.iter().any(|r| r.ok && r.text == "Has related skill: next.js (for react)"), "{reasons:?}");
+        assert!(reasons.iter().any(|r| r.ok && r.text == "Has related skill: spring (for spring boot)"), "{reasons:?}");
+        assert!(!reasons.iter().any(|r| r.text.starts_with("Missing")));
+    }
+
+    #[test]
+    fn semantic_points_are_linear_between_floor_and_full() {
+        assert_eq!(semantic_points(Some(0.2)), 0.0);
+        assert_eq!(semantic_points(Some(0.95)), SEMANTIC_WEIGHT);
+        assert!((semantic_points(Some(0.6)) - SEMANTIC_WEIGHT / 2.0).abs() < 1e-6);
+        assert_eq!(semantic_points(None), SEMANTIC_WEIGHT / 2.0);
+        assert_eq!(SKILL_WEIGHT + EXPERIENCE_WEIGHT + LOCATION_WEIGHT + SEMANTIC_WEIGHT, 100.0);
+    }
+
+    #[test]
+    fn profiles_lead_with_structured_fields() {
+        let r = RequirementFields {
+            role_title: "Java Developer".into(),
+            must_have_skills: vec!["SpringBoot".into(), "java".into()],
+            min_experience: Some(5.0),
+            max_experience: Some(8.0),
+            location: Some("bangalore".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            requirement_profile(&r, "  Need Java devs  "),
+            "Java Developer\nSkills: java, spring boot\n5–8 years experience\nLocation: Bengaluru\nNeed Java devs"
+        );
+        let c = CandidateFields { skills: vec!["k8s".into()], total_experience: Some(4.0), ..Default::default() };
+        assert_eq!(candidate_profile(&c, ""), "Skills: kubernetes\n4 years experience");
+        assert!(requirement_profile(&r, &"x".repeat(5_000)).chars().count() < PROFILE_SOURCE_CHARS + 200);
     }
 
     #[test]

@@ -282,9 +282,33 @@ and `available` is false when the workspace has no such active label.
 ## Matching: referrals ↔ client requirements (P1)
 
 Emails labelled `client_requirement` become **Requirements**; emails labelled `candidate_referral` (and their
-PDF/DOCX CVs) become **Candidates**. Each new record is scored against every open counterpart (0–100: must-have
-skills 60, experience 25, location 15) and kept when the score is ≥ 40, with reasons. The AI proposes; a recruiter
-shortlists or dismisses. Re-scoring never overrides a recruiter's decision.
+PDF/DOCX CVs) become **Candidates**. The AI proposes; a recruiter shortlists or dismisses. Re-scoring never
+overrides a recruiter's decision.
+
+**Semantic matching (M4).** Skills are normalised by a taxonomy (`src/skills.rs`, ~80 skills: `reactjs`/`react.js` →
+`react`, `springboot` → `spring boot`, `k8s` → `kubernetes`, `golang` → `go`, `postgres` → `postgresql`, `mssql` →
+`sql server`, `dotnet` → `.net`, `ml` → `machine learning`, …) at extraction and at scoring. Each record gets a
+profile embedding (`baai/bge-m3`; role, skills, experience, location, summary + an excerpt of the email/CV/JD text),
+re-embedded only when its profile changes. A new or updated record **recalls** the 20 nearest open counterparts in its
+workspace (vector KNN) plus every open counterpart sharing a skill (exact, alias or related), then scores each pair:
+
+| Component | Points | Rule |
+|---|---|---|
+| Must-have skills | 50 | Share of must-haves the candidate has; a **related** skill (e.g. `spring boot` ↔ `spring`, `next.js` ↔ `react`, `postgresql` ↔ `sql`) counts half |
+| Experience | 20 | Fits the band 20 · ≤1 yr below or above 10 · further below 0 · unknown 6 · no band 12 |
+| Location | 15 | Same city or remote role 15 · different 3 · unknown 8 |
+| Semantic fit | 15 | Cosine similarity of the two profiles: 0 at ≤ 0.40, 15 at ≥ 0.80, linear between · no embedding 7.5 |
+
+Matches scoring ≥ 40 are kept. Reasons now include `Has related skill: next.js (for react)` and one of
+`Profile closely matches the role (similarity 0.82)` (≥ 0.65), `Profile is somewhat similar to the role (similarity
+0.58)` (≥ 0.50) or `Profile is not much like the role (similarity 0.31)` (`ok: false`). If the embedding provider is
+down, the match job retries; on its last attempt it scores skill-overlap counterparts without semantic fit. Response
+shapes are unchanged.
+
+**Daily match digest.** Once per UTC day at the alert settings' `digest_hour`, the alert `recipients` get one email with
+the new strong matches (status `suggested`, score ≥ 70, created in the last 24 hours, requirement open), grouped by
+requirement with links to `{APP_BASE_URL}/w/:ws/matching?req=:requirement_id`. Nothing is sent when there are none;
+a day is claimed once (`match_digests`), so retries never send twice. Turned off with the alert `daily_digest` switch.
 
 | Method | Path | Role | Body | Response |
 |---|---|---|---|---|

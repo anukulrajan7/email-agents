@@ -18,6 +18,7 @@ pub mod replies;
 pub mod memory;
 pub mod memory_learning;
 pub mod sessions;
+pub mod skills;
 pub mod sources;
 pub mod text_clean;
 pub mod threads;
