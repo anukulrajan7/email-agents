@@ -1,3 +1,4 @@
+mod alerts_api;
 mod auth_api;
 mod automations_api;
 mod dto;
@@ -58,6 +59,10 @@ pub struct AppState {
     /// Sends verification codes; `None` = verification disabled.
     pub mailer: Option<Arc<dyn crate::mailer::Mailer>>,
     pub jobs_notify: Arc<Notify>,
+    /// Learns durable facts from emails and replies (no-op without a model).
+    pub memory_extractor: Arc<dyn crate::ai::memory_extractor::MemoryExtractor>,
+    /// Sends alert emails; `None` = alerts stay in-app only.
+    pub alert_mailer: Option<Arc<dyn crate::mailer::Mailer>>,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -108,6 +113,10 @@ pub fn router(state: AppState) -> Router {
         .route("/workspaces/{ws}/matching/matches", get(matching_api::matches))
         .route("/workspaces/{ws}/matching/matches/{id}", patch(matching_api::decide))
         .route("/workspaces/{ws}/search", get(search_api::search))
+        .route("/workspaces/{ws}/alerts", get(alerts_api::list))
+        .route("/workspaces/{ws}/alerts/{id}", patch(alerts_api::update))
+        .route("/workspaces/{ws}/alert-settings", get(alerts_api::get_settings).put(alerts_api::put_settings))
+        .route("/workspaces/{ws}/alert-settings/test", post(alerts_api::test))
         .route("/workspaces/{ws}/jobs", get(jobs_api::list))
         .route("/workspaces/{ws}/jobs/{id}/retry", post(jobs_api::retry))
         .merge(automations_api::routes())
@@ -118,7 +127,7 @@ pub fn router(state: AppState) -> Router {
         .allow_origin(
             HeaderValue::from_str(&state.config.public_web_url).unwrap_or(HeaderValue::from_static("http://localhost:5173")),
         )
-        .allow_methods([Method::GET, Method::POST, Method::PATCH, Method::DELETE])
+        .allow_methods([Method::GET, Method::POST, Method::PATCH, Method::PUT, Method::DELETE])
         .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE, HeaderName::from_static("x-auth-token")])
         .expose_headers([HeaderName::from_static("x-request-id")]);
 

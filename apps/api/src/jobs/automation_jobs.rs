@@ -164,7 +164,21 @@ async fn record_run(
     }
     tx.commit().await?;
     if created && status == "failed" {
-        // TODO(integrate): alerts::raise(kind = "automation") so a failed automation reaches a person.
+        // A failed automation must reach a person, not just the run log.
+        crate::alerts::raise(
+            &state.db,
+            crate::alerts::NewAlert {
+                workspace_id,
+                kind: "automation",
+                severity: "normal",
+                title: format!("Automation failed: {}", automation.name),
+                body: "One or more steps failed. Open the automation's runs to see which step and why.".into(),
+                message_id: Some(message_id),
+                level: 1,
+                dedupe_key: Some(format!("automation_failed:{}:{message_id}", automation.id)),
+            },
+        )
+        .await?;
     }
     Ok(())
 }
@@ -453,23 +467,27 @@ pub async fn remind_no_reply(state: &AppState, payload: &Value) -> Result<(), Jo
     if workspace_id != message_ws {
         return Ok(());
     }
-    let answered: bool = sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM drafts WHERE message_id = ?1 AND status = 'sent')
-             OR EXISTS (SELECT 1 FROM email_messages
-                        WHERE thread_id = ?2 AND id != ?1 AND received_at > ?3 AND lower(sender_address) != lower(?4))",
-    )
-    .bind(&message_id)
-    .bind(&thread_id)
-    .bind(received_at)
-    .bind(&sender)
-    .fetch_one(&state.db)
-    .await?;
+    // Answered = our side replied in the thread (outbound mail or a sent draft), not just anyone writing again.
+    let answered = crate::threads::thread_has_reply_after(&state.db, &workspace_id, &thread_id, received_at).await?;
     if answered {
         return Ok(());
     }
     let title = format!("No reply yet: {subject}");
     if insert_review(state, &workspace_id, automation_id, &message_id, "reminder", &title).await? {
-        // TODO(integrate): alerts::raise(kind = "automation") so an unanswered email reaches a person.
+        crate::alerts::raise(
+            &state.db,
+            crate::alerts::NewAlert {
+                workspace_id: &workspace_id,
+                kind: "automation",
+                severity: "high",
+                body: format!("Nobody has replied to {sender} yet."),
+                title,
+                message_id: Some(&message_id),
+                level: 1,
+                dedupe_key: Some(format!("reminder:{automation_id}:{message_id}")),
+            },
+        )
+        .await?;
     }
     Ok(())
 }

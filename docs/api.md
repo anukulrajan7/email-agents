@@ -173,6 +173,46 @@ type Contact = {
 
 `Draft` gains `memories_used: { id: string; content: string }[]` — what the drafter was given.
 
+### Self-learning memory (wave 2, F1)
+
+Memory **learns itself**; people only pin, confirm or delete. Sources:
+- **Incoming mail** (job `learn_from_message`, after classification, efficient model): only `contact` facts
+  (who someone is: name, role, company, which client) and `client` facts (open roles, process rules). Skipped:
+  mail labelled `other` with no reply needed, automated senders (`no-reply@`, `notifications@`, …), short bodies.
+- **The team's replies** (job `learn_from_reply`, when a draft is approved or sent, drafting model; and mail
+  sent from the connected mailbox): also standing answers (`"Timesheets are due by the 3rd"`) and team
+  preferences/style.
+
+Filters (deterministic, after the model): one-off details are excluded by the prompt; anything mentioning
+secrets/OTPs/passwords, bank/ID numbers, salary, health or other sensitive personal data, links, or long digit
+runs is dropped (word-boundary matching); instructions phrased as facts (`"always send rates to…"`) are dropped;
+at most 5 facts per email. Email text is fenced as untrusted data.
+
+Confidence: facts seen only in outside mail are capped at **0.7**; once a team reply states them, **0.95**; each
+extra distinct source adds 0.1 within the cap; a person confirming (or editing the text) sets **1.0**.
+**Drafts only use manual memories and auto memories with confidence ≥ 0.6**; every use bumps `use_count` /
+`last_used_at`.
+
+Dedupe: an auto fact's identity is its normalised `subject|key` (e.g. `priya@acme.com|role`). Same identity →
+the memory is updated (same text: confidence raised; changed text: newest wins) and the source is appended
+(up to 10). Pinned or confirmed memories keep their text; manual memories are never changed; a deleted
+(archived) auto memory is never relearned. Cap: 500 active auto memories per workspace; beyond that the
+least-used, lowest-confidence, oldest unpinned unconfirmed ones are evicted.
+
+`Memory` adds:
+```ts
+origin: 'auto' | 'manual';        // auto = learned (emails, replies, draft edits); manual = written by a person
+confidence: number;               // 0..1 (manual = 1)
+source_message_id: string | null; // latest email it was learned from (same value as evidence_message_id)
+pinned: boolean;
+use_count: number;
+last_used_at: string | null;
+```
+- `GET /memories?origin=auto|manual` (400 for anything else; combines with `status`, `scope`, `contact`, `q`).
+- `PATCH /memories/:id` also accepts `{pinned: boolean}` and `{confirmed: true}` (confidence 1; a `suggested`
+  memory becomes `active`). `confirmed: false` → 400. Accepting a suggestion (`status: "active"`) also sets
+  confidence 1. Delete = `status: "archived"`.
+
 ## Auth: email + password (v1)
 
 `AUTH_MODE=password` (production). `AUTH_MODE=dev` (local only) keeps the `dev:<email>` token. The client always
@@ -423,3 +463,52 @@ The AI reads up to 60 recent inbound emails (subject + snippet, unlabelled `othe
 `POST .../labels {name, description, color}`. No mail returns `{items: []}`. If the AI call fails: 503
 `ai_unavailable`. Contract note: the original sketch used a hex colour; a palette name is returned so the result
 can be sent to `POST /labels` unchanged.
+
+## Alerts (wave 2, F2)
+
+Deterministic rules, evaluated every 15 minutes per workspace (job `evaluate_alerts`, scheduled by the worker).
+Only mail received in the last 7 days and older than `unanswered_hours` can raise an alert.
+
+| Kind | Fires when | Auto-resolves when |
+|---|---|---|
+| `important_unanswered` | priority `high`, or needs a reply (insight, else classifier) and label ≠ `other`; label not `approval`/`leave`; sender is not on the team; no reply yet | a reply exists, or the label/priority changes |
+| `approval_pending` | label `approval` or `leave`; no closed review item; no reply yet | the review item is closed, or a reply exists |
+| `automation` | raised by automations via `alerts::raise` | – (resolve by hand) |
+
+**Reply detection** (until messages carry a direction): a later message in the same thread sent from a team
+address (any workspace member's email, or the user who connected the mailbox), or a reply sent from Post Room
+(`drafts.status = 'sent'`) in the thread after the email arrived. Mail sent by the team never raises alerts.
+
+**Escalation**: an `open` alert unchanged for `escalate_after_hours` goes up one level (max 3), becomes
+`severity: high` and is emailed to `escalate_to` (or `recipients` if empty). Snoozed alerts don't escalate.
+
+**Email** (Hostinger SMTP, same transport as verification codes): pending alerts are batched into one email per
+recipient per run (plain text + HTML), each with a deep link `{APP_BASE_URL}/w/{ws}/inbox/{message_id}`
+(`/w/{ws}/alerts` when there is no message). **Daily digest**: once per UTC day, in the run that falls in
+`digest_hour` (**UTC**), all open alerts go to `recipients` (skipped if none are open). `enabled: false` stops
+new alerts, escalation and email; existing alerts still auto-resolve. A resolved alert is never re-raised.
+
+| Method | Path | Role | Body | Response |
+|---|---|---|---|---|
+| GET | `/api/v1/workspaces/:ws/alerts?status=open\|resolved\|all` | member | – | `{items: Alert[], open_count: number}` (`open` = open + snoozed; `open_count` counts `open` only; max 200) |
+| PATCH | `/api/v1/workspaces/:ws/alerts/:id` | member | `{status: 'resolved'}` / `{status: 'open'}` / `{status?: 'open', snooze_hours: 1-168}` | `Alert` |
+| GET | `/api/v1/workspaces/:ws/alert-settings` | member | – | `AlertSettings` |
+| PUT | `/api/v1/workspaces/:ws/alert-settings` | admin | `AlertSettings` (all fields) | `AlertSettings` (addresses trimmed, lower-cased, deduped) |
+| POST | `/api/v1/workspaces/:ws/alert-settings/test` | admin | – | `{sent_to: string[]}`; 409 if email isn't configured, 400 with no recipients |
+
+```ts
+interface Alert { id: string; kind: 'important_unanswered' | 'approval_pending' | 'automation'; severity: 'high' | 'normal';
+  title: string; body: string; message_id: string | null; message_subject: string | null;
+  status: 'open' | 'snoozed' | 'resolved'; escalation_level: number; notified: string[];
+  snoozed_until: string | null; created_at: string; resolved_at: string | null }
+interface AlertSettings { enabled: boolean; recipients: string[]; escalate_to: string[];
+  unanswered_hours: number;      // 1-168, default 4
+  escalate_after_hours: number;  // 1-720, default 24
+  daily_digest: boolean;         // default true
+  digest_hour: number }          // 0-23 UTC, default 9
+```
+Defaults apply until an admin saves settings; until then `recipients` = the workspace admins' emails. Validation
+errors → 400 `bad_request`; unknown fields → 422.
+
+Config: `APP_BASE_URL` (default `https://mail.anukulraj.tech`) for links; SMTP via `SMTP_HOST`/`SMTP_PORT`/
+`SMTP_USERNAME`/`SMTP_PASSWORD`/`SMTP_FROM` (without SMTP, alerts are in-app only).

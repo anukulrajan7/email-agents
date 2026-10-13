@@ -19,7 +19,8 @@ use crate::{
 };
 
 pub const MEMORY_COLUMNS: &str =
-    "id, scope, contact_email, kind, content, status, source, created_by, evidence_message_id, created_at, updated_at";
+    "id, scope, contact_email, kind, content, status, source, created_by, evidence_message_id, created_at, updated_at,
+     origin, confidence, pinned, use_count, last_used_at";
 
 #[derive(FromRow)]
 pub struct MemoryRow {
@@ -34,6 +35,11 @@ pub struct MemoryRow {
     evidence_message_id: Option<String>,
     created_at: i64,
     updated_at: i64,
+    origin: String,
+    confidence: f64,
+    pinned: bool,
+    use_count: i64,
+    last_used_at: Option<i64>,
 }
 
 #[derive(Serialize)]
@@ -49,6 +55,13 @@ pub struct Memory {
     evidence_message_id: Option<String>,
     created_at: String,
     updated_at: String,
+    origin: String,
+    confidence: f64,
+    /// Latest email this memory was learned from (same as `evidence_message_id`).
+    source_message_id: Option<String>,
+    pinned: bool,
+    use_count: i64,
+    last_used_at: Option<String>,
 }
 
 impl From<MemoryRow> for Memory {
@@ -62,9 +75,15 @@ impl From<MemoryRow> for Memory {
             status: r.status,
             source: r.source,
             created_by: r.created_by,
+            source_message_id: r.evidence_message_id.clone(),
             evidence_message_id: r.evidence_message_id,
             created_at: iso(r.created_at),
             updated_at: iso(r.updated_at),
+            origin: r.origin,
+            confidence: r.confidence,
+            pinned: r.pinned,
+            use_count: r.use_count,
+            last_used_at: r.last_used_at.map(iso),
         }
     }
 }
@@ -104,6 +123,7 @@ pub struct ListQuery {
     scope: Option<String>,
     contact: Option<String>,
     q: Option<String>,
+    origin: Option<String>,
 }
 
 pub async fn list(
@@ -116,6 +136,10 @@ pub async fn list(
     let status = q.status.unwrap_or_else(|| "active".into());
     if !matches!(status.as_str(), "active" | "suggested" | "archived") {
         return Err(AppError::BadRequest("unknown status".into()));
+    }
+    let origin = q.origin.filter(|o| !o.is_empty());
+    if origin.as_deref().is_some_and(|o| !matches!(o, "auto" | "manual")) {
+        return Err(AppError::BadRequest("origin must be auto or manual".into()));
     }
     let scope = q.scope.filter(|s| !s.is_empty());
     let contact = q.contact.filter(|c| !c.is_empty()).map(|c| normalize::address(&c));
@@ -133,6 +157,7 @@ pub async fn list(
            AND (?3 IS NULL OR scope = ?3)
            AND (?4 IS NULL OR contact_email = ?4)
            AND (?5 IS NULL OR id IN (SELECT value FROM json_each(?5)))
+           AND (?6 IS NULL OR origin = ?6)
          ORDER BY updated_at DESC LIMIT 200"
     ))
     .bind(&ws)
@@ -140,6 +165,7 @@ pub async fn list(
     .bind(scope)
     .bind(contact)
     .bind(ids.map(|i| json!(i).to_string()))
+    .bind(origin)
     .fetch_all(&state.db)
     .await?;
     let items: Vec<Memory> = rows.into_iter().map(Into::into).collect();
@@ -210,6 +236,9 @@ pub struct Patch {
     content: Option<String>,
     kind: Option<String>,
     status: Option<String>,
+    pinned: Option<bool>,
+    /// `true` = a person vouches for it: confidence 1 (and a suggestion becomes active).
+    confirmed: Option<bool>,
 }
 
 pub async fn update(
@@ -228,13 +257,20 @@ pub async fn update(
     {
         return Err(AppError::BadRequest("status must be active or archived".into()));
     }
-    if content.is_none() && body.kind.is_none() && body.status.is_none() {
+    if body.confirmed == Some(false) {
+        return Err(AppError::BadRequest("confirmed can only be true".into()));
+    }
+    let confirmed = body.confirmed == Some(true);
+    if content.is_none() && body.kind.is_none() && body.status.is_none() && body.pinned.is_none() && !confirmed {
         return Err(AppError::BadRequest("nothing to update".into()));
     }
     let mut tx = state.db.begin().await?;
+    // A person accepting, confirming or rewriting a memory vouches for it (confidence 1).
     let row: MemoryRow = sqlx::query_as(&format!(
         "UPDATE memories SET content = COALESCE(?1, content), kind = COALESCE(?2, kind),
-                status = COALESCE(?3, status), updated_at = ?4
+                confidence = CASE WHEN ?7 OR ?1 IS NOT NULL OR (?3 = 'active' AND status = 'suggested') THEN 1.0 ELSE confidence END,
+                status = COALESCE(?3, CASE WHEN ?7 AND status = 'suggested' THEN 'active' ELSE status END),
+                pinned = COALESCE(?8, pinned), updated_at = ?4
          WHERE id = ?5 AND workspace_id = ?6
          RETURNING {MEMORY_COLUMNS}"
     ))
@@ -244,12 +280,17 @@ pub async fn update(
     .bind(now_ms())
     .bind(&id)
     .bind(&ws)
+    .bind(confirmed)
+    .bind(body.pinned)
     .fetch_optional(&mut *tx)
     .await?
     .ok_or(AppError::NotFound)?;
-    let action = match body.status.as_deref() {
-        Some("active") if row.source == "learned" => "memory.accepted",
-        Some("archived") => "memory.archived",
+    let action = match (body.status.as_deref(), body.pinned) {
+        (Some("active"), _) if row.source == "learned" => "memory.accepted",
+        (Some("archived"), _) => "memory.archived",
+        _ if confirmed => "memory.confirmed",
+        (None, Some(true)) => "memory.pinned",
+        (None, Some(false)) => "memory.unpinned",
         _ => "memory.updated",
     };
     audit::record(

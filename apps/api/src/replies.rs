@@ -242,6 +242,9 @@ pub async fn send_draft(state: &AppState, ws: &str, draft_id: &str, actor: Actor
     )
     .await?;
     tx.commit().await?;
+    if let Err(e) = crate::jobs::learning_jobs::enqueue_reply_learning(&state.db, &ctx.draft_id).await {
+        tracing::warn!(error = %e, "could not schedule learning from the sent reply");
+    }
     state.jobs_notify.notify_one();
     Ok(provider_message_id)
 }

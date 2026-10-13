@@ -73,6 +73,9 @@ pub async fn handle(state: &AppState, job: &Job) -> Result<(), JobError> {
         kind::REMIND_NO_REPLY => super::automation_jobs::remind_no_reply(state, &payload).await,
         kind::REGISTER_NANGO_CONNECTION => crate::sources::nango::register_from_webhook(state, &payload).await,
         kind::INDEX_MESSAGE | kind::INDEX_REPLY | kind::BACKFILL_KNOWLEDGE => super::knowledge_jobs::handle(state, job, &payload).await,
+        kind::LEARN_FROM_MESSAGE => super::learning_jobs::learn_from_message(state, &payload).await,
+        kind::LEARN_FROM_REPLY => super::learning_jobs::learn_from_reply(state, &payload).await,
+        kind::EVALUATE_ALERTS => crate::alerts::evaluate_job(state, &payload).await,
         other => Err(JobError::Permanent(format!("unknown job kind {other}"))),
     }
 }
@@ -372,6 +375,7 @@ pub async fn persist_classification(
     jobs::enqueue(&mut tx, kind::RUN_AUTOMATIONS, &format!("automations:{message_id}"), Some(&workspace_id), &json!({ "message_id": message_id }))
         .await?;
     super::knowledge_jobs::enqueue_index_message(&mut tx, &workspace_id, message_id).await?;
+    jobs::enqueue(&mut tx, kind::LEARN_FROM_MESSAGE, &format!("learn:{message_id}"), Some(&workspace_id), &json!({ "message_id": message_id })).await?;
     // Requirement / referral emails also become structured records for matching.
     if super::matching_jobs::is_extractable(&out.category) {
         jobs::enqueue(
@@ -604,6 +608,7 @@ async fn generate_draft(state: &AppState, job: &Job, payload: &Value) -> Result<
                 },
             )
             .await?;
+            crate::memory_learning::record_use(&mut tx, &ctx.ids(), now).await?;
         }
     }
     if let Some(run_id) = &run_id {
@@ -834,6 +839,8 @@ async fn finish_without_draft(
 /// Compares the suggested draft with what an operator approved and stores up to three
 /// reusable lessons as *suggestions*. Nothing is used until a person accepts it.
 async fn learn_from_draft(state: &AppState, payload: &Value) -> Result<(), JobError> {
+    // An approved reply also teaches durable facts (once per draft).
+    super::learning_jobs::enqueue_reply_learning(&state.db, &str_field(payload, "draft_id")?).await?;
     let Some(learner) = state.learner.clone() else {
         return Ok(());
     };
