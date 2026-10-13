@@ -10,6 +10,8 @@ pub mod ingest;
 pub mod jobs;
 pub mod labels;
 pub mod mailer;
+pub mod matching;
+pub mod replies;
 pub mod memory;
 pub mod sessions;
 pub mod sources;

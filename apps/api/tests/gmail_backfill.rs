@@ -6,12 +6,14 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 
+use std::sync::Mutex;
+
 use axum::{
     Json, Router,
     body::Body,
     extract::Path,
     http::{Request, StatusCode},
-    routing::get,
+    routing::{get, post, put},
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use email_ai_api::{build_state, config::Config, db, http::router, jobs::worker};
@@ -38,8 +40,28 @@ fn full_message(id: &str, subject: &str, body: &str) -> Value {
     })
 }
 
-async fn spawn_mock(flaky_first: Arc<AtomicUsize>) -> String {
+type Calls = Arc<Mutex<Vec<(String, Value)>>>;
+
+async fn spawn_mock(flaky_first: Arc<AtomicUsize>, calls: Calls) -> String {
+    let (c1, c2, c3, c4) = (calls.clone(), calls.clone(), calls.clone(), calls);
     let app = Router::new()
+        .route("/proxy/gmail/v1/users/me/profile", get(|| async { Json(json!({"emailAddress": "me@acme.com"})) }))
+        .route("/proxy/gmail/v1/users/me/drafts", post(move |Json(b): Json<Value>| async move {
+            c1.lock().unwrap().push(("create_draft".into(), b));
+            Json(json!({"id": "gdraft1"}))
+        }))
+        .route("/proxy/gmail/v1/users/me/drafts/{id}", put(move |Path(id): Path<String>, Json(b): Json<Value>| async move {
+            c2.lock().unwrap().push((format!("update_draft:{id}"), b));
+            Json(json!({"id": id}))
+        }))
+        .route("/proxy/gmail/v1/users/me/drafts/send", post(move |Json(b): Json<Value>| async move {
+            c3.lock().unwrap().push(("send_draft".into(), b));
+            Json(json!({"id": "gmsg-sent"}))
+        }))
+        .route("/proxy/gmail/v1/users/me/messages/send", post(move |Json(b): Json<Value>| async move {
+            c4.lock().unwrap().push(("send_message".into(), b));
+            Json(json!({"id": "gmsg-direct"}))
+        }))
         .route(
             "/connections/{id}",
             get(|Path(id): Path<String>| async move {
@@ -94,7 +116,8 @@ async fn backfills_full_messages_once_with_retry() {
     let dir = tempfile::tempdir().unwrap();
     let flaky = Arc::new(AtomicUsize::new(0));
     let mut config = Config::for_tests(&format!("sqlite://{}", dir.path().join("t.db").display()));
-    config.nango_api_url = spawn_mock(flaky.clone()).await;
+    let calls: Calls = Arc::default();
+    config.nango_api_url = spawn_mock(flaky.clone(), calls.clone()).await;
     config.nango_api_key = "k".into();
     config.nango_gmail_model = "Message".into();
     let state = build_state(config).await.unwrap();
@@ -128,4 +151,32 @@ async fn backfills_full_messages_once_with_retry() {
     call(&app, "POST", &format!("/api/v1/workspaces/{ws}/sources/{}/sync", src["id"].as_str().unwrap()), None).await;
     worker::drain(&state).await;
     assert_eq!(flaky.load(Ordering::SeqCst), fetched);
+
+    // Reply from the mailbox: the timesheet email got a workflow draft.
+    let ts = items.iter().find(|m| m["subject"] == "Timesheet for September").unwrap();
+    let (_, detail) = call(&app, "GET", &format!("/api/v1/workspaces/{ws}/messages/{}", ts["id"].as_str().unwrap()), None).await;
+    assert_eq!((detail["source"]["can_create_provider_draft"].as_bool(), detail["source"]["can_send"].as_bool()), (Some(true), Some(true)));
+    let draft_id = detail["draft"]["id"].as_str().unwrap().to_string();
+
+    let (s, saved) = call(&app, "POST", &format!("/api/v1/workspaces/{ws}/drafts/{draft_id}/provider-draft"), None).await;
+    assert_eq!((s, saved["provider_draft_id"].as_str()), (StatusCode::OK, Some("gdraft1")));
+    {
+        let calls = calls.lock().unwrap();
+        let (kind, body) = &calls[0];
+        assert_eq!(kind, "create_draft");
+        assert_eq!(body["message"]["threadId"], "t-m2", "reply stays in the Gmail thread");
+        let raw = String::from_utf8(URL_SAFE_NO_PAD.decode(body["message"]["raw"].as_str().unwrap()).unwrap()).unwrap();
+        assert!(raw.contains("Subject: Re: Timesheet for September") && raw.contains("hr@capgemini.example"));
+    }
+
+    // Sending needs explicit confirmation, happens once, and is audited.
+    assert_eq!(call(&app, "POST", &format!("/api/v1/workspaces/{ws}/drafts/{draft_id}/send"), Some(json!({"confirm": false}))).await.0, StatusCode::BAD_REQUEST);
+    let (s, sent) = call(&app, "POST", &format!("/api/v1/workspaces/{ws}/drafts/{draft_id}/send"), Some(json!({"confirm": true}))).await;
+    assert_eq!((s, sent["status"].as_str()), (StatusCode::OK, Some("sent")));
+    assert_eq!(call(&app, "POST", &format!("/api/v1/workspaces/{ws}/drafts/{draft_id}/send"), Some(json!({"confirm": true}))).await.0, StatusCode::CONFLICT);
+    let kinds: Vec<String> = calls.lock().unwrap().iter().map(|(k, _)| k.clone()).collect();
+    assert_eq!(kinds, ["create_draft", "update_draft:gdraft1", "send_draft"]);
+    let (_, detail) = call(&app, "GET", &format!("/api/v1/workspaces/{ws}/messages/{}", ts["id"].as_str().unwrap()), None).await;
+    assert_eq!(detail["draft"]["status"], "sent");
+    assert!(detail["audit"].as_array().unwrap().iter().any(|a| a["action"] == "draft.sent"));
 }

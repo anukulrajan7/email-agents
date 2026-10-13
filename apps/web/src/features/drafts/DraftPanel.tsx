@@ -3,14 +3,36 @@ import type { Draft, MessageDetail } from '../../api/types';
 import { Button, Textarea } from '../../components/ui';
 import { ErrorNote } from '../../components/ErrorNote';
 import { StatusBadge } from '../../components/StatusBadges';
-import { useGenerateDraft, useUpdateDraft } from './hooks';
+import { fullDate } from '../../lib/format';
+import { SendDialog } from './SendDialog';
+import { useGenerateDraft, useSaveProviderDraft, useSendDraft, useUpdateDraft } from './hooks';
 
 const POLL_LIMIT_MS = 60_000;
 
-function DraftEditor({ ws, messageId, draft }: { ws: string; messageId: string; draft: Draft }) {
+const replySubject = (subject: string) => (/^\s*re:/i.test(subject) ? subject.trim() : `Re: ${subject}`);
+
+function DraftEditor({
+  ws,
+  message,
+  draft,
+  savedToGmail,
+  onSavedToGmail,
+}: {
+  ws: string;
+  message: MessageDetail;
+  draft: Draft;
+  savedToGmail: boolean;
+  onSavedToGmail: () => void;
+}) {
+  const messageId = message.id;
   const [text, setText] = useState(draft.body_text);
   const [copied, setCopied] = useState(false);
+  const [confirming, setConfirming] = useState(false);
   const update = useUpdateDraft(ws, messageId, draft.id);
+  const saveProvider = useSaveProviderDraft(ws, messageId, draft.id);
+  const send = useSendDraft(ws, messageId, draft.id);
+  const sent = draft.status === 'sent';
+  const dirty = text !== draft.body_text;
 
   const copy = async () => {
     await navigator.clipboard.writeText(text);
@@ -23,28 +45,75 @@ function DraftEditor({ ws, messageId, draft }: { ws: string; messageId: string; 
       <label htmlFor="draft-body" className="sr-only">
         Draft reply
       </label>
-      <Textarea id="draft-body" rows={10} className="ruled bg-surface px-4 py-0 text-[15px]" value={text} onChange={(e) => setText(e.target.value)} />
+      <Textarea
+        id="draft-body"
+        rows={10}
+        readOnly={sent}
+        className="ruled bg-surface px-4 py-0 text-[15px]"
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+      />
+      {sent && (
+        <p className="text-sm font-semibold text-ink-muted" aria-live="polite">
+          Sent ✓ — Sent from Gmail on {fullDate(draft.updated_at)}
+        </p>
+      )}
       <div className="flex flex-wrap gap-2">
-        <Button
-          variant="secondary"
-          loading={update.isPending && update.variables?.body_text !== undefined}
-          disabled={text === draft.body_text}
-          onClick={() => update.mutate({ body_text: text, status: 'edited' })}
-        >
-          Save
-        </Button>
-        <Button
-          loading={update.isPending && update.variables?.body_text === undefined}
-          disabled={draft.status === 'approved' && text === draft.body_text}
-          onClick={() => update.mutate(text === draft.body_text ? { status: 'approved' } : { body_text: text, status: 'approved' })}
-        >
-          Approve
-        </Button>
+        {!sent && (
+          <>
+            <Button
+              variant="secondary"
+              loading={update.isPending && update.variables?.body_text !== undefined}
+              disabled={!dirty}
+              onClick={() => update.mutate({ body_text: text, status: 'edited' })}
+            >
+              Save
+            </Button>
+            <Button
+              loading={update.isPending && update.variables?.body_text === undefined}
+              disabled={draft.status === 'approved' && !dirty}
+              onClick={() => update.mutate(!dirty ? { status: 'approved' } : { body_text: text, status: 'approved' })}
+            >
+              Approve
+            </Button>
+            {message.source.can_create_provider_draft && (
+              <Button
+                variant="secondary"
+                loading={saveProvider.isPending}
+                onClick={() => saveProvider.mutate(dirty ? text : undefined, { onSuccess: onSavedToGmail })}
+              >
+                Save to Gmail drafts
+              </Button>
+            )}
+            {message.source.can_send && (
+              <Button onClick={() => setConfirming(true)}>Send reply…</Button>
+            )}
+          </>
+        )}
         <Button variant="secondary" onClick={copy}>
           {copied ? 'Copied' : 'Copy draft'}
         </Button>
       </div>
-      <ErrorNote error={update.error} />
+      {savedToGmail && !sent && (
+        <p className="text-sm text-ink-muted" role="status">
+          Saved in your Gmail Drafts — you can finish it there too.
+        </p>
+      )}
+      <ErrorNote error={update.error ?? saveProvider.error} />
+      {confirming && (
+        <SendDialog
+          to={message.from}
+          subject={replySubject(message.subject)}
+          body={text}
+          sending={send.isPending}
+          error={send.error}
+          onCancel={() => {
+            send.reset();
+            setConfirming(false);
+          }}
+          onConfirm={() => send.mutate(dirty ? text : undefined, { onSuccess: () => setConfirming(false) })}
+        />
+      )}
     </div>
   );
 }
@@ -60,6 +129,7 @@ export function DraftPanel({
 }) {
   const generate = useGenerateDraft(ws, message.id);
   const [baseline, setBaseline] = useState<{ updatedAt: string | null } | undefined>();
+  const [savedToGmail, setSavedToGmail] = useState(false);
   const draft = message.draft;
   const awaiting = baseline !== undefined && (draft?.updated_at ?? null) === baseline.updatedAt;
 
@@ -71,7 +141,12 @@ export function DraftPanel({
   }, [awaiting, onAwaitingChange]);
 
   const start = () =>
-    generate.mutate(undefined, { onSuccess: () => setBaseline({ updatedAt: draft?.updated_at ?? null }) });
+    generate.mutate(undefined, {
+      onSuccess: () => {
+        setSavedToGmail(false);
+        setBaseline({ updatedAt: draft?.updated_at ?? null });
+      },
+    });
 
   return (
     <section aria-labelledby="draft-heading" className="flex flex-col gap-3">
@@ -93,7 +168,14 @@ export function DraftPanel({
         </p>
       )}
       {draft ? (
-        <DraftEditor key={`${draft.id}:${draft.updated_at}`} ws={ws} messageId={message.id} draft={draft} />
+        <DraftEditor
+          key={`${draft.id}:${draft.updated_at}`}
+          ws={ws}
+          message={message}
+          draft={draft}
+          savedToGmail={savedToGmail}
+          onSavedToGmail={() => setSavedToGmail(true)}
+        />
       ) : null}
       {draft && draft.memories_used.length > 0 && (
         <details className="text-sm">
@@ -108,11 +190,6 @@ export function DraftPanel({
             ))}
           </ul>
         </details>
-      )}
-      {message.source.can_create_provider_draft && draft && (
-        <Button variant="secondary" className="self-start" disabled title="Provider drafts are not wired up yet">
-          Create draft in mailbox
-        </Button>
       )}
     </section>
   );

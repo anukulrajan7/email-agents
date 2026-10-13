@@ -204,7 +204,7 @@ async fn gmail_connect_backfill_and_incremental_sync() {
     assert_eq!(s, StatusCode::OK);
     assert_eq!((src["kind"].as_str(), src["status"].as_str()), (Some("nango_gmail"), Some("connected")));
     assert_eq!(src["capabilities"]["sync"], true);
-    assert_eq!(src["capabilities"]["provider_drafts"], false);
+    assert_eq!(src["capabilities"]["provider_drafts"], true, "drafts + send on explicit user action");
     let src_id = src["id"].as_str().unwrap().to_string();
 
     // Initial backfill: m1 + m2 (same Gmail thread), not the 40-day-old one, not the deleted one.

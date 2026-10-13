@@ -12,8 +12,8 @@ use crate::domain::Capabilities;
 pub fn capabilities(kind: &str) -> Capabilities {
     match kind {
         "forwarding" => Capabilities::forwarding(),
-        // Provider drafts stay off until the draft action is implemented and the scope verified.
-        "nango_gmail" => Capabilities { read: true, sync: true, provider_labels: false, provider_drafts: false, send: false },
+        // Drafts and sends happen only on an explicit user click, never automatically.
+        "nango_gmail" => Capabilities { read: true, sync: true, provider_labels: false, provider_drafts: true, send: true },
         // Connected mailboxes get real flags from granted scopes once implemented (P1).
         _ => Capabilities { read: false, sync: false, provider_labels: false, provider_drafts: false, send: false },
     }

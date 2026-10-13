@@ -81,6 +81,8 @@ pub fn router(state: AppState) -> Router {
         .route("/workspaces/{ws}/messages/{id}/draft", post(messages::request_draft))
         .route("/workspaces/{ws}/messages/{id}/reprocess", post(messages::reprocess))
         .route("/workspaces/{ws}/drafts/{id}", patch(messages::update_draft))
+        .route("/workspaces/{ws}/drafts/{id}/provider-draft", post(crate::replies::save_to_provider))
+        .route("/workspaces/{ws}/drafts/{id}/send", post(crate::replies::send))
         .route("/workspaces/{ws}/reviews", get(reviews::list))
         .route("/workspaces/{ws}/reviews/{id}", patch(reviews::update))
         .route("/workspaces/{ws}/workflows", get(workflows::list))

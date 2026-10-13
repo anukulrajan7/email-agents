@@ -194,6 +194,26 @@ impl NangoClient {
         }
     }
 
+    /// Generic Gmail call through Nango's proxy (`path` is relative to `users/me/`).
+    pub async fn gmail_call(
+        &self,
+        method: reqwest::Method,
+        connection_id: &str,
+        provider_config_key: &str,
+        path: &str,
+        body: Option<&Value>,
+    ) -> Result<Value, NangoError> {
+        let mut req = self
+            .http
+            .request(method, format!("{}/proxy/gmail/v1/users/me/{path}", self.api_url))
+            .header("Connection-Id", connection_id)
+            .header("Provider-Config-Key", provider_config_key);
+        if let Some(b) = body {
+            req = req.json(b);
+        }
+        self.send(req).await
+    }
+
     /// One page of Gmail message IDs matching `q` (e.g. `newer_than:14d`).
     pub async fn gmail_list_ids(
         &self,

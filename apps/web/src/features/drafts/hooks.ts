@@ -1,7 +1,7 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '../../api/client';
 import type { Draft, DraftPatch } from '../../api/types';
-import { messageKey } from '../inbox/hooks';
+import { messageKey, messagesKey } from '../inbox/hooks';
 
 export function useGenerateDraft(ws: string, messageId: string) {
   const qc = useQueryClient();
@@ -16,5 +16,40 @@ export function useUpdateDraft(ws: string, messageId: string, draftId: string) {
   return useMutation({
     mutationFn: (patch: DraftPatch) => api<Draft>(`/workspaces/${ws}/drafts/${draftId}`, { method: 'PATCH', body: patch }),
     onSuccess: () => qc.invalidateQueries({ queryKey: messageKey(ws, messageId) }),
+  });
+}
+
+export function useSaveProviderDraft(ws: string, messageId: string, draftId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (body_text?: string) => {
+      if (body_text !== undefined) {
+        await api<Draft>(`/workspaces/${ws}/drafts/${draftId}`, { method: 'PATCH', body: { body_text, status: 'edited' } });
+      }
+      return api<{ status: 'saved'; provider_draft_id: string }>(`/workspaces/${ws}/drafts/${draftId}/provider-draft`, {
+        method: 'POST',
+      });
+    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: messageKey(ws, messageId) }),
+  });
+}
+
+export function useSendDraft(ws: string, messageId: string, draftId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (body_text?: string) => {
+      if (body_text !== undefined) {
+        await api<Draft>(`/workspaces/${ws}/drafts/${draftId}`, { method: 'PATCH', body: { body_text, status: 'edited' } });
+      }
+      return api<{ status: 'sent'; provider_message_id: string }>(`/workspaces/${ws}/drafts/${draftId}/send`, {
+        method: 'POST',
+        body: { confirm: true },
+      });
+    },
+    onSuccess: () =>
+      Promise.all([
+        qc.invalidateQueries({ queryKey: messageKey(ws, messageId) }),
+        qc.invalidateQueries({ queryKey: messagesKey(ws) }),
+      ]),
   });
 }

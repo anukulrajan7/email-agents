@@ -171,7 +171,7 @@ export type AuditEvent = {
 
 export type MessageDetail = {
   id: string;
-  source: { id: string; kind: SourceKind; can_create_provider_draft: boolean };
+  source: { id: string; kind: SourceKind; can_create_provider_draft: boolean; can_send: boolean };
   from: string;
   original_from: string | null;
   to: string[];

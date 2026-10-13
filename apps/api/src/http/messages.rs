@@ -264,6 +264,7 @@ pub async fn detail(
             "id": m.source_id,
             "kind": m.source_kind,
             "can_create_provider_draft": policy::can_create_provider_draft(&capabilities),
+            "can_send": policy::can_send(&capabilities),
         },
         "from": m.sender_address,
         "original_from": m.original_sender_address,
