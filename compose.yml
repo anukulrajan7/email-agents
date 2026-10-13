@@ -1,9 +1,10 @@
 # Production on a single host. The API binds to loopback only; the host's reverse
 # proxy (Caddy) terminates TLS and fronts it. SQLite lives on a local volume.
+# CI sets IMAGE/IMAGE_TAG in .env and runs `up --no-build`; locally `build: .` is used.
 services:
   app:
+    image: ${IMAGE:-email-agents}:${IMAGE_TAG:-latest}
     build: .
-    image: email-agents:latest
     network_mode: host
     env_file: .env
     environment:

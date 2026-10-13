@@ -1,0 +1,133 @@
+name: deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE: ghcr.io/anukulrajan7/email-agents
+  APP_DIR: /docker/email-agents
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/api
+      - name: Rust lint + tests
+        run: |
+          cargo clippy --manifest-path apps/api/Cargo.toml --all-targets -- -D warnings
+          cargo test --manifest-path apps/api/Cargo.toml
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 12.5.1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: apps/web/pnpm-lock.yaml
+      - name: Web typecheck + tests
+        working-directory: apps/web
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm typecheck
+          pnpm test --run
+
+  image:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:${{ github.sha }}
+            ${{ env.IMAGE }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    needs: image
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+      url: https://mail.anukulraj.tech
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure SSH
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "${{ secrets.VPS_SSH_KEY }}" > ~/.ssh/id_ed25519
+          printf '%s\n' "${{ secrets.VPS_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/id_ed25519 ~/.ssh/known_hosts
+      - name: Render server .env from secrets
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          NANGO_API_KEY: ${{ secrets.NANGO_API_KEY }}
+          NANGO_WEBHOOK_SECRET: ${{ secrets.NANGO_WEBHOOK_SECRET }}
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          RESEND_WEBHOOK_SECRET: ${{ secrets.RESEND_WEBHOOK_SECRET }}
+          TYPESAFE_API_KEY: ${{ secrets.TYPESAFE_API_KEY }}
+          OPENROUTER_MODEL_ID: ${{ vars.OPENROUTER_MODEL_ID }}
+        run: |
+          umask 077
+          cat > deploy.env <<ENV
+          IMAGE=${IMAGE}
+          IMAGE_TAG=${GITHUB_SHA}
+          RUST_LOG=info,tower_http=info
+          AUTH_MODE=dev
+          PUBLIC_WEB_URL=https://mail.anukulraj.tech
+          API_PUBLIC_URL=https://mail.anukulraj.tech
+          ALLOW_TEST_EMAILS=true
+          INBOUND_DOMAIN=inbound.anukulraj.tech
+          RESEND_API_KEY=${RESEND_API_KEY}
+          RESEND_WEBHOOK_SECRET=${RESEND_WEBHOOK_SECRET}
+          NANGO_API_KEY=${NANGO_API_KEY}
+          NANGO_WEBHOOK_SECRET=${NANGO_WEBHOOK_SECRET}
+          NANGO_GMAIL_INTEGRATION_ID=google-mail
+          TYPESAFE_API_KEY=${TYPESAFE_API_KEY}
+          OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+          OPENROUTER_MODEL_ID=${OPENROUTER_MODEL_ID}
+          EMAIL_RETENTION_DAYS=30
+          JOB_WORKER_CONCURRENCY=2
+          ENV
+          sed -i 's/^ *//' deploy.env
+      - name: Ship config and roll out
+        run: |
+          H="root@${{ secrets.VPS_HOST }}"
+          ssh "$H" "mkdir -p $APP_DIR/data && chown 10001 $APP_DIR/data"
+          scp compose.yml "$H:$APP_DIR/compose.yml"
+          scp deploy.env "$H:$APP_DIR/.env"
+          rm -f deploy.env
+          echo "${{ secrets.GITHUB_TOKEN }}" | ssh "$H" "docker login ghcr.io -u ${{ github.actor }} --password-stdin >/dev/null"
+          ssh "$H" "cd $APP_DIR && docker compose pull && docker compose up -d --no-build --remove-orphans; docker logout ghcr.io >/dev/null"
+      - name: Health check
+        run: |
+          for i in $(seq 1 30); do
+            if ssh "root@${{ secrets.VPS_HOST }}" "curl -fsS http://127.0.0.1:18090/health/ready"; then exit 0; fi
+            sleep 2
+          done
+          ssh "root@${{ secrets.VPS_HOST }}" "cd $APP_DIR && docker compose logs --tail 80"
+          exit 1
