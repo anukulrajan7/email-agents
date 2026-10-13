@@ -5,7 +5,9 @@ import { ErrorNote } from '../../components/ErrorNote';
 import { useWorkspace } from '../../app/useWorkspace';
 import { riseStyle } from '../../lib/motion';
 import { markLabelsVisited } from '../onboarding/storage';
+import { Tabs } from '../../components/ui/Tabs';
 import { LabelForm } from './LabelForm';
+import { LabelHealth, type HealthAction } from './LabelHealth';
 import { SuggestLabels } from './SuggestLabels';
 import { useCreateLabel, useLabels, useUpdateLabel } from './hooks';
 
@@ -15,6 +17,7 @@ function LabelRow({
   isAdmin,
   isFirst,
   isLast,
+  startEditing,
   onMove,
   onArchive,
   busy,
@@ -24,16 +27,17 @@ function LabelRow({
   isAdmin: boolean;
   isFirst: boolean;
   isLast: boolean;
+  startEditing: boolean;
   onMove: (direction: -1 | 1) => void;
   onArchive: (archived: boolean) => void;
   busy: boolean;
 }) {
-  const [editing, setEditing] = useState(false);
+  const [editing, setEditing] = useState(startEditing);
   const update = useUpdateLabel(ws);
 
   if (editing) {
     return (
-      <li className="p-4">
+      <li id={`label-${label.key}`} className="p-4">
         <LabelForm
           idPrefix={`edit-${label.id}`}
           initial={{ name: label.name, description: label.description, color: label.color }}
@@ -57,7 +61,7 @@ function LabelRow({
   }
 
   return (
-    <li className={label.archived ? 'p-4 opacity-70' : 'p-4'}>
+    <li id={`label-${label.key}`} className={label.archived ? 'p-4 opacity-70' : 'p-4'}>
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div className="flex min-w-0 flex-1 flex-col gap-2">
           <div className="flex flex-wrap items-center gap-2">
@@ -98,17 +102,34 @@ function LabelRow({
   );
 }
 
+type Tab = 'labels' | 'health';
+
 export function LabelsPage() {
   const { ws, isAdmin } = useWorkspace();
   const labels = useLabels(ws, { includeArchived: true });
   const create = useCreateLabel(ws);
   const update = useUpdateLabel(ws);
   const [formKey, setFormKey] = useState(0);
+  const [tab, setTab] = useState<Tab>('labels');
+  const [pending, setPending] = useState<HealthAction | undefined>();
   const items = labels.data?.items ?? [];
 
   useEffect(() => {
     markLabelsVisited(ws);
   }, [ws]);
+
+  useEffect(() => {
+    if (tab !== 'labels' || !pending || !labels.data) return;
+    const el = document.getElementById(pending.kind === 'suggest' ? 'suggest-labels' : `label-${pending.key}`);
+    el?.scrollIntoView({ block: 'center' });
+    if (pending.kind === 'suggest') el?.focus();
+    setPending(undefined);
+  }, [tab, pending, labels.data]);
+
+  const openFromHealth = (action: HealthAction) => {
+    setPending(action);
+    setTab('labels');
+  };
 
   const move = (index: number, direction: -1 | 1) => {
     const target = items[index + direction];
@@ -123,53 +144,72 @@ export function LabelsPage() {
         title="Labels"
         description="Each label has a description. The AI reads it as an instruction, and your team sees it as help text — write it like you'd brief a new teammate."
       />
-      {labels.isLoading && <Spinner />}
-      <ErrorNote error={labels.error ?? update.error} />
-      {labels.data &&
-        (items.length === 0 ? (
-          <Card className="rise" style={riseStyle(1)}>
-            <EmptyState
-              title="No labels yet"
-              description="Labels are the categories the AI sorts each email into. An admin can add the first one below."
-            />
-          </Card>
-        ) : (
-          <Card className="rise p-0" style={riseStyle(1)}>
-            <ul className="divide-y divide-rule" aria-label="Labels">
-              {items.map((l, i) => (
-                <LabelRow
-                  key={l.id}
-                  ws={ws}
-                  label={l}
-                  isAdmin={isAdmin}
-                  isFirst={i === 0}
-                  isLast={i === items.length - 1}
-                  busy={update.isPending}
-                  onMove={(d) => move(i, d)}
-                  onArchive={(archived) => update.mutate({ id: l.id, archived })}
-                />
+      <Tabs
+        label="Labels views"
+        tabs={[
+          { id: 'labels', label: 'Labels' },
+          { id: 'health', label: 'Health' },
+        ]}
+        value={tab}
+        onChange={(t) => {
+          setPending(undefined);
+          setTab(t);
+        }}
+      >
+        {tab === 'health' && <LabelHealth ws={ws} isAdmin={isAdmin} onAction={openFromHealth} />}
+        {tab === 'labels' && (
+          <>
+            {labels.isLoading && <Spinner />}
+            <ErrorNote error={labels.error ?? update.error} />
+            {labels.data &&
+              (items.length === 0 ? (
+                <Card className="rise" style={riseStyle(1)}>
+                  <EmptyState
+                    title="No labels yet"
+                    description="Labels are the categories the AI sorts each email into. An admin can add the first one below."
+                  />
+                </Card>
+              ) : (
+                <Card className="rise p-0" style={riseStyle(1)}>
+                  <ul className="divide-y divide-rule" aria-label="Labels">
+                    {items.map((l, i) => (
+                      <LabelRow
+                        key={l.id}
+                        ws={ws}
+                        label={l}
+                        isAdmin={isAdmin}
+                        isFirst={i === 0}
+                        isLast={i === items.length - 1}
+                        startEditing={pending?.kind === 'edit' && pending.key === l.key}
+                        busy={update.isPending}
+                        onMove={(d) => move(i, d)}
+                        onArchive={(archived) => update.mutate({ id: l.id, archived })}
+                      />
+                    ))}
+                  </ul>
+                </Card>
               ))}
-            </ul>
-          </Card>
-        ))}
-      {isAdmin && <SuggestLabels ws={ws} />}
-      {isAdmin ? (
-        <Card className="rise max-w-xl bg-raised" style={riseStyle(2)}>
-          <CardTitle className="mb-3">Add a label</CardTitle>
-          <LabelForm
-            key={formKey}
-            idPrefix="new-label"
-            submitLabel="Add label"
-            busy={create.isPending}
-            onSubmit={(v) => create.mutate(v, { onSuccess: () => setFormKey((k) => k + 1) })}
-          />
-          <div className="mt-3">
-            <ErrorNote error={create.error} />
-          </div>
-        </Card>
-      ) : (
-        <p className="text-sm text-ink-muted">Only workspace admins can add or change labels.</p>
-      )}
+            {isAdmin && <SuggestLabels ws={ws} />}
+            {isAdmin ? (
+              <Card className="rise max-w-xl bg-raised" style={riseStyle(2)}>
+                <CardTitle className="mb-3">Add a label</CardTitle>
+                <LabelForm
+                  key={formKey}
+                  idPrefix="new-label"
+                  submitLabel="Add label"
+                  busy={create.isPending}
+                  onSubmit={(v) => create.mutate(v, { onSuccess: () => setFormKey((k) => k + 1) })}
+                />
+                <div className="mt-3">
+                  <ErrorNote error={create.error} />
+                </div>
+              </Card>
+            ) : (
+              <p className="text-sm text-ink-muted">Only workspace admins can add or change labels.</p>
+            )}
+          </>
+        )}
+      </Tabs>
     </Page>
   );
 }

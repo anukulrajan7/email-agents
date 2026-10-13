@@ -88,7 +88,7 @@ export function SuggestLabels({ ws }: { ws: string }) {
   };
 
   return (
-    <section aria-labelledby="suggest-heading" className="flex flex-col gap-3">
+    <section id="suggest-labels" tabIndex={-1} aria-labelledby="suggest-heading" className="flex flex-col gap-3 outline-none">
       <div className="flex flex-wrap items-center gap-3">
         <h2 id="suggest-heading" className="type-display text-2xl tracking-[-0.01em]">
           Suggested labels

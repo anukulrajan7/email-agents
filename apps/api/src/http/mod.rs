@@ -3,6 +3,7 @@ mod auth_api;
 mod automations_api;
 mod dto;
 mod jobs_api;
+mod label_health;
 mod labels_api;
 mod matching_api;
 mod memories;
@@ -78,6 +79,7 @@ pub fn router(state: AppState) -> Router {
         .route("/label-templates", get(labels_api::templates))
         .route("/workspaces/{ws}/labels", get(labels_api::list).post(labels_api::create))
         .route("/workspaces/{ws}/labels/suggest", post(labels_api::suggest))
+        .route("/workspaces/{ws}/labels/health", get(label_health::health))
         .route("/workspaces/{ws}/labels/{id}", patch(labels_api::update))
         .route("/workspaces/{ws}/members", post(workspaces::add_member))
         .route("/workspaces/{ws}/sources", get(sources::list))

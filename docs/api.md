@@ -464,6 +464,32 @@ The AI reads up to 60 recent inbound emails (subject + snippet, unlabelled `othe
 `ai_unavailable`. Contract note: the original sketch used a hex colour; a palette name is returned so the result
 can be sent to `POST /labels` unchanged.
 
+### Label health: `GET /api/v1/workspaces/:ws/labels/health?days=30` (operator)
+How well automatic labelling works over the last `days` days (1–180, default 30; otherwise 400) of **inbound** mail
+(`direction = 'inbound'`, by `received_at`, UTC days).
+```ts
+{ days: number; total: number;            // classified inbound emails in the window
+  other_share: number;                    // share landing in `other`
+  auto_share: number;                     // share nobody had to change (extra field beyond the original sketch)
+  labels: { key: string; name: string; count: number; share: number;
+            auto: number;                 // count - corrected_into: the AI's pick stood
+            corrected_away: number;       // the AI chose this label and a person changed it
+            corrected_into: number;       // a person moved the email into this label
+            correction_rate: number;      // corrected_away / (auto + corrected_away)
+            avg_confidence: number | null;// mean of the AI's own picks (null with no model confidence)
+            trend: { date: "YYYY-MM-DD"; count: number }[] }[];   // one point per day, zeros included
+  other_trend: { date: string; count: number }[];
+  advice: { kind: "add_label" | "label_unreliable" | "label_unused"; label_key: string | null; text: string }[] }
+```
+`labels` holds every non-`other` active label (plus archived ones that still have mail in the window); `other` is
+reported through `other_share` / `other_trend`. Ratios are rounded to 2 decimals. Advice rules: `other_share >= 0.25`
+-> `add_label` (listed first); `correction_rate >= 0.2` with at least 5 AI picks -> `label_unreliable`; an active
+label with 0 emails in the window (and mail in the workspace) -> `label_unused`.
+
+Correction signal: when a person changes an email's label (`PATCH .../messages/:id/classification`),
+`classifications.ai_category` keeps what the AI chose first (set once, never overwritten by later human changes) and
+`confirmed` becomes 1. AI re-runs never touch either column.
+
 ## Alerts (wave 2, F2)
 
 Deterministic rules, evaluated every 15 minutes per workspace (job `evaluate_alerts`, scheduled by the worker).

@@ -304,7 +304,11 @@ pub async fn persist_classification(
            confidence = excluded.confidence, needs_review = excluded.needs_review, source = excluded.source,
            model_id = excluded.model_id, model_version = excluded.model_version,
            taxonomy_version = excluded.taxonomy_version, prompt_version = excluded.prompt_version,
-           updated_at = excluded.updated_at
+           updated_at = excluded.updated_at,
+           ai_category = CASE WHEN excluded.source = 'manual'
+             THEN COALESCE(classifications.ai_category, CASE WHEN classifications.source != 'manual' THEN classifications.category END)
+             ELSE classifications.ai_category END,
+           confirmed = CASE WHEN excluded.source = 'manual' THEN 1 ELSE classifications.confirmed END
          WHERE classifications.source != 'manual' OR excluded.source = 'manual'"
         }
     };
@@ -312,8 +316,8 @@ pub async fn persist_classification(
     let written = sqlx::query(&format!(
         "INSERT INTO classifications
            (message_id, category, priority, requires_reply, confidence, needs_review, source, model_id, model_version,
-            taxonomy_version, prompt_version, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+            taxonomy_version, prompt_version, updated_at, confirmed)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
          {conflict}"
     ))
     .bind(message_id)
@@ -328,6 +332,7 @@ pub async fn persist_classification(
     .bind(TAXONOMY_VERSION)
     .bind(matches!(out.source, ClassificationSource::Jev | ClassificationSource::Llm).then_some(ai::PROMPT_VERSION))
     .bind(now)
+    .bind(matches!(out.source, ClassificationSource::Manual))
     .execute(&mut *tx)
     .await?
     .rows_affected()

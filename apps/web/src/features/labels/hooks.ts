@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '../../api/client';
 import type { Items, Label, LabelCreateBody, LabelPatch, LabelTemplateInfo } from '../../api/types';
+import type { LabelHealthReport } from './healthTypes';
 
 export const labelsKey = (ws: string) => ['ws', ws, 'labels'] as const;
 
@@ -58,6 +59,14 @@ export type LabelSuggestion = {
 export function useSuggestLabels(ws: string) {
   return useMutation({
     mutationFn: () => api<Items<LabelSuggestion>>(`/workspaces/${ws}/labels/suggest`, { method: 'POST' }),
+  });
+}
+
+export function useLabelHealth(ws: string, days: number) {
+  return useQuery({
+    queryKey: [...labelsKey(ws), 'health', days],
+    queryFn: () => api<LabelHealthReport>(`/workspaces/${ws}/labels/health`, { query: { days } }),
+    staleTime: 30_000,
   });
 }
 
