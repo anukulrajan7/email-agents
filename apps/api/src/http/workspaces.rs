@@ -129,6 +129,7 @@ pub async fn create(
         .bind(&user.id)
         .execute(&mut *tx)
         .await?;
+    crate::team::access::seed_owner(&mut tx, &id, &user.id).await?;
     packs::seed_labels(&mut tx, &id, &seeds).await?;
     packs::enable(&mut tx, &id, &chosen).await?;
     crate::automations::seed_defaults(&mut tx, &id).await?;

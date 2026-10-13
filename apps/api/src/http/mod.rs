@@ -16,6 +16,8 @@ mod reply_settings_api;
 mod reviews;
 mod search_api;
 mod sources;
+mod staffing_api;
+mod team_api;
 mod webhooks;
 mod workflows;
 mod workspaces;
@@ -157,6 +159,8 @@ pub fn router(state: AppState) -> Router {
         .merge(agents_api::routes())
         .merge(agent_profiles_api::routes())
         .merge(assistant_api::routes())
+        .merge(team_api::routes())
+        .merge(staffing_api::routes())
         .fallback(|| async { AppError::NotFound })
         .layer(middleware::from_fn(crate::ai_ledger::attach_context))
         .layer(DefaultBodyLimit::max(256 * 1024));

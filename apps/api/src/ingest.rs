@@ -46,6 +46,10 @@ pub async fn persist_message(
         return Ok(None);
     }
 
+    if crate::staffing::policy::blocks_ingest(conn, source_id, workspace_id, email).await? {
+        return Ok(None);
+    }
+
     let now = now_ms();
     let thread_id = match provider_thread_id {
         Some(ptid) => {

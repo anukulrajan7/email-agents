@@ -46,6 +46,7 @@ pub mod kind {
     pub const AGENT_STEP: &str = "agent_step";
     pub const SEND_DRAFT: &str = "send_draft";
     pub const BACKUP_DATABASE: &str = "backup_database";
+    pub const STAFFING_SCAN: &str = "staffing_scan";
 }
 
 #[derive(Debug, Clone, FromRow)]

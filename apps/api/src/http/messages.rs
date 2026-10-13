@@ -39,6 +39,10 @@ pub struct ListQuery {
     direction: Option<String>,
     /// `replied` (we answered) or `awaiting` (needs a reply, not answered yet).
     reply: Option<String>,
+    /// Only mail stored under this connected mailbox.
+    source_id: Option<String>,
+    /// Only mail in the mailbox linked to this person in the team directory.
+    person_id: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -141,7 +145,10 @@ pub async fn list(
     Path(ws): Path<String>,
     Query(query): Query<ListQuery>,
 ) -> AppResult<Json<Value>> {
-    require_role(&state.db, &ws, &user, Role::Operator).await?;
+    let access = crate::team::access::resolve(&state.db, &ws, &user).await?;
+    let scope = crate::team::scope::source_filter(&state.db, &ws, &access, query.source_id.as_deref(), query.person_id.as_deref())
+        .await?
+        .map(|ids| json!(ids).to_string());
     let limit = query.limit.unwrap_or(50).clamp(1, 100);
     let category = match query.category.as_deref().filter(|c| !c.is_empty()) {
         Some(c) if labels::is_active(&state.db, &ws, c).await? => Some(c.to_string()),
@@ -180,6 +187,7 @@ pub async fn list(
         let mut rows: Vec<SummaryRow> = sqlx::query_as(&format!(
             "{SUMMARY_SELECT}
              {filters}
+               AND (?7 IS NULL OR m.source_id IN (SELECT value FROM json_each(?7)))
              ORDER BY (COALESCE(i.needs_reply, c.requires_reply, 0) = 1 AND NOT {replied}) DESC,
                       CASE c.priority WHEN 'high' THEN 2 WHEN 'low' THEN 0 ELSE 1 END DESC,
                       m.received_at DESC, m.id DESC
@@ -191,6 +199,7 @@ pub async fn list(
         .bind(direction)
         .bind(limit + 1)
         .bind(offset)
+        .bind(&scope)
         .fetch_all(&state.db)
         .await?;
         let has_more = rows.len() as i64 > limit;
@@ -209,6 +218,7 @@ pub async fn list(
             "{SUMMARY_SELECT}
              {filters}
                AND (?5 IS NULL OR m.received_at < ?5 OR (m.received_at = ?5 AND m.id < ?6))
+               AND (?8 IS NULL OR m.source_id IN (SELECT value FROM json_each(?8)))
              ORDER BY m.received_at DESC, m.id DESC
              LIMIT ?7"
         ))
@@ -219,6 +229,7 @@ pub async fn list(
         .bind(cursor_ts)
         .bind(cursor_id)
         .bind(limit + 1)
+        .bind(&scope)
         .fetch_all(&state.db)
         .await?;
         let has_more = rows.len() as i64 > limit;
