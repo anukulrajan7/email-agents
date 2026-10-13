@@ -1,17 +1,15 @@
 import { useId, useState } from 'react';
 import { Link } from 'react-router';
-import { Button, Card, Label, Textarea } from '../../components/ui';
+import { Button, Card, Label, RelativeTime, Textarea, useToast } from '../../components/ui';
 import { ErrorNote } from '../../components/ErrorNote';
-import { relativeTime } from '../../lib/format';
 import { useDecideApproval } from './hooks';
 import type { Approval } from './types';
 
-export type NotifyResult = (tone: 'success' | 'error', message: string) => void;
-
 const HAS_GAPS = /\[NEEDS:/i;
 
-export function ApprovalCard({ ws, approval, notify }: { ws: string; approval: Approval; notify: NotifyResult }) {
+export function ApprovalCard({ ws, approval }: { ws: string; approval: Approval }) {
   const uid = useId();
+  const notify = useToast();
   const decide = useDecideApproval(ws);
   const [body, setBody] = useState(approval.body);
   const [declining, setDeclining] = useState(false);
@@ -39,15 +37,14 @@ export function ApprovalCard({ ws, approval, notify }: { ws: string; approval: A
   };
 
   return (
-    <>
-      <Card className="flex flex-col gap-4 p-5" aria-label={approval.summary} role="group">
+    <Card className="flex flex-col gap-4 p-5" aria-label={approval.summary} role="group">
         <div className="flex flex-col gap-1">
           <h3 className="type-display text-xl tracking-[-0.01em] break-words">{approval.summary}</h3>
           <p className="text-sm text-ink-muted">
-            <Link to={`/w/${ws}/agents/${approval.case_id}`} className="underline underline-offset-2 hover:text-ink">
+            <Link to={`/w/${ws}/agents/${approval.case_id}`} className="underline decoration-current/40 underline-offset-[3px] hover:text-ink">
               {approval.case_title}
             </Link>{' '}
-            · <time dateTime={approval.created_at}>{relativeTime(approval.created_at)}</time>
+            · <RelativeTime iso={approval.created_at} />
           </p>
         </div>
 
@@ -91,7 +88,7 @@ export function ApprovalCard({ ws, approval, notify }: { ws: string; approval: A
             <button
               type="button"
               onClick={() => setBody(approval.body)}
-              className="self-start text-sm text-accent underline underline-offset-2 hover:text-accent-hover"
+              className="self-start text-sm text-accent underline decoration-current/40 underline-offset-[3px] hover:text-accent-hover"
             >
               Undo my edits
             </button>
@@ -128,7 +125,6 @@ export function ApprovalCard({ ws, approval, notify }: { ws: string; approval: A
             </>
           )}
         </div>
-      </Card>
-    </>
+    </Card>
   );
 }

@@ -14,7 +14,7 @@ function Skeleton({ ws, messageId }: { ws: string; messageId: string }) {
     return (
       <section aria-label="What they're asking" className="flex items-center justify-between gap-3 border border-rule bg-surface px-4 py-3">
         <p className="text-sm text-ink-muted">Couldn&apos;t read this email just now.</p>
-        <button type="button" onClick={() => understand.mutate()} className="text-sm font-semibold text-accent underline underline-offset-2">
+        <button type="button" onClick={() => understand.mutate()} className="text-sm font-semibold text-accent underline decoration-current/40 underline-offset-[3px]">
           Try again
         </button>
       </section>

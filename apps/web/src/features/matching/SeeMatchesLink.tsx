@@ -8,7 +8,7 @@ export function SeeMatchesLink({ ws, messageId, category }: { ws: string; messag
   return (
     <Link
       to={`/w/${ws}/matching${req ? `?req=${req.id}` : ''}`}
-      className="mt-3 inline-block text-sm font-semibold text-accent underline underline-offset-2 hover:text-accent-hover"
+      className="inline-block text-sm font-semibold text-accent underline decoration-accent/40 underline-offset-[3px] hover:text-accent-hover"
     >
       See matches →
     </Link>

@@ -35,12 +35,12 @@ export function SkillChips({ skills, label }: { skills: string[]; label: string 
 
 export function SourceNote({ source }: { source: MatchSource }) {
   if (source !== 'rules') return null;
-  return <p className="text-xs text-ink-muted">Extracted by keyword rules — check details</p>;
+  return <p className="text-xs text-ink-muted">Read quickly — double-check the details</p>;
 }
 
 export function SourceEmailLink({ ws, messageId }: { ws: string; messageId: string }) {
   return (
-    <Link to={`/w/${ws}/inbox/${messageId}`} className="text-[13px] text-accent underline underline-offset-2 hover:text-accent-hover">
+    <Link to={`/w/${ws}/inbox/${messageId}`} className="rounded-xs text-[13px] text-accent underline decoration-accent/40 underline-offset-[3px] hover:text-accent-hover">
       Source email
     </Link>
   );
@@ -98,7 +98,7 @@ export function MatchCard({ ws, match, showRequirement }: { ws: string; match: M
   ].filter((x): x is string => x !== undefined);
   const set = (status: Match['status']) => decide.mutate({ id: match.id, status });
   return (
-    <article aria-label={`${c.name} for ${r.role_title}`} className="flex gap-4 rounded-sm border border-rule bg-surface p-4">
+    <article aria-label={`${c.name} for ${r.role_title}`} className="flex flex-col gap-4 rounded-sm border border-rule bg-surface p-4 sm:flex-row">
       <ScoreRing score={match.score} />
       <div className="flex min-w-0 flex-1 flex-col gap-3">
         <div className="flex flex-wrap items-start justify-between gap-2">

@@ -1,6 +1,5 @@
-import { Badge, type Tone } from '../../components/ui';
-import { fullDate, relativeTime } from '../../lib/format';
-import { ApprovalCard, type NotifyResult } from './ApprovalCard';
+import { Badge, RelativeTime, type Tone } from '../../components/ui';
+import { ApprovalCard } from './ApprovalCard';
 import { StepKindIcon, STEP_LABEL } from './icons';
 import { formatCents } from './labels';
 import type { Approval, Step } from './types';
@@ -17,7 +16,7 @@ const pretty = (value: unknown) => JSON.stringify(value ?? null, null, 2);
 function Raw({ step }: { step: Step }) {
   return (
     <details className="text-sm">
-      <summary className="cursor-pointer text-ink-muted hover:text-ink focus-visible:outline-2 focus-visible:outline-accent">Technical details</summary>
+      <summary className="w-fit cursor-pointer rounded-xs text-ink-muted hover:text-ink">Technical details</summary>
       <div className="mt-2 flex flex-col gap-2">
         <div>
           <p className="kicker">Input</p>
@@ -41,7 +40,7 @@ function DecidedApproval({ approval }: { approval: Approval }) {
       {approval.decided_at && (
         <>
           {' '}
-          <time dateTime={approval.decided_at}>{relativeTime(approval.decided_at)}</time>
+          <RelativeTime iso={approval.decided_at} />
         </>
       )}
     </p>
@@ -53,13 +52,11 @@ export function Timeline({
   steps,
   approvals,
   isAdmin,
-  notify,
 }: {
   ws: string;
   steps: Step[];
   approvals: Approval[];
   isAdmin: boolean;
-  notify: NotifyResult;
 }) {
   const ordered = [...steps].sort((a, b) => a.seq - b.seq);
   const approvalSteps = ordered.filter((s) => s.kind === 'approval');
@@ -88,14 +85,12 @@ export function Timeline({
                 <p className="flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-xs text-ink-muted">
                   {status && <Badge tone={status.tone}>{status.label}</Badge>}
                   <span>{formatCents(step.cost_usd)}</span>
-                  <time dateTime={step.created_at} title={fullDate(step.created_at)}>
-                    {relativeTime(step.created_at)}
-                  </time>
+                  <RelativeTime iso={step.created_at} />
                 </p>
                 {isAdmin && <Raw step={step} />}
                 {approval &&
                   (approval.status === 'pending' ? (
-                    <ApprovalCard ws={ws} approval={approval} notify={notify} />
+                    <ApprovalCard ws={ws} approval={approval} />
                   ) : (
                     <DecidedApproval approval={approval} />
                   ))}
@@ -105,7 +100,7 @@ export function Timeline({
         })}
       </ol>
       {leftover.map((a) => (
-        <ApprovalCard key={a.id} ws={ws} approval={a} notify={notify} />
+        <ApprovalCard key={a.id} ws={ws} approval={a} />
       ))}
     </div>
   );

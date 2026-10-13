@@ -1,10 +1,9 @@
 import { useState } from 'react';
-import { Link } from 'react-router';
-import { Card, Spinner } from '../../components/ui';
+import { Card, RelativeTime, Skeleton, TextLink } from '../../components/ui';
 import { ErrorNote } from '../../components/ErrorNote';
 import { StatusBadge } from '../../components/StatusBadges';
 import { DraftPanel } from '../drafts/DraftPanel';
-import { fullDate, humanize } from '../../lib/format';
+import { humanize } from '../../lib/format';
 import { ClassificationPanel } from './ClassificationPanel';
 import { useMessage } from './hooks';
 import { EmailReader } from './EmailReader';
@@ -19,21 +18,35 @@ export function MessageDetailView({ ws, messageId }: { ws: string; messageId: st
 
   if (isLoading) {
     return (
-      <div className="flex justify-center p-12 text-ink-muted">
-        <Spinner />
+      <div role="status" aria-label="Loading email" aria-busy="true" className="flex max-w-3xl flex-col gap-5 px-4 pt-6 pb-8 sm:px-6 lg:px-8">
+        <Skeleton className="h-7 w-3/4" />
+        <Skeleton className="h-4 w-24" />
+        <div className="flex items-center gap-3">
+          <Skeleton className="h-10 w-10 rounded-full" />
+          <div className="flex flex-1 flex-col gap-2">
+            <Skeleton className="h-3.5 w-1/3" />
+            <Skeleton className="h-3 w-1/4" />
+          </div>
+        </div>
+        <Skeleton className="h-24 w-full" />
+        <div className="flex flex-col gap-2">
+          <Skeleton className="h-3 w-full" />
+          <Skeleton className="h-3 w-11/12" />
+          <Skeleton className="h-3 w-4/5" />
+        </div>
       </div>
     );
   }
   if (error || !m) {
     return (
-      <div className="p-6">
-        <ErrorNote error={error} />
+      <div className="p-4 sm:p-6">
+        <ErrorNote error={error ?? new Error('This email could not be found.')} />
       </div>
     );
   }
 
   return (
-    <div className="grid gap-x-12 gap-y-8 px-8 pt-6 pb-8 2xl:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
+    <div className="grid gap-x-12 gap-y-8 px-4 pt-6 pb-10 sm:px-6 lg:px-8 2xl:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
       <div className="flex min-w-0 flex-col gap-8 2xl:col-start-1">
         <div className="rise" style={riseStyle(0)}>
           <EmailReader ws={ws} message={m} />
@@ -48,23 +61,25 @@ export function MessageDetailView({ ws, messageId }: { ws: string; messageId: st
         <div className="rise border-t border-rule-strong pt-6 2xl:border-t-0 2xl:pt-0" style={riseStyle(2)}>
           <ClassificationPanel ws={ws} messageId={m.id} classification={m.classification} />
         </div>
-        <section className="rise flex flex-col gap-2 border-t border-rule-strong pt-6" style={riseStyle(3)}>
-          <h3 className="kicker">Workflow</h3>
+        <section aria-labelledby="followup-heading" className="rise flex flex-col gap-3 border-t border-rule-strong pt-6" style={riseStyle(3)}>
+          <h3 id="followup-heading" className="kicker">
+            Follow-up
+          </h3>
           {m.workflow_run ? (
             <div className="flex flex-col gap-1 text-sm">
-              <div className="flex items-center gap-2">
-                Run status: <StatusBadge status={m.workflow_run.status} />
-              </div>
-              {m.workflow_run.error && <p className="font-mono text-xs text-danger">{m.workflow_run.error}</p>}
+              <p className="flex items-center gap-2">
+                Automatic follow-up <StatusBadge status={m.workflow_run.status} />
+              </p>
+              {m.workflow_run.status === 'failed' && <p className="text-danger">Something went wrong with the follow-up. An admin can retry it from Workflows.</p>}
             </div>
           ) : (
-            <p className="text-sm text-ink-muted">{m.processing_status === 'processed' ? 'Nothing else needed for this email.' : 'No workflow run yet.'}</p>
+            <p className="text-sm text-ink-muted">{m.processing_status === 'processed' ? 'Nothing else needed for this email.' : 'No automatic follow-up for this email.'}</p>
           )}
           {m.review && (
             <p className="flex items-center gap-2 text-sm">
-              <Link to={`/w/${ws}/reviews`} className="font-semibold text-accent underline underline-offset-2 hover:text-accent-hover">
+              <TextLink to={`/w/${ws}/reviews`} className="font-semibold">
                 {humanize(m.review.kind)} review
-              </Link>{' '}
+              </TextLink>{' '}
               <StatusBadge status={m.review.status} />
             </p>
           )}
@@ -75,12 +90,9 @@ export function MessageDetailView({ ws, messageId }: { ws: string; messageId: st
             <h3 id="sender-heading" className="kicker">
               Sender
             </h3>
-            <Link
-              to={`/w/${ws}/memory/contacts/${encodeURIComponent(m.from)}`}
-              className="text-sm text-accent underline underline-offset-2 hover:text-accent-hover"
-            >
+            <TextLink to={`/w/${ws}/memory/contacts/${encodeURIComponent(m.from)}`} className="text-sm">
               Open profile
-            </Link>
+            </TextLink>
           </div>
           {m.contact ? (
             <div className="flex flex-col gap-1 text-sm">
@@ -114,23 +126,18 @@ export function MessageDetailView({ ws, messageId }: { ws: string; messageId: st
       </div>
 
       <section className="rise min-w-0 border-t border-rule-strong pt-6 2xl:col-start-1" style={riseStyle(5)}>
-        <h3 className="kicker">Audit trail</h3>
+        <h3 className="kicker">History</h3>
         {m.audit.length === 0 ? (
           <p className="mt-3 text-sm text-ink-muted">No events yet.</p>
         ) : (
           <ol className="mt-3 flex flex-col divide-y divide-rule text-sm">
             {m.audit.map((e) => (
-              <li key={e.id} className="flex justify-between gap-3 py-1.5">
-                <span>
+              <li key={e.id} className="flex justify-between gap-3 py-2">
+                <span className="min-w-0 break-words">
                   <span className="font-semibold">{humanize(e.action.replace(/\./g, ' '))}</span>{' '}
-                  <span className="text-ink-muted">
-                    by {e.actor_type}
-                    {e.actor_id ? ` (${e.actor_id})` : ''}
-                  </span>
+                  <span className="text-ink-muted">{e.actor_type === 'system' ? 'automatically' : `by ${e.actor_id?.includes('@') ? e.actor_id : 'a teammate'}`}</span>
                 </span>
-                <time dateTime={e.created_at} className="shrink-0 font-mono text-xs text-ink-muted">
-                  {fullDate(e.created_at)}
-                </time>
+                <RelativeTime iso={e.created_at} className="shrink-0 font-mono text-xs text-ink-muted" />
               </li>
             ))}
           </ol>

@@ -3,6 +3,7 @@ import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { ToastProvider } from '../../components/ui';
 import { MatchingPage } from '../matching/MatchingPage';
 import { AgentsBadge } from './AgentsBadge';
 import { AgentsPage } from './AgentsPage';
@@ -79,16 +80,19 @@ function mockFetch(handler: Handler) {
   return fetchMock;
 }
 
-function renderAt(path: string, routes: { path: string; element: React.ReactNode }[]) {
+function renderAt(path: string, routes: { path: string; element: React.ReactNode }[], toasts = true) {
+  const tree = (
+    <MemoryRouter initialEntries={[path]}>
+      <Routes>
+        {routes.map((r) => (
+          <Route key={r.path} path={r.path} element={r.element} />
+        ))}
+      </Routes>
+    </MemoryRouter>
+  );
   return render(
     <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
-      <MemoryRouter initialEntries={[path]}>
-        <Routes>
-          {routes.map((r) => (
-            <Route key={r.path} path={r.path} element={r.element} />
-          ))}
-        </Routes>
-      </MemoryRouter>
+      {toasts ? <ToastProvider>{tree}</ToastProvider> : tree}
     </QueryClientProvider>,
   );
 }
@@ -125,7 +129,7 @@ describe('AgentsBadge', () => {
 
   it('renders nothing when nothing is pending', async () => {
     const fetchMock = mockFetch(() => json({ items: [], pending_count: 0 }));
-    const { container } = renderAt('/w/w1/agents', [{ path: '/w/:ws/agents', element: <AgentsBadge ws="w1" /> }]);
+    const { container } = renderAt('/w/w1/agents', [{ path: '/w/:ws/agents', element: <AgentsBadge ws="w1" /> }], false);
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalled());
     expect(container).toBeEmptyDOMElement();

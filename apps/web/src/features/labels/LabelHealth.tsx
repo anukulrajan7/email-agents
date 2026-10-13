@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Badge, Button, Card, EmptyState, Mono, Spinner, Stamp, Table, Td, Th, type Tone } from '../../components/ui';
+import { Badge, Button, Card, EmptyState, Mono, SegmentedControl, SkeletonTable, Stamp, Table, Td, Th, type Tone } from '../../components/ui';
 import { ErrorNote } from '../../components/ErrorNote';
 import { useLabelHealth, useLabelMap } from './hooks';
 import type { HealthAdvice, LabelHealthRow, TrendPoint } from './healthTypes';
@@ -123,15 +123,9 @@ export function LabelHealth({ ws, isAdmin, onAction }: { ws: string; isAdmin: bo
         <h2 id="health-heading" className="type-display text-2xl tracking-[-0.01em]">
           Label health
         </h2>
-        <div role="group" aria-label="Time range" className="flex gap-1">
-          {RANGES.map((d) => (
-            <Button key={d} size="sm" variant={d === days ? 'primary' : 'secondary'} aria-pressed={d === days} onClick={() => setDays(d)}>
-              {d} days
-            </Button>
-          ))}
-        </div>
+        <SegmentedControl label="Time range" options={RANGES.map((d) => ({ value: d as number, label: `${d} days` }))} value={days} onChange={setDays} />
       </div>
-      {health.isLoading && <Spinner />}
+      {health.isLoading && <SkeletonTable rows={5} label="Loading label health" />}
       <ErrorNote error={health.error} />
       {report && report.total === 0 && (
         <Card>

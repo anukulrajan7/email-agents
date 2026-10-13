@@ -1,4 +1,4 @@
-import { humanize } from '../../lib/format';
+import { formatCost, humanize } from '../../lib/format';
 import type { Tone } from '../../components/ui';
 import type { CaseFilter, CaseStatus, CaseSummary } from './types';
 
@@ -48,12 +48,7 @@ export const FILTER_STATUS: Partial<Record<CaseFilter, CaseStatus>> = {
 export const isWaiting = (c: Pick<CaseSummary, 'status'>) => c.status === 'waiting_approval' || c.status === 'waiting_event';
 export const isFinished = (status: CaseStatus) => status === 'done' || status === 'failed' || status === 'cancelled';
 
-export function formatCents(usd: number): string {
-  const cents = usd * 100;
-  if (cents === 0) return '0¢';
-  if (cents < 0.05) return '<0.1¢';
-  return `${Number(cents.toFixed(1))}¢`;
-}
+export const formatCents = formatCost;
 
 export function wakeText(iso: string, now = new Date()): string {
   const d = new Date(iso);

@@ -1,6 +1,7 @@
 import { useState, type ReactNode } from 'react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { ApiError } from '../api/client';
+import { ToastProvider } from '../components/ui/Toast';
 
 export function createQueryClient() {
   return new QueryClient({
@@ -16,5 +17,9 @@ export function createQueryClient() {
 
 export function Providers({ children }: { children: ReactNode }) {
   const [client] = useState(createQueryClient);
-  return <QueryClientProvider client={client}>{children}</QueryClientProvider>;
+  return (
+    <QueryClientProvider client={client}>
+      <ToastProvider>{children}</ToastProvider>
+    </QueryClientProvider>
+  );
 }

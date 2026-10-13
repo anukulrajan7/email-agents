@@ -1,7 +1,6 @@
 import { useState } from 'react';
-import { Button, Card, CardTitle, Input, Label as FieldLabel, Textarea } from '../../components/ui';
+import { Button, Card, CardTitle, Input, Label as FieldLabel, Skeleton, Switch, Textarea, useToast } from '../../components/ui';
 import { ErrorNote } from '../../components/ErrorNote';
-import { Switch } from './Switch';
 import { useReplySettings, useSaveReplySettings } from './hooks';
 import type { ReplySettings } from './types';
 
@@ -10,6 +9,7 @@ const MAX_SIGNATURE = 200;
 
 function ReplySettingsForm({ ws, initial, isAdmin }: { ws: string; initial: ReplySettings; isAdmin: boolean }) {
   const save = useSaveReplySettings(ws);
+  const notify = useToast();
   const [autoReply, setAutoReply] = useState(initial.auto_reply ?? false);
   const [instructions, setInstructions] = useState(initial.reply_instructions ?? '');
   const [signature, setSignature] = useState(initial.signature ?? '');
@@ -24,7 +24,10 @@ function ReplySettingsForm({ ws, initial, isAdmin }: { ws: string; initial: Repl
       className="flex flex-col gap-4"
       onSubmit={(e) => {
         e.preventDefault();
-        save.mutate({ auto_reply: autoReply, reply_instructions: instructions.trim(), signature: signature.trim() || null });
+        save.mutate(
+          { auto_reply: autoReply, reply_instructions: instructions.trim(), signature: signature.trim() || null },
+          { onSuccess: () => notify('success', 'Reply settings saved.') },
+        );
       }}
     >
       <div className="flex items-start justify-between gap-4">
@@ -100,7 +103,13 @@ export function ReplySettingsCard({ ws, isAdmin }: { ws: string; isAdmin: boolea
   return (
     <Card aria-labelledby="reply-settings-heading" role="region" className="flex flex-col gap-4">
       <CardTitle id="reply-settings-heading">Replies</CardTitle>
-      {settings.isLoading && <p className="text-sm text-ink-muted">Loading…</p>}
+      {settings.isLoading && (
+        <div role="status" aria-label="Loading reply settings" className="flex flex-col gap-3">
+          <Skeleton className="h-4 w-2/3" />
+          <Skeleton className="h-24 w-full" />
+          <Skeleton className="h-10 w-full" />
+        </div>
+      )}
       <ErrorNote error={settings.error} />
       {settings.data && <ReplySettingsForm ws={ws} initial={settings.data} isAdmin={isAdmin} />}
     </Card>

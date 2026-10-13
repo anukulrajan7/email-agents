@@ -145,103 +145,145 @@ export function AutomationBuilder({
     onSave(input);
   };
 
-  return (
-    <form onSubmit={submit} className="flex max-w-4xl flex-col gap-6" noValidate>
-      <div className="flex max-w-md flex-col gap-1">
-        <FieldLabel htmlFor="automation-name">Name</FieldLabel>
-        <Input
-          id="automation-name"
-          maxLength={80}
-          placeholder="Reply to timesheets"
-          value={name}
-          onChange={(e) => setName(e.target.value)}
-        />
-      </div>
+  const issueFor = (id: string) => (attempted ? issues.find((i) => i.id === id)?.message : undefined);
+  const actionErrors = (i: number) =>
+    attempted ? issues.filter((x) => x.id.startsWith(`action-${i}-`)).map((x) => x.message) : [];
+  const nameError = issueFor('name');
+  const actionsError = issueFor('actions');
 
-      <section aria-labelledby="when-heading" className="flex flex-col gap-3">
-        <h2 id="when-heading" className="type-display text-2xl tracking-[-0.01em]">
-          When an email arrives{conds.length > 0 ? ' and…' : '…'}
-        </h2>
-        {conds.length === 0 && <p className="text-sm text-ink-muted">With no conditions this runs for every email. Add one to narrow it down.</p>}
-        {conds.length > 0 && (
-          <ul className="flex flex-col gap-2" aria-label="Conditions">
-            {conds.map((c, i) => (
-              <ConditionRow
-                key={c.id}
-                index={i}
-                condition={c.value}
-                labels={activeLabels}
-                onChange={(next) => setConds((list) => list.map((x) => (x.id === c.id ? { ...x, value: next } : x)))}
-                onRemove={() => setConds((list) => list.filter((x) => x.id !== c.id))}
-              />
-            ))}
-          </ul>
+  return (
+    <form onSubmit={submit} className="grid items-start gap-8 xl:grid-cols-[minmax(0,1fr)_22rem]" noValidate>
+      <div className="flex min-w-0 flex-col gap-8">
+        <div className="flex max-w-md flex-col gap-1.5">
+          <FieldLabel htmlFor="automation-name">Name</FieldLabel>
+          <Input
+            id="automation-name"
+            maxLength={80}
+            placeholder="Reply to timesheets"
+            aria-invalid={nameError ? true : undefined}
+            aria-describedby={nameError ? 'automation-name-error' : undefined}
+            className={nameError ? 'border-danger' : undefined}
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+          />
+          {nameError && (
+            <p id="automation-name-error" className="text-sm text-danger">
+              {nameError}
+            </p>
+          )}
+        </div>
+
+        <section aria-labelledby="when-heading" className="flex flex-col gap-4 rounded-sm border border-rule bg-surface p-5">
+          <div className="flex items-baseline gap-3">
+            <span aria-hidden="true" className="font-mono text-xs font-semibold tracking-[0.14em] text-accent">
+              01
+            </span>
+            <h2 id="when-heading" className="type-display text-2xl tracking-[-0.01em]">
+              When an email arrives{conds.length > 0 ? '…' : ''}
+            </h2>
+          </div>
+          {conds.length === 0 && (
+            <p className="text-sm text-ink-muted">Right now this runs for every email. Add a condition to narrow it down, for example by label or sender.</p>
+          )}
+          {conds.length > 0 && (
+            <ul className="flex flex-col gap-3" aria-label="Conditions">
+              {conds.map((c, i) => (
+                <ConditionRow
+                  key={c.id}
+                  index={i}
+                  condition={c.value}
+                  labels={activeLabels}
+                  error={issueFor(`condition-${i}`)}
+                  onChange={(next) => setConds((list) => list.map((x) => (x.id === c.id ? { ...x, value: next } : x)))}
+                  onRemove={() => setConds((list) => list.filter((x) => x.id !== c.id))}
+                />
+              ))}
+            </ul>
+          )}
+          <div>
+            <Button variant="secondary" size="sm" onClick={() => setConds((list) => [...list, keyed(defaultCondition('label', activeLabels))])}>
+              + Add a condition
+            </Button>
+          </div>
+        </section>
+
+        <section aria-labelledby="then-heading" className="flex flex-col gap-4 rounded-sm border border-rule bg-surface p-5">
+          <div className="flex items-baseline gap-3">
+            <span aria-hidden="true" className="font-mono text-xs font-semibold tracking-[0.14em] text-accent">
+              02
+            </span>
+            <h2 id="then-heading" className="type-display text-2xl tracking-[-0.01em]">
+              Then…
+            </h2>
+          </div>
+          {acts.length === 0 && (
+            <p className={actionsError ? 'text-sm text-danger' : 'text-sm text-ink-muted'}>
+              {actionsError ?? 'Pick the first step below. Steps run in order, top to bottom.'}
+            </p>
+          )}
+          {acts.length > 0 && (
+            <ol ref={actionList} className="flex flex-col gap-3" aria-label="Steps">
+              {acts.map((a, i) => (
+                <ActionRow
+                  key={a.id}
+                  actionId={a.id}
+                  index={i}
+                  count={acts.length}
+                  action={a.value}
+                  problem={needsEarlierDraft(input.actions, i) ? 'Add “Draft a reply” before this step.' : undefined}
+                  errors={actionErrors(i)}
+                  onChange={(next) => setActs((list) => list.map((x) => (x.id === a.id ? { ...x, value: next } : x)))}
+                  onMove={(d) => moveAction(i, d)}
+                  onRemove={() => setActs((list) => list.filter((x) => x.id !== a.id))}
+                />
+              ))}
+            </ol>
+          )}
+          <div className="flex flex-col gap-2">
+            <p className="kicker">{acts.length === 0 ? 'Add a step' : 'Add another step'}</p>
+            <div role="group" aria-label="Add a step" className="flex flex-wrap gap-2">
+              {ACTION_OPTIONS.map((o) => (
+                <Button key={o.type} variant="secondary" size="sm" onClick={() => addAction(o.type)}>
+                  + {o.label}
+                </Button>
+              ))}
+            </div>
+          </div>
+        </section>
+
+        <TestPanel ws={ws} automationId={initial?.id} />
+
+        {attempted && issues.length > 0 && (
+          <div role="alert" className="rounded-sm border-l-[3px] border-danger bg-danger-tint px-3 py-2 text-sm text-danger">
+            <p className="font-semibold">Fix these before saving</p>
+            <ul className="list-disc pl-5">
+              {issues.map((issue) => (
+                <li key={issue.id}>{issue.message}</li>
+              ))}
+            </ul>
+          </div>
         )}
-        <div>
-          <Button variant="secondary" size="sm" onClick={() => setConds((list) => [...list, keyed(defaultCondition('label', activeLabels))])}>
-            + Add a condition
+        <ErrorNote error={error} />
+
+        <div className="flex flex-wrap gap-2 border-t border-rule pt-5">
+          <Button type="submit" loading={saving}>
+            {initial ? 'Save changes' : 'Create automation'}
+          </Button>
+          <Button variant="secondary" onClick={onCancel}>
+            Cancel
           </Button>
         </div>
-      </section>
-
-      <section aria-labelledby="then-heading" className="flex flex-col gap-3">
-        <h2 id="then-heading" className="type-display text-2xl tracking-[-0.01em]">
-          Then…
-        </h2>
-        {acts.length === 0 && <p className="text-sm text-ink-muted">Pick the first step below. Steps run in order, top to bottom.</p>}
-        {acts.length > 0 && (
-          <ol ref={actionList} className="flex flex-col gap-3" aria-label="Steps">
-            {acts.map((a, i) => (
-              <ActionRow
-                key={a.id}
-                actionId={a.id}
-                index={i}
-                count={acts.length}
-                action={a.value}
-                problem={needsEarlierDraft(input.actions, i) ? 'Add “Draft a reply” before this step.' : undefined}
-                onChange={(next) => setActs((list) => list.map((x) => (x.id === a.id ? { ...x, value: next } : x)))}
-                onMove={(d) => moveAction(i, d)}
-                onRemove={() => setActs((list) => list.filter((x) => x.id !== a.id))}
-              />
-            ))}
-          </ol>
-        )}
-        <div role="group" aria-label="Add a step" className="flex flex-wrap gap-2">
-          {ACTION_OPTIONS.map((o) => (
-            <Button key={o.type} variant="secondary" size="sm" onClick={() => addAction(o.type)}>
-              + {o.label}
-            </Button>
-          ))}
-        </div>
-      </section>
-
-      <Card className="flex flex-col gap-1 bg-surface">
-        <p className="kicker">In plain words</p>
-        <AutomationSentence conditions={input.conditions} actions={input.actions} labelName={labelName} />
-      </Card>
-
-      <TestPanel ws={ws} automationId={initial?.id} />
-
-      {attempted && issues.length > 0 && (
-        <div role="alert" className="rounded-sm border-l-[3px] border-danger bg-danger-tint px-3 py-2 text-sm text-danger">
-          <p className="font-semibold">Fix these before saving</p>
-          <ul className="list-disc pl-5">
-            {issues.map((issue) => (
-              <li key={issue.id}>{issue.message}</li>
-            ))}
-          </ul>
-        </div>
-      )}
-      <ErrorNote error={error} />
-
-      <div className="flex gap-2">
-        <Button type="submit" loading={saving}>
-          {initial ? 'Save changes' : 'Create automation'}
-        </Button>
-        <Button variant="secondary" onClick={onCancel}>
-          Cancel
-        </Button>
       </div>
+
+      <aside aria-label="Preview" className="flex flex-col gap-3 xl:sticky xl:top-6">
+        <Card className="flex flex-col gap-3 bg-raised p-5">
+          <p className="kicker">In plain words</p>
+          <AutomationSentence conditions={input.conditions} actions={input.actions} labelName={labelName} />
+          <p className={issues.length === 0 ? 'border-t border-rule pt-3 text-sm text-success' : 'border-t border-rule pt-3 text-sm text-ink-muted'}>
+            {issues.length === 0 ? 'Ready to save.' : `${issues.length} ${issues.length === 1 ? 'thing' : 'things'} left before you can save.`}
+          </p>
+        </Card>
+      </aside>
     </form>
   );
 }

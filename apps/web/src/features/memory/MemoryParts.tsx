@@ -1,7 +1,7 @@
 import { useId, useState, type FormEvent } from 'react';
 import { Link } from 'react-router';
 import type { Memory, MemoryKind, MemoryScope } from '../../api/types';
-import { Badge, Button, Label, Select, Textarea, type Tone } from '../../components/ui';
+import { Badge, Button, Label, Select, Textarea, useToast, type Tone } from '../../components/ui';
 import { ErrorNote } from '../../components/ErrorNote';
 import { humanize } from '../../lib/format';
 import { cn } from '../../lib/cn';
@@ -47,13 +47,19 @@ export function MemoryForm({
   const [kind, setKind] = useState<MemoryKind>('fact');
   const [content, setContent] = useState('');
   const create = useCreateMemory(ws);
+  const notify = useToast();
 
   const submit = (e: FormEvent) => {
     e.preventDefault();
     if (!isValidContent(content)) return;
     create.mutate(
       { scope, kind, content: content.trim(), ...(scope === 'contact' && contactEmail ? { contact_email: contactEmail } : {}) },
-      { onSuccess: () => setContent('') },
+      {
+        onSuccess: () => {
+          setContent('');
+          notify('success', 'Saved. The assistant will use this from now on.');
+        },
+      },
     );
   };
 
@@ -94,6 +100,7 @@ export function MemoryItem({ ws, memory }: { ws: string; memory: Memory }) {
   const [editing, setEditing] = useState(false);
   const [text, setText] = useState(memory.content);
   const update = useUpdateMemory(ws);
+  const notify = useToast();
 
   const save = () =>
     update.mutate({ id: memory.id, content: text.trim() }, { onSuccess: () => setEditing(false) });
@@ -105,7 +112,7 @@ export function MemoryItem({ ws, memory }: { ws: string; memory: Memory }) {
         {memory.scope === 'contact' && memory.contact_email && (
           <Link
             to={`/w/${ws}/memory/contacts/${encodeURIComponent(memory.contact_email)}`}
-            className="font-mono text-xs text-accent underline underline-offset-2 hover:text-accent-hover"
+            className="rounded-xs font-mono text-xs text-accent underline decoration-accent/40 underline-offset-[3px] hover:text-accent-hover"
           >
             {memory.contact_email}
           </Link>
@@ -150,7 +157,7 @@ export function MemoryItem({ ws, memory }: { ws: string; memory: Memory }) {
               size="sm"
               variant="ghost"
               loading={update.isPending}
-              onClick={() => update.mutate({ id: memory.id, status: 'archived' })}
+              onClick={() => update.mutate({ id: memory.id, status: 'archived' }, { onSuccess: () => notify('success', 'Note archived.') })}
             >
               Archive
             </Button>

@@ -1,11 +1,9 @@
 import { useState } from 'react';
 import { Link, useNavigate } from 'react-router';
-import { Card, EmptyState, Input, Label, Mono, PageHeader, Spinner, Table, Td, Th, Page } from '../../components/ui';
-import { Tabs, type TabItem } from '../../components/ui/Tabs';
+import { Card, EmptyState, Input, Label, Mono, Page, PageHeader, RelativeTime, SkeletonList, SkeletonTable, Table, Tabs, Td, Th, type TabItem } from '../../components/ui';
 import { ErrorNote } from '../../components/ErrorNote';
 import { useWorkspace } from '../../app/useWorkspace';
 import { useDebounced } from '../../lib/useDebounced';
-import { relativeTime } from '../../lib/format';
 import { riseStyle } from '../../lib/motion';
 import { useContacts, useMemories } from './hooks';
 import { LabelStamp } from '../labels/LabelStamp';
@@ -47,7 +45,7 @@ function Learned({ ws }: { ws: string }) {
   return (
     <section aria-label="What the assistant has learned" className="rise flex flex-col gap-5" style={riseStyle(1)}>
       <ErrorNote error={active.error ?? suggested.error} />
-      {active.isLoading && <Spinner />}
+      {active.isLoading && <SkeletonList rows={3} label="Loading memories" />}
       {loaded && (
         <Tabs label="Filter memories" tabs={tabs} value={tab} onChange={setTab}>
           {groups.length === 0 ? (
@@ -91,12 +89,12 @@ function Contacts({ ws }: { ws: string }) {
         <h2 id="contacts-heading" className="kicker">
           Everyone who emails you
         </h2>
-        <div className="flex flex-col gap-1">
+        <div className="flex w-full flex-col gap-1 sm:w-auto">
           <Label htmlFor="contact-search">Search contacts</Label>
-          <Input id="contact-search" type="search" className="w-64" value={search} onChange={(e) => setSearch(e.target.value)} />
+          <Input id="contact-search" type="search" className="w-full sm:w-64" value={search} onChange={(e) => setSearch(e.target.value)} />
         </div>
       </div>
-      {contacts.isLoading && <Spinner />}
+      {contacts.isLoading && <SkeletonTable rows={4} label="Loading contacts" />}
       <ErrorNote error={contacts.error} />
       {contacts.data &&
         (contacts.data.items.length === 0 ? (
@@ -120,7 +118,7 @@ function Contacts({ ws }: { ws: string }) {
                     <Link
                       to={`/w/${ws}/memory/contacts/${encodeURIComponent(c.email)}`}
                       onClick={(e) => e.stopPropagation()}
-                      className="block font-semibold text-accent underline underline-offset-2 hover:text-accent-hover"
+                      className="block font-semibold text-accent underline decoration-current/40 underline-offset-[3px] hover:text-accent-hover"
                     >
                       {c.display_name ?? c.email}
                     </Link>
@@ -137,7 +135,9 @@ function Contacts({ ws }: { ws: string }) {
                     </span>
                   </Td>
                   <Td className="whitespace-nowrap">
-                    <Mono>{relativeTime(c.last_seen_at)}</Mono>
+                    <Mono>
+                      <RelativeTime iso={c.last_seen_at} />
+                    </Mono>
                   </Td>
                 </tr>
               ))}

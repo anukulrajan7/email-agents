@@ -58,7 +58,7 @@ export function GettingStarted({ ws }: { ws: string }) {
   return (
     <>
     {replySetup}
-    <Card className="rise m-6 max-w-2xl bg-raised" style={riseStyle(0)} role="region" aria-labelledby="getting-started-heading">
+    <Card className="rise m-4 max-w-2xl bg-raised p-5 sm:m-6 sm:p-6" style={riseStyle(0)} role="region" aria-labelledby="getting-started-heading">
       <div className="flex items-start justify-between gap-4">
         <div>
           <p className="kicker">New here?</p>
@@ -106,7 +106,7 @@ export function GettingStarted({ ws }: { ws: string }) {
                   <ErrorNote error={testEmail.error} />
                 </div>
               ) : (
-                <Link to={s.to} className="text-sm font-semibold text-accent underline underline-offset-2 hover:text-accent-hover">
+                <Link to={s.to} className="rounded-xs text-sm font-semibold text-accent underline decoration-accent/40 underline-offset-[3px] hover:text-accent-hover">
                   {s.cta}
                 </Link>
               )}

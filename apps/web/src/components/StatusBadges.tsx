@@ -24,8 +24,26 @@ const tones: Record<string, Tone> = {
   sent: 'success',
 };
 
+const labels: Record<string, string> = {
+  pending: 'Waiting',
+  normalized: 'Reading',
+  classified: 'Labelled',
+  workflow_running: 'Following up',
+  workflow_completed: 'Done',
+  processed: 'Done',
+  running: 'In progress',
+  completed: 'Done',
+  degraded: 'Needs attention',
+  closed: 'Done',
+  suggested: 'Suggested',
+};
+
 type AnyStatus = ProcessingStatus | RunStatus | SourceStatus | ReviewStatus | DraftStatus;
 
+export function statusLabel(status: string): string {
+  return labels[status] ?? humanize(status);
+}
+
 export function StatusBadge({ status }: { status: AnyStatus }) {
-  return <Badge tone={tones[status] ?? 'neutral'}>{humanize(status)}</Badge>;
+  return <Badge tone={tones[status] ?? 'neutral'}>{statusLabel(status)}</Badge>;
 }

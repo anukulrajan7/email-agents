@@ -100,7 +100,7 @@ export function EmailHeader({ ws, message }: { ws: string; message: MessageDetai
   return (
     <header className="flex flex-col gap-4">
       <div className="flex flex-col gap-2">
-        <h2 className="text-[26px] leading-tight font-normal break-words text-ink">{message.subject || '(no subject)'}</h2>
+        <h2 className="text-[22px] leading-tight font-normal break-words text-ink sm:text-[26px]">{message.subject || '(no subject)'}</h2>
         <div className="flex flex-wrap items-center gap-2">
           {category && <LabelStamp ws={ws} category={category} />}
           {message.classification?.priority === 'high' && <Badge tone="danger">High priority</Badge>}

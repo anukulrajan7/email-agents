@@ -109,10 +109,13 @@ describe('MemoryPage', () => {
     });
   });
 
-  it('delete archives the memory', async () => {
+  it('delete asks for confirmation, then archives the memory', async () => {
     const fetchMock = setup([auto({ id: 'd1', content: 'Wrong fact' })]);
 
     await userEvent.click(await screen.findByRole('button', { name: 'Delete' }));
+    const dialog = screen.getByRole('dialog', { name: 'Delete this fact?' });
+    expect(patchCall(fetchMock)).toBeUndefined();
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Delete' }));
     await waitFor(() => {
       const call = patchCall(fetchMock);
       expect(call?.[0]).toContain('/memories/d1');

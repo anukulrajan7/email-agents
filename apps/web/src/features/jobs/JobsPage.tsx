@@ -1,27 +1,27 @@
 import { Navigate } from 'react-router';
-import { Badge, Button, Card, EmptyState, Mono, PageHeader, Spinner, Table, Td, Th, Page } from '../../components/ui';
+import { Badge, Button, Card, EmptyState, Mono, Page, PageHeader, RelativeTime, SkeletonTable, Table, Td, Th, useToast } from '../../components/ui';
 import { riseStyle } from '../../lib/motion';
 import { ErrorNote } from '../../components/ErrorNote';
 import { useWorkspace } from '../../app/useWorkspace';
-import { relativeTime } from '../../lib/format';
 import { useDeadJobs, useRetryJob } from './hooks';
 
 export function JobsPage() {
   const { ws, workspace, isAdmin } = useWorkspace();
   const jobs = useDeadJobs(ws, isAdmin);
   const retry = useRetryJob(ws);
+  const notify = useToast();
 
   if (workspace && !isAdmin) return <Navigate to={`/w/${ws}/inbox`} replace />;
 
   return (
     <Page className="gap-6">
-      <PageHeader kicker="Admin" title="Dead jobs" description="Background work that failed and needs a retry." />
-      {jobs.isLoading && <Spinner />}
+      <PageHeader kicker="Admin" title="Jobs" description="Background work that failed after several tries. Retry it once the cause is fixed." />
+      {jobs.isLoading && <SkeletonTable rows={3} label="Loading jobs" />}
       <ErrorNote error={jobs.error ?? retry.error} />
       {jobs.data &&
         (jobs.data.items.length === 0 ? (
           <Card className="rise" style={riseStyle(1)}>
-            <EmptyState title="No dead jobs" description="Failed background work would appear here with a Retry button. Nothing has failed." />
+            <EmptyState title="Nothing has failed" description="Background work that fails after several tries appears here with a Retry button." />
           </Card>
         ) : (
           <div className="rise" style={riseStyle(1)}>
@@ -52,14 +52,16 @@ export function JobsPage() {
                       </span>
                     </Td>
                     <Td className="whitespace-nowrap">
-                      <Mono>{relativeTime(j.updated_at)}</Mono>
+                      <Mono>
+                        <RelativeTime iso={j.updated_at} />
+                      </Mono>
                     </Td>
                     <Td className="text-right">
                       <Button
                         size="sm"
                         variant="secondary"
                         loading={retry.isPending && retry.variables === j.id}
-                        onClick={() => retry.mutate(j.id)}
+                        onClick={() => retry.mutate(j.id, { onSuccess: () => notify('success', 'Job queued to run again.') })}
                       >
                         Retry
                       </Button>

@@ -20,10 +20,11 @@ export function Tabs<T extends string>({
 
   const onKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
     const index = tabs.findIndex((t) => t.id === value);
-    const step = e.key === 'ArrowRight' ? 1 : e.key === 'ArrowLeft' ? -1 : 0;
-    if (step === 0) return;
+    const target =
+      e.key === 'ArrowRight' ? index + 1 : e.key === 'ArrowLeft' ? index - 1 : e.key === 'Home' ? 0 : e.key === 'End' ? tabs.length - 1 : undefined;
+    if (target === undefined) return;
     e.preventDefault();
-    const next = tabs[(index + step + tabs.length) % tabs.length];
+    const next = tabs[(target + tabs.length) % tabs.length];
     if (!next) return;
     onChange(next.id);
     document.getElementById(`${uid}-tab-${next.id}`)?.focus();
@@ -31,7 +32,7 @@ export function Tabs<T extends string>({
 
   return (
     <div className="flex flex-col gap-5">
-      <div role="tablist" aria-label={label} onKeyDown={onKeyDown} className="flex flex-wrap gap-1 border-b border-rule">
+      <div role="tablist" aria-label={label} onKeyDown={onKeyDown} className="flex gap-1 overflow-x-auto border-b border-rule [scrollbar-width:none]">
         {tabs.map((t) => {
           const selected = t.id === value;
           return (
@@ -45,13 +46,13 @@ export function Tabs<T extends string>({
               tabIndex={selected ? 0 : -1}
               onClick={() => onChange(t.id)}
               className={cn(
-                '-mb-px border-b-2 px-3 py-2 text-sm font-semibold motion-safe:transition-colors',
-                'focus-visible:outline-2 focus-visible:outline-offset-0 focus-visible:outline-accent',
-                selected ? 'border-accent text-ink' : 'border-transparent text-ink-muted hover:text-ink',
+                'shrink-0 px-3 py-2.5 text-sm font-semibold whitespace-nowrap motion-safe:transition-colors',
+                'focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent',
+                selected ? 'text-ink shadow-[inset_0_-2px_0_var(--color-accent)]' : 'text-ink-muted hover:text-ink hover:shadow-[inset_0_-2px_0_var(--color-rule-strong)]',
               )}
             >
               {t.label}
-              {t.count !== undefined && <span className="ml-2 font-mono text-xs text-ink-muted">{t.count}</span>}
+              {t.count !== undefined && <span className="ml-2 rounded-full bg-neutral-tint px-1.5 py-px font-mono text-xs text-ink-muted">{t.count}</span>}
             </button>
           );
         })}

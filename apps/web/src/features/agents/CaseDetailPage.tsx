@@ -1,6 +1,6 @@
 import { useState } from 'react';
-import { Link, useParams } from 'react-router';
-import { Button, Card, Page, PageHeader, Spinner } from '../../components/ui';
+import { useParams } from 'react-router';
+import { Button, Card, ConfirmDialog, Page, PageHeader, Skeleton, SkeletonList, TextLink, useToast } from '../../components/ui';
 import { ErrorNote } from '../../components/ErrorNote';
 import { useWorkspace } from '../../app/useWorkspace';
 import { riseStyle } from '../../lib/motion';
@@ -9,7 +9,6 @@ import { useCancelCase, useCase } from './hooks';
 import { KIND_LABEL } from './icons';
 import { formatCents, isFinished, wakeText } from './labels';
 import { Timeline } from './Timeline';
-import { ToastRegion, useToasts } from './Toasts';
 import type { CaseDetail } from './types';
 
 export function BudgetBar({ spent, budget }: { spent: number; budget: number }) {
@@ -33,54 +32,60 @@ export function BudgetBar({ spent, budget }: { spent: number; budget: number }) 
   );
 }
 
-function CancelCase({ ws, id, onCancelled }: { ws: string; id: string; onCancelled: () => void }) {
+function CancelCase({ ws, id }: { ws: string; id: string }) {
   const cancel = useCancelCase(ws);
+  const notify = useToast();
   const [confirming, setConfirming] = useState(false);
 
-  if (!confirming) {
-    return (
+  return (
+    <>
       <Button variant="danger" size="sm" onClick={() => setConfirming(true)}>
         Cancel case
       </Button>
-    );
-  }
-  return (
-    <div role="alertdialog" aria-label="Confirm cancel" className="flex flex-col gap-2 rounded-sm border border-danger/40 bg-danger-tint p-3">
-      <p className="text-sm">Stop this case? The agent will not do anything more, and nothing waiting for approval will be sent.</p>
-      <ErrorNote error={cancel.error} />
-      <div className="flex gap-2">
-        <Button
-          variant="danger"
-          size="sm"
-          loading={cancel.isPending}
-          onClick={async () => {
-            try {
-              await cancel.mutateAsync(id);
-              onCancelled();
-            } catch {
-              return;
-            }
+      {confirming && (
+        <ConfirmDialog
+          title="Stop this case?"
+          confirmLabel="Yes, cancel case"
+          cancelLabel="Keep going"
+          busy={cancel.isPending}
+          error={cancel.error}
+          onCancel={() => {
+            cancel.reset();
+            setConfirming(false);
           }}
+          onConfirm={() =>
+            cancel.mutate(id, {
+              onSuccess: () => {
+                setConfirming(false);
+                notify('success', 'Case cancelled.');
+              },
+            })
+          }
         >
-          Yes, cancel case
-        </Button>
-        <Button variant="ghost" size="sm" onClick={() => setConfirming(false)} disabled={cancel.isPending}>
-          Keep going
-        </Button>
-      </div>
-    </div>
+          The agent will not do anything more, and nothing waiting for approval will be sent.
+        </ConfirmDialog>
+      )}
+    </>
+  );
+}
+
+function BackToAgents({ ws }: { ws: string }) {
+  return (
+    <TextLink to={`/w/${ws}/agents`} className="-mb-2 self-start text-sm">
+      ← All cases
+    </TextLink>
   );
 }
 
 function Detail({ ws, c, isAdmin }: { ws: string; c: CaseDetail; isAdmin: boolean }) {
-  const { toasts, push, dismiss } = useToasts();
   return (
     <Page className="gap-8">
+      <BackToAgents ws={ws} />
       <PageHeader
         kicker={`${KIND_LABEL[c.kind]} case`}
         title={c.title}
         description={c.goal}
-        actions={isAdmin && !isFinished(c.status) ? <CancelCase ws={ws} id={c.id} onCancelled={() => push('success', 'Case cancelled.')} /> : undefined}
+        actions={isAdmin && !isFinished(c.status) ? <CancelCase ws={ws} id={c.id} /> : undefined}
       />
       <Card className="rise flex flex-col gap-3" style={riseStyle(1)}>
         <div className="flex flex-wrap items-center justify-between gap-2">
@@ -93,14 +98,10 @@ function Detail({ ws, c, isAdmin }: { ws: string; c: CaseDetail; isAdmin: boolea
         <BudgetBar spent={c.spent_usd} budget={c.budget_usd} />
         <p className="flex flex-wrap gap-4 text-sm">
           {c.message_id && (
-            <Link to={`/w/${ws}/inbox/${c.message_id}`} className="text-accent underline underline-offset-2 hover:text-accent-hover">
-              Source email
-            </Link>
+            <TextLink to={`/w/${ws}/inbox/${c.message_id}`}>Source email</TextLink>
           )}
           {c.requirement_id && (
-            <Link to={`/w/${ws}/matching?req=${c.requirement_id}`} className="text-accent underline underline-offset-2 hover:text-accent-hover">
-              See matches
-            </Link>
+            <TextLink to={`/w/${ws}/matching?req=${c.requirement_id}`}>See matches</TextLink>
           )}
         </p>
       </Card>
@@ -108,9 +109,8 @@ function Detail({ ws, c, isAdmin }: { ws: string; c: CaseDetail; isAdmin: boolea
         <h2 id="timeline-heading" className="type-display text-2xl tracking-[-0.01em]">
           What the agent did
         </h2>
-        <Timeline ws={ws} steps={c.steps} approvals={c.approvals} isAdmin={isAdmin} notify={push} />
+        <Timeline ws={ws} steps={c.steps} approvals={c.approvals} isAdmin={isAdmin} />
       </section>
-      <ToastRegion toasts={toasts} onDismiss={dismiss} />
     </Page>
   );
 }
@@ -123,14 +123,19 @@ export function CaseDetailPage() {
   return (
     <>
       {query.isLoading && (
-        <div className="flex justify-center p-12 text-ink-muted">
-          <Spinner />
-        </div>
+        <Page>
+          <div className="flex flex-col gap-3 border-b border-rule-strong pb-6">
+            <Skeleton className="h-3 w-32" />
+            <Skeleton className="h-9 w-2/3" />
+          </div>
+          <SkeletonList rows={3} label="Loading case" />
+        </Page>
       )}
       {query.error && (
-        <div className="p-6">
+        <Page>
+          <BackToAgents ws={ws} />
           <ErrorNote error={query.error} />
-        </div>
+        </Page>
       )}
       {query.data && <Detail ws={ws} c={query.data} isAdmin={isAdmin} />}
     </>

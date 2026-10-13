@@ -1,15 +1,15 @@
 import { useEffect, useState } from 'react';
 import type { Label } from '../../api/types';
-import { Badge, Button, Card, CardTitle, EmptyState, Page, PageHeader, Spinner, Stamp } from '../../components/ui';
+import { Badge, Button, Card, CardTitle, EmptyState, Page, PageHeader, SkeletonList, Stamp, Tabs, useToast } from '../../components/ui';
 import { ErrorNote } from '../../components/ErrorNote';
 import { useWorkspace } from '../../app/useWorkspace';
 import { riseStyle } from '../../lib/motion';
 import { markLabelsVisited } from '../onboarding/storage';
-import { Tabs } from '../../components/ui/Tabs';
 import { LabelForm } from './LabelForm';
 import { LabelHealth, type HealthAction } from './LabelHealth';
 import { SuggestLabels } from './SuggestLabels';
 import { useCreateLabel, useLabels, useUpdateLabel } from './hooks';
+import { plural } from '../../lib/format';
 
 function LabelRow({
   ws,
@@ -34,6 +34,7 @@ function LabelRow({
 }) {
   const [editing, setEditing] = useState(startEditing);
   const update = useUpdateLabel(ws);
+  const notify = useToast();
 
   if (editing) {
     return (
@@ -48,7 +49,10 @@ function LabelRow({
             update.mutate(
               { id: label.id, ...v },
               {
-                onSuccess: () => setEditing(false),
+                onSuccess: () => {
+                  setEditing(false);
+                  notify('success', `“${v.name}” saved.`);
+                },
               },
             )
           }
@@ -68,9 +72,7 @@ function LabelRow({
             <Stamp name={label.name} color={label.color} />
             {label.system && <Badge tone="info">System</Badge>}
             {label.archived && <Badge>Archived</Badge>}
-            <span className="font-mono text-xs text-ink-muted">
-              {label.message_count} {label.message_count === 1 ? 'email' : 'emails'}
-            </span>
+            <span className="font-mono text-xs text-ink-muted">{plural(label.message_count, 'email')}</span>
           </div>
           <p className="max-w-prose text-sm text-ink">{label.description}</p>
         </div>
@@ -109,6 +111,7 @@ export function LabelsPage() {
   const labels = useLabels(ws, { includeArchived: true });
   const create = useCreateLabel(ws);
   const update = useUpdateLabel(ws);
+  const notify = useToast();
   const [formKey, setFormKey] = useState(0);
   const [tab, setTab] = useState<Tab>('labels');
   const [pending, setPending] = useState<HealthAction | undefined>();
@@ -140,7 +143,7 @@ export function LabelsPage() {
   return (
     <Page>
       <PageHeader
-        kicker="How the AI sorts your mail"
+        kicker="How your mail gets sorted"
         title="Labels"
         description="Each label has a description. The AI reads it as an instruction, and your team sees it as help text — write it like you'd brief a new teammate."
       />
@@ -159,7 +162,7 @@ export function LabelsPage() {
         {tab === 'health' && <LabelHealth ws={ws} isAdmin={isAdmin} onAction={openFromHealth} />}
         {tab === 'labels' && (
           <>
-            {labels.isLoading && <Spinner />}
+            {labels.isLoading && <SkeletonList rows={4} label="Loading labels" />}
             <ErrorNote error={labels.error ?? update.error} />
             {labels.data &&
               (items.length === 0 ? (
@@ -183,7 +186,12 @@ export function LabelsPage() {
                         startEditing={pending?.kind === 'edit' && pending.key === l.key}
                         busy={update.isPending}
                         onMove={(d) => move(i, d)}
-                        onArchive={(archived) => update.mutate({ id: l.id, archived })}
+                        onArchive={(archived) =>
+                          update.mutate(
+                            { id: l.id, archived },
+                            { onSuccess: () => notify('success', archived ? `“${l.name}” archived. New mail won't be sorted into it.` : `“${l.name}” is back in use.`) },
+                          )
+                        }
                       />
                     ))}
                   </ul>
@@ -198,7 +206,14 @@ export function LabelsPage() {
                   idPrefix="new-label"
                   submitLabel="Add label"
                   busy={create.isPending}
-                  onSubmit={(v) => create.mutate(v, { onSuccess: () => setFormKey((k) => k + 1) })}
+                  onSubmit={(v) =>
+                    create.mutate(v, {
+                      onSuccess: () => {
+                        setFormKey((k) => k + 1);
+                        notify('success', `“${v.name}” added.`);
+                      },
+                    })
+                  }
                 />
                 <div className="mt-3">
                   <ErrorNote error={create.error} />

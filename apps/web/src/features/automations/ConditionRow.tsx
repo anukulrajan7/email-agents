@@ -74,48 +74,53 @@ export function ConditionRow({
   index,
   condition,
   labels,
+  error,
   onChange,
   onRemove,
 }: {
   index: number;
   condition: Condition;
   labels: Label[];
+  error?: string;
   onChange: (c: Condition) => void;
   onRemove: () => void;
 }) {
   const id = `Condition ${index + 1}`;
   return (
-    <li className="flex flex-wrap items-center gap-2">
-      <span className="w-10 text-sm text-ink-muted">{index === 0 ? '' : 'and'}</span>
-      <Select
-        aria-label={`${id} field`}
-        className="w-44"
-        value={condition.field}
-        onChange={(e) => onChange(defaultCondition(e.target.value as ConditionField, labels))}
-      >
-        {FIELD_OPTIONS.map((o) => (
-          <option key={o.value} value={o.value}>
-            {o.label}
-          </option>
-        ))}
-      </Select>
-      {condition.field === 'label' ? (
+    <li className="flex flex-col gap-1">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="w-12 shrink-0 font-mono text-xs tracking-[0.12em] text-ink-muted uppercase">{index === 0 ? 'where' : 'and'}</span>
         <Select
-          aria-label={`${id} operator`}
-          className="w-28"
-          value={condition.op}
-          onChange={(e) => onChange({ ...condition, op: e.target.value as 'is' | 'is_not' })}
+          aria-label={`${id} field`}
+          className="w-44"
+          value={condition.field}
+          onChange={(e) => onChange(defaultCondition(e.target.value as ConditionField, labels))}
         >
-          <option value="is">is</option>
-          <option value="is_not">is not</option>
+          {FIELD_OPTIONS.map((o) => (
+            <option key={o.value} value={o.value}>
+              {o.label}
+            </option>
+          ))}
         </Select>
-      ) : (
-        <span className="text-sm text-ink">{condition.op === 'contains' ? 'contains' : 'is'}</span>
-      )}
-      <ValueInput id={id} condition={condition} labels={labels} onChange={onChange} />
-      <Button variant="ghost" size="sm" aria-label={`Remove ${id.toLowerCase()}`} onClick={onRemove}>
-        Remove
-      </Button>
+        {condition.field === 'label' ? (
+          <Select
+            aria-label={`${id} operator`}
+            className="w-28"
+            value={condition.op}
+            onChange={(e) => onChange({ ...condition, op: e.target.value as 'is' | 'is_not' })}
+          >
+            <option value="is">is</option>
+            <option value="is_not">is not</option>
+          </Select>
+        ) : (
+          <span className="text-sm text-ink">{condition.op === 'contains' ? 'contains' : 'is'}</span>
+        )}
+        <ValueInput id={id} condition={condition} labels={labels} onChange={onChange} />
+        <Button variant="ghost" size="sm" aria-label={`Remove ${id.toLowerCase()}`} onClick={onRemove}>
+          Remove
+        </Button>
+      </div>
+      {error && <p className="pl-14 text-sm text-danger">{error}</p>}
     </li>
   );
 }

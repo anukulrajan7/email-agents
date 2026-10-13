@@ -1,6 +1,6 @@
-import { useId } from 'react';
+import { useId, useState } from 'react';
 import { Link } from 'react-router';
-import { Badge, Button, Card } from '../../components/ui';
+import { Badge, Button, Card, ConfirmDialog, useToast } from '../../components/ui';
 import { ErrorNote } from '../../components/ErrorNote';
 import { cn } from '../../lib/cn';
 import { useMessage } from '../inbox/hooks';
@@ -37,7 +37,7 @@ function SourceLink({ ws, messageId }: { ws: string; messageId: string }) {
   return (
     <span className="min-w-0">
       Learned from:{' '}
-      <Link to={`/w/${ws}/inbox/${messageId}`} className="text-accent underline underline-offset-2 hover:text-accent-hover">
+      <Link to={`/w/${ws}/inbox/${messageId}`} className="rounded-xs text-accent underline decoration-accent/40 underline-offset-[3px] hover:text-accent-hover">
         {subject}
       </Link>
     </span>
@@ -49,6 +49,8 @@ const usedText = (n: number) => (n === 0 ? 'Not used yet' : `Used ${n} ${n === 1
 export function LearnedItem({ ws, memory }: { ws: string; memory: LearnedMemory }) {
   const factId = useId();
   const update = useUpdateMemory(ws);
+  const notify = useToast();
+  const [deleting, setDeleting] = useState(false);
   const level = confidenceLevel(memory);
   const origin = originOf(memory);
   const busy = update.isPending;
@@ -64,7 +66,7 @@ export function LearnedItem({ ws, memory }: { ws: string; memory: LearnedMemory 
           {memory.scope === 'contact' && memory.contact_email && (
             <Link
               to={`/w/${ws}/memory/contacts/${encodeURIComponent(memory.contact_email)}`}
-              className="font-mono text-xs text-accent underline underline-offset-2 hover:text-accent-hover"
+              className="font-mono text-xs text-accent underline decoration-current/40 underline-offset-[3px] hover:text-accent-hover"
             >
               {memory.contact_email}
             </Link>
@@ -101,12 +103,38 @@ export function LearnedItem({ ws, memory }: { ws: string; memory: LearnedMemory 
             variant="ghost"
             aria-describedby={factId}
             disabled={busy}
-            onClick={() => update.mutate({ id: memory.id, status: 'archived' })}
+            onClick={() => setDeleting(true)}
           >
             Delete
           </Button>
         </div>
-        <ErrorNote error={update.error} />
+        <ErrorNote error={deleting ? undefined : update.error} />
+        {deleting && (
+          <ConfirmDialog
+            title="Delete this fact?"
+            confirmLabel="Delete"
+            busy={busy}
+            error={update.error}
+            onCancel={() => {
+              update.reset();
+              setDeleting(false);
+            }}
+            onConfirm={() =>
+              update.mutate(
+                { id: memory.id, status: 'archived' },
+                {
+                  onSuccess: () => {
+                    setDeleting(false);
+                    notify('success', 'Fact deleted. The assistant will stop using it.');
+                  },
+                },
+              )
+            }
+          >
+            <p className="border-l-[3px] border-rule-strong pl-3 break-words text-ink">{memory.content}</p>
+            <p className="mt-2">The assistant will stop using it when it labels and drafts.</p>
+          </ConfirmDialog>
+        )}
       </Card>
     </li>
   );

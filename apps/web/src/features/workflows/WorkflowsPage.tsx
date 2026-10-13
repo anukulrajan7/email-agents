@@ -1,36 +1,14 @@
 import { Link } from 'react-router';
 import type { Workflow } from '../../api/types';
-import { Badge, Button, Card, CardTitle, EmptyState, Mono, PageHeader, Spinner, Table, Td, Th, Page } from '../../components/ui';
+import { statusLabel } from '../../components/StatusBadges';
+import { Badge, Button, Card, CardTitle, EmptyState, Mono, Page, PageHeader, RelativeTime, SkeletonList, SkeletonTable, Switch, Table, Td, Th, TextLink, useToast } from '../../components/ui';
 import { riseStyle } from '../../lib/motion';
 import { ErrorNote } from '../../components/ErrorNote';
 import { StatusBadge } from '../../components/StatusBadges';
 import { useWorkspace } from '../../app/useWorkspace';
-import { relativeTime } from '../../lib/format';
-import { cn } from '../../lib/cn';
 import { useLabelMap } from '../labels/hooks';
 import { useReprocess } from '../inbox/hooks';
 import { useSetupWorkflow, useToggleWorkflow, useWorkflowRuns, useWorkflows } from './hooks';
-
-function Toggle({ workflow, canEdit, onChange, busy }: { workflow: Workflow; canEdit: boolean; onChange: (v: boolean) => void; busy: boolean }) {
-  const disabled = !canEdit || !workflow.available || busy;
-  return (
-    <button
-      type="button"
-      role="switch"
-      aria-checked={workflow.enabled}
-      aria-label={`${workflow.name} enabled`}
-      disabled={disabled}
-      onClick={() => onChange(!workflow.enabled)}
-      className={cn(
-        'relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors',
-        'focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-50',
-        workflow.enabled ? 'bg-success' : 'bg-ink-muted',
-      )}
-    >
-      <span className={cn('inline-block h-5 w-5 rounded-full bg-white shadow-sm transition-transform', workflow.enabled ? 'translate-x-5' : 'translate-x-0.5')} />
-    </button>
-  );
-}
 
 function setupLabelName(w: Workflow): string {
   const names: Record<string, string> = { timesheet: 'Timesheet', leave: 'Leave', candidate_referral: 'Candidate referral' };
@@ -45,24 +23,25 @@ export function WorkflowsPage() {
   const toggle = useToggleWorkflow(ws);
   const reprocess = useReprocess(ws);
   const setup = useSetupWorkflow(ws);
+  const notify = useToast();
 
   return (
     <Page>
       <PageHeader
-        kicker="Automation"
+        kicker="Built-in follow-ups"
         title="Workflows"
-        description="Built-in workflows that run when an email gets a certain label, for example creating a review task."
+        description="Ready-made follow-ups that run when an email gets a certain label, for example opening a review task for a timesheet."
         actions={
-          <Link to={`/w/${ws}/automations`} className="text-sm font-semibold text-accent underline underline-offset-2 hover:text-accent-hover">
+          <TextLink to={`/w/${ws}/automations`} className="text-sm font-semibold">
             Build your own in Automations
-          </Link>
+          </TextLink>
         }
       />
-      {workflows.isLoading && <Spinner />}
+      {workflows.isLoading && <SkeletonList rows={2} label="Loading workflows" />}
       <ErrorNote error={workflows.error ?? toggle.error ?? reprocess.error ?? setup.error} />
-      <div className="grid gap-4 md:grid-cols-3 2xl:grid-cols-4">
+      <div className="grid auto-rows-fr gap-4 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
         {workflows.data?.items.map((w, i) => (
-          <Card key={w.id} className="rise flex flex-col gap-3" style={riseStyle(i + 1)}>
+          <Card key={w.id} className="rise flex h-full flex-col gap-3" style={riseStyle(i + 1)}>
             <div className="flex items-start justify-between gap-2">
               <CardTitle>{w.name}</CardTitle>
               {!w.available && <Badge>Needs label</Badge>}
@@ -75,7 +54,11 @@ export function WorkflowsPage() {
               {!w.available &&
                 (isAdmin ? (
                   <div className="mt-2 flex flex-col items-start gap-1">
-                    <Button size="sm" loading={setup.isPending && setup.variables === w.id} onClick={() => setup.mutate(w.id)}>
+                    <Button
+                      size="sm"
+                      loading={setup.isPending && setup.variables === w.id}
+                      onClick={() => setup.mutate(w.id, { onSuccess: () => notify('success', `${w.name} is on.`) })}
+                    >
                       Add “{setupLabelName(w)}” label &amp; enable
                     </Button>
                     <p className="text-ink-muted">Creates the label the AI uses to spot these emails, then turns the workflow on.</p>
@@ -84,19 +67,22 @@ export function WorkflowsPage() {
                   <p className="mt-1 text-ink-muted">Ask a workspace admin to add the label for this workflow.</p>
                 ))}
             </div>
-            <div className="flex items-center justify-between gap-2 border-t border-rule pt-3">
+            <div className="mt-auto flex flex-wrap items-center justify-between gap-2 border-t border-rule pt-3">
               <div className="flex items-center gap-2 text-sm">
-                <Toggle
-                  workflow={w}
-                  canEdit={isAdmin}
-                  busy={toggle.isPending && toggle.variables?.id === w.id}
+                <Switch
+                  checked={w.enabled}
+                  label={`${w.name} enabled`}
+                  disabled={!isAdmin || !w.available || (toggle.isPending && toggle.variables?.id === w.id)}
                   onChange={(enabled) => toggle.mutate({ id: w.id, enabled })}
                 />
-                <span className="text-ink">{w.enabled ? 'Enabled' : 'Disabled'}</span>
+                <span aria-hidden="true" className="text-ink-muted">{w.enabled ? 'On' : 'Off'}</span>
               </div>
               {w.last_run ? (
-                <span className="flex items-center gap-1 text-xs text-ink-muted">
-                  <StatusBadge status={w.last_run.status} /> <Mono>{relativeTime(w.last_run.created_at)}</Mono>
+                <span className="flex items-center gap-1 text-xs text-ink-muted" title={`Last run: ${statusLabel(w.last_run.status)}`}>
+                  <StatusBadge status={w.last_run.status} />{' '}
+                  <Mono>
+                    <RelativeTime iso={w.last_run.created_at} />
+                  </Mono>
                 </span>
               ) : (
                 <span className="text-xs text-ink-muted">No runs yet</span>
@@ -108,14 +94,14 @@ export function WorkflowsPage() {
 
       <section aria-labelledby="runs-heading" className="rise flex flex-col gap-3" style={riseStyle(4)}>
         <h2 id="runs-heading" className="type-display text-2xl tracking-[-0.01em]">
-          Runs
+          Recent activity
         </h2>
-        {runs.isLoading && <Spinner />}
+        {runs.isLoading && <SkeletonTable rows={3} label="Loading runs" />}
         <ErrorNote error={runs.error} />
         {runs.data &&
           (runs.data.items.length === 0 ? (
             <Card>
-              <EmptyState title="No runs yet" description="Each time an enabled workflow handles an email, the run is listed here. Turn a workflow on above, then wait for a matching email." />
+              <EmptyState title="Nothing has run yet" description="Each time a workflow handles an email, it is listed here. Turn one on above, then wait for a matching email." />
             </Card>
           ) : (
             <Table>
@@ -123,7 +109,7 @@ export function WorkflowsPage() {
                 <tr>
                   <Th>Status</Th>
                   <Th>Message</Th>
-                  <Th>Error</Th>
+                  <Th>Problem</Th>
                   <Th>When</Th>
                   {isAdmin && (
                     <Th>
@@ -139,7 +125,7 @@ export function WorkflowsPage() {
                       <StatusBadge status={r.status} />
                     </Td>
                     <Td className="max-w-xs">
-                      <Link to={`/w/${ws}/inbox/${r.message_id}`} className="block truncate text-accent underline underline-offset-2 hover:text-accent-hover">
+                      <Link to={`/w/${ws}/inbox/${r.message_id}`} className="block truncate rounded-xs text-accent underline decoration-accent/40 underline-offset-[3px] hover:text-accent-hover">
                         {r.message_subject || '(no subject)'}
                       </Link>
                     </Td>
@@ -149,7 +135,9 @@ export function WorkflowsPage() {
                       </span>
                     </Td>
                     <Td className="whitespace-nowrap">
-                      <Mono>{relativeTime(r.created_at)}</Mono>
+                      <Mono>
+                        <RelativeTime iso={r.created_at} />
+                      </Mono>
                     </Td>
                     {isAdmin && (
                       <Td className="text-right">
@@ -157,9 +145,9 @@ export function WorkflowsPage() {
                           size="sm"
                           variant="secondary"
                           loading={reprocess.isPending && reprocess.variables === r.message_id}
-                          onClick={() => reprocess.mutate(r.message_id)}
+                          onClick={() => reprocess.mutate(r.message_id, { onSuccess: () => notify('success', 'Queued to run again.') })}
                         >
-                          Reprocess
+                          Run again
                         </Button>
                       </Td>
                     )}

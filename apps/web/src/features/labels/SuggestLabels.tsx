@@ -99,7 +99,7 @@ export function SuggestLabels({ ws }: { ws: string }) {
       </div>
       {suggest.isPending && (
         <p role="status" className="flex items-center gap-2 text-sm text-ink-muted">
-          <Spinner className="h-4 w-4" /> Reading your recent mail…
+          <Spinner className="h-4 w-4" /> Reading your recent mail. This can take a few seconds…
         </p>
       )}
       {unavailable && (
@@ -117,7 +117,7 @@ export function SuggestLabels({ ws }: { ws: string }) {
         </p>
       )}
       {items.length > 0 && (
-        <ul className="grid gap-4 md:grid-cols-2 2xl:grid-cols-3" aria-label="Label suggestions">
+        <ul className="grid auto-rows-fr gap-4 md:grid-cols-2 2xl:grid-cols-3" aria-label="Label suggestions">
           {items.map((s) => (
             <SuggestionCard key={s.key} ws={ws} suggestion={s} onDone={() => setGone((g) => new Set(g).add(s.key))} />
           ))}

@@ -21,7 +21,7 @@ export function StartAgentButton({
     return (
       <p role="status" className="text-sm">
         <span className="text-success">Agent started. </span>
-        <Link to={`/w/${ws}/agents/${start.data.id}`} className="font-semibold text-accent underline underline-offset-2 hover:text-accent-hover">
+        <Link to={`/w/${ws}/agents/${start.data.id}`} className="font-semibold text-accent underline decoration-current/40 underline-offset-[3px] hover:text-accent-hover">
           View case
         </Link>
       </p>

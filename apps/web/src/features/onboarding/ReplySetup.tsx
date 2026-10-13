@@ -1,11 +1,10 @@
 import { useState } from 'react';
-import { Button, Card, CardTitle, Spinner } from '../../components/ui';
+import { Button, Card, CardTitle, SkeletonList, Switch } from '../../components/ui';
 import { ErrorNote } from '../../components/ErrorNote';
 import { riseStyle } from '../../lib/motion';
 import { useMe } from '../auth/hooks';
 import { SEND_WARNING } from '../automations/ActionRow';
 import { AutomationSentence } from '../automations/Sentence';
-import { Switch } from '../automations/Switch';
 import { useAutomations, useCreateFromPreset, usePresets, useUpdateAutomation } from '../automations/hooks';
 import { SuggestLabels } from '../labels/SuggestLabels';
 import { useLabels } from '../labels/hooks';
@@ -25,7 +24,7 @@ function RepliesStep({ ws, onNext, onSkip }: { ws: string; onNext: () => void; o
       <p className="text-sm text-ink-muted">
         Pick what happens when mail arrives. You can change any of this later under Automations.
       </p>
-      {(presets.isLoading || automations.isLoading) && <Spinner />}
+      {(presets.isLoading || automations.isLoading) && <SkeletonList rows={2} label="Loading reply options" />}
       <ErrorNote error={presets.error ?? automations.error ?? create.error ?? update.error} />
       <ul className="flex flex-col divide-y divide-rule" aria-label="Reply options">
         {presets.data?.items.map((p) => {
@@ -79,7 +78,7 @@ export function ReplySetup({ ws }: { ws: string }) {
   };
 
   return (
-    <Card className="rise m-6 flex max-w-2xl flex-col gap-3 bg-raised" style={riseStyle(0)} role="region" aria-labelledby="reply-setup-heading">
+    <Card className="rise m-4 flex max-w-2xl flex-col gap-3 bg-raised p-5 sm:m-6 sm:p-6" style={riseStyle(0)} role="region" aria-labelledby="reply-setup-heading">
       <div className="flex items-start justify-between gap-4">
         <div>
           <p className="kicker">{step === 'replies' ? 'Step 1 of 2' : 'Step 2 of 2'}</p>

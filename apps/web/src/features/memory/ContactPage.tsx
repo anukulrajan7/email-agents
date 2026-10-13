@@ -1,8 +1,8 @@
-import { Link, useParams } from 'react-router';
-import { Card, CardTitle, EmptyState, Mono, Spinner, Page } from '../../components/ui';
+import { useParams } from 'react-router';
+import { Card, CardTitle, EmptyState, Mono, Page, RelativeTime, SkeletonList, TextLink } from '../../components/ui';
 import { ErrorNote } from '../../components/ErrorNote';
 import { useWorkspace } from '../../app/useWorkspace';
-import { fullDate, relativeTime } from '../../lib/format';
+import { fullDate } from '../../lib/format';
 import { riseStyle } from '../../lib/motion';
 import { useContact } from './hooks';
 import { LabelStamp } from '../labels/LabelStamp';
@@ -15,16 +15,16 @@ export function ContactPage() {
 
   return (
     <Page>
-      <Link to={`/w/${ws}/memory`} className="text-sm text-accent underline underline-offset-2 hover:text-accent-hover">
-        Back to Memory
-      </Link>
-      {isLoading && <Spinner />}
+      <TextLink to={`/w/${ws}/memory`} className="-mb-2 self-start text-sm">
+        ← Back to Memory
+      </TextLink>
+      {isLoading && <SkeletonList rows={3} label="Loading contact" />}
       <ErrorNote error={error} />
       {data && (
         <>
           <header className="rise flex flex-col gap-3 border-b border-rule-strong pb-6" style={riseStyle(0)}>
             <p className="kicker">Contact</p>
-            <h1 className="type-display text-4xl tracking-[-0.02em] break-words text-ink">{data.contact.display_name ?? data.contact.email}</h1>
+            <h1 className="type-display text-[2rem] leading-[1.05] tracking-[-0.02em] break-words text-ink sm:text-[2.5rem]">{data.contact.display_name ?? data.contact.email}</h1>
             <p className="font-mono text-[13px] break-all">{data.contact.email}</p>
             <dl className="grid grid-cols-[auto_1fr] items-baseline gap-x-6 gap-y-1.5 text-sm">
               <dt className="kicker">Messages</dt>
@@ -75,11 +75,13 @@ export function ContactPage() {
                   <li key={m.id} className="flex items-center justify-between gap-3 py-2">
                     <span className="flex min-w-0 items-center gap-2">
                       {m.category && <LabelStamp ws={ws} category={m.category} />}
-                      <Link to={`/w/${ws}/inbox/${m.id}`} className="truncate text-accent underline underline-offset-2 hover:text-accent-hover">
+                      <TextLink to={`/w/${ws}/inbox/${m.id}`} className="truncate">
                         {m.subject || '(no subject)'}
-                      </Link>
+                      </TextLink>
                     </span>
-                    <Mono className="shrink-0">{relativeTime(m.received_at)}</Mono>
+                    <Mono className="shrink-0">
+                      <RelativeTime iso={m.received_at} />
+                    </Mono>
                   </li>
                 ))}
               </ul>

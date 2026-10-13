@@ -3,7 +3,7 @@ import { splitEmailText, type TextSegment } from './emailText';
 
 const TOKEN_RE = /https?:\/\/[^\s<>"]+|[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+/g;
 const TRAILING_PUNCT_RE = /[.,;:!?)\]}'"]+$/;
-const LINK_CLASS = 'break-all text-accent underline underline-offset-2 hover:text-accent-hover';
+const LINK_CLASS = 'break-all text-accent underline decoration-current/40 underline-offset-[3px] hover:text-accent-hover';
 
 function linkify(text: string): ReactNode[] {
   const nodes: ReactNode[] = [];

@@ -1,9 +1,8 @@
 import { useState } from 'react';
 import { NavLink } from 'react-router';
-import { Badge, Button, EmptyState, Input, Select, Spinner } from '../../components/ui';
+import { Badge, Button, EmptyState, Input, RelativeTime, SegmentedControl, Select, Skeleton } from '../../components/ui';
 import { ErrorNote } from '../../components/ErrorNote';
 import { cn } from '../../lib/cn';
-import { relativeTime } from '../../lib/format';
 import { useDebounced } from '../../lib/useDebounced';
 import { LabelStamp } from '../labels/LabelStamp';
 import { useLabels } from '../labels/hooks';
@@ -29,30 +28,10 @@ function writeSort(sort: MessageSort): void {
   }
 }
 
-function SortToggle({ sort, onChange }: { sort: MessageSort; onChange: (sort: MessageSort) => void }) {
-  const options: { value: MessageSort; label: string }[] = [
-    { value: 'importance', label: 'Important first' },
-    { value: 'recent', label: 'Newest' },
-  ];
-  return (
-    <div role="group" aria-label="Sort messages" className="inline-flex divide-x divide-rule overflow-hidden rounded-sm border border-rule-strong self-start">
-      {options.map((o) => (
-        <button
-          key={o.value}
-          type="button"
-          aria-pressed={sort === o.value}
-          onClick={() => onChange(o.value)}
-          className={cn(
-            'px-3 py-1 text-[13px] font-semibold transition-colors focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent',
-            sort === o.value ? 'bg-ink text-accent-ink' : 'bg-raised text-ink-muted hover:text-ink',
-          )}
-        >
-          {o.label}
-        </button>
-      ))}
-    </div>
-  );
-}
+const SORT_OPTIONS: { value: MessageSort; label: string }[] = [
+  { value: 'importance', label: 'Important first' },
+  { value: 'recent', label: 'Newest' },
+];
 
 function Row({ ws, m }: { ws: string; m: MessageSummary }) {
   const sender = parseAddress(m.from).name;
@@ -63,31 +42,34 @@ function Row({ ws, m }: { ws: string; m: MessageSummary }) {
       to={`/w/${ws}/inbox/${m.id}`}
       className={({ isActive }) =>
         cn(
-          'relative block px-4 py-2 motion-safe:transition-colors focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent',
+          'group relative block py-3 pr-4 pl-6 motion-safe:transition-colors focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent',
           'before:absolute before:inset-y-0 before:left-0 before:w-[3px]',
-          isActive ? 'bg-raised before:bg-accent' : 'before:bg-transparent hover:bg-ink/[0.04]',
+          isActive ? 'bg-raised shadow-[inset_0_-1px_0_var(--color-rule),inset_0_1px_0_var(--color-rule)] before:bg-accent' : 'before:bg-transparent hover:bg-ink/[0.035]',
         )
       }
     >
+      {unread && (
+        <span className="absolute top-[1.15rem] left-2.5 h-2 w-2 rounded-full bg-info">
+          <span className="sr-only">Unread</span>
+        </span>
+      )}
       <div className="flex items-baseline justify-between gap-2">
         <p className={cn('flex min-w-0 items-center gap-1.5 text-sm text-ink', unread ? 'font-bold' : 'font-medium')}>
           {m.priority === 'high' && (
-            <span role="img" aria-label="High priority" title="High priority" className="h-2 w-2 shrink-0 rounded-full bg-accent" />
+            <span role="img" aria-label="High priority" title="High priority" className="h-2 w-2 shrink-0 rotate-45 bg-accent" />
           )}
           <span className="truncate">{sender}</span>
         </p>
-        <time dateTime={m.received_at} className="shrink-0 text-xs text-ink-muted">
-          {relativeTime(m.received_at)}
-        </time>
+        <RelativeTime iso={m.received_at} className={cn('shrink-0 text-xs', unread ? 'font-semibold text-ink' : 'text-ink-muted')} />
       </div>
-      <p className="truncate text-sm text-ink-muted">
+      <p className="mt-0.5 line-clamp-2 text-sm leading-snug text-ink-muted">
         <span className={cn('text-ink', unread ? 'font-bold' : 'font-normal')}>{m.subject || '(no subject)'}</span>
         {summary && <span> — {summary}</span>}
       </p>
-      <div className="mt-1 flex flex-wrap items-center gap-1">
+      <div className="mt-2 flex flex-wrap items-center gap-1.5 empty:hidden">
         {m.category && <LabelStamp ws={ws} category={m.category} />}
         {m.replied ? <Badge tone="success">Replied</Badge> : m.needs_reply && <Badge tone="danger">Needs reply</Badge>}
-        {m.processing_status === 'failed' && <Badge tone="danger">Failed</Badge>}
+        {m.processing_status === 'failed' && <Badge tone="danger">Couldn&apos;t read</Badge>}
         {m.attachment_count > 0 && (
           <Badge>
             {m.attachment_count} attachment{m.attachment_count === 1 ? '' : 's'}
@@ -95,6 +77,23 @@ function Row({ ws, m }: { ws: string; m: MessageSummary }) {
         )}
       </div>
     </NavLink>
+  );
+}
+
+function ListSkeleton() {
+  return (
+    <div role="status" aria-label="Loading messages" aria-busy="true">
+      {Array.from({ length: 6 }, (_, i) => (
+        <div key={i} className="flex flex-col gap-2 border-b border-rule py-3 pr-4 pl-6">
+          <div className="flex justify-between gap-4">
+            <Skeleton className="h-3.5 w-1/3" />
+            <Skeleton className="h-3 w-12" />
+          </div>
+          <Skeleton className="h-3 w-11/12" />
+          <Skeleton className="h-4 w-20" />
+        </div>
+      ))}
+    </div>
   );
 }
 
@@ -111,11 +110,11 @@ export function MessageList({ ws }: { ws: string }) {
 
   return (
     <div className="flex h-full flex-col">
-      <div className="flex flex-col gap-3 border-b border-rule-strong p-4">
+      <div className="flex flex-col gap-3 border-b border-rule-strong px-4 pt-5 pb-4">
         <div>
           <p className="kicker">Incoming</p>
-          <h1 className="type-display text-3xl tracking-[-0.02em]">Inbox</h1>
-          <p className="mt-1 text-sm text-ink-muted">Email that reached this workspace. Each one is labelled automatically.</p>
+          <h1 className="type-display mt-1 text-[2rem] leading-none tracking-[-0.02em]">Inbox</h1>
+          <p className="mt-2 text-sm text-ink-muted">Every email that reaches this workspace, read and labelled for you.</p>
         </div>
         <label htmlFor="msg-search" className="sr-only">
           Search messages
@@ -139,8 +138,10 @@ export function MessageList({ ws }: { ws: string }) {
             ))}
           </optgroup>
         </Select>
-        <SortToggle
-          sort={sort}
+        <SegmentedControl
+          label="Sort messages"
+          options={SORT_OPTIONS}
+          value={sort}
           onChange={(next) => {
             setSort(next);
             writeSort(next);
@@ -148,11 +149,7 @@ export function MessageList({ ws }: { ws: string }) {
         />
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto [scrollbar-gutter:stable]">
-        {messages.isLoading && (
-          <div className="flex justify-center p-6 text-ink-muted">
-            <Spinner />
-          </div>
-        )}
+        {messages.isLoading && <ListSkeleton />}
         {messages.error && (
           <div className="p-3">
             <ErrorNote error={messages.error} />
@@ -163,11 +160,11 @@ export function MessageList({ ws }: { ws: string }) {
             description={
               category || q
                 ? 'Try a different label or search. Matching emails will appear here.'
-                : 'Emails that reach this workspace will appear here, each with an AI label. Forward one to your inbound address or send a test email from Integrations.'
+                : 'Emails that reach this workspace will appear here, each one labelled. Forward one to your inbound address or send a test email from Integrations.'
             }
           />
         )}
-        <ul>
+        <ul aria-label="Messages in this view">
           {items.map((m) => (
             <li key={m.id} className="border-b border-rule">
               <Row ws={ws} m={m} />

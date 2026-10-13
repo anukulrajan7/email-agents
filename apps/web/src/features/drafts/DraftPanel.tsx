@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import type { Draft, MessageDetail } from '../../api/types';
-import { Button } from '../../components/ui';
+import { Button, useToast } from '../../components/ui';
 import { ErrorNote } from '../../components/ErrorNote';
 import { StatusBadge } from '../../components/StatusBadges';
 import { cn } from '../../lib/cn';
@@ -100,15 +100,20 @@ function DraftEditor({
   const update = useUpdateDraft(ws, messageId, draft.id);
   const saveProvider = useSaveProviderDraft(ws, messageId, draft.id);
   const send = useSendDraft(ws, messageId, draft.id);
+  const notify = useToast();
   const sent = draft.status === 'sent';
   const dirty = text !== draft.body_text;
   const needsInput = hasNeeds(text);
   const checklist = Array.from(new Set(draft.unanswered ?? extractNeeds(draft.body_text)));
 
   const copy = async () => {
-    await navigator.clipboard.writeText(text);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 1500);
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      notify('error', 'Could not copy. Select the text and copy it yourself.');
+    }
   };
 
   return (
@@ -135,14 +140,18 @@ function DraftEditor({
               variant="secondary"
               loading={update.isPending && update.variables?.body_text !== undefined}
               disabled={!dirty}
-              onClick={() => update.mutate({ body_text: text, status: 'edited' })}
+              onClick={() => update.mutate({ body_text: text, status: 'edited' }, { onSuccess: () => notify('success', 'Draft saved.') })}
             >
               Save
             </Button>
             <Button
               loading={update.isPending && update.variables?.body_text === undefined}
               disabled={draft.status === 'approved' && !dirty}
-              onClick={() => update.mutate(!dirty ? { status: 'approved' } : { body_text: text, status: 'approved' })}
+              onClick={() =>
+                update.mutate(!dirty ? { status: 'approved' } : { body_text: text, status: 'approved' }, {
+                  onSuccess: () => notify('success', 'Draft approved.'),
+                })
+              }
             >
               Approve
             </Button>
@@ -183,7 +192,14 @@ function DraftEditor({
             send.reset();
             setConfirming(false);
           }}
-          onConfirm={() => send.mutate(dirty ? text : undefined, { onSuccess: () => setConfirming(false) })}
+          onConfirm={() =>
+            send.mutate(dirty ? text : undefined, {
+              onSuccess: () => {
+                setConfirming(false);
+                notify('success', `Reply sent to ${message.from}.`);
+              },
+            })
+          }
         />
       )}
     </div>
@@ -223,7 +239,7 @@ export function DraftPanel({
 
   return (
     <section aria-labelledby="draft-heading" className="flex flex-col gap-3">
-      <div className="flex items-center justify-between gap-2 border-b-[3px] border-double border-rule-strong pb-3">
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b-[3px] border-double border-rule-strong pb-3">
         <h3 id="draft-heading" className="type-display flex items-center gap-3 text-2xl tracking-[-0.01em]">
           Draft reply {draft && <StatusBadge status={draft.status} />}
         </h3>
@@ -239,7 +255,7 @@ export function DraftPanel({
         </div>
       </div>
       <p className="min-h-5 text-sm text-ink-muted" aria-live="polite">
-        {awaiting ? 'Generating draft…' : !draft ? 'No draft yet.' : ''}
+        {awaiting ? 'Writing a draft…' : !draft ? 'No draft yet. Generate one when you are ready to reply.' : ''}
       </p>
       <ErrorNote error={generate.error} />
       {message.source.kind === 'forwarding' && (

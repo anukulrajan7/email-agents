@@ -1,7 +1,6 @@
 import { useId } from 'react';
 import { Link } from 'react-router';
-import { Badge, Button, Card, Mono, Select } from '../../components/ui';
-import { relativeTime } from '../../lib/format';
+import { Badge, Button, Card, Mono, RelativeTime, Select } from '../../components/ui';
 import type { Alert } from './types';
 import { hoursUntilTomorrowMorning } from './validation';
 
@@ -37,7 +36,9 @@ export function AlertCard({
           <Badge tone={alert.severity === 'high' ? 'danger' : 'neutral'}>{alert.severity === 'high' ? 'High' : 'Normal'}</Badge>
           {alert.escalation_level > 0 && <Badge tone="warning">Escalated to manager</Badge>}
           {snoozed && <Badge tone="info">Snoozed</Badge>}
-          <Mono className="ml-auto">{relativeTime(alert.created_at)}</Mono>
+          <Mono className="ml-auto">
+            <RelativeTime iso={alert.created_at} />
+          </Mono>
         </div>
         <div>
           <h3 id={`${uid}-title`} className="text-[15px] font-semibold text-ink">
@@ -49,13 +50,17 @@ export function AlertCard({
           {alert.message_id && (
             <p>
               Email:{' '}
-              <Link to={`/w/${ws}/inbox/${alert.message_id}`} className="text-accent underline underline-offset-2 hover:text-accent-hover">
+              <Link to={`/w/${ws}/inbox/${alert.message_id}`} className="rounded-xs text-accent underline decoration-accent/40 underline-offset-[3px] hover:text-accent-hover">
                 {alert.message_subject || '(no subject)'}
               </Link>
             </p>
           )}
           {alert.notified.length > 0 && <p className="break-words">Notified: {alert.notified.join(', ')}</p>}
-          {resolved && alert.resolved_at && <p>Resolved {relativeTime(alert.resolved_at)}</p>}
+          {resolved && alert.resolved_at && (
+            <p>
+              Resolved <RelativeTime iso={alert.resolved_at} />
+            </p>
+          )}
         </div>
         <div className="flex flex-wrap items-center gap-2">
           {!resolved && (

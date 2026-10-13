@@ -1,7 +1,7 @@
 import { useState, type CSSProperties, type ReactNode } from 'react';
 import { ApiError } from '../../api/client';
 import type { Source } from '../../api/types';
-import { Badge, Button, Card, CardTitle, Mono, PageHeader, Spinner, Page } from '../../components/ui';
+import { Badge, Button, Card, CardTitle, ConfirmDialog, Mono, Page, PageHeader, Skeleton, useToast } from '../../components/ui';
 import { riseStyle } from '../../lib/motion';
 import { ErrorNote } from '../../components/ErrorNote';
 import { StatusBadge } from '../../components/StatusBadges';
@@ -23,38 +23,44 @@ import {
 const TEST_QUEUED = 'Test email queued — it appears in the Inbox in a few seconds';
 
 function capabilityLabel(source: Source): string {
-  return source.capabilities.provider_drafts ? 'Draft capable' : 'Read only';
+  return source.capabilities.provider_drafts ? 'Can save drafts' : 'Read only';
 }
 
 function Ticket({
   number,
   title,
   chips,
-  className,
+  description,
+  footer,
+  muted = false,
   style,
   children,
 }: {
   number: string;
   title: string;
   chips?: ReactNode;
-  className?: string;
+  description: string;
+  footer?: ReactNode;
+  muted?: boolean;
   style?: CSSProperties;
-  children: ReactNode;
+  children?: ReactNode;
 }) {
   return (
-    <Card className={cn('rise relative flex flex-col gap-4 overflow-hidden', className)} style={style}>
-      <div className="flex items-start justify-between gap-3">
-        <div>
+    <Card className={cn('rise relative flex h-full flex-col gap-4 overflow-hidden p-6', muted && 'bg-neutral-tint/40')} style={style}>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0">
           <p className="kicker">Service {number}</p>
           <CardTitle className="mt-1 text-2xl">{title}</CardTitle>
         </div>
         {chips && <div className="flex flex-wrap justify-end gap-1.5">{chips}</div>}
       </div>
       <div aria-hidden="true" className="relative border-t border-dashed border-rule-strong">
-        <span className="absolute -top-2 -left-[25px] h-4 w-4 rounded-full border border-rule bg-paper" />
-        <span className="absolute -top-2 -right-[25px] h-4 w-4 rounded-full border border-rule bg-paper" />
+        <span className="absolute -top-2 -left-[33px] h-4 w-4 rounded-full border border-rule bg-paper" />
+        <span className="absolute -top-2 -right-[33px] h-4 w-4 rounded-full border border-rule bg-paper" />
       </div>
+      <p className="text-sm leading-relaxed text-ink-muted">{description}</p>
       {children}
+      {footer && <div className="mt-auto flex flex-col gap-2 border-t border-rule pt-4">{footer}</div>}
     </Card>
   );
 }
@@ -62,11 +68,13 @@ function Ticket({
 function ForwardingCard({ ws, source, isAdmin, style }: { ws: string; source: Source | undefined; isAdmin: boolean; style?: CSSProperties }) {
   const create = useCreateForwardingSource(ws);
   const test = useSendTestEmailEnsuringSource(ws);
+  const notify = useToast();
   return (
     <Ticket
       number="01"
       title="Forward emails"
       style={style}
+      description="Forward HR emails to a private address. Each one is read, labelled and routed; nothing is ever sent from your mailbox."
       chips={
         source && (
           <>
@@ -75,28 +83,30 @@ function ForwardingCard({ ws, source, isAdmin, style }: { ws: string; source: So
           </>
         )
       }
+      footer={
+        source ? undefined : isAdmin ? (
+          <>
+            <div className="flex flex-wrap items-center gap-2">
+              <Button onClick={() => create.mutate(undefined, { onSuccess: () => notify('success', 'Forwarding address created.') })} loading={create.isPending}>
+                Create forwarding address
+              </Button>
+              <Button variant="secondary" onClick={() => test.mutate()} loading={test.isPending}>
+                Send test email
+              </Button>
+            </div>
+            {test.isSuccess && (
+              <span role="status" className="text-sm text-success">
+                {TEST_QUEUED}
+              </span>
+            )}
+            <ErrorNote error={create.error ?? test.error} />
+          </>
+        ) : (
+          <p className="text-sm text-ink-muted">Ask a workspace admin to set up forwarding.</p>
+        )
+      }
     >
-      <p className="text-sm text-ink-muted">
-        Forward HR emails to a dedicated address. Messages are read, classified and routed; nothing is ever sent from your mailbox.
-      </p>
-      {source ? (
-        <ForwardingDetails ws={ws} source={source} isAdmin={isAdmin} />
-      ) : isAdmin ? (
-        <div className="flex flex-col gap-2">
-          <div className="flex flex-wrap items-center gap-3">
-            <Button onClick={() => create.mutate()} loading={create.isPending}>
-              Create forwarding address
-            </Button>
-            <Button variant="secondary" onClick={() => test.mutate()} loading={test.isPending}>
-              Send test email
-            </Button>
-          </div>
-          {test.isSuccess && <span role="status" className="text-sm text-success">{TEST_QUEUED}</span>}
-          <ErrorNote error={create.error ?? test.error} />
-        </div>
-      ) : (
-        <p className="text-sm text-ink-muted">Ask a workspace admin to set up forwarding.</p>
-      )}
+      {source && <ForwardingDetails ws={ws} source={source} isAdmin={isAdmin} />}
     </Ticket>
   );
 }
@@ -105,12 +115,17 @@ function ForwardingDetails({ ws, source, isAdmin }: { ws: string; source: Source
   const [copied, setCopied] = useState(false);
   const [testUnavailable, setTestUnavailable] = useState(false);
   const test = useSendTestEmail(ws, source.id);
+  const notify = useToast();
   const address = source.inbound_address ?? '';
 
   const copy = async () => {
-    await navigator.clipboard.writeText(address);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 1500);
+    try {
+      await navigator.clipboard.writeText(address);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      notify('error', 'Could not copy. Select the address and copy it yourself.');
+    }
   };
 
   const sendTest = () =>
@@ -124,7 +139,7 @@ function ForwardingDetails({ ws, source, isAdmin }: { ws: string; source: Source
     );
 
   return (
-    <div className="flex flex-col gap-3">
+    <div className="flex flex-1 flex-col gap-3">
       <div className="overflow-hidden rounded-sm border border-rule-strong bg-raised">
         <div aria-hidden="true" className="airmail h-1" />
         <div className="flex items-center gap-3 p-3">
@@ -144,11 +159,15 @@ function ForwardingDetails({ ws, source, isAdmin }: { ws: string; source: Source
         {source.last_synced_at ? ` · Last email ${fullDate(source.last_synced_at)}` : ''}
       </Mono>
       {isAdmin && !testUnavailable && (
-        <div className="flex items-center gap-3">
+        <div className="mt-auto flex flex-wrap items-center gap-3 border-t border-rule pt-4">
           <Button variant="secondary" size="sm" onClick={sendTest} loading={test.isPending}>
             Send test email
           </Button>
-          {test.isSuccess && <span role="status" className="text-sm text-success">{TEST_QUEUED}</span>}
+          {test.isSuccess && (
+            <span role="status" className="text-sm text-success">
+              {TEST_QUEUED}
+            </span>
+          )}
         </div>
       )}
       {test.error && !testUnavailable && <ErrorNote error={test.error} />}
@@ -163,6 +182,7 @@ function GmailCard({ ws, source, isAdmin, style }: { ws: string; source: Source 
       number="02"
       title="Connect Gmail"
       style={style}
+      description="Connect a shared HR Gmail inbox. We bring in the last 14 days (up to 500 messages), then new mail as it arrives. Nothing is sent from the mailbox without your OK."
       chips={
         connected ? (
           <>
@@ -173,18 +193,15 @@ function GmailCard({ ws, source, isAdmin, style }: { ws: string; source: Source 
           <Badge tone="neutral">Read + sync</Badge>
         )
       }
+      footer={
+        connected ? undefined : isAdmin ? (
+          <ConnectGmailButton ws={ws} />
+        ) : (
+          <p className="text-sm text-ink-muted">Ask a workspace admin to connect Gmail.</p>
+        )
+      }
     >
-      <p className="text-sm text-ink-muted">
-        Connect a shared HR Gmail inbox through Nango. We import the last 14 days (up to 500 messages), then new mail as it
-        arrives. Drafts stay in this app; nothing is sent from the mailbox.
-      </p>
-      {connected ? (
-        <GmailDetails ws={ws} source={source} isAdmin={isAdmin} />
-      ) : isAdmin ? (
-        <ConnectGmailButton ws={ws} />
-      ) : (
-        <p className="text-sm text-ink-muted">Ask a workspace admin to connect Gmail.</p>
-      )}
+      {connected && <GmailDetails ws={ws} source={source} isAdmin={isAdmin} />}
     </Ticket>
   );
 }
@@ -192,16 +209,20 @@ function GmailCard({ ws, source, isAdmin, style }: { ws: string; source: Source 
 function ConnectGmailButton({ ws }: { ws: string }) {
   const session = useNangoSession(ws);
   const register = useRegisterNangoConnection(ws);
-  const [uiError, setUiError] = useState<string | null>(null);
+  const notify = useToast();
+  const [uiError, setUiError] = useState<string | undefined>();
   const notConfigured = session.error instanceof ApiError && session.error.status === 501;
 
   const connect = () => {
-    setUiError(null);
+    setUiError(undefined);
     // Open the Connect UI synchronously (keeps the click gesture), then hand it the token.
     const ui = new Nango().openConnectUI({
       onEvent: (event) => {
         if (event.type === 'connect') {
-          register.mutate({ connection_id: event.payload.connectionId, provider_config_key: event.payload.providerConfigKey });
+          register.mutate(
+            { connection_id: event.payload.connectionId, provider_config_key: event.payload.providerConfigKey },
+            { onSuccess: () => notify('success', 'Gmail connected. Your recent mail is on its way.') },
+          );
         } else if (event.type === 'error') {
           setUiError(event.payload.errorMessage);
         }
@@ -214,83 +235,132 @@ function ConnectGmailButton({ ws }: { ws: string }) {
   };
 
   return (
-    <div className="flex flex-col gap-2">
+    <>
       <Button onClick={connect} loading={session.isPending || register.isPending} className="self-start">
         Connect Gmail
       </Button>
-      {register.isPending && <span className="text-sm text-ink-muted">Verifying connection…</span>}
+      {register.isPending && (
+        <span role="status" className="text-sm text-ink-muted">
+          Checking the connection…
+        </span>
+      )}
       {notConfigured ? (
-        <p className="text-sm text-ink-muted">Nango isn&apos;t configured on the server yet. Set NANGO_API_KEY to enable this.</p>
+        <p className="text-sm text-ink-muted">Connecting Gmail isn&apos;t switched on for this server yet. Ask whoever runs Post Room to finish the mailbox setup.</p>
       ) : (
         <ErrorNote error={session.error} />
       )}
       <ErrorNote error={register.error} />
-      {uiError && <p className="text-sm text-danger">{uiError}</p>}
-    </div>
+      {uiError && (
+        <p role="alert" className="text-sm text-danger">
+          {uiError}
+        </p>
+      )}
+    </>
   );
 }
 
 function GmailDetails({ ws, source, isAdmin }: { ws: string; source: Source; isAdmin: boolean }) {
   const sync = useSyncSource(ws);
   const disconnect = useDisconnectSource(ws);
+  const notify = useToast();
   const [confirming, setConfirming] = useState(false);
   return (
-    <div className="flex flex-col gap-3">
+    <div className="flex flex-1 flex-col gap-3">
       <Mono>
         Connected {fullDate(source.created_at)}
         {source.last_synced_at ? ` · Last sync ${fullDate(source.last_synced_at)}` : ' · First sync running…'}
       </Mono>
       {source.last_error && (
-        <p role="status" className="rounded-sm border border-danger/40 bg-danger-tint px-3 py-2 text-sm text-danger">
+        <p role="status" className="rounded-sm border-l-[3px] border-danger bg-danger-tint px-3 py-2 text-sm text-danger">
           {source.last_error}
         </p>
       )}
       {isAdmin && (
-        <div className="flex flex-wrap items-center gap-3">
-          <Button variant="secondary" size="sm" onClick={() => sync.mutate(source.id)} loading={sync.isPending}>
+        <div className="mt-auto flex flex-wrap items-center gap-2 border-t border-rule pt-4">
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={() => sync.mutate(source.id, { onSuccess: () => notify('success', 'Sync started. New mail will show up shortly.') })}
+            loading={sync.isPending}
+          >
             Sync now
           </Button>
-          {confirming ? (
-            <>
-              <Button variant="danger" size="sm" onClick={() => disconnect.mutate(source.id)} loading={disconnect.isPending}>
-                Confirm disconnect
-              </Button>
-              <Button variant="ghost" size="sm" onClick={() => setConfirming(false)}>
-                Cancel
-              </Button>
-            </>
-          ) : (
-            <Button variant="ghost" size="sm" onClick={() => setConfirming(true)}>
-              Disconnect
-            </Button>
-          )}
-          {sync.isSuccess && <span className="text-sm text-success">Sync queued.</span>}
+          <Button variant="ghost" size="sm" onClick={() => setConfirming(true)}>
+            Disconnect
+          </Button>
         </div>
       )}
-      <ErrorNote error={sync.error ?? disconnect.error} />
+      <ErrorNote error={sync.error} />
+      {confirming && (
+        <ConfirmDialog
+          title="Disconnect Gmail?"
+          confirmLabel="Disconnect"
+          busy={disconnect.isPending}
+          error={disconnect.error}
+          onCancel={() => {
+            disconnect.reset();
+            setConfirming(false);
+          }}
+          onConfirm={() =>
+            disconnect.mutate(source.id, {
+              onSuccess: () => {
+                setConfirming(false);
+                notify('success', 'Gmail disconnected.');
+              },
+            })
+          }
+        >
+          New mail from this inbox stops arriving. Emails already here stay in Post Room.
+        </ConfirmDialog>
+      )}
     </div>
   );
 }
 
 function MicrosoftCard({ style }: { style?: CSSProperties }) {
   return (
-    <Ticket number="03" title="Connect Microsoft 365" style={style} chips={<Badge>Not yet supported</Badge>} className="bg-neutral-tint/40">
-      <p className="text-sm text-ink-muted">
-        Outlook mailboxes will use the same Nango flow once the Microsoft proof of concept passes (message IDs, threading,
-        delta sync and tenant-admin consent).
-      </p>
-      <Button variant="secondary" size="sm" disabled className="self-start">
-        Not yet supported
-      </Button>
-    </Ticket>
+    <Ticket
+      number="03"
+      title="Connect Microsoft 365"
+      style={style}
+      muted
+      chips={<Badge>Coming soon</Badge>}
+      description="Outlook and Microsoft 365 mailboxes will connect the same way as Gmail. We will let you know when it is ready."
+      footer={
+        <Button variant="secondary" size="sm" disabled className="self-start">
+          Not available yet
+        </Button>
+      }
+    />
   );
 }
 
 function MoreSourcesCard({ style }: { style?: CSSProperties }) {
   return (
-    <Ticket number="04" title="More coming later" style={style} chips={<Badge>Planned</Badge>} className="bg-neutral-tint/40">
-      <p className="text-sm text-ink-muted">Additional providers and sources are on the roadmap.</p>
-    </Ticket>
+    <Ticket
+      number="04"
+      title="More coming later"
+      style={style}
+      muted
+      chips={<Badge>Planned</Badge>}
+      description="More mail providers and sources are on the way. Tell us which one your team needs next."
+    />
+  );
+}
+
+function SourcesSkeleton() {
+  return (
+    <div role="status" aria-label="Loading integrations" className="grid gap-6 md:grid-cols-2 2xl:grid-cols-3">
+      {[0, 1].map((i) => (
+        <div key={i} className="flex h-64 flex-col gap-4 rounded-sm border border-rule bg-surface p-6">
+          <Skeleton className="h-3 w-20" />
+          <Skeleton className="h-7 w-48" />
+          <Skeleton className="h-3 w-full" />
+          <Skeleton className="h-3 w-4/5" />
+          <Skeleton className="mt-auto h-10 w-40" />
+        </div>
+      ))}
+    </div>
   );
 }
 
@@ -305,10 +375,10 @@ export function IntegrationsPage() {
   return (
     <Page>
       <PageHeader kicker="Postal services" title="Integrations" description="Where your email comes from. Connect a mailbox or forward mail to a private address." />
-      {sources.isLoading && <Spinner />}
+      {sources.isLoading && <SourcesSkeleton />}
       <ErrorNote error={sources.error} />
       {sources.data && (
-        <div className="grid items-start gap-6 md:grid-cols-2 2xl:grid-cols-3">
+        <div className="grid auto-rows-fr gap-6 md:grid-cols-2 2xl:grid-cols-3">
           <ForwardingCard ws={ws} source={forwarding} isAdmin={isAdmin} style={riseStyle(1)} />
           <GmailCard ws={ws} source={gmail} isAdmin={isAdmin} style={riseStyle(2)} />
           <MicrosoftCard style={riseStyle(3)} />

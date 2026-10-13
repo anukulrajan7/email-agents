@@ -1,8 +1,8 @@
 import { useState } from 'react';
-import { Link, useSearchParams } from 'react-router';
+import { useSearchParams } from 'react-router';
 import type { Candidate, Requirement } from '../../api/types';
 import { ErrorNote } from '../../components/ErrorNote';
-import { Badge, Button, Card, EmptyState, Mono, Page, PageHeader, Spinner, Table, Td, Th } from '../../components/ui';
+import { Badge, Button, Card, ConfirmDialog, EmptyState, Mono, Page, PageHeader, SkeletonList, Table, Tabs, Td, Th, TextLink, useToast } from '../../components/ui';
 import { useWorkspace } from '../../app/useWorkspace';
 import { cn } from '../../lib/cn';
 import { riseStyle } from '../../lib/motion';
@@ -44,15 +44,17 @@ function SetupEmptyState({ ws, isAdmin }: { ws: string; isAdmin: boolean }) {
         <p className="text-sm text-ink-muted">Ask a workspace admin to set up the matching labels.</p>
       )}
       <ErrorNote error={setup.error} />
-      <Link to={`/w/${ws}/inbox`} className="text-sm text-accent underline underline-offset-2 hover:text-accent-hover">
+      <TextLink to={`/w/${ws}/inbox`} className="text-sm">
         Go to Inbox
-      </Link>
+      </TextLink>
     </Card>
   );
 }
 
 function RequirementItem({ ws, req, selected, onSelect }: { ws: string; req: Requirement; selected: boolean; onSelect: () => void }) {
   const close = useCloseRequirement(ws);
+  const notify = useToast();
+  const [confirming, setConfirming] = useState(false);
   const band = experienceBand(req.min_experience, req.max_experience);
   const meta = [req.client, req.location, band].filter((x): x is string => !!x);
   return (
@@ -89,8 +91,7 @@ function RequirementItem({ ws, req, selected, onSelect }: { ws: string; req: Req
             <Button
               size="sm"
               variant="ghost"
-              loading={close.isPending}
-              onClick={() => close.mutate(req.id)}
+              onClick={() => setConfirming(true)}
               aria-label={`Close requirement ${req.role_title}`}
             >
               Close
@@ -98,7 +99,28 @@ function RequirementItem({ ws, req, selected, onSelect }: { ws: string; req: Req
           </div>
         </div>
       </div>
-      <ErrorNote error={close.error} />
+      {confirming && (
+        <ConfirmDialog
+          title={`Close “${req.role_title}”?`}
+          confirmLabel="Close requirement"
+          busy={close.isPending}
+          error={close.error}
+          onCancel={() => {
+            close.reset();
+            setConfirming(false);
+          }}
+          onConfirm={() =>
+            close.mutate(req.id, {
+              onSuccess: () => {
+                setConfirming(false);
+                notify('success', `“${req.role_title}” closed.`);
+              },
+            })
+          }
+        >
+          It leaves the open list and no new candidates are matched to it.
+        </ConfirmDialog>
+      )}
     </li>
   );
 }
@@ -112,9 +134,7 @@ function MatchesPanel({ ws, selected }: { ws: string; selected: Requirement | un
         {selected ? `Matches for ${selected.role_title}` : 'Top matches'}
       </h2>
       {matches.isLoading ? (
-        <div className="flex justify-center p-8 text-ink-muted">
-          <Spinner />
-        </div>
+        <SkeletonList rows={2} label="Loading matches" />
       ) : matches.error ? (
         <ErrorNote error={matches.error} />
       ) : items.length === 0 ? (
@@ -208,9 +228,7 @@ export function MatchingPage() {
     return (
       <Page>
         {header}
-        <div className="flex justify-center p-12 text-ink-muted">
-          <Spinner />
-        </div>
+        <SkeletonList rows={3} label="Loading matching" />
       </Page>
     );
   }
@@ -234,67 +252,44 @@ export function MatchingPage() {
     );
   }
 
-  const tabs: { key: Tab; label: string }[] = [
-    { key: 'requirements', label: `Requirements (${open.length})` },
-    { key: 'candidates', label: `Candidates (${candItems.length})` },
+  const tabs = [
+    { id: 'requirements' as const, label: 'Requirements', count: open.length },
+    { id: 'candidates' as const, label: 'Candidates', count: candItems.length },
   ];
 
   return (
     <Page>
       {header}
-      <div role="tablist" aria-label="Matching views" className="rise -mb-4 flex gap-1 border-b border-rule" style={riseStyle(1)}>
-        {tabs.map((t) => (
-          <button
-            key={t.key}
-            type="button"
-            role="tab"
-            id={`tab-${t.key}`}
-            aria-selected={tab === t.key}
-            aria-controls={`panel-${t.key}`}
-            onClick={() => setTab(t.key)}
-            className={cn(
-              '-mb-px border-b-2 px-4 py-2 text-[15px] font-semibold focus-visible:outline-2 focus-visible:outline-accent',
-              tab === t.key ? 'border-accent text-ink' : 'border-transparent text-ink-muted hover:text-ink',
-            )}
-          >
-            {t.label}
-          </button>
-        ))}
+      <div className="rise" style={riseStyle(1)}>
+        <Tabs label="Matching views" tabs={tabs} value={tab} onChange={setTab}>
+          {tab === 'requirements' ? (
+            <div className="grid items-start gap-8 xl:grid-cols-[minmax(0,2fr)_minmax(0,3fr)]">
+              <section aria-labelledby="open-reqs-heading" className="flex min-w-0 flex-col gap-3">
+                <h2 id="open-reqs-heading" className="kicker">
+                  Open requirements
+                </h2>
+                {open.length === 0 ? (
+                  <p className="rounded-sm border border-dashed border-rule-strong p-6 text-sm text-ink-muted">No open requirements.</p>
+                ) : (
+                  <ul className="flex flex-col gap-3">
+                    {open.map((r) => (
+                      <RequirementItem key={r.id} ws={ws} req={r} selected={r.id === selected?.id} onSelect={() => select(r.id)} />
+                    ))}
+                  </ul>
+                )}
+                {selected && (
+                  <Button size="sm" variant="ghost" className="self-start" onClick={() => select(undefined)}>
+                    Show all top matches
+                  </Button>
+                )}
+              </section>
+              <MatchesPanel ws={ws} selected={selected} />
+            </div>
+          ) : (
+            <CandidatesTable ws={ws} items={candItems} />
+          )}
+        </Tabs>
       </div>
-      {tab === 'requirements' ? (
-        <div
-          role="tabpanel"
-          id="panel-requirements"
-          aria-labelledby="tab-requirements"
-          className="rise grid items-start gap-8 xl:grid-cols-[minmax(0,2fr)_minmax(0,3fr)]"
-          style={riseStyle(2)}
-        >
-          <section aria-labelledby="open-reqs-heading" className="flex min-w-0 flex-col gap-3">
-            <h2 id="open-reqs-heading" className="kicker">
-              Open requirements
-            </h2>
-            {open.length === 0 ? (
-              <p className="rounded-sm border border-dashed border-rule-strong p-6 text-sm text-ink-muted">No open requirements.</p>
-            ) : (
-              <ul className="flex flex-col gap-3">
-                {open.map((r) => (
-                  <RequirementItem key={r.id} ws={ws} req={r} selected={r.id === selected?.id} onSelect={() => select(r.id)} />
-                ))}
-              </ul>
-            )}
-            {selected && (
-              <Button size="sm" variant="ghost" className="self-start" onClick={() => select(undefined)}>
-                Show all top matches
-              </Button>
-            )}
-          </section>
-          <MatchesPanel ws={ws} selected={selected} />
-        </div>
-      ) : (
-        <div role="tabpanel" id="panel-candidates" aria-labelledby="tab-candidates" className="rise" style={riseStyle(2)}>
-          <CandidatesTable ws={ws} items={candItems} />
-        </div>
-      )}
     </Page>
   );
 }

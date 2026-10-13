@@ -1,15 +1,35 @@
 const rtf = new Intl.RelativeTimeFormat('en', { numeric: 'auto' });
+const numberFormat = new Intl.NumberFormat('en');
 
 export function relativeTime(iso: string, now = Date.now()): string {
-  const diffSec = Math.round((new Date(iso).getTime() - now) / 1000);
+  const then = new Date(iso);
+  const diffSec = Math.round((then.getTime() - now) / 1000);
   const abs = Math.abs(diffSec);
+  if (Number.isNaN(diffSec)) return '';
   if (abs < 45) return 'just now';
   if (abs < 3600) return rtf.format(Math.round(diffSec / 60), 'minute');
   if (abs < 86400) return rtf.format(Math.round(diffSec / 3600), 'hour');
-  return rtf.format(Math.round(diffSec / 86400), 'day');
+  if (abs < 7 * 86400) return rtf.format(Math.round(diffSec / 86400), 'day');
+  const sameYear = then.getFullYear() === new Date(now).getFullYear();
+  return then.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', ...(sameYear ? {} : { year: 'numeric' }) });
 }
 
-export const fullDate = (iso: string) => new Date(iso).toLocaleString();
+export const fullDate = (iso: string) =>
+  new Date(iso).toLocaleString('en-GB', { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+
+export const formatNumber = (n: number) => numberFormat.format(n);
+
+export const formatPercent = (share: number) => `${Math.round(share * 100)}%`;
+
+export function formatCost(usd: number): string {
+  const cents = usd * 100;
+  if (cents === 0) return '0¢';
+  if (cents < 0.05) return '<0.1¢';
+  if (cents >= 100) return `$${(usd).toFixed(2)}`;
+  return `${Number(cents.toFixed(1))}¢`;
+}
+
+export const plural = (n: number, one: string, many = `${one}s`) => `${formatNumber(n)} ${n === 1 ? one : many}`;
 
 export function humanize(value: string): string {
   const s = value.replace(/_/g, ' ');

@@ -73,6 +73,58 @@ describe('SignInPage', () => {
     await waitFor(() => expect(screen.getByTestId('where')).toHaveTextContent('/workspaces'));
   });
 
+  it('toggles password visibility', async () => {
+    stubFetch();
+    renderPage('sign-in');
+    const user = userEvent.setup();
+    const password = await screen.findByLabelText('Password');
+    await user.type(password, 'secret-pass');
+    expect(password).toHaveAttribute('type', 'password');
+    await user.click(screen.getByRole('button', { name: 'Show password' }));
+    expect(password).toHaveAttribute('type', 'text');
+    expect(screen.getByRole('button', { name: 'Hide password' })).toHaveAttribute('aria-pressed', 'true');
+    await user.click(screen.getByRole('button', { name: 'Hide password' }));
+    expect(password).toHaveAttribute('type', 'password');
+  });
+
+  it('validates fields inline before calling the API', async () => {
+    const fetchMock = stubFetch();
+    renderPage('sign-in');
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole('button', { name: 'Sign in' }));
+    expect(screen.getByText('Enter your email address.')).toBeInTheDocument();
+    expect(screen.getByText('Enter your password.')).toBeInTheDocument();
+    await user.type(screen.getByLabelText('Email'), 'not-an-email');
+    await user.tab();
+    expect(screen.getByText(/Enter a full email address/)).toBeInTheDocument();
+    expect(screen.getByLabelText('Email')).toHaveAttribute('aria-invalid', 'true');
+    expect(fetchMock.mock.calls.some(([u]) => String(u).endsWith('/auth/login'))).toBe(false);
+  });
+
+  it('warns when Caps Lock is on in the password field', async () => {
+    stubFetch();
+    renderPage('sign-in');
+    const user = userEvent.setup();
+    await user.click(await screen.findByLabelText('Password'));
+    expect(screen.queryByText('Caps Lock is on')).toBeNull();
+    await user.keyboard('{CapsLock}a');
+    expect(screen.getByText('Caps Lock is on')).toBeInTheDocument();
+  });
+
+  it('moves to the code step when signing in with an unverified email', async () => {
+    stubFetch(json(403, { error: { code: 'email_not_verified', message: 'verify first' } }));
+    renderPage('sign-in');
+    const user = userEvent.setup();
+    await user.type(await screen.findByLabelText('Email'), 'new@b.test');
+    await user.type(screen.getByLabelText('Password'), 'correct-horse');
+    await user.click(screen.getByRole('button', { name: 'Sign in' }));
+    expect(await screen.findByRole('heading', { name: 'Check your email' })).toBeInTheDocument();
+    expect(screen.getByText(/We sent a new code to new@b.test/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Verify' })).toBeDisabled();
+    await user.click(screen.getByRole('button', { name: 'Use a different email' }));
+    expect(await screen.findByRole('heading', { name: 'Sign in' })).toBeInTheDocument();
+  });
+
   it('shows the code step after a 202 sign-up and stores the token on verify', async () => {
     const fetchMock = vi.fn((url: string, _init?: RequestInit) => {
       if (url.endsWith('/auth/config')) return Promise.resolve(json(200, { mode: 'password', signup_enabled: true, email_verification: true }));

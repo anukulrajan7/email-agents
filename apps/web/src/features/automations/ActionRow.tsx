@@ -102,6 +102,7 @@ export function ActionRow({
   count,
   action,
   problem,
+  errors = [],
   onChange,
   onMove,
   onRemove,
@@ -111,6 +112,7 @@ export function ActionRow({
   count: number;
   action: Action;
   problem: string | undefined;
+  errors?: string[];
   onChange: (a: Action) => void;
   onMove: (direction: -1 | 1) => void;
   onRemove: () => void;
@@ -121,8 +123,8 @@ export function ActionRow({
     <li data-action-id={actionId}>
       <Card className="flex flex-col gap-3 bg-raised">
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <div className="flex items-center gap-2">
-            <span aria-hidden="true" className="flex h-6 w-6 items-center justify-center rounded-full border border-rule-strong text-xs font-semibold text-ink-muted">
+          <div className="flex min-w-0 items-center gap-2">
+            <span aria-hidden="true" className="type-display flex h-7 w-7 items-center justify-center rounded-full border border-ink text-sm text-ink">
               {step}
             </span>
             <h4 className="text-sm font-semibold text-ink">{title}</h4>
@@ -146,6 +148,11 @@ export function ActionRow({
             {problem}
           </p>
         )}
+        {errors.map((e) => (
+          <p key={e} className="text-sm text-danger">
+            {e}
+          </p>
+        ))}
       </Card>
     </li>
   );

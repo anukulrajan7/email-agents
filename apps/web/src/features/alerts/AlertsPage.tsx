@@ -1,6 +1,5 @@
 import { useState } from 'react';
-import { Card, EmptyState, PageHeader, Spinner, Page } from '../../components/ui';
-import { Tabs, type TabItem } from '../../components/ui/Tabs';
+import { Card, EmptyState, Page, PageHeader, SkeletonList, Tabs, useToast, type TabItem } from '../../components/ui';
 import { ErrorNote } from '../../components/ErrorNote';
 import { useWorkspace } from '../../app/useWorkspace';
 import { riseStyle } from '../../lib/motion';
@@ -18,11 +17,12 @@ const EMPTY = {
 function AlertList({ ws, status }: { ws: string; status: 'open' | 'resolved' }) {
   const alerts = useAlerts(ws, status);
   const update = useUpdateAlert(ws);
+  const notify = useToast();
   const busyId = update.isPending ? update.variables?.id : undefined;
 
   return (
     <div className="flex flex-col gap-4">
-      {alerts.isLoading && <Spinner />}
+      {alerts.isLoading && <SkeletonList rows={3} label="Loading alerts" />}
       <ErrorNote error={alerts.error ?? update.error} />
       {alerts.data &&
         (alerts.data.items.length === 0 ? (
@@ -37,9 +37,14 @@ function AlertList({ ws, status }: { ws: string; status: 'open' | 'resolved' }) 
                 ws={ws}
                 alert={a}
                 busy={busyId === a.id}
-                onResolve={() => update.mutate({ id: a.id, status: 'resolved' })}
-                onReopen={() => update.mutate({ id: a.id, status: 'open' })}
-                onSnooze={(hours) => update.mutate({ id: a.id, status: 'open', snooze_hours: hours })}
+                onResolve={() => update.mutate({ id: a.id, status: 'resolved' }, { onSuccess: () => notify('success', 'Alert resolved.') })}
+                onReopen={() => update.mutate({ id: a.id, status: 'open' }, { onSuccess: () => notify('success', 'Alert reopened.') })}
+                onSnooze={(hours) =>
+                  update.mutate(
+                    { id: a.id, status: 'open', snooze_hours: hours },
+                    { onSuccess: () => notify('success', `Snoozed for ${hours} ${hours === 1 ? 'hour' : 'hours'}.`) },
+                  )
+                }
               />
             ))}
           </ul>

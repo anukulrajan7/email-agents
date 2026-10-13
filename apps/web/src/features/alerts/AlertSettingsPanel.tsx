@@ -1,30 +1,10 @@
 import { useId, useState, type FormEvent, type ReactNode } from 'react';
-import { Button, Card, CardTitle, Input, Label, Select, Spinner } from '../../components/ui';
+import { Button, Card, CardTitle, Input, Label, Select, SkeletonList, Switch, useToast } from '../../components/ui';
 import { ErrorNote } from '../../components/ErrorNote';
-import { cn } from '../../lib/cn';
 import { EmailChipInput } from './EmailChipInput';
 import { useAlertSettings, useSaveAlertSettings, useSendTestAlert } from './hooks';
 import type { AlertSettings } from './types';
 import { validateSettings } from './validation';
-
-function Switch({ checked, label, onChange }: { checked: boolean; label: string; onChange: (next: boolean) => void }) {
-  return (
-    <button
-      type="button"
-      role="switch"
-      aria-checked={checked}
-      aria-label={label}
-      onClick={() => onChange(!checked)}
-      className={cn(
-        'relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors',
-        'focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent',
-        checked ? 'bg-success' : 'bg-ink-muted',
-      )}
-    >
-      <span className={cn('inline-block h-5 w-5 rounded-full bg-white shadow-sm transition-transform', checked ? 'translate-x-5' : 'translate-x-0.5')} />
-    </button>
-  );
-}
 
 function HoursField({ label, before, after, value, error, onChange }: {
   label: string;
@@ -65,8 +45,8 @@ function HoursField({ label, before, after, value, error, onChange }: {
 
 function Row({ title, description, control }: { title: string; description: string; control: ReactNode }) {
   return (
-    <div className="flex items-center justify-between gap-4">
-      <div>
+    <div className="flex items-start justify-between gap-4">
+      <div className="min-w-0">
         <p className="text-[15px] font-semibold text-ink">{title}</p>
         <p className="text-sm text-ink-muted">{description}</p>
       </div>
@@ -82,6 +62,7 @@ function SettingsForm({ ws, initial }: { ws: string; initial: AlertSettings }) {
   const [showErrors, setShowErrors] = useState(false);
   const save = useSaveAlertSettings(ws);
   const test = useSendTestAlert(ws);
+  const notify = useToast();
 
   const set = <K extends keyof AlertSettings>(key: K, value: AlertSettings[K]) => {
     setForm((f) => ({ ...f, [key]: value }));
@@ -99,6 +80,7 @@ function SettingsForm({ ws, initial }: { ws: string; initial: AlertSettings }) {
       onSuccess: () => {
         setSaved(form);
         setShowErrors(false);
+        notify('success', 'Alert settings saved.');
       },
     });
   };
@@ -185,7 +167,7 @@ export function AlertSettingsPanel({ ws }: { ws: string }) {
   const settings = useAlertSettings(ws);
   return (
     <div className="flex max-w-2xl flex-col gap-4">
-      {settings.isLoading && <Spinner />}
+      {settings.isLoading && <SkeletonList rows={2} label="Loading alert settings" />}
       <ErrorNote error={settings.error} />
       {settings.data && <SettingsForm ws={ws} initial={settings.data} />}
     </div>

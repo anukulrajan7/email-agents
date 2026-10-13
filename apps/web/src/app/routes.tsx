@@ -1,22 +1,24 @@
+import { lazy } from 'react';
 import { Navigate, Route, Routes } from 'react-router';
 import { RequireAuth } from '../features/auth/RequireAuth';
 import { SignInPage } from '../features/auth/SignInPage';
 import { WorkspacesPage } from '../features/auth/WorkspacesPage';
 import { InboxPage } from '../features/inbox/InboxPage';
-import { IntegrationsPage } from '../features/sources/IntegrationsPage';
 import { ReviewsPage } from '../features/reviews/ReviewsPage';
 import { WorkflowsPage } from '../features/workflows/WorkflowsPage';
 import { JobsPage } from '../features/jobs/JobsPage';
 import { LabelsPage } from '../features/labels/LabelsPage';
-import { MatchingPage } from '../features/matching/MatchingPage';
 import { MemoryPage } from '../features/memory/MemoryPage';
 import { ContactPage } from '../features/memory/ContactPage';
 import { AlertsPage } from '../features/alerts/AlertsPage';
-import { AutomationsPage } from '../features/automations/AutomationsPage';
 import { AgentsPage } from '../features/agents/AgentsPage';
-import { CaseDetailPage } from '../features/agents/CaseDetailPage';
 import { UsagePage } from '../features/usage/UsagePage';
 import { AppShell } from './AppShell';
+
+const IntegrationsPage = lazy(() => import('../features/sources/IntegrationsPage').then((m) => ({ default: m.IntegrationsPage })));
+const MatchingPage = lazy(() => import('../features/matching/MatchingPage').then((m) => ({ default: m.MatchingPage })));
+const AutomationsPage = lazy(() => import('../features/automations/AutomationsPage').then((m) => ({ default: m.AutomationsPage })));
+const CaseDetailPage = lazy(() => import('../features/agents/CaseDetailPage').then((m) => ({ default: m.CaseDetailPage })));
 
 export function AppRoutes() {
   return (
