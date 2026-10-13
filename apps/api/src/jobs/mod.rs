@@ -23,6 +23,7 @@ pub mod kind {
     pub const LEARN_FROM_DRAFT: &str = "learn_from_draft";
     pub const EXTRACT_RECORD: &str = "extract_record";
     pub const MATCH_RECORD: &str = "match_record";
+    pub const ANALYZE_MESSAGE: &str = "analyze_message";
 }
 
 #[derive(Debug, Clone, FromRow)]

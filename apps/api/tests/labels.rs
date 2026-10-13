@@ -123,13 +123,13 @@ async fn workflow_setup_adds_label_and_approve_clears_review() {
     let (_, labels) = call(&app, "GET", &format!("{base}/labels"), ADMIN, None).await;
     assert!(keys(&labels).contains(&"timesheet".to_string()));
 
-    // A timesheet email now runs the workflow; approving keeps the AI label.
+    // A timesheet email now runs the workflow, labelled automatically (no review); approving is still allowed.
     let (_, src) = call(&app, "POST", &format!("{base}/sources/forwarding"), ADMIN, None).await;
     call(&app, "POST", &format!("{base}/sources/{}/test-email", src["id"].as_str().unwrap()), ADMIN, None).await;
     worker::drain(&state).await;
     let (_, msgs) = call(&app, "GET", &format!("{base}/messages"), ADMIN, None).await;
     let m = &msgs["items"][0];
-    assert_eq!((m["category"].as_str(), m["needs_review"].as_bool()), (Some("timesheet"), Some(true)));
+    assert_eq!((m["category"].as_str(), m["needs_review"].as_bool()), (Some("timesheet"), Some(false)));
     let id = m["id"].as_str().unwrap();
     let (s, c) = call(&app, "POST", &format!("{base}/messages/{id}/classification/approve"), ADMIN, None).await;
     assert_eq!((s, c["category"].as_str(), c["needs_review"].as_bool(), c["source"].as_str()), (StatusCode::OK, Some("timesheet"), Some(false), Some("fallback")));

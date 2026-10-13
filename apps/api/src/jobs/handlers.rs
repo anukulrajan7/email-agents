@@ -64,6 +64,7 @@ pub async fn handle(state: &AppState, job: &Job) -> Result<(), JobError> {
         kind::PURGE_EXPIRED_EVENTS => purge_expired_events(state).await,
         kind::SYNC_NANGO_SOURCE => crate::sources::nango::sync_source(state, &payload).await,
         kind::LEARN_FROM_DRAFT => learn_from_draft(state, &payload).await,
+        kind::ANALYZE_MESSAGE => analyze_message(state, &payload).await.map(|_| ()),
         kind::EXTRACT_RECORD => super::matching_jobs::extract_record(state, &payload).await,
         kind::MATCH_RECORD => super::matching_jobs::match_record(state, &payload).await,
         kind::REGISTER_NANGO_CONNECTION => crate::sources::nango::register_from_webhook(state, &payload).await,
@@ -356,6 +357,9 @@ pub async fn persist_classification(
     .await?;
     let trigger = trigger.map(str::to_string).unwrap_or_else(|| format!("{}:{}", out.category, now));
     enqueue_workflow(&mut tx, &workspace_id, message_id, &trigger).await?;
+    // Understand what the email asks (shown to people, used by the drafter).
+    jobs::enqueue(&mut tx, kind::ANALYZE_MESSAGE, &format!("analyze:{message_id}"), Some(&workspace_id), &json!({ "message_id": message_id }))
+        .await?;
     // Requirement / referral emails also become structured records for matching.
     if super::matching_jobs::is_extractable(&out.category) {
         jobs::enqueue(
@@ -523,6 +527,11 @@ async fn generate_draft(state: &AppState, job: &Job, payload: &Value) -> Result<
         .fetch_optional(&state.db)
         .await?;
     let category = category.unwrap_or_else(|| OTHER_LABEL.to_string());
+    let insight = analyze_message(state, &json!({ "message_id": message_id })).await?;
+    // Workflows don't draft replies to email that needs none (newsletters, notifications).
+    if run_id.is_some() && !insight.needs_reply {
+        return finish_without_draft(state, &msg.workspace_id, &message_id, run_id.as_deref(), "no reply needed").await;
+    }
     let category_name = labels::active(&state.db, &msg.workspace_id)
         .await?
         .into_iter()
@@ -542,16 +551,20 @@ async fn generate_draft(state: &AppState, job: &Job, payload: &Value) -> Result<
             body_text: msg.body_text,
             memory_notes: ctx.lines(),
             sender_history: ctx.sender_history.clone(),
+            insight: Some(insight),
         })
         .await?;
+    if out.body_text.trim().is_empty() {
+        return finish_without_draft(state, &msg.workspace_id, &message_id, run_id.as_deref(), "model judged no reply needed").await;
+    }
 
     let now = now_ms();
     let draft_id = new_id("drf");
     let mut tx = state.db.begin().await?;
     let inserted = sqlx::query(
         "INSERT OR IGNORE INTO drafts (id, workspace_id, message_id, body_text, original_body_text, status, model_id,
-                                       origin_key, memory_ids_json, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?4, 'suggested', ?5, ?6, ?8, ?7, ?7)",
+                                       origin_key, memory_ids_json, unanswered_json, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?4, 'suggested', ?5, ?6, ?8, ?9, ?7, ?7)",
     )
     .bind(&draft_id)
     .bind(&msg.workspace_id)
@@ -561,6 +574,7 @@ async fn generate_draft(state: &AppState, job: &Job, payload: &Value) -> Result<
     .bind(&job.dedupe_key)
     .bind(now)
     .bind(json!(ctx.ids()).to_string())
+    .bind(json!(out.unanswered).to_string())
     .execute(&mut *tx)
     .await?
     .rows_affected()
@@ -607,6 +621,85 @@ async fn generate_draft(state: &AppState, job: &Job, payload: &Value) -> Result<
             .await?;
         }
     }
+    tx.commit().await?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------- understanding
+
+/// Returns the stored insight, computing and storing it on first use (idempotent).
+pub async fn analyze_message(state: &AppState, payload: &Value) -> Result<ai::Insight, JobError> {
+    let message_id = str_field(payload, "message_id")?;
+    let stored: Option<(String, String, Option<String>, bool, String)> = sqlx::query_as(
+        "SELECT summary, asks_json, deadline, needs_reply, missing_json FROM message_insights WHERE message_id = ?1",
+    )
+    .bind(&message_id)
+    .fetch_optional(&state.db)
+    .await?;
+    if let Some((summary, asks, deadline, needs_reply, missing)) = stored {
+        return Ok(ai::Insight {
+            summary,
+            asks: serde_json::from_str(&asks).unwrap_or_default(),
+            deadline,
+            needs_reply,
+            missing_info: serde_json::from_str(&missing).unwrap_or_default(),
+        });
+    }
+    let msg = load_message(state, &message_id).await?;
+    let requires_reply: Option<bool> = sqlx::query_scalar("SELECT requires_reply FROM classifications WHERE message_id = ?1")
+        .bind(&message_id)
+        .fetch_optional(&state.db)
+        .await?;
+    let (mut insight, model_id) = state.analyst.analyze(&msg.subject, &msg.sender_address, &msg.body_text).await?;
+    // Two independent signals must agree before we skip a reply.
+    insight.needs_reply = insight.needs_reply || (requires_reply == Some(true) && !insight.asks.is_empty());
+    let source = if model_id == "rules-v1" { "rules" } else { "llm" };
+    sqlx::query(
+        "INSERT INTO message_insights (message_id, summary, asks_json, deadline, needs_reply, missing_json, source, model_id, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) ON CONFLICT(message_id) DO NOTHING",
+    )
+    .bind(&message_id)
+    .bind(&insight.summary)
+    .bind(json!(insight.asks).to_string())
+    .bind(&insight.deadline)
+    .bind(insight.needs_reply)
+    .bind(json!(insight.missing_info).to_string())
+    .bind(source)
+    .bind(&model_id)
+    .bind(now_ms())
+    .execute(&state.db)
+    .await?;
+    Ok(insight)
+}
+
+async fn finish_without_draft(
+    state: &AppState,
+    workspace_id: &str,
+    message_id: &str,
+    run_id: Option<&str>,
+    reason: &str,
+) -> Result<(), JobError> {
+    let mut tx = state.db.begin().await?;
+    if let Some(run_id) = run_id {
+        sqlx::query("UPDATE workflow_runs SET status = 'completed', error = NULL WHERE id = ?1").bind(run_id).execute(&mut *tx).await?;
+        sqlx::query("UPDATE email_messages SET processing_status = 'workflow_completed', processing_error = NULL WHERE id = ?1")
+            .bind(message_id)
+            .execute(&mut *tx)
+            .await?;
+    }
+    audit::record(
+        &mut tx,
+        Entry {
+            workspace_id,
+            actor: Actor::System,
+            action: "draft.skipped",
+            entity_type: "message",
+            entity_id: message_id,
+            message_id: Some(message_id),
+            metadata: json!({ "reason": reason }),
+        },
+    )
+    .await?;
     tx.commit().await?;
     Ok(())
 }

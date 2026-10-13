@@ -75,7 +75,13 @@ pub fn template_body(input: &DraftInput) -> String {
 #[async_trait]
 impl Drafter for TemplateDrafter {
     async fn draft(&self, input: &DraftInput) -> Result<DraftOutput, AiError> {
-        Ok(DraftOutput { body_text: template_body(input), model_id: "template-v1".into() })
+        let asks = input.insight.as_ref().map(|i| i.asks.clone()).unwrap_or_default();
+        let mut body = template_body(input);
+        if !asks.is_empty() {
+            let gaps: String = asks.iter().map(|a| format!("- {a} [NEEDS: answer]\n")).collect();
+            body = body.replacen("\n\nBest regards", &format!("\n\nOn your questions:\n{gaps}\nBest regards"), 1);
+        }
+        Ok(DraftOutput { body_text: body, model_id: "template-v1".into(), unanswered: asks })
     }
 }
 

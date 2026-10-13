@@ -9,15 +9,10 @@ use crate::{
 pub const AUTO_TRUST_CONFIDENCE: f64 = 0.8;
 
 pub fn needs_review(c: &ClassifyOutput) -> bool {
-    match c.source {
-        ClassificationSource::Manual => false,
-        ClassificationSource::Fallback => true,
-        // A confident "Other" (newsletters, notifications) needs no human; low confidence
-        // or money-related labels do. Error fallbacks never come through here.
-        ClassificationSource::Jev | ClassificationSource::Llm => {
-            c.category == "payroll" || c.confidence.is_none_or(|conf| conf < AUTO_TRUST_CONFIDENCE)
-        }
-    }
+    // Labelling is fully automatic. A person only looks when the AI could not label
+    // at all (dead-lettered → "other" error fallback). Confidence is kept for metrics.
+    let _ = AUTO_TRUST_CONFIDENCE;
+    matches!(c.source, ClassificationSource::Fallback) && c.model_id.as_deref() == Some("error-fallback")
 }
 
 /// Sending requires a capable source; it always also needs an explicit user action.

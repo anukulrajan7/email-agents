@@ -24,7 +24,7 @@ use crate::{
     ai::{
         Classifier, Drafter, fallback,
         jev::JevClassifier,
-        openrouter::{OpenRouterClassifier, OpenRouterClient, OpenRouterDrafter, OpenRouterExtractor, OpenRouterLearner},
+        openrouter::{OpenRouterAnalyst, OpenRouterClassifier, OpenRouterClient, OpenRouterDrafter, OpenRouterExtractor, OpenRouterLearner},
     },
     auth::Authenticator,
     config::Config,
@@ -103,7 +103,14 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
         _ => Arc::new(ai::RulesExtractor),
     };
 
+    // Understanding uses the stronger model: misreading an email is costlier than tokens.
+    let analyst: Arc<dyn ai::Analyst> = match &openrouter {
+        Some(client) if !config.openrouter_model_id.is_empty() => Arc::new(OpenRouterAnalyst::new(client.clone(), &config.openrouter_model_id)),
+        _ => Arc::new(ai::RulesAnalyst),
+    };
+
     Ok(AppState {
+        analyst,
         extractor,
         mailer,
         learner,
