@@ -105,8 +105,8 @@ pub async fn enqueue_at(
 ) -> sqlx::Result<bool> {
     let now = now_ms();
     let res = sqlx::query(
-        "INSERT INTO jobs (id, workspace_id, kind, dedupe_key, payload_json, status, max_attempts, run_at, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, 'pending', ?7, ?8, ?6, ?6)
+        "INSERT INTO jobs (id, workspace_id, kind, dedupe_key, payload_json, status, max_attempts, run_at, created_at, updated_at, priority)
+         VALUES (?1, ?2, ?3, ?4, ?5, 'pending', ?7, ?8, ?6, ?6, ?9)
          ON CONFLICT(dedupe_key) DO UPDATE SET
            status = 'pending', attempts = 0, run_at = excluded.run_at, last_error = NULL,
            locked_by = NULL, locked_until = NULL, updated_at = excluded.updated_at
@@ -120,9 +120,22 @@ pub async fn enqueue_at(
     .bind(now)
     .bind(max_attempts)
     .bind(run_at)
+    .bind(priority_of(kind, dedupe_key))
     .execute(conn)
     .await?;
     Ok(res.rows_affected() > 0)
+}
+
+/// Fetching and labelling new mail goes first; bulk re-checks and backfills go last, so a
+/// burst of background work never delays a new email reaching the inbox.
+pub fn priority_of(kind: &str, dedupe_key: &str) -> i64 {
+    match kind {
+        kind::SYNC_NANGO_SOURCE | kind::FETCH_FORWARDED_EMAIL | kind::REGISTER_NANGO_CONNECTION => 10,
+        kind::CLASSIFY_EMAIL if dedupe_key.contains(":recheck:") => -5,
+        kind::CLASSIFY_EMAIL => 5,
+        kind::BACKFILL_KNOWLEDGE | kind::CLEAN_STORED_TEXT | kind::REFETCH_GMAIL_HTML => -5,
+        _ => 0,
+    }
 }
 
 /// Atomically claims one due job (or one whose lease expired) in a single statement,
@@ -138,7 +151,7 @@ pub async fn claim(pool: &SqlitePool, worker_id: &str) -> sqlx::Result<Option<Jo
              (status = 'pending' AND run_at <= ?3)
              OR (status = 'running' AND locked_until <= ?3)
            )
-           ORDER BY run_at, created_at
+           ORDER BY priority DESC, run_at, created_at
            LIMIT 1
          )
          RETURNING {JOB_COLUMNS}"

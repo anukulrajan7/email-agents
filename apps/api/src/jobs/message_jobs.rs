@@ -112,6 +112,7 @@ pub async fn refetch_gmail_html(state: &AppState, payload: &Value) -> Result<(),
     let rows: Vec<(String, String)> = sqlx::query_as(
         "SELECT id, source_message_id FROM email_messages
          WHERE source_id = ?1 AND body_html IS NULL AND html_refetch_tries < ?2
+           AND id IN (SELECT id FROM email_messages WHERE source_id = ?1 ORDER BY received_at DESC LIMIT 100)
          ORDER BY received_at DESC LIMIT ?3",
     )
     .bind(&source_id)

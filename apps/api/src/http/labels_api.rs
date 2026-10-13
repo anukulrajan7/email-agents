@@ -304,34 +304,47 @@ pub async fn suggest(State(state): State<AppState>, user: AuthUser, Path(ws): Pa
     Ok(Json(json!({ "items": finalize(proposals, &taken, samples.len()) })))
 }
 
-/// How many recent "other" emails a new label re-checks (each one is a model call).
-const RECHECK_LIMIT: i64 = 100;
+/// Only the most recent emails are re-checked: older mail isn't worth the model calls.
+const RECHECK_WINDOW: i64 = 100;
+/// Labels added within this window share one re-check (people often add several at once).
+const RECHECK_BUCKET_MS: i64 = 10 * 60_000;
+/// Wait a moment so labels added together are all present when the re-check runs.
+const RECHECK_DELAY_MS: i64 = 60_000;
 
 /// A new label may fit mail that was filed under "other" before it existed: re-classify the
-/// most recent inbound ones (last 30 days). People's own label choices are never touched.
-async fn recheck_other_mail(conn: &mut sqlx::SqliteConnection, ws: &str, label_id: &str) -> sqlx::Result<usize> {
-    let since = now_ms() - 30 * 24 * 3_600_000;
+/// "other" emails among the latest 100, once per burst of new labels. People's own label
+/// choices are never touched. Runs at low priority, behind new mail.
+async fn recheck_other_mail(conn: &mut sqlx::SqliteConnection, ws: &str, _label_id: &str) -> sqlx::Result<usize> {
     let ids: Vec<String> = sqlx::query_scalar(
-        "SELECT m.id FROM email_messages m JOIN classifications c ON c.message_id = m.id
-         WHERE m.workspace_id = ?1 AND m.direction = 'inbound' AND m.received_at >= ?2
-           AND c.category = ?3 AND c.source != 'manual'
-         ORDER BY m.received_at DESC LIMIT ?4",
+        "SELECT m.id FROM (
+           SELECT id, received_at FROM email_messages
+           WHERE workspace_id = ?1 AND direction = 'inbound' ORDER BY received_at DESC LIMIT ?2
+         ) m JOIN classifications c ON c.message_id = m.id
+         WHERE c.category = ?3 AND c.source != 'manual'
+         ORDER BY m.received_at DESC",
     )
     .bind(ws)
-    .bind(since)
+    .bind(RECHECK_WINDOW)
     .bind(OTHER_LABEL)
-    .bind(RECHECK_LIMIT)
     .fetch_all(&mut *conn)
     .await?;
+    let now = now_ms();
+    let bucket = now / RECHECK_BUCKET_MS;
+    let mut queued = 0;
     for id in &ids {
-        crate::jobs::enqueue(
-            &mut *conn,
-            crate::jobs::kind::CLASSIFY_EMAIL,
-            &format!("classify:{id}:{}:label:{label_id}", crate::domain::TAXONOMY_VERSION),
-            Some(ws),
-            &json!({ "message_id": id }),
-        )
-        .await?;
+        // Same key for every label added in this bucket → each email is re-checked once.
+        queued += usize::from(
+            crate::jobs::enqueue_at(
+                &mut *conn,
+                crate::jobs::kind::CLASSIFY_EMAIL,
+                &format!("classify:{id}:{}:recheck:{bucket}", crate::domain::TAXONOMY_VERSION),
+                Some(ws),
+                &json!({ "message_id": id }),
+                crate::jobs::DEFAULT_MAX_ATTEMPTS,
+                now + RECHECK_DELAY_MS,
+            )
+            .await?,
+        );
     }
-    Ok(ids.len())
+    Ok(queued)
 }

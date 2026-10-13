@@ -153,7 +153,11 @@ async fn backfill(state: &AppState, payload: &Value) -> Result<(), JobError> {
         "messages" => {
             sqlx::query_as(
                 "SELECT m.id, m.workspace_id FROM email_messages m
-                 WHERE m.id > ?1 AND NOT EXISTS (
+                 WHERE m.id > ?1 AND m.direction = 'inbound'
+                   -- Only the latest 100 emails per workspace are worth indexing retroactively.
+                   AND m.id IN (SELECT x.id FROM email_messages x WHERE x.workspace_id = m.workspace_id
+                                AND x.direction = 'inbound' ORDER BY x.received_at DESC LIMIT 100)
+                   AND NOT EXISTS (
                    SELECT 1 FROM knowledge_chunks c WHERE c.message_id = m.id AND c.kind = 'email' AND c.embedded = 1)
                  ORDER BY m.id LIMIT ?2",
             )

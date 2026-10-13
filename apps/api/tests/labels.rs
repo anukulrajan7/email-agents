@@ -157,12 +157,17 @@ async fn new_label_rechecks_recent_other_mail_but_not_manual_choices() {
     let manual = items[0]["id"].as_str().unwrap();
     sqlx::query("UPDATE classifications SET source = 'manual' WHERE message_id = ?1").bind(manual).execute(&state.db).await.unwrap();
 
-    let (s, _) = call(&app, "POST", &format!("{base}/labels"), ADMIN,
-        Some(json!({"name":"Events","description":"Meetups, conferences and sponsorship requests"}))).await;
-    assert_eq!(s, StatusCode::CREATED);
-    let queued: Vec<String> = sqlx::query_scalar("SELECT dedupe_key FROM jobs WHERE dedupe_key LIKE 'classify:%:label:%'")
+    // Two labels added back to back share one re-check: each email is re-classified once.
+    for (name, description) in [("Events", "Meetups, conferences and sponsorship requests"), ("Sponsorships", "Requests to sponsor or exhibit")] {
+        let (s, _) = call(&app, "POST", &format!("{base}/labels"), ADMIN, Some(json!({"name":name,"description":description}))).await;
+        assert_eq!(s, StatusCode::CREATED);
+    }
+    let queued: Vec<(String, i64)> = sqlx::query_as("SELECT dedupe_key, priority FROM jobs WHERE dedupe_key LIKE 'classify:%:recheck:%'")
         .fetch_all(&state.db).await.unwrap();
-    assert_eq!(queued.len(), 1, "only the non-manual 'other' email is re-checked: {queued:?}");
-    assert!(!queued[0].contains(manual));
+    assert_eq!(queued.len(), 1, "only the non-manual 'other' email, once for both labels: {queued:?}");
+    assert!(!queued[0].0.contains(manual));
+    // Bulk re-checks wait behind new mail.
+    assert!(queued[0].1 < email_ai_api::jobs::priority_of("sync_nango_source", "sync:x"));
+    assert!(queued[0].1 < email_ai_api::jobs::priority_of("classify_email", "classify:m:taxonomy-v1"));
     worker::drain(&state).await;
 }

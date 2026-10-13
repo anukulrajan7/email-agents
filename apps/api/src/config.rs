@@ -85,7 +85,7 @@ impl Config {
             nango_gmail_integration: var("NANGO_GMAIL_INTEGRATION_ID", "google-mail"),
             nango_gmail_model: var("NANGO_GMAIL_MODEL", "GmailEmail"),
             nango_backfill_days: var("NANGO_BACKFILL_DAYS", "14").parse().context("NANGO_BACKFILL_DAYS")?,
-            nango_backfill_max: var("NANGO_BACKFILL_MAX", "500").parse().context("NANGO_BACKFILL_MAX")?,
+            nango_backfill_max: var("NANGO_BACKFILL_MAX", "100").parse().context("NANGO_BACKFILL_MAX")?,
             typesafe_api_key: var("TYPESAFE_API_KEY", ""),
             jev_api_url: var("JEV_API_URL", "https://api.typesafe.ai/v1/systemone"),
             jev_model_id: var("JEV_MODEL_ID", "jev-latest"),
