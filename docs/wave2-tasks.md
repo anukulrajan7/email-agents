@@ -107,3 +107,31 @@ Indexing, RAG labelling and RAG drafting are internal (no UI change besides sear
 
 Shared files (`http/mod.rs` router, `jobs/mod.rs` kinds, `jobs/handlers.rs` hooks, `lib.rs`, `api/types.ts`,
 `app/routes.tsx`, `AppShell.tsx`): touch with **small additive edits only**; the integrator merges.
+
+## Added: self-learning memory + email alerts (agents F backend, G UI)
+
+| # | Gap | Fix |
+|---|---|---|
+| G12 | Memory is mostly typed by people | Memory **learns itself**: facts about contacts, clients, standing answers and team preferences are extracted from incoming email + sent/approved replies, deduped, confidence-scored, with source links; people only pin/delete |
+| G13 | Nobody is told when something important is missed | **Alerts engine** + outbound **email alerts** (Hostinger SMTP via `mailer.rs`, later Wokay app) with escalation |
+
+### F1. Memory (existing `/memories` endpoints keep working) adds fields
+`origin: 'auto'|'manual'`, `confidence: number`, `source_message_id: string|null`, `pinned: boolean`, `use_count: number`,
+`last_used_at: string|null`. `GET /memories?origin=auto|manual`. `PATCH /memories/{id}` accepts `{pinned}`.
+Auto memories with confidence < 0.6 are kept but never used in drafts until confirmed (`PATCH {confirmed:true}` sets confidence 1).
+
+### F2. Alerts
+```
+GET   /alerts?status=open|resolved|all     → { items: Alert[], open_count: number }
+PATCH /alerts/{id}  { status: 'resolved' | 'open', snooze_hours?: number } → Alert
+GET   /alert-settings → AlertSettings      PUT /alert-settings (Admin) → AlertSettings
+POST  /alert-settings/test (Admin) → { sent_to: string[] }   // sends a test alert email
+```
+```ts
+interface Alert { id: string; kind: 'important_unanswered'|'approval_pending'|'automation'; severity: 'high'|'normal';
+  title: string; body: string; message_id: string|null; message_subject: string|null;
+  status: 'open'|'snoozed'|'resolved'; escalation_level: number; notified: string[]; created_at: string; resolved_at: string|null }
+interface AlertSettings { enabled: boolean; recipients: string[]; escalate_to: string[];
+  unanswered_hours: number; escalate_after_hours: number; daily_digest: boolean; digest_hour: number }
+```
+Default: enabled, recipients = workspace admins' emails, unanswered_hours 4, escalate_after_hours 24, digest at 9.
