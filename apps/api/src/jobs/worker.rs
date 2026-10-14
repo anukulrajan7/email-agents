@@ -144,6 +144,9 @@ async fn maintenance(state: &AppState) {
     if let Err(e) = crate::agents::triggers::schedule(state).await {
         tracing::warn!(error = %e, "failed to schedule agent ticks");
     }
+    if let Err(e) = jobs::eval_jobs::schedule(state).await {
+        tracing::warn!(error = %e, "failed to schedule the metrics rollup");
+    }
     if let Err(e) = jobs::match_digest::schedule(state).await {
         tracing::warn!(error = %e, "failed to schedule match digest");
     }

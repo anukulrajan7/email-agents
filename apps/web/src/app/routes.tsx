@@ -17,6 +17,8 @@ import { UsagePage } from '../features/usage/UsagePage';
 import { PeoplePage } from '../features/team/PeoplePage';
 import { PerformancePage } from '../features/team/PerformancePage';
 import { EscalationsPage } from '../features/team/EscalationsPage';
+import { MetricsRoute } from '../features/metrics/MetricsRoute';
+import { AgentMetricsView } from '../features/metrics/AgentMetricsView';
 import { AppShell } from './AppShell';
 
 const IntegrationsPage = lazy(() => import('../features/sources/IntegrationsPage').then((m) => ({ default: m.IntegrationsPage })));
@@ -39,6 +41,8 @@ export function AppRoutes() {
           <Route path="inbox/:messageId" element={<InboxPage />} />
           <Route path="agents" element={<AgentsPage />} />
           <Route path="agents/:caseId" element={<CaseDetailPage />} />
+          <Route path="metrics" element={<MetricsRoute />} />
+          <Route path="metrics/:agentId" element={<AgentMetricsView />} />
           <Route path="matching" element={<MatchingPage />} />
           <Route path="people" element={<PeoplePage />} />
           <Route path="performance" element={<PerformancePage />} />

@@ -33,6 +33,9 @@ const PRICES: &[(&str, f64, f64)] = &[
 const AUTOMATIC_TASKS: &[&str] =
     &["classify", "analyze", "understand", "learn", "extract", "embed", "judge", "vision", "audio", "agent_plan", "agent_critic"];
 
+/// Tasks a person asks for (running an eval, designing an agent). Never counted as per-email spend.
+pub const MANUAL_TASKS: &[&str] = &["eval", "designer"];
+
 fn price(model: &str) -> Option<(f64, f64)> {
     let model = model.to_lowercase();
     PRICES.iter().find(|(m, _, _)| *m == model).map(|(_, i, o)| (*i, *o))
@@ -355,6 +358,8 @@ pub fn task_label(task: &str) -> &'static str {
         "judge" => "Checks",
         "vision" | "audio" => "Files",
         t if t.starts_with("agent_") => "Agents",
+        "eval" => "Evals",
+        "designer" => "Agent design",
         t if t.starts_with("assistant_") => "Assistant",
         _ => "Other",
     }
@@ -490,6 +495,8 @@ mod tests {
         assert_eq!(task_label("classify"), "Labelling");
         assert_eq!(task_label("agent_critic"), "Agents");
         assert_eq!(task_label("embed"), "Search");
+        assert_eq!(task_label("eval"), "Evals");
+        assert!(MANUAL_TASKS.iter().all(|t| !AUTOMATIC_TASKS.contains(t)));
         assert_eq!(task_label("whatever"), "Other");
     }
 

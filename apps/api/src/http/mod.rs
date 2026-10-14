@@ -7,12 +7,14 @@ mod assistant_api;
 mod auth_api;
 mod automations_api;
 mod dto;
+mod evals_api;
 mod jobs_api;
 mod label_health;
 mod learning_api;
 mod labels_api;
 mod matching_api;
 mod memories;
+mod metrics_api;
 mod messages;
 mod reply_settings_api;
 mod reviews;
@@ -165,6 +167,8 @@ pub fn router(state: AppState) -> Router {
         .merge(agent_profiles_api::routes())
         .merge(agent_registry_api::routes())
         .merge(learning_api::routes())
+        .merge(metrics_api::routes())
+        .merge(evals_api::routes())
         .merge(assistant_api::routes())
         .merge(team_api::routes())
         .merge(staffing_api::routes())

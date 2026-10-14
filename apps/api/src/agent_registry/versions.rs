@@ -45,10 +45,10 @@ impl VersionRow {
     }
 }
 
-/// Called whenever a version is saved or activated. Replaced by the evals gate (safety and replay
-/// suites) when that package merges; until then a version stays `pending`.
-pub async fn on_new_version(_conn: &mut SqliteConnection, _ws: &str, _agent_id: &str, _version: i64) -> sqlx::Result<()> {
-    Ok(())
+/// Called whenever a version is saved or activated: a behaviour-changing version queues its safety
+/// and replay runs and stays `pending` until they finish (see `evals::gate`).
+pub async fn on_new_version(conn: &mut SqliteConnection, ws: &str, agent_id: &str, version: i64) -> sqlx::Result<()> {
+    crate::evals::gate::on_new_version(conn, ws, agent_id, version).await
 }
 
 pub async fn list<'e>(db: impl SqliteExecutor<'e>, agent_id: &str) -> sqlx::Result<Vec<VersionRow>> {

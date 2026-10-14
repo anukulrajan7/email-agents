@@ -101,6 +101,10 @@ pub struct Config {
     pub agent_max_autonomy: i64,
     /// Automatic sends (level 2 and up) wait this many seconds so a person can stop them; 0 sends at once.
     pub agent_auto_send_delay_secs: i64,
+    /// A behaviour-changing agent version queues its safety and replay evals (`EVALS_ON_VERSION`).
+    pub evals_on_version: bool,
+    /// Most one in-product live eval run may spend, in USD (`EVALS_LIVE_MAX_USD`).
+    pub evals_live_max_usd: f64,
     pub email_retention_days: i64,
     pub job_worker_concurrency: usize,
     pub allow_test_emails: bool,
@@ -193,6 +197,8 @@ impl Config {
             agent_best_model_id: var("AGENT_BEST_MODEL_ID", "deepseek/deepseek-v4-pro"),
             agent_auto_send_daily_cap: var("AGENT_AUTO_SEND_DAILY_CAP", "20").parse().context("AGENT_AUTO_SEND_DAILY_CAP")?,
             agent_max_autonomy: var("AGENT_MAX_AUTONOMY", "3").parse::<i64>().context("AGENT_MAX_AUTONOMY")?.clamp(0, 3),
+            evals_on_version: var("EVALS_ON_VERSION", "1") != "0",
+            evals_live_max_usd: var("EVALS_LIVE_MAX_USD", "0.50").parse::<f64>().context("EVALS_LIVE_MAX_USD")?.clamp(0.0, 5.0),
             agent_auto_send_delay_secs: var("AGENT_AUTO_SEND_DELAY_SECS", "600").parse::<i64>().context("AGENT_AUTO_SEND_DELAY_SECS")?.clamp(0, 86_400),
             email_retention_days: var("EMAIL_RETENTION_DAYS", "30").parse().context("EMAIL_RETENTION_DAYS")?,
             job_worker_concurrency: var("JOB_WORKER_CONCURRENCY", "2").parse().context("JOB_WORKER_CONCURRENCY")?,
@@ -277,6 +283,8 @@ impl Config {
             agent_auto_send_daily_cap: 20,
             agent_max_autonomy: 3,
             agent_auto_send_delay_secs: 0,
+            evals_on_version: false,
+            evals_live_max_usd: 0.50,
             email_retention_days: 30,
             job_worker_concurrency: 2,
             allow_test_emails: true,

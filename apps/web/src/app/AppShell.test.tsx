@@ -51,7 +51,7 @@ describe('AppShell navigation', () => {
   it('groups the sidebar into Work, Teach and Settings without admin-only items for members', async () => {
     renderShell('member');
     const nav = await screen.findByRole('navigation', { name: 'Main' });
-    expect(itemsOf(nav, 'Work')).toEqual(['Inbox', 'Agents', 'Alerts']);
+    expect(itemsOf(nav, 'Work')).toEqual(['Inbox', 'Agents', 'Results', 'Alerts']);
     expect(itemsOf(nav, 'HRMS')).toEqual(['People', 'Performance', 'Timesheets', 'Portal reconciliation', 'Escalations', 'Matching']);
     expect(itemsOf(nav, 'Teach')).toEqual(['Labels', 'Memory', 'Automations']);
     expect(itemsOf(nav, 'Settings')).toEqual(['Integrations', 'Workflows', 'Reviews']);
