@@ -101,10 +101,6 @@ static LONG_NUMBER: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\d(?:[\s-]?\
 
 /// The leak check, in code: the draft names an email address that is not part of this conversation
 /// or our own, or carries a long number (account, card, phone). Such a reply goes to a person.
-pub fn is_sensitive(body: &str) -> bool {
-    SENSITIVE.is_match(body)
-}
-
 pub fn leaks(body: &str, known: &[String]) -> bool {
     LONG_NUMBER.is_match(body)
         || EMAIL_ADDRESS.find_iter(body).any(|m| !known.iter().any(|k| k.trim().eq_ignore_ascii_case(m.as_str().trim_end_matches('.'))))
