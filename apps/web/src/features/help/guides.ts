@@ -297,7 +297,7 @@ export const GUIDES: Guide[] = [
     nudge: true,
     steps: [
       { text: 'Import the hours and submissions you exported from the client portal.', anchor: 'portal-header' },
-      { text: 'Press Compare. Every difference becomes an alert you can open.', anchor: 'portal-header' },
+      { text: 'Press Compare now. Every difference becomes an alert you can open.', anchor: 'portal-header' },
     ],
     safe: 'Comparing only reads. It never changes the portal or your mail.',
   },
