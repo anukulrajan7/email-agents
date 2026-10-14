@@ -13,6 +13,7 @@ export function navGroups(isAdmin: boolean, hasStaffing = true): NavGroup[] {
       items: [
         { to: 'inbox', label: 'Inbox' },
         { to: 'agents', label: 'Agents', badge: 'agents' },
+        { to: 'metrics', label: 'Results' },
         ...(hasStaffing ? [{ to: 'matching', label: 'Matching' }] : []),
         { to: 'alerts', label: 'Alerts', badge: 'alerts' },
       ],

@@ -3,6 +3,7 @@
 pub mod agent_jobs;
 pub mod attachment_jobs;
 pub mod automation_jobs;
+pub mod eval_jobs;
 pub mod handlers;
 pub mod knowledge_jobs;
 pub mod learning_jobs;
@@ -47,6 +48,8 @@ pub mod kind {
     pub const AGENT_SCHEDULE_TICK: &str = "agent_schedule_tick";
     pub const SEND_DRAFT: &str = "send_draft";
     pub const BACKUP_DATABASE: &str = "backup_database";
+    pub const RUN_EVAL: &str = "run_eval";
+    pub const ROLLUP_AGENT_METRICS: &str = "rollup_agent_metrics";
 }
 
 #[derive(Debug, Clone, FromRow)]
