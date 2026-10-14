@@ -616,7 +616,7 @@ struct AgentSigned;
 impl Drafter for AgentSigned {
     async fn draft(&self, input: &DraftInput) -> Result<DraftOutput, AiError> {
         let notes = input.memory_notes.join(" | ");
-        Ok(DraftOutput { body_text: format!("Hello,\n\nThanks for writing. ({notes})\n\nBest regards,\nAarav"), model_id: "test".into(), unanswered: vec![] })
+        Ok(DraftOutput { body_text: format!("Hello,\n\nThanks for writing. ({notes})\n\nBest regards,\nMeera"), model_id: "test".into(), unanswered: vec![] })
     }
 }
 
@@ -624,14 +624,14 @@ impl Drafter for AgentSigned {
 async fn the_agent_never_signs_as_itself() {
     let script = vec![
         tool("read_email", json!({"message_id": "$message_id"})),
-        tool("draft_email", json!({"message_id": "$message_id", "instructions": "Thank them, signed off as Aarav."})),
+        tool("draft_email", json!({"message_id": "$message_id", "instructions": "Thank them, signed off as Meera."})),
         finish(None, "Drafted a reply."),
     ];
     let env = env_state(ScriptedPlanner::new().script("inbox", script), |_| {}, |s| s.drafter = Arc::new(AgentSigned)).await;
     call(&env.app, "PUT", &format!("{}/reply-settings", env.base()), ADMIN, Some(json!({"auto_reply": true, "reply_instructions": "", "signature": "Priya, HR Team"}))).await;
     let msg = env.receive("sg1", "t-sg1", "ravi@acme.com", "Hello", "Thanks for the update on the project.", 1).await;
     let body = draft_body(&env, &msg).await;
-    assert!(!body.contains("Aarav") && !body.to_lowercase().contains("signed off"), "{body}");
+    assert!(!body.contains("Meera") && !body.to_lowercase().contains("signed off"), "{body}");
     assert!(body.ends_with("Best regards,\nPriya, HR Team"), "{body}");
 }
 

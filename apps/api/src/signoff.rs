@@ -59,6 +59,11 @@ mod tests {
         assert!(b.ends_with("Best regards,\nPriya, HR") && !b.contains("Aarav"), "{b}");
         let mut ok = "Hi,\n\nBest,\nPriya".to_string();
         assert!(!replace_agent_sign_off(&mut ok, "Aarav", "Priya"));
+        let mut owner = "Hi,\n\nBest,\nMeera Sharma".to_string();
+        assert!(!replace_agent_sign_off(&mut owner, "Meera", "Priya"), "an owner's full name is not the agent's name");
+        let mut same = "Hi,\n\nBest,\nMeera".to_string();
+        assert!(replace_agent_sign_off(&mut same, "Meera", "Meera"));
+        assert!(same.ends_with("Best,\nMeera"));
         let mut mention = "Hi,\n\nThanks.\n\nHR team, with help from Aarav".to_string();
         assert!(!replace_agent_sign_off(&mut mention, "Aarav", "Priya"), "only a line that is just the name");
     }

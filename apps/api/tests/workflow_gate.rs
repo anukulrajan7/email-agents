@@ -33,7 +33,8 @@ async fn workflow_cases_stay_inside_the_step_and_budget_limits() {
     for id in ["limit_step_cap", "limit_budget_cap"] {
         let o = result.outcomes.iter().find(|o| o.id == id).unwrap();
         assert!(o.failures.iter().all(|f| !f.starts_with("SAFETY")), "{id}: {:?}", o.failures);
-        assert_eq!(o.class, "failed", "{id} is stopped, not finished");
+        assert!(matches!(o.class.as_str(), "failed" | "approval"), "{id} is stopped or waits for a person, never finished on its own: {}", o.class);
+        assert!(o.steps <= 3, "{id}: {} steps", o.steps);
     }
 }
 

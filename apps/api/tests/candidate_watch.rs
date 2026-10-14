@@ -243,6 +243,9 @@ async fn the_standing_rules_of_an_agent_send_apply() {
         known_client(&env).await;
         if what == "workspace send is ask" {
             env.ok("PUT", "/agent", ADMIN, Some(json!({"permissions": {"send": "ask"}}))).await;
+        } else if what == "level one" {
+            let lead: String = sqlx::query_scalar("SELECT id FROM agents WHERE kind = 'lead'").fetch_one(&env.state.db).await.unwrap();
+            env.ok("PATCH", &format!("/agents/{lead}"), ADMIN, Some(json!({"autonomy_cap": 1}))).await;
         } else {
             sqlx::query(setup).execute(&env.state.db).await.unwrap();
         }
@@ -427,13 +430,13 @@ async fn a_requirement_is_marked_confidential_from_its_text_or_attachment() {
 #[tokio::test]
 async fn the_job_seeker_reply_answers_directly_and_sending_it_enrols() {
     let env = watch_env().await;
-    env.drafter.set("Hello Ananth,\n\nThank you for reaching out about a Java role. You asked if there are any Java openings: [NEEDS: current Java job openings]. We will review what we have and get back to you.\n\nBest regards,\nAarav");
+    env.drafter.set("Hello Ananth,\n\nThank you for reaching out about a Java role. You asked if there are any Java openings: [NEEDS: current Java job openings]. We will review what we have and get back to you.\n\nBest regards,\nMeera");
     let msg = seeker(&env, "s1", SEEKER, "candidate_referral").await;
     let (s, _) = env.req("POST", &format!("/messages/{msg}/draft"), ADMIN, None).await;
     assert!(s.is_success(), "{s}");
     worker::drain(&env.state).await;
     let (draft_id, body): (String, String) = sqlx::query_as("SELECT id, body_text FROM drafts WHERE message_id = ?1 AND origin_key IS NOT NULL").bind(&msg).fetch_one(&env.state.db).await.unwrap();
-    assert!(body.contains(NONE_SENTENCE) && !body.contains("[NEEDS") && !body.to_lowercase().contains("get back to you") && !body.contains("Aarav"), "{body}");
+    assert!(body.contains(NONE_SENTENCE) && !body.contains("[NEEDS") && !body.to_lowercase().contains("get back to you") && !body.contains("Meera"), "{body}");
     replies::send_draft(&env.state, &env.ws, &draft_id, Actor::System).await.unwrap();
     worker::drain(&env.state).await;
     assert_eq!(enrolled(&env).await, 1, "the sent promise started the watch");
