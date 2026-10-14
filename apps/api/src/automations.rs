@@ -459,9 +459,39 @@ pub async fn insert(
     .bind(serde_json::to_string(&input.actions).unwrap_or_else(|_| "[]".into()))
     .bind(preset_key)
     .bind(now)
-    .execute(conn)
+    .execute(&mut *conn)
     .await?;
+    record_version(conn, workspace_id, &id, None).await?;
     Ok(id)
+}
+
+/// Writes the automation's current definition as its next version (and makes that its version), so an
+/// agent rollback can put it back. Call after every insert and update, inside the same transaction.
+pub async fn record_version(conn: &mut SqliteConnection, workspace_id: &str, automation_id: &str, created_by: Option<&str>) -> sqlx::Result<i64> {
+    let version: i64 = sqlx::query_scalar("SELECT COALESCE(MAX(version), 0) + 1 FROM automation_versions WHERE automation_id = ?1")
+        .bind(automation_id)
+        .fetch_one(&mut *conn)
+        .await?;
+    sqlx::query(
+        "INSERT INTO automation_versions (automation_id, version, definition_json, created_by, created_at)
+         SELECT id, ?1, json_object('name', name, 'enabled', enabled, 'trigger', \"trigger\", 'conditions', json(conditions_json),
+                                    'actions', json(actions_json)), ?2, ?3
+         FROM automations WHERE id = ?4 AND workspace_id = ?5",
+    )
+    .bind(version)
+    .bind(created_by)
+    .bind(now_ms())
+    .bind(automation_id)
+    .bind(workspace_id)
+    .execute(&mut *conn)
+    .await?;
+    sqlx::query("UPDATE automations SET version = ?1 WHERE id = ?2 AND workspace_id = ?3")
+        .bind(version)
+        .bind(automation_id)
+        .bind(workspace_id)
+        .execute(&mut *conn)
+        .await?;
+    Ok(version)
 }
 
 /// Creates the default automations once per workspace. Returns true if it seeded.

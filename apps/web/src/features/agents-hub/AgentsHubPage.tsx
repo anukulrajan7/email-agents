@@ -3,7 +3,6 @@ import { Link } from 'react-router';
 import { Button, Page, PageHeader, Skeleton, useToast } from '../../components/ui';
 import { ErrorNote } from '../../components/ErrorNote';
 import { useWorkspace } from '../../app/useWorkspace';
-import { featureEnabled } from '../../lib/features';
 import { riseStyle } from '../../lib/motion';
 import type { AgentCategory, AgentSummary } from '../../api/types';
 import { HelpPopover } from '../help/HelpPopover';
@@ -61,7 +60,7 @@ export function AgentsHubPage() {
           <>
             <HelpPopover topic="agents" />
             <HelpPopover topic="autonomy" label="About freedom levels" />
-            {featureEnabled('agent-builder') && isAdmin && (
+            {isAdmin && (
               <Link
                 to={`/w/${ws}/agents/new`}
                 className="inline-flex h-8 items-center rounded-sm bg-accent px-3 text-[13px] font-semibold text-accent-ink hover:bg-accent-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"

@@ -53,7 +53,8 @@ pub fn scope_of_tool(tool: &str) -> Scope {
     match tool {
         "draft_email" => Scope::Draft,
         "send_email" | "submit_candidate" => Scope::Send,
-        "create_task" | "update_case" => Scope::Label,
+        "save_to_gmail_drafts" => Scope::Draft,
+        "create_task" | "update_case" | "label_email" => Scope::Label,
         "schedule_check" | "propose_automation" => Scope::Schedule,
         _ => Scope::ReadMail,
     }
@@ -163,7 +164,7 @@ pub enum FieldType {
     Boolean,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExtractField {
     pub name: String,
@@ -194,6 +195,19 @@ pub enum Step {
 }
 
 impl Step {
+    /// The tools a fixed workflow calls to carry this step out. A step only runs when its spec lists them.
+    pub fn required_tools(&self) -> &'static [&'static str] {
+        match self {
+            Step::Extract { .. } => &["extract_fields"],
+            Step::DraftReply { .. } => &["draft_email"],
+            Step::CreateReview { .. } | Step::Notify { .. } => &["create_task"],
+            Step::RemindIfNoReply { .. } => &["schedule_check", "create_task"],
+            Step::SaveToGmailDrafts => &["save_to_gmail_drafts"],
+            Step::Label { .. } => &["label_email"],
+            Step::StartCase => &["update_case"],
+        }
+    }
+
     pub fn describe(&self) -> String {
         match self {
             Step::Extract { fields } => format!("extract {}", fields.iter().map(|f| f.name.as_str()).collect::<Vec<_>>().join(", ")),
@@ -377,6 +391,11 @@ fn check_match(m: &TriggerMatch, path: &str, out: &mut Vec<Issue>) {
     }
 }
 
+/// A field to extract needs a lower-case name and a description of at most 200 characters.
+pub fn field_ok(f: &ExtractField) -> bool {
+    is_slug(&f.name) && f.description.chars().count() <= 200
+}
+
 fn check_step(step: &Step, path: &str, out: &mut Vec<Issue>) {
     match step {
         Step::Extract { fields } => {
@@ -384,7 +403,7 @@ fn check_step(step: &Step, path: &str, out: &mut Vec<Issue>) {
                 out.push(issue(format!("{path}.fields"), "bad_fields", "extract 1 to 12 fields"));
             }
             for (i, f) in fields.iter().enumerate() {
-                if !is_slug(&f.name) || f.description.chars().count() > 200 {
+                if !field_ok(f) {
                     out.push(issue(format!("{path}.fields[{i}]"), "bad_field", "a field needs a lower-case name and a description of at most 200 characters"));
                 }
             }

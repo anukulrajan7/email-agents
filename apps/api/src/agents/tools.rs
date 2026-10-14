@@ -96,6 +96,8 @@ pub struct ToolOutput {
     pub state: Option<Value>,
     /// The case sleeps until this time (unix ms).
     pub sleep_until: Option<i64>,
+    /// What the tool itself spent on models (reading an email, say); added to the case's spend.
+    pub cost_usd: f64,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -182,6 +184,9 @@ static REGISTRY: LazyLock<Registry> = LazyLock::new(|| Registry {
         Box::new(CreateTask),
         Box::new(ScheduleCheck),
         Box::new(UpdateCase),
+        Box::new(ExtractFields),
+        Box::new(LabelEmail),
+        Box::new(SaveToGmailDrafts),
         Box::new(SendEmail),
         Box::new(SubmitCandidate),
         Box::new(ProposeAutomation),
@@ -535,6 +540,12 @@ impl Tool for RecallMemory {
 
 // ---------------------------------------------------------------- low tools
 
+/// Stable short key of a draft's instructions, so retrying the same step finds the draft it already made.
+fn instruction_key(text: &str) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(text.as_bytes()).iter().take(8).map(|b| format!("{b:02x}")).collect()
+}
+
 struct DraftEmail;
 
 #[async_trait]
@@ -608,7 +619,10 @@ impl Tool for DraftEmail {
                         ..Default::default()
                     });
                 }
-                let origin = format!("agent:{}:{}", ctx.case.id, ctx.turn);
+                let origin = match instructions {
+                    Some(text) => format!("agent:{}:{}:{}", ctx.case.id, msg.id, instruction_key(text)),
+                    None => format!("agent:{}:{}", ctx.case.id, ctx.turn),
+                };
                 crate::agent_profiles::with_draft_style(style, handlers::create_agent_draft(ctx.state, &msg.id, instructions, quality, &origin, ctx.case.agent_id.as_deref()))
                     .await?
                     .ok_or_else(|| ToolError::Failed("The writer judged that this email needs no reply.".into()))?
@@ -770,6 +784,160 @@ impl Tool for UpdateCase {
     }
 }
 
+struct ExtractFields;
+
+#[async_trait]
+impl Tool for ExtractFields {
+    fn name(&self) -> &'static str {
+        "extract_fields"
+    }
+    fn description(&self) -> &'static str {
+        "Read named details (an order number, a budget, a date) out of one email. Details the email does not state come back missing. \
+         fields: [{name, type: string|number|date|boolean, description}]."
+    }
+    fn schema(&self) -> Value {
+        object(
+            json!({
+                "message_id": {"type": "string", "description": "The email to read"},
+                "fields": {"type": "array", "items": {"type": "object"}, "description": "1 to 12 details to find"}
+            }),
+            &["message_id", "fields"],
+        )
+    }
+    fn risk(&self) -> Risk {
+        Risk::Read
+    }
+    async fn run(&self, ctx: &ToolCtx<'_>, args: &Value) -> Result<ToolOutput, ToolError> {
+        let msg = message_in_ws(ctx, str_arg(args, "message_id")?).await?;
+        if msg.direction != "inbound" {
+            return failed("Details can only be read from an email we received.");
+        }
+        let fields: Vec<crate::agent_registry::spec::ExtractField> = serde_json::from_value(args.get("fields").cloned().unwrap_or(Value::Null))
+            .map_err(|_| ToolError::Failed("The details to find are not in the expected shape.".into()))?;
+        if fields.is_empty() || fields.len() > 12 {
+            return failed("Ask for 1 to 12 details.");
+        }
+        if !fields.iter().all(crate::agent_registry::spec::field_ok) {
+            return failed("Each detail needs a lower-case name and a description of at most 200 characters.");
+        }
+        let extracted = ctx
+            .state
+            .field_extractor
+            .extract(&msg.subject, &knowledge::clean_body(&msg.body_text), &fields)
+            .await
+            .map_err(|_| ToolError::Failed("The details could not be read right now.".into()))?;
+        let found = extracted.found;
+        let missing: Vec<&str> = fields.iter().map(|f| f.name.as_str()).filter(|n| !found.contains_key(*n)).collect();
+        let list = |names: Vec<String>| if names.is_empty() { "nothing".to_string() } else { names.join(", ") };
+        Ok(ToolOutput {
+            summary: format!(
+                "Read the email: found {}; missing {}",
+                list(found.iter().map(|(k, v)| format!("{k} = {v}")).collect()),
+                list(missing.iter().map(|m| m.to_string()).collect())
+            ),
+            value: json!({"found": found, "missing": missing}),
+            state: Some(json!({"extracted": found, "extract_missing": missing})),
+            cost_usd: extracted.cost_usd,
+            ..Default::default()
+        })
+    }
+}
+
+struct LabelEmail;
+
+#[async_trait]
+impl Tool for LabelEmail {
+    fn name(&self) -> &'static str {
+        "label_email"
+    }
+    fn description(&self) -> &'static str {
+        "Give an email one of this workspace's labels (a person's own label is never overwritten)."
+    }
+    fn schema(&self) -> Value {
+        object(json!({"message_id": {"type": "string"}, "label": {"type": "string", "description": "A label key"}}), &["message_id", "label"])
+    }
+    fn risk(&self) -> Risk {
+        Risk::Low
+    }
+    async fn run(&self, ctx: &ToolCtx<'_>, args: &Value) -> Result<ToolOutput, ToolError> {
+        let msg = message_in_ws(ctx, str_arg(args, "message_id")?).await?;
+        let label = str_arg(args, "label")?;
+        if ctx.case.shadow {
+            return Ok(ToolOutput {
+                summary: format!("Observe mode: would have labelled it {label}; nothing was done"),
+                value: json!({"simulated": true}),
+                ..Default::default()
+            });
+        }
+        if !crate::labels::is_active(&ctx.state.db, ctx.ws(), label).await? {
+            return failed("That label does not exist in this workspace.");
+        }
+        let existing: Option<(String, String, bool, String)> =
+            sqlx::query_as("SELECT category, priority, requires_reply, source FROM classifications WHERE message_id = ?1")
+                .bind(&msg.id)
+                .fetch_optional(&ctx.state.db)
+                .await?;
+        let Some((category, priority, requires_reply, source)) = existing else { return failed("This email has not been labelled yet.") };
+        if source == "manual" {
+            return Ok(ToolOutput {
+                summary: format!("Kept the label a person chose ({category})"),
+                value: json!({"label": category, "kept": true}),
+                ..Default::default()
+            });
+        }
+        let out = crate::ai::ClassifyOutput {
+            category: label.to_string(),
+            priority: crate::domain::Priority::parse(&priority).unwrap_or(crate::domain::Priority::Normal),
+            requires_reply,
+            confidence: None,
+            source: crate::domain::ClassificationSource::Llm,
+            model_id: Some("agent".into()),
+            model_version: None,
+        };
+        handlers::persist_classification(ctx.state, &msg.id, &out, ctx.actor, None, handlers::WriteMode::Upsert).await?;
+        Ok(ToolOutput { summary: format!("Labelled the email {label}"), value: json!({"label": label}), ..Default::default() })
+    }
+}
+
+struct SaveToGmailDrafts;
+
+#[async_trait]
+impl Tool for SaveToGmailDrafts {
+    fn name(&self) -> &'static str {
+        "save_to_gmail_drafts"
+    }
+    fn description(&self) -> &'static str {
+        "Save a drafted reply to the mailbox's Drafts folder so a person can finish it there. Nothing is sent."
+    }
+    fn schema(&self) -> Value {
+        object(json!({"draft_id": {"type": "string"}}), &["draft_id"])
+    }
+    fn risk(&self) -> Risk {
+        Risk::Low
+    }
+    async fn run(&self, ctx: &ToolCtx<'_>, args: &Value) -> Result<ToolOutput, ToolError> {
+        let draft_id = str_arg(args, "draft_id")?;
+        if ctx.case.shadow {
+            return Ok(ToolOutput {
+                summary: "Observe mode: would have saved the draft to Gmail Drafts; nothing was done".into(),
+                value: json!({"simulated": true}),
+                ..Default::default()
+            });
+        }
+        let rc = replies::load(ctx.state, ctx.ws(), draft_id).await?;
+        if !crate::ai::policy::can_create_provider_draft(&replies::capabilities(&rc)) {
+            return Ok(ToolOutput {
+                summary: "This mailbox cannot hold Gmail drafts, so the draft stays in Post Room".into(),
+                value: json!({"saved": false}),
+                ..Default::default()
+            });
+        }
+        let provider_draft_id = replies::save_draft(ctx.state, ctx.ws(), draft_id, ctx.actor).await?;
+        Ok(ToolOutput { summary: "Saved the draft to Gmail Drafts".into(), value: json!({"saved": true, "provider_draft_id": provider_draft_id}), ..Default::default() })
+    }
+}
+
+
 // ---------------------------------------------------------------- high tools (run on approval)
 
 #[derive(sqlx::FromRow)]
@@ -928,6 +1096,46 @@ impl Tool for SubmitCandidate {
 struct ProposeAutomation;
 
 impl ProposeAutomation {
+    /// The suggestion as a plain-English job for the designer. Automatic sending is described as
+    /// "reply for review" because a designed agent earns sending later; nothing here can switch it on.
+    fn describe(input: &crate::automations::AutomationInput, reason: &str) -> String {
+        use crate::automations::{Action, Condition, ContainsOp, LabelOp};
+        let when: Vec<String> = input
+            .conditions
+            .iter()
+            .map(|c| match c {
+                Condition::Label { op: LabelOp::Is, value } => format!("the label is {value}"),
+                Condition::Label { op: LabelOp::IsNot, value } => format!("the label is not {value}"),
+                Condition::Priority { value, .. } => format!("the priority is {value:?}").to_lowercase(),
+                Condition::NeedsReply { value, .. } => if *value { "it needs a reply".to_string() } else { "it needs no reply".to_string() },
+                Condition::From { op: ContainsOp::Contains, value } => format!("the sender contains \"{value}\""),
+                Condition::Subject { op: ContainsOp::Contains, value } => format!("the subject contains \"{value}\""),
+            })
+            .collect();
+        let then: Vec<String> = input
+            .actions
+            .iter()
+            .map(|a| match a {
+                Action::DraftReply { instructions: Some(i) } => format!("draft a reply ({})", sentence(i, 160)),
+                Action::DraftReply { instructions: None } => "draft a reply".to_string(),
+                Action::SaveToGmailDrafts => "save the draft to Gmail Drafts".to_string(),
+                Action::SendReply { .. } => "send the reply (here: draft it and ask a person before sending)".to_string(),
+                Action::CreateReview { title: Some(t) } => format!("ask a person to review: {}", sentence(t, 100)),
+                Action::CreateReview { title: None } => "ask a person to review".to_string(),
+                Action::RemindIfNoReply { hours } => format!("remind a person if nobody replied after {hours} hours"),
+            })
+            .collect();
+        let mut text = format!("An agent suggested a standing rule called \"{}\". ", sentence(input.name.trim(), 80));
+        if !when.is_empty() {
+            text.push_str(&format!("When {}: ", when.join(" and ")));
+        }
+        text.push_str(&format!("{}.", then.join(", then ")));
+        if !reason.is_empty() {
+            text.push_str(&format!(" Why: {reason}"));
+        }
+        text
+    }
+
     fn parse(args: &Value) -> Result<crate::automations::AutomationInput, ToolError> {
         let input = json!({
             "name": args.get("name").cloned().unwrap_or(Value::Null),
@@ -948,7 +1156,7 @@ impl Tool for ProposeAutomation {
         "propose_automation"
     }
     fn description(&self) -> &'static str {
-        "Suggest a standing rule for emails like this one. It is only created if a person approves it. \
+        "Suggest a standing rule for emails like this one. If an admin approves, it opens the agent designer; nothing runs until they review, dry-run and save it. \
          conditions: [{field: label, op: is|is_not, value: <label key>} | {field: priority, op: is, value: high|normal|low} | \
          {field: needs_reply, op: is, value: bool} | {field: from|subject, op: contains, value: text}]. \
          actions: [{type: draft_reply, instructions?} | {type: save_to_gmail_drafts} | {type: create_review, title?} | \
@@ -976,30 +1184,28 @@ impl Tool for ProposeAutomation {
     }
     async fn run(&self, ctx: &ToolCtx<'_>, args: &Value) -> Result<ToolOutput, ToolError> {
         let input = Self::parse(args)?;
-        let mut tx = ctx.state.db.begin().await?;
-        let id = crate::automations::insert(&mut tx, ctx.ws(), &input, None).await?;
-        let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM automations WHERE workspace_id = ?1").bind(ctx.ws()).fetch_one(&mut *tx).await?;
-        if total > crate::automations::MAX_AUTOMATIONS {
-            tx.rollback().await?;
-            return failed("This workspace already has the most automations allowed.");
-        }
+        let Actor::User(admin_id) = ctx.actor else {
+            return failed("Only an admin who approves the suggestion can open the agent designer.");
+        };
+        let reason = opt_str(args, "reason").map(|r| sentence(r, 240)).unwrap_or_default();
+        let session = crate::designer::session::open_from_proposal(ctx.state, ctx.ws(), admin_id, &input.name, &Self::describe(&input, &reason)).await?;
         audit::record(
-            &mut tx,
+            &mut *ctx.state.db.acquire().await?,
             Entry {
                 workspace_id: ctx.ws(),
                 actor: ctx.actor,
-                action: "automation.created",
-                entity_type: "automation",
-                entity_id: &id,
+                action: "designer.session_opened",
+                entity_type: "designer_session",
+                entity_id: &session.id,
                 message_id: None,
-                metadata: json!({ "by": "agent", "case_id": ctx.case.id, "enabled": true }),
+                metadata: json!({ "by": "agent", "case_id": ctx.case.id, "drafted": session.spec.is_some() }),
             },
         )
         .await?;
-        tx.commit().await?;
+        let name = sentence(input.name.trim(), 80);
         Ok(ToolOutput {
-            summary: format!("Created the automation \"{}\"", sentence(input.name.trim(), 80)),
-            value: json!({"automation_id": id}),
+            summary: format!("Opened the agent designer for \"{name}\". Nothing runs until an admin reviews, dry-runs and saves it"),
+            value: json!({"designer_session_id": session.id, "drafted": session.spec.is_some()}),
             ..Default::default()
         })
     }
@@ -1045,7 +1251,8 @@ mod tests {
         }
         let expected = [
             "search_mail", "read_email", "read_thread", "find_candidates", "recall_memory", "draft_email", "create_task",
-            "schedule_check", "update_case", "send_email", "submit_candidate", "propose_automation",
+            "schedule_check", "update_case", "extract_fields", "label_email", "save_to_gmail_drafts", "send_email", "submit_candidate",
+            "propose_automation",
         ];
         assert_eq!(names, expected.into_iter().collect());
         let specs = reg.specs();
@@ -1062,10 +1269,10 @@ mod tests {
     fn risks_follow_the_contract() {
         let reg = registry();
         let risk = |n: &str| reg.get(n).unwrap().risk();
-        for n in ["search_mail", "read_email", "read_thread", "find_candidates", "recall_memory"] {
+        for n in ["search_mail", "read_email", "read_thread", "find_candidates", "recall_memory", "extract_fields"] {
             assert_eq!(risk(n), Risk::Read, "{n}");
         }
-        for n in ["draft_email", "create_task", "schedule_check", "update_case"] {
+        for n in ["draft_email", "create_task", "schedule_check", "update_case", "label_email", "save_to_gmail_drafts"] {
             assert_eq!(risk(n), Risk::Low, "{n}");
         }
         assert_eq!((risk("send_email"), risk("submit_candidate")), (Risk::High, Risk::High));

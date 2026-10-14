@@ -152,6 +152,7 @@ pub async fn handle(state: &AppState, job: &Job) -> Result<(), JobError> {
         kind::STAFFING_SCAN => crate::staffing::scan_job(state, &payload).await,
         kind::RUN_EVAL => super::eval_jobs::run_eval(state, &payload).await,
         kind::ROLLUP_AGENT_METRICS => super::eval_jobs::rollup_agent_metrics(state).await,
+        kind::DESIGNER_DRY_RUN => super::designer_jobs::designer_dry_run(state, job, &payload).await,
         other => Err(JobError::Permanent(format!("unknown job kind {other}"))),
     }
 }
@@ -215,6 +216,7 @@ pub async fn on_dead(state: &AppState, job: &Job, error: &str) {
             // The pipeline must not stall behind a failed reading: the next stages run and surface the failure themselves.
             kind::ANALYZE_MESSAGE => continue_pipeline(state, job, &payload).await,
             kind::RUN_EVAL => super::eval_jobs::on_dead(state, &payload, error).await,
+            kind::DESIGNER_DRY_RUN => super::designer_jobs::on_dead(state, job, &payload).await,
             _ => Ok(()),
         }
     }

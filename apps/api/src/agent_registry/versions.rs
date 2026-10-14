@@ -140,14 +140,23 @@ pub async fn active_spec_in(db: &sqlx::SqlitePool, agent: &AgentRow) -> sqlx::Re
     active_spec(&mut conn, agent).await
 }
 
-/// A change that widens what an agent may do or how it behaves: tools, permissions, steps or
+/// A change that widens what an agent may do or how it behaves: tools, scopes, triggers, permissions, steps or
 /// drafting. Such a version is capped at level 1 until it passes the regression gate.
 pub fn behaviour_changed(old: &AgentSpec, new: &AgentSpec) -> bool {
     let mut old_tools = old.tools.clone();
     let mut new_tools = new.tools.clone();
     old_tools.sort();
     new_tools.sort();
-    old_tools != new_tools || old.permissions != new.permissions || old.steps != new.steps || old.drafting != new.drafting
+    let mut old_scopes = old.scopes.clone();
+    let mut new_scopes = new.scopes.clone();
+    old_scopes.sort();
+    new_scopes.sort();
+    old_tools != new_tools
+        || old_scopes != new_scopes
+        || old.triggers != new.triggers
+        || old.permissions != new.permissions
+        || old.steps != new.steps
+        || old.drafting != new.drafting
 }
 
 /// Caps the agent at level 1 when its behaviour changed. Returns true when the level was lowered.
@@ -251,6 +260,22 @@ pub async fn activate(conn: &mut SqliteConnection, ws: &str, agent: &AgentRow, v
 mod tests {
     use super::*;
     use crate::agent_registry::templates::{INBOX_KEY, template};
+
+    #[test]
+    fn widening_triggers_or_scopes_counts_as_a_behaviour_change() {
+        use crate::agent_registry::spec::{Scope, Trigger};
+        let a = template(INBOX_KEY).unwrap().spec();
+        assert!(!behaviour_changed(&a, &a.clone()));
+        let mut wider = a.clone();
+        wider.triggers.push(Trigger::Manual);
+        assert!(behaviour_changed(&a, &wider), "more triggers take more mail");
+        let mut narrower = a.clone();
+        narrower.scopes.retain(|s| *s != Scope::Send);
+        assert!(behaviour_changed(&a, &narrower));
+        let mut reordered = a.clone();
+        reordered.scopes.reverse();
+        assert!(!behaviour_changed(&a, &reordered), "order alone changes nothing");
+    }
 
     #[test]
     fn diff_lists_changed_fields_only() {

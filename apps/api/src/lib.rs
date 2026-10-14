@@ -13,6 +13,7 @@ pub mod backup;
 pub mod bulk;
 pub mod config;
 pub mod db;
+pub mod designer;
 pub mod domain;
 pub mod error;
 pub mod evals;
@@ -250,6 +251,19 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
             Arc::new(assistant::transcribe::UnavailableTranscriber)
         };
 
+    // The designer drafts agents from plain English with the best-tier model; without one it is off.
+    let designer: Arc<dyn designer::Designer> = match &openrouter {
+        Some(client) if !config.designer_model_id.is_empty() => {
+            Arc::new(designer::OpenRouterDesigner::new(client.clone(), &config.designer_model_id, &config.designer_fallback_model_id))
+        }
+        _ => Arc::new(designer::DisabledDesigner),
+    };
+    // The workflow `extract` step reads named details with the efficient model; without one, plain rules read them.
+    let field_extractor: Arc<dyn ai::field_extract::FieldExtractor> = match &openrouter {
+        Some(client) if !analyst_model.is_empty() => Arc::new(ai::field_extract::OpenRouterFieldExtractor::new(client.clone(), analyst_model)),
+        _ => Arc::new(ai::field_extract::RulesFieldExtractor),
+    };
+
     // Typed decisions: Jev if configured, else the efficient OpenRouter model, else none (callers fail open).
     let judge: Arc<dyn ai::judge::Judge> = match &openrouter {
         _ if !config.typesafe_api_key.is_empty() => Arc::new(ai::judge::JevJudge::new(
@@ -287,6 +301,8 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
     }
 
     Ok(AppState {
+        designer,
+        field_extractor,
         assistant_planner,
         transcriber,
         vision,

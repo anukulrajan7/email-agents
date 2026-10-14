@@ -59,6 +59,9 @@ pub enum AppError {
     AiUnavailable,
     #[error("too many attempts; try again later")]
     RateLimited,
+    /// 429 with a specific, user-facing reason (a daily or per-session limit).
+    #[error("{0}")]
+    LimitReached(String),
     #[error("verify your email first; we sent you a new code")]
     EmailNotVerified,
     /// The send safety check found blocking issues. `details` = `{ blocking: Issue[], warnings: Issue[] }`.
@@ -92,6 +95,7 @@ impl IntoResponse for AppError {
             AppError::Unavailable => (StatusCode::SERVICE_UNAVAILABLE, "unavailable"),
             AppError::AiUnavailable => (StatusCode::SERVICE_UNAVAILABLE, "ai_unavailable"),
             AppError::RateLimited => (StatusCode::TOO_MANY_REQUESTS, "rate_limited"),
+            AppError::LimitReached(_) => (StatusCode::TOO_MANY_REQUESTS, "limit_reached"),
             AppError::EmailNotVerified => (StatusCode::FORBIDDEN, "email_not_verified"),
             AppError::SendBlocked(..) => (StatusCode::CONFLICT, "send_blocked"),
             AppError::EmailNotSent(_) => (StatusCode::SERVICE_UNAVAILABLE, "email_not_sent"),

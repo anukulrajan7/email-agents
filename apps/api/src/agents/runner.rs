@@ -269,7 +269,7 @@ pub async fn run_step(state: &AppState, ws: &str, case_id: &str, turn: i64) -> R
 fn permission_block(agent: &AgentContext, tool: &str) -> Option<String> {
     let name = &agent.agent.name;
     match tool {
-        "draft_email" if !agent.agent.permissions.draft => {
+        "draft_email" | "save_to_gmail_drafts" if !agent.agent.permissions.draft => {
             Some(format!("Writing drafts is switched off for {name}; create a task for a person instead."))
         }
         "send_email" | "submit_candidate" if agent.agent.permissions.send == "never" => {
@@ -469,6 +469,10 @@ async fn preview_again(ctx: &ToolCtx<'_>, tool: &dyn tools::Tool, args: &Value) 
 
 async fn commit(state: &AppState, case: &Case, turn: i64, usage: &Usage, result: TurnResult, state_patch: Option<Value>) -> Result<(), JobError> {
     let now = now_ms();
+    let tool_cost = match &result {
+        TurnResult::Ran { out, .. } => out.cost_usd,
+        _ => 0.0,
+    };
     let mut tx = state.db.begin().await?;
     // Fence: only one run of this turn may record it, and never after a cancel.
     let taken = sqlx::query(
@@ -477,7 +481,7 @@ async fn commit(state: &AppState, case: &Case, turn: i64, usage: &Usage, result:
          WHERE id = ?4 AND step_count = ?1 - 1 AND status IN ('running', 'waiting_event')",
     )
     .bind(turn)
-    .bind(usage.cost_usd)
+    .bind(usage.cost_usd + tool_cost)
     .bind(now)
     .bind(&case.id)
     .execute(&mut *tx)
@@ -498,7 +502,7 @@ async fn commit(state: &AppState, case: &Case, turn: i64, usage: &Usage, result:
         status,
         tokens_in: usage.tokens_in,
         tokens_out: usage.tokens_out,
-        cost_usd: usage.cost_usd,
+        cost_usd: usage.cost_usd + tool_cost,
         model_id: usage.model_id.clone(),
     };
     let static_name = |name: &str| tools::registry().get(name).map(|t| t.name());

@@ -50,7 +50,7 @@ pub fn routes() -> Router<AppState> {
 // ---------------------------------------------------------------- shared pieces
 
 /// An agent the member may see; another member's personal agent is not found.
-async fn visible_agent(state: &AppState, ws: &str, user: &AuthUser, id: &str) -> AppResult<AgentRow> {
+pub(super) async fn visible_agent(state: &AppState, ws: &str, user: &AuthUser, id: &str) -> AppResult<AgentRow> {
     let agent = store::get_in(&state.db, ws, id).await?.ok_or(AppError::NotFound)?;
     if !store::visible_to(&agent, &user.id) {
         return Err(AppError::NotFound);
@@ -59,7 +59,7 @@ async fn visible_agent(state: &AppState, ws: &str, user: &AuthUser, id: &str) ->
 }
 
 /// May this member change the agent? A personal agent's owner may; a workspace agent needs an admin.
-async fn require_edit(state: &AppState, ws: &str, user: &AuthUser, agent: &AgentRow) -> AppResult<()> {
+pub(super) async fn require_edit(state: &AppState, ws: &str, user: &AuthUser, agent: &AgentRow) -> AppResult<()> {
     let role = require_role(&state.db, ws, user, Role::Operator).await?;
     if agent.is_personal() || role == Role::Admin {
         return Ok(());
@@ -180,7 +180,7 @@ async fn profile_asks_first(state: &AppState, ws: &str, a: &AgentRow) -> sqlx::R
     Ok(!agent_profiles::user_profile(&state.db, ws, owner).await?.is_some_and(|p| p.routine_ok()))
 }
 
-async fn detail_json(state: &AppState, ws: &str, a: &AgentRow) -> AppResult<Value> {
+pub(super) async fn detail_json(state: &AppState, ws: &str, a: &AgentRow) -> AppResult<Value> {
     let (spec, _) = versions::active_spec_in(&state.db, a).await?;
     let today = today_counts(state, ws).await?;
     let mut v = summary(state, a, &spec, today.get(&a.id), profile_asks_first(state, ws, a).await?);
@@ -189,7 +189,7 @@ async fn detail_json(state: &AppState, ws: &str, a: &AgentRow) -> AppResult<Valu
     Ok(v)
 }
 
-async fn audit_change(conn: &mut sqlx::SqliteConnection, ws: &str, user: &AuthUser, action: &str, agent_id: &str, metadata: Value) -> sqlx::Result<()> {
+pub(super) async fn audit_change(conn: &mut sqlx::SqliteConnection, ws: &str, user: &AuthUser, action: &str, agent_id: &str, metadata: Value) -> sqlx::Result<()> {
     audit::record(conn, Entry { workspace_id: ws, actor: Actor::User(&user.id), action, entity_type: "agent", entity_id: agent_id, message_id: None, metadata }).await
 }
 
@@ -404,7 +404,7 @@ async fn insert_custom(
     store::get_in(&state.db, ws, &id).await?.ok_or(AppError::NotFound)
 }
 
-fn look(avatar: Option<&str>, color: Option<&str>) -> AppResult<(String, String)> {
+pub(super) fn look(avatar: Option<&str>, color: Option<&str>) -> AppResult<(String, String)> {
     let avatar = match avatar {
         Some(a) => agent_profiles::valid_avatar(a).ok_or_else(|| AppError::BadRequest("the avatar must be one emoji or 1 to 2 letters".into()))?,
         None => "🤖".to_string(),

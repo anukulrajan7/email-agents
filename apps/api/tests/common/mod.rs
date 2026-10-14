@@ -98,16 +98,22 @@ pub async fn call(app: &Router, method: &str, path: &str, token: &str, body: Opt
 pub struct Opts {
     pub packs: Vec<&'static str>,
     pub planner: ScriptedPlanner,
+    pub designer: Arc<email_ai_api::designer::ScriptedDesigner>,
     pub tweak: Box<dyn FnOnce(&mut Config)>,
 }
 
 impl Opts {
     pub fn packs(packs: &[&'static str]) -> Self {
-        Self { packs: packs.to_vec(), planner: ScriptedPlanner::new(), tweak: Box::new(|_| {}) }
+        Self { packs: packs.to_vec(), planner: ScriptedPlanner::new(), designer: Arc::default(), tweak: Box::new(|_| {}) }
     }
 
     pub fn planner(mut self, planner: ScriptedPlanner) -> Self {
         self.planner = planner;
+        self
+    }
+
+    pub fn designer(mut self, designer: email_ai_api::designer::ScriptedDesigner) -> Self {
+        self.designer = Arc::new(designer);
         self
     }
 
@@ -129,6 +135,7 @@ pub struct Env {
     pub op_id: String,
     pub calls: Calls,
     pub planner: Arc<ScriptedPlanner>,
+    pub designer: Arc<email_ai_api::designer::ScriptedDesigner>,
     pub drafter: Arc<BodyDrafter>,
     pub judge: Arc<FixedJudge>,
     pub dir: tempfile::TempDir,
@@ -146,6 +153,8 @@ impl Env {
         db::migrate(&state.db).await.unwrap();
         let planner = Arc::new(opts.planner);
         state.planner = planner.clone();
+        let designer = opts.designer;
+        state.designer = designer.clone();
         let judge = Arc::new(
             FixedJudge::new()
                 .with("promises", Verdict::YesNo(false), "")
@@ -185,7 +194,7 @@ impl Env {
             .await
             .unwrap();
         }
-        Env { state, app, ws, shared_src: "src_shared".into(), op_src: "src_priya".into(), admin_id, op_id, calls, planner, drafter, judge, dir }
+        Env { state, app, ws, shared_src: "src_shared".into(), op_src: "src_priya".into(), admin_id, op_id, calls, planner, designer, drafter, judge, dir }
     }
 
     pub fn base(&self) -> String {

@@ -115,8 +115,14 @@ describe('AgentsHubPage', () => {
     await waitFor(() => expect(calls).toContainEqual(expect.objectContaining({ url: '/api/v1/workspaces/w1/agents/a-pay/versions/1/activate', method: 'POST' })));
   });
 
-  it('keeps the builder entry hidden until the feature is on', async () => {
+  it('shows Create an agent to admins only', async () => {
     setup();
+    await screen.findByRole('heading', { name: 'Your personal agent' });
+    expect(await screen.findByRole('link', { name: 'Create an agent' })).toHaveAttribute('href', '/w/w1/agents/new');
+  });
+
+  it('hides Create an agent from operators', async () => {
+    setup('operator');
     await screen.findByRole('heading', { name: 'Your personal agent' });
     expect(screen.queryByRole('link', { name: 'Create an agent' })).not.toBeInTheDocument();
   });
