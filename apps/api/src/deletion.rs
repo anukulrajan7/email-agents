@@ -760,6 +760,8 @@ pub struct PurgeRun {
     pub batches: usize,
     /// The longest a batch held the write lock.
     pub max_lock: Duration,
+    /// How long each batch held it.
+    pub locks: Vec<Duration>,
 }
 
 /// Deletes the mailbox's emails batch by batch (reads first, then one short write transaction per batch),
@@ -767,7 +769,7 @@ pub struct PurgeRun {
 pub async fn purge_run(state: &AppState, ws: &str, source_id: &str, requested_by: Option<&str>, budget: Duration, pause: Duration) -> Result<PurgeRun, JobError> {
     let started = Instant::now();
     let opts = Opts { actor: Actor::System, tombstone: false, audit: false };
-    let mut run = PurgeRun { outcome: PurgeOutcome::Done, batches: 0, max_lock: Duration::ZERO };
+    let mut run = PurgeRun { outcome: PurgeOutcome::Done, batches: 0, max_lock: Duration::ZERO, locks: vec![] };
     loop {
         let ids: Vec<String> = sqlx::query_scalar(
             "SELECT m.id FROM email_messages m WHERE m.source_id = ?1
@@ -798,6 +800,7 @@ pub async fn purge_run(state: &AppState, ws: &str, source_id: &str, requested_by
         .await?;
         tx.commit().await?;
         run.max_lock = run.max_lock.max(locked.elapsed());
+        run.locks.push(locked.elapsed());
         run.batches += 1;
         if started.elapsed() >= budget {
             run.outcome = PurgeOutcome::MoreToDo;
