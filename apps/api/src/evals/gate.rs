@@ -282,7 +282,7 @@ pub async fn promote(db: &SqlitePool, config: &Config, ws: &str, agent: &AgentRo
     if !all_met(&reqs) {
         return Ok(Err(PromoteError::Unmet(reqs)));
     }
-    let mut tx = db.begin().await?;
+    let mut tx = db.begin_with("BEGIN IMMEDIATE").await?;
     if !store::set_autonomy_level(&mut tx, ws, &agent.id, to).await? {
         tx.rollback().await?;
         return Ok(Err(PromoteError::Unmet(requirements(to, &Stats { cap: to - 1, ..st }))));
@@ -313,7 +313,7 @@ pub async fn sweep(db: &SqlitePool) -> sqlx::Result<usize> {
         let week = queries::counts(db, &ws, Some(&agent_id), 7).await?.remove(&agent_id).unwrap_or_default();
         let Some(reason) = demotion_reason(level, incidents, week.decided(), week.approved) else { continue };
         let evidence = json!({"incidents_since_change": incidents, "decided_7d": week.decided(), "approved_7d": week.approved});
-        let mut tx = db.begin().await?;
+        let mut tx = db.begin_with("BEGIN IMMEDIATE").await?;
         if demote(&mut tx, &ws, &agent_id, level - 1, &reason, evidence, "system").await? {
             demoted += 1;
         }

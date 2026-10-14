@@ -186,7 +186,7 @@ async fn demote_agent(db: &SqlitePool, ws: &str, agent_id: &str, kind: Kind, inc
     if recently {
         return Ok(());
     }
-    let mut tx = db.begin().await?;
+    let mut tx = db.begin_with("BEGIN IMMEDIATE").await?;
     if let Some(agent) = store::get_in(&mut *tx, ws, agent_id).await?
         && agent.autonomy_level >= 1
     {

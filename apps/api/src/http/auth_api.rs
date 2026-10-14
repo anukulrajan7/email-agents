@@ -107,7 +107,7 @@ pub async fn signup(State(state): State<AppState>, Json(body): Json<SignupBody>)
             .bind(format!("pw|{email}"))
             .fetch_optional(&state.db)
             .await?;
-    let mut tx = state.db.begin().await?;
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     let id = match existing {
         Some((_, Some(_))) => return Err(AppError::Conflict("an account with this email already exists".into())),
         // Never verified: nobody has proven they own this inbox, so an earlier sign-up can't
@@ -340,7 +340,7 @@ pub async fn verify(State(state): State<AppState>, ClientIp(ip): ClientIp, Json(
     };
     let code_id = check_code(&state, &user_id, VERIFY_EMAIL, body.code.trim(), &limit_key, ip).await?;
     let now = now_ms();
-    let mut tx = state.db.begin().await?;
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     sqlx::query("UPDATE email_codes SET consumed_at = ?1 WHERE id = ?2").bind(now).bind(&code_id).execute(&mut *tx).await?;
     let first_verification = sqlx::query("UPDATE users SET email_verified_at = ?1 WHERE id = ?2 AND email_verified_at IS NULL")
         .bind(now)
@@ -437,7 +437,7 @@ pub async fn password_reset_confirm(
     let code_id = check_code(&state, &user_id, PASSWORD_RESET, body.code.trim(), &limit_key, ip).await?;
     let hash = sessions::hash_password(body.new_password).await?;
     let now = now_ms();
-    let mut tx = state.db.begin().await?;
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     let consumed = sqlx::query("UPDATE email_codes SET consumed_at = ?1 WHERE id = ?2 AND consumed_at IS NULL")
         .bind(now)
         .bind(&code_id)

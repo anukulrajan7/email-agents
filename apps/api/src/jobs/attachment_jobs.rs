@@ -110,7 +110,7 @@ pub async fn extract_attachments(state: &AppState, job: &Job, payload: &Value) -
     }
 
     let open = if person { ":open" } else { "" };
-    let mut tx = state.db.begin().await?;
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     jobs::enqueue(
         &mut tx,
         kind::INDEX_MESSAGE,

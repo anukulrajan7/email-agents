@@ -234,7 +234,7 @@ pub async fn run(db: &SqlitePool, ws: Option<&str>, from_day: i64, to_day: i64) 
         }
     }
 
-    let mut tx = db.begin().await?;
+    let mut tx = db.begin_with("BEGIN IMMEDIATE").await?;
     sqlx::query("DELETE FROM agent_metrics_daily WHERE day >= ?2 AND day <= ?3 AND (?1 IS NULL OR workspace_id = ?1)")
         .bind(ws)
         .bind(from_day)

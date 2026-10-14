@@ -261,7 +261,7 @@ pub async fn embed_pending(db: &SqlitePool, embedder: &dyn Embedder, message_id:
         if vectors.len() != rows.len() || vectors.iter().any(|v| v.len() != EMBEDDING_DIMS) {
             return Err(AiError::Permanent("embedder returned the wrong number or size of vectors".into()).into());
         }
-        let mut tx = db.begin().await?;
+        let mut tx = db.begin_with("BEGIN IMMEDIATE").await?;
         for (row, vector) in rows.iter().zip(&vectors) {
             let claimed = sqlx::query("UPDATE knowledge_chunks SET embedded = 1 WHERE id = ?1 AND embedded = 0 AND text = ?2")
                 .bind(row.id)

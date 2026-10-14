@@ -87,7 +87,7 @@ async fn start_run(State(state): State<AppState>, user: AuthUser, Path((ws, id))
     if body.suite == "golden_live" && !live_available(&state) {
         return Err(AppError::Conflict("the live suite needs the AI service and a budget for evals".into()));
     }
-    let mut tx = state.db.begin().await?;
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     let version = agent.active_version.unwrap_or(0);
     let run_id = run::enqueue(&mut tx, &ws, &id, Some(version), &body.suite, "manual", Some(&user.id)).await?;
     tx.commit().await?;
@@ -207,7 +207,7 @@ async fn change_level(State(state): State<AppState>, user: AuthUser, Path((ws, i
         return Ok(Json(state_json(&state, &ws, &agent).await?));
     }
     if body.level < agent.autonomy_level {
-        let mut tx = state.db.begin().await?;
+        let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
         gate::demote(&mut tx, &ws, &id, body.level, "Lowered by a person", json!({}), &format!("user:{}", user.id)).await?;
         tx.commit().await?;
     } else {
@@ -217,7 +217,7 @@ async fn change_level(State(state): State<AppState>, user: AuthUser, Path((ws, i
             Err(gate::PromoteError::NotNextLevel) => return Err(AppError::BadRequest("levels are earned one at a time".into())),
             Err(gate::PromoteError::Unmet(reqs)) => {
                 if reqs.iter().any(|r| r.name.starts_with("Safety checks") && r.actual == "not run yet") {
-                    let mut tx = state.db.begin().await?;
+                    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
                     run::enqueue(&mut tx, &ws, &id, Some(agent.active_version.unwrap_or(0)), "safety", "promotion", Some(&user.id)).await?;
                     tx.commit().await?;
                     state.jobs_notify.notify_one();
@@ -249,7 +249,7 @@ async fn override_gate(
     let agent = visible_agent(&state, &ws, &user, &id).await?;
     require_role(&state.db, &ws, &user, Role::Admin).await?;
     let note = crate::agents::sentence(&body.note, 240);
-    let mut tx = state.db.begin().await?;
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     match gate::override_replay(&mut tx, &ws, &agent.id, version, &user.id, &note).await? {
         Ok(()) => {}
         Err(gate::OverrideError::NoSuchVersion) => return Err(AppError::NotFound),

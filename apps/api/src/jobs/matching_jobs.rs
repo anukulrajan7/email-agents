@@ -210,7 +210,7 @@ pub async fn extract_record(state: &AppState, payload: &Value) -> Result<(), Job
         _ => return Ok(()),
     };
 
-    let mut tx = state.db.begin().await?;
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     jobs::enqueue(
         &mut tx,
         kind::MATCH_RECORD,
@@ -383,7 +383,7 @@ async fn ensure_profiles(state: &AppState, ws: &str, records: &[(&'static str, S
         return Err(JobError::Permanent("embedder returned the wrong number or size of vectors".into()));
     }
     let now = now_ms();
-    let mut tx = state.db.begin().await?;
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     for ((record_kind, id, _, hash), vector) in stale.iter().zip(&vectors) {
         let blob = to_blob(vector);
         let rowid: i64 = sqlx::query_scalar(
@@ -575,7 +575,7 @@ pub async fn match_record(state: &AppState, job: &Job, payload: &Value) -> Resul
     let recalled = scored.len();
     let scored = llm_rerank(scored);
 
-    let mut tx = state.db.begin().await?;
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     let mut kept = 0;
     for pair in scored.into_iter().filter(|p| p.score >= MIN_MATCH_SCORE) {
         // Re-scoring never overrides a recruiter's decision.

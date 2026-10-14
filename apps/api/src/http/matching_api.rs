@@ -21,7 +21,7 @@ pub async fn setup(State(state): State<AppState>, user: AuthUser, Path(ws): Path
     if !crate::packs::has_feature(&state.db, &ws, crate::packs::FEATURE_MATCHING).await? {
         return Err(AppError::Conflict("matching is part of the HR & recruiting pack; turn that pack on first".into()));
     }
-    let mut tx = state.db.begin().await?;
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     for key in [REQUIREMENT_LABEL, CANDIDATE_LABEL] {
         let seed = LABEL_TEMPLATES
             .iter()
@@ -232,7 +232,7 @@ pub async fn decide(
     if !matches!(body.status.as_str(), "suggested" | "shortlisted" | "dismissed") {
         return Err(AppError::BadRequest("status must be suggested, shortlisted or dismissed".into()));
     }
-    let mut tx = state.db.begin().await?;
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     let updated = sqlx::query("UPDATE matches SET status = ?1, decided_by = ?2, updated_at = ?3 WHERE id = ?4 AND workspace_id = ?5")
         .bind(&body.status)
         .bind(&user.id)

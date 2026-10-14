@@ -316,7 +316,7 @@ pub async fn design_turn(state: &AppState, ws: &str, id: &str, text: &str) -> Ap
     let issues = issues_json(&outcome.issues);
     let ready = outcome.spec.is_some() && outcome.issues.is_empty();
     let changed = spec.as_ref().map(AgentSpec::hash) != session.spec.as_ref().map(AgentSpec::hash);
-    let mut tx = state.db.begin().await?;
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     sqlx::query("UPDATE designer_calls SET status = 'done', cost_usd = ?1 WHERE id = ?2").bind(outcome.cost_usd).bind(&call_id).execute(&mut *tx).await?;
     let swapped = sqlx::query(
         "UPDATE designer_sessions SET turns_json = ?1, spec_json = ?2, issues_json = ?3, status = ?4, cost_usd = cost_usd + ?5, updated_at = ?6, rev = rev + 1,
@@ -419,7 +419,7 @@ pub async fn request_dry_run(state: &AppState, ws: &str, id: &str, message_ids: 
         return Err(AppError::LimitReached("this workspace has used its AI budget for today; try again tomorrow".into()));
     }
     let hash = spec.hash();
-    let mut tx = state.db.begin().await?;
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     let claimed = sqlx::query(
         "UPDATE designer_sessions SET dry_run_status = 'running', dry_run_json = NULL, dry_run_spec_hash = ?1, updated_at = ?2, rev = rev + 1
          WHERE id = ?3 AND workspace_id = ?4 AND rev = ?5 AND status IN ('drafting', 'ready') AND (dry_run_status != 'running' OR updated_at < ?6)",
@@ -518,7 +518,7 @@ pub async fn save(state: &AppState, ws: &str, user_id: &str, id: &str, opts: Sav
         return Err(AppError::Conflict("this agent changed since you started; start a new session from its current version".into()));
     }
     let note = format!("Designed: {}", crate::agents::sentence(&session.goal, 160));
-    let mut tx = state.db.begin().await?;
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     let (agent_id, version, action) = match editing {
         None => {
             let agent_id = store::insert(

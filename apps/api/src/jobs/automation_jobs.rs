@@ -126,7 +126,7 @@ async fn record_run(
         "completed"
     };
     let now = now_ms();
-    let mut tx = state.db.begin().await?;
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     let created = sqlx::query(
         "INSERT OR IGNORE INTO automation_runs (id, workspace_id, automation_id, message_id, status, actions_json, created_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
@@ -417,7 +417,7 @@ async fn insert_review(
     title: &str,
 ) -> Result<bool, JobError> {
     let review_id = new_id("rev");
-    let mut tx = state.db.begin().await?;
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     let created = sqlx::query(
         "INSERT OR IGNORE INTO review_items (id, workspace_id, message_id, workflow_run_id, kind, title, status, created_at, automation_id)
          VALUES (?1, ?2, ?3, NULL, ?4, ?5, 'open', ?6, ?7)",

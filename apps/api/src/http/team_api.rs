@@ -189,7 +189,7 @@ pub async fn create_person(State(state): State<AppState>, user: AuthUser, Path(w
     access::resolve(&state.db, &ws, &user).await?.require_owner()?;
     let ctx = context(&state, &ws).await?;
     let draft = people::merge(people::blank_draft(), body, &ctx).map_err(bad)?;
-    let mut tx = state.db.begin().await?;
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     people::validate(&mut tx, &ws, None, &draft, &ctx).await.map_err(bad)?;
     let id = people::insert(&mut tx, &ws, &draft).await?;
     audit::record(&mut tx, Entry { workspace_id: &ws, actor: Actor::User(&user.id), action: "person.created", entity_type: "person", entity_id: &id, message_id: None, metadata: json!({}) }).await?;
@@ -204,7 +204,7 @@ pub async fn update_person(State(state): State<AppState>, user: AuthUser, Path((
     let ctx = context(&state, &ws).await?;
     let current = people::get(&state.db, &ws, &id).await?.ok_or(AppError::NotFound)?;
     let draft: Draft = people::merge(Draft::from_person(&current), body, &ctx).map_err(bad)?;
-    let mut tx = state.db.begin().await?;
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     people::validate(&mut tx, &ws, Some(&id), &draft, &ctx).await.map_err(bad)?;
     people::update(&mut tx, &ws, &id, &draft).await?;
     audit::record(&mut tx, Entry { workspace_id: &ws, actor: Actor::User(&user.id), action: "person.updated", entity_type: "person", entity_id: &id, message_id: None, metadata: json!({}) }).await?;
@@ -221,7 +221,7 @@ pub async fn archive_person(State(state): State<AppState>, user: AuthUser, Path(
     let current = people::get(&state.db, &ws, &id).await?.ok_or(AppError::NotFound)?;
     let mut draft = Draft::from_person(&current);
     draft.active = false;
-    let mut tx = state.db.begin().await?;
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     people::update(&mut tx, &ws, &id, &draft).await?;
     sqlx::query("UPDATE people SET manager_id = NULL WHERE manager_id = ?1").bind(&id).execute(&mut *tx).await?;
     audit::record(&mut tx, Entry { workspace_id: &ws, actor: Actor::User(&user.id), action: "person.archived", entity_type: "person", entity_id: &id, message_id: None, metadata: json!({}) }).await?;
@@ -324,7 +324,7 @@ pub struct Transfer {
 /// The super admin hands the role to another admin of the workspace. They stay an admin.
 pub async fn transfer_ownership(State(state): State<AppState>, user: AuthUser, Path(ws): Path<String>, Json(body): Json<Transfer>) -> AppResult<Json<Value>> {
     access::resolve(&state.db, &ws, &user).await?.require_owner()?;
-    let mut tx = state.db.begin().await?;
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     // The first statement is a write, so the checks below run under the write lock.
     sqlx::query("UPDATE workspaces SET name = name WHERE id = ?1").bind(&ws).execute(&mut *tx).await?;
     let target: Option<String> = sqlx::query_scalar(
