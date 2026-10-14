@@ -672,6 +672,9 @@ impl Tool for DraftEmail {
                     _ => None,
                 };
                 let style = agent.draft_style(&ctx.state.config);
+                let owner_said = ctx.case.state().get("owner_said").and_then(|o| {
+                    Some((o.get("user_id")?.as_str()?.to_string(), o.get("text")?.as_str()?.to_string()))
+                });
                 if ctx.case.shadow {
                     let body = crate::agent_profiles::with_draft_style(style, handlers::preview_draft(ctx.state, &msg.id, quality)).await?;
                     if body.trim().is_empty() {
@@ -690,7 +693,7 @@ impl Tool for DraftEmail {
                     Some(text) => format!("agent:{}:{}:{}", ctx.case.id, msg.id, instruction_key(text)),
                     None => format!("agent:{}:{}", ctx.case.id, ctx.turn),
                 };
-                crate::agent_profiles::with_draft_style(style, handlers::create_agent_draft(ctx.state, &msg.id, instructions, quality, &origin, ctx.case.agent_id.as_deref()))
+                crate::agent_profiles::with_draft_style(style, handlers::create_agent_draft(ctx.state, &msg.id, instructions, quality, &origin, ctx.case.agent_id.as_deref(), owner_said.as_ref().map(|(u, t)| (u.as_str(), t.as_str()))))
                     .await?
                     .ok_or_else(|| ToolError::Failed("The writer judged that this email needs no reply.".into()))?
             }

@@ -175,7 +175,7 @@ impl From<DraftRow> for Draft {
             created_at: iso(r.created_at),
             updated_at: iso(r.updated_at),
             memories_used: vec![],
-            unanswered: serde_json::from_str(&r.unanswered_json).unwrap_or_default(),
+            unanswered: crate::gap_resolver::parse_unanswered(&r.unanswered_json),
         }
     }
 }

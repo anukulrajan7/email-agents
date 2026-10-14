@@ -146,6 +146,12 @@ describe('AgentsPage approvals', () => {
       return undefined;
     });
 
+  it('tells the approver what the draft could not confirm', async () => {
+    mockFetch((url) => (url.includes('/approvals') ? json({ items: [approval({ unanswered: ['invoice amount'] })], pending_count: 1 }) : undefined));
+    renderAgents();
+    expect(await screen.findByRole('note')).toHaveTextContent("Couldn't confirm: invoice amount");
+  });
+
   it('shows the approval with recipient, subject, and candidate scores', async () => {
     pending();
     renderAgents();

@@ -354,7 +354,7 @@ pub async fn escalate_unresolved_reply(conn: &mut SqliteConnection, case: &Case,
     .fetch_optional(&mut *conn)
     .await?;
     let mut needs = draft.as_ref().map(|(_, body, _)| open_needs(body)).unwrap_or_default();
-    for topic in draft.as_ref().map(|(_, _, json)| serde_json::from_str::<Vec<String>>(json).unwrap_or_default()).unwrap_or_default() {
+    for topic in draft.as_ref().map(|(_, _, json)| crate::gap_resolver::parse_unanswered(json)).unwrap_or_default() {
         if !needs.contains(&topic) {
             needs.push(topic);
         }

@@ -584,12 +584,21 @@ async fn job_seeker_draft_names_a_matching_open_requirement() {
 }
 
 #[tokio::test]
-async fn job_seeker_draft_says_none_right_now_without_asking_a_person() {
+async fn job_seeker_draft_says_none_right_now_only_when_nothing_is_open() {
     let env = auto_reply_env(drafting_script()).await;
-    add_opening(&env, "Java Developer", json!(["Java"])).await;
     let msg = env.receive("js2", "t-js2", "dev@gmail.com", "Looking for a job", SEEKER, 1).await;
     let body = draft_body(&env, &msg).await;
-    assert!(body.contains("don't have a matching opening right now") && !body.contains("[NEEDS") && !body.contains("Java Developer"), "{body}");
+    assert!(body.contains("don't have a matching opening right now") && !body.contains("[NEEDS"), "{body}");
+}
+
+#[tokio::test]
+async fn an_unrelated_opening_does_not_make_the_draft_deny_other_openings() {
+    let env = auto_reply_env(drafting_script()).await;
+    add_opening(&env, "Java Developer", json!(["Java"])).await;
+    let msg = env.receive("js3", "t-js3", "dev@gmail.com", "Looking for a job", SEEKER, 1).await;
+    let body = draft_body(&env, &msg).await;
+    assert!(!body.contains("[NEEDS") && !body.contains("Java Developer") && !body.contains("don't have a matching opening"), "{body}");
+    assert!(body.contains("We'll confirm the current openings shortly."), "left for a person, not denied: {body}");
 }
 
 #[tokio::test]

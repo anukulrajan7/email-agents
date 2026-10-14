@@ -1,13 +1,13 @@
 import { useEffect, useRef, useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
-import type { Draft, MessageDetail } from '../../api/types';
+import type { Draft, MessageDetail, SafetyReport } from '../../api/types';
 import { Button, MoreMenu, useToast } from '../../components/ui';
 import { ErrorNote } from '../../components/ErrorNote';
 import { StatusBadge } from '../../components/StatusBadges';
 import { cn } from '../../lib/cn';
 import { fullDate } from '../../lib/format';
 import { extractNeeds, hasNeeds, isStillNeeded, splitNeeds } from './needs';
-import { useGenerateDraft, useSaveProviderDraft, useSendDraft, useUndoSend, useUpdateDraft } from './hooks';
+import { useCheckDraft, useGenerateDraft, useSaveProviderDraft, useSendDraft, useUndoSend, useUpdateDraft } from './hooks';
 import { messageKey, messagesKey } from '../inbox/hooks';
 
 const POLL_LIMIT_MS = 60_000;
@@ -34,6 +34,21 @@ function NeedsChecklist({ items, text }: { items: string[]; text: string }) {
         })}
       </ul>
     </section>
+  );
+}
+
+function CheckNotes({ report }: { report: SafetyReport | undefined }) {
+  if (!report) return null;
+  const issues = [...report.blocking.map((i) => ({ ...i, hard: true })), ...report.warnings.map((i) => ({ ...i, hard: false }))];
+  if (issues.length === 0) return null;
+  return (
+    <ul aria-label="Heads-up" className="flex flex-col gap-1 text-sm">
+      {issues.map((i) => (
+        <li key={`${i.code}:${i.message}`} className={cn('border-l-[3px] px-3 py-1', i.hard ? 'border-danger text-danger' : 'border-review bg-review-tint text-review-ink')}>
+          {i.message}
+        </li>
+      ))}
+    </ul>
   );
 }
 
@@ -166,6 +181,7 @@ function DraftEditor({
   const saveProvider = useSaveProviderDraft(ws, messageId, draft.id);
   const send = useSendDraft(ws, messageId, draft.id);
   const notify = useToast();
+  const check = useCheckDraft(ws, draft.id);
   const sent = draft.status === 'sent';
   const sendAt = draft.status === 'scheduled' ? (draft.send_at ?? undefined) : send.data?.send_at;
   const scheduled = !sent && (draft.status === 'scheduled' || send.data !== undefined);
@@ -174,6 +190,13 @@ function DraftEditor({
   const dirty = text !== draft.body_text;
   const needsInput = hasNeeds(text);
   const checklist = Array.from(new Set(draft.unanswered ?? extractNeeds(draft.body_text)));
+
+  const runCheck = check.mutate;
+  useEffect(() => {
+    if (locked) return;
+    const id = setTimeout(() => runCheck(text), text === draft.body_text ? 0 : 800);
+    return () => clearTimeout(id);
+  }, [text, locked, draft.body_text, runCheck]);
 
   const copy = async () => {
     try {
@@ -191,6 +214,7 @@ function DraftEditor({
         Draft reply
       </label>
       {!locked && (hasNeeds(draft.body_text) ? <NeedsChecklist items={checklist} text={text} /> : <UnconfirmedNote items={draft.unanswered ?? []} />)}
+      {!locked && <CheckNotes report={check.data} />}
       <HighlightedTextarea text={text} onChange={setText} readOnly={readOnly} />
       {scheduled && <UndoBar ws={ws} messageId={messageId} draftId={draft.id} sendAt={sendAt} onUndone={() => send.reset()} />}
       {!locked && draft.send_error && (

@@ -45,7 +45,7 @@ async fn a_database_at_0033_migrates_and_backfills() {
 
     let versions: Vec<i64> = sqlx::query_scalar("SELECT version FROM _sqlx_migrations ORDER BY version").fetch_all(&pool).await.unwrap();
     assert!(versions.windows(2).all(|w| w[0] < w[1]), "{versions:?}");
-    assert_eq!(versions.last().copied(), Some(48), "{versions:?}");
+    assert_eq!(versions.last().copied(), Some(50), "{versions:?}");
 
     for (table, expected) in [("labels", 3), ("email_messages", 1), ("classifications", 1), ("drafts", 1), ("cases", 1), ("automations", 1), ("workspace_packs", 2)] {
         assert_eq!(count(&pool, &format!("SELECT COUNT(*) FROM {table}")).await, expected, "{table}");

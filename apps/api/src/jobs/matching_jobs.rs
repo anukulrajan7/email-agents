@@ -177,6 +177,9 @@ pub async fn extract_record(state: &AppState, payload: &Value) -> Result<(), Job
             .bind(now)
             .fetch_one(&state.db)
             .await?;
+            if format!("{} {}", msg.subject, msg.body_text).to_lowercase().contains("confidential") {
+                sqlx::query("UPDATE requirements SET confidential = 1 WHERE id = ?1").bind(&id).execute(&state.db).await?;
+            }
             ("requirement", id)
         }
         CANDIDATE_LABEL => {
@@ -600,6 +603,7 @@ pub async fn match_record(state: &AppState, job: &Job, payload: &Value) -> Resul
     tracing::info!(record_kind, recalled, kept, semantic = own_vector.is_some(), "matching finished");
     if record_kind == "requirement" {
         crate::agents::triggers::after_requirement_matched(state, &ws, id).await?;
+        crate::candidate_watch::notify_matches(state, &ws, id).await?;
     }
     Ok(())
 }

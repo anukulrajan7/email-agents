@@ -400,7 +400,10 @@ async fn evaluate(
             match critic_objection(state, case, tool, &args, preview.as_ref(), usage).await {
                 Critique::Fine => {}
                 Critique::Objection(reason) => return Ok(TurnResult::Blocked { tool: tool_name, input: args, reason }),
-                Critique::Unavailable => critic_down = true,
+                Critique::Unavailable => {
+                    tracing::warn!(case_id = %case.id, tool = %tool_name, "critic unavailable; low-risk step proceeds, sends go to a person");
+                    critic_down = true;
+                }
             }
         }
     }
@@ -442,6 +445,9 @@ async fn evaluate(
                     out.summary = format!("{} Held until {} so you can stop it.", out.summary, crate::db::iso(at));
                 }
             }
+            if critic_down {
+                out.summary = format!("{} (the safety check was unavailable; this step only writes a draft, so it went ahead)", out.summary);
+            }
             TurnResult::Ran { tool: tool_name, input: args, out, auto_sent }
         }
         // A send check stopped the automatic send: a person decides instead.
@@ -462,10 +468,13 @@ async fn evaluate(
 }
 
 /// What the critic made of a proposal.
+///
+/// When the critic is down, a step that only writes a draft (low risk) still runs: nothing leaves the
+/// mailbox, and the timeline says so. A send always goes to a person instead, once, never as a retry loop.
 enum Critique {
     Fine,
     Objection(String),
-    /// The check could not run at all (provider down). A person decides instead; the step is not retried.
+    /// The check could not run at all (provider down).
     Unavailable,
 }
 

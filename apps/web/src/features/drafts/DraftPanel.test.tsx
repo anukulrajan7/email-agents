@@ -75,7 +75,19 @@ describe('DraftPanel', () => {
         expect.objectContaining({ method: 'POST', body: JSON.stringify({ confirm: true }) }),
       ),
     );
-    expect(fetchMock).not.toHaveBeenCalledWith('/api/v1/workspaces/w1/drafts/d1/check', expect.anything());
+  });
+
+  it('checks the draft when it loads and shows a quiet heads-up that never blocks Send', async () => {
+    const fetchMock = setup(message(), { blocking: [], warnings: [{ code: 'unsupported_promise', message: 'This mentions a payment date - double-check before sending.', fix: null }] });
+    expect(await screen.findByText('This mentions a payment date - double-check before sending.')).toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledWith('/api/v1/workspaces/w1/drafts/d1/check', expect.objectContaining({ method: 'POST' }));
+    expect(screen.getByRole('button', { name: 'Send' })).toBeEnabled();
+  });
+
+  it('shows nothing when the check is clean', async () => {
+    const fetchMock = setup(message());
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('/api/v1/workspaces/w1/drafts/d1/check', expect.anything()));
+    expect(screen.queryByRole('list', { name: 'Heads-up' })).toBeNull();
   });
 
   describe('send and undo', () => {

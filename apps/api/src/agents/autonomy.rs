@@ -249,7 +249,7 @@ pub async fn may_send_on_its_own(state: &AppState, case: &Case, ctx: &AgentConte
             .unwrap_or_default(),
         None => String::new(),
     };
-    if !serde_json::from_str::<Vec<String>>(&unconfirmed).unwrap_or_default().is_empty() {
+    if !(unconfirmed.is_empty() || crate::gap_resolver::parse_unanswered(&unconfirmed).is_empty()) {
         tracing::info!(case_id = %case.id, "the draft promises to confirm something it could not; a person decides");
         return Ok(false);
     }

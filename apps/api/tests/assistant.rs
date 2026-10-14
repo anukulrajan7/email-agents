@@ -269,9 +269,13 @@ async fn an_action_prepares_a_card_and_only_runs_after_confirm() {
         .fetch_one(&env.state.db)
         .await
         .unwrap();
-    assert_eq!(serde_json::from_str::<Value>(&payload).unwrap(), json!({"message_id": id, "instructions": "Say we will send it on Friday"}));
+    let payload = serde_json::from_str::<Value>(&payload).unwrap();
+    assert_eq!((payload["message_id"].clone(), payload["instructions"].clone()), (json!(id), json!("Say we will send it on Friday")));
+    assert_eq!(payload["owner_said"], "draft a reply to Priya saying Friday", "the person's own turn travels with the request");
     worker::drain(&env.state).await;
     assert_eq!(env.scalar("SELECT COUNT(*) FROM drafts WHERE message_id = ?1", &id).await, drafts_before + 1);
+    let said: String = sqlx::query_scalar("SELECT instructions_by_user FROM drafts WHERE message_id = ?1 AND instructions_by_user IS NOT NULL").bind(&id).fetch_one(&env.state.db).await.unwrap();
+    assert!(said.contains("draft a reply to Priya saying Friday") && said.contains("Say we will send it on Friday"), "{said}");
 
     let (status, again) = env.confirm(OPERATOR, &plan_id).await;
     assert_eq!(status, StatusCode::CONFLICT, "a card works once: {again}");

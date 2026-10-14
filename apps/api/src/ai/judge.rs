@@ -399,6 +399,8 @@ pub struct FixedJudge {
     fail: AtomicBool,
     calls: AtomicUsize,
     last_context: Mutex<String>,
+    /// (needle, reason): a reply that mentions the needle without the team notes backing it is an unsupported promise.
+    unsupported_unless_noted: Mutex<Option<(String, String)>>,
 }
 
 impl FixedJudge {
@@ -418,6 +420,9 @@ impl FixedJudge {
     pub fn calls(&self) -> usize {
         self.calls.load(Ordering::SeqCst)
     }
+    pub fn flag_unless_noted(&self, needle: &str, reason: &str) {
+        *self.unsupported_unless_noted.lock().expect("judge lock") = Some((needle.to_string(), reason.to_string()));
+    }
     /// The context of the latest question set (tests check what the judge was told).
     pub fn last_context(&self) -> String {
         self.last_context.lock().expect("judge lock").clone()
@@ -434,9 +439,17 @@ impl Judge for FixedJudge {
             return Err(AiError::Retryable("judge unavailable (test)".into()));
         }
         let verdicts = self.verdicts.lock().expect("judge lock");
+        let rule = self.unsupported_unless_noted.lock().expect("judge lock").clone();
+        let between = |open: &str, close: &str| context.split_once(open).and_then(|(_, r)| r.split_once(close)).map(|(t, _)| t.to_string()).unwrap_or_default();
         let raw = questions
             .iter()
-            .filter_map(|q| verdicts.get(&q.id).map(|(v, r)| (q.id.clone(), v.clone(), r.clone())))
+            .filter_map(|q| match (&rule, q.id.as_str()) {
+                (Some((needle, reason)), "promises") => {
+                    let flagged = between("<reply>", "</reply>").contains(needle.as_str()) && !between("<team_notes>", "</team_notes>").contains(needle.as_str());
+                    Some((q.id.clone(), Verdict::YesNo(flagged), if flagged { reason.clone() } else { String::new() }))
+                }
+                _ => verdicts.get(&q.id).map(|(v, r)| (q.id.clone(), v.clone(), r.clone())),
+            })
             .collect();
         Ok(normalize(questions, raw))
     }

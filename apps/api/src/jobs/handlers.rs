@@ -918,9 +918,13 @@ async fn generate_draft(state: &AppState, job: &Job, payload: &Value) -> Result<
         .rows_affected()
             == 1;
         if inserted {
-            if by_person && let Some(said) = payload.get("instructions").and_then(Value::as_str).map(str::trim).filter(|t| !t.is_empty()) {
-                sqlx::query("UPDATE drafts SET instructions_by_user = ?1 WHERE id = ?2").bind(said).bind(&draft_id).execute(&mut *tx).await?;
-            }
+            let said = [payload.get("owner_said"), payload.get("instructions")]
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .fold(None::<String>, |acc, t| Some(crate::owner_said::merge(acc.as_deref(), t)));
+            let author = payload.get("owner_user_id").and_then(Value::as_str);
+            crate::owner_said::record(&mut tx, &msg.workspace_id, &draft_id, &message_id, author, said.as_deref()).await?;
             audit::record(
                 &mut tx,
                 Entry {
@@ -1039,6 +1043,7 @@ async fn compose_draft(
     .await?;
     ctx.preference_ids = preferences.iter().map(|p| p.id.clone()).collect();
     let mut memory_notes = ctx.lines();
+    let team_notes = memory_notes.clone();
     let extra_instructions = extra_instructions.map(crate::signoff::strip_sign_off_instruction);
     if let Some(extra) = extra_instructions.as_deref().map(str::trim).filter(|e| !e.is_empty()) {
         memory_notes.push(format!("Instruction for this reply: {extra}"));
@@ -1097,7 +1102,15 @@ async fn compose_draft(
         }
     }
     if !out.body_text.trim().is_empty() {
-        crate::gap_resolver::resolve_draft(&state.db, &msg.workspace_id, staffing, &msg.subject, &msg.body_text, &mut out).await?;
+        let sources = crate::gap_resolver::Sources {
+            ws: &msg.workspace_id,
+            staffing,
+            subject: &msg.subject,
+            email_body: &msg.body_text,
+            category: &input.category,
+            notes: &team_notes,
+        };
+        crate::gap_resolver::resolve_draft(&state.db, &sources, &mut out).await?;
     }
     Ok((out, ctx, quality))
 }
@@ -1180,6 +1193,7 @@ pub async fn create_agent_draft(
     requested: Option<ai::DraftQuality>,
     origin_key: &str,
     agent_id: Option<&str>,
+    owner: Option<(&str, &str)>,
 ) -> Result<Option<(String, String)>, JobError> {
     let existing: Option<(String, String)> = sqlx::query_as("SELECT id, body_text FROM drafts WHERE origin_key = ?1")
         .bind(origin_key)
@@ -1216,6 +1230,7 @@ pub async fn create_agent_draft(
     .rows_affected()
         == 1;
     if inserted {
+        crate::owner_said::record(&mut tx, &msg.workspace_id, &draft_id, message_id, owner.map(|o| o.0), owner.map(|o| o.1)).await?;
         audit::record(
             &mut tx,
             Entry {

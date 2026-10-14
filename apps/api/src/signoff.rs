@@ -6,8 +6,10 @@ use std::sync::LazyLock;
 use regex::Regex;
 
 static SIGN_OFF_INSTRUCTION: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)[,;]?\s*(?:and\s+)?\b(?:sign(?:ed|ing)?[\s-]*(?:it\s+)?(?:off\s+)?(?:as|by|with|from)|signature\s*:)\s*[^.;\n]*[.;]?")
-        .expect("valid regex")
+    Regex::new(
+        r"(?i)[,;]?\s*(?:and\s+)?\b(?:sign(?:ed|ing)?[\s-]*off(?:\s+(?:as|with|by))?|sign(?:ed)?\s+(?:it|this|the\s+(?:email|reply|mail|message))\s+(?:off\s+)?(?:as|with|by)|signed,\s*\w+|signature\s*:)\s*[^.;\n]*[.;]?",
+    )
+    .expect("valid regex")
 });
 
 /// The instruction without any "sign off as <name>" clause.
@@ -19,7 +21,7 @@ pub fn strip_sign_off_instruction(text: &str) -> String {
 fn is_name_line(line: &str, agent_name: &str) -> bool {
     let bare: String = line.trim().trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase();
     let name = agent_name.trim().to_lowercase();
-    !name.is_empty() && (bare == name || bare.ends_with(&format!(" {name}")) && bare.split_whitespace().count() <= 4)
+    !name.is_empty() && bare == name
 }
 
 /// Replaces a closing line that is the agent's own name with the owner's signature. Returns whether it changed.
@@ -44,6 +46,10 @@ mod tests {
         let t = strip_sign_off_instruction("Say we have no openings, signed off as Aarav. Keep it short.");
         assert!(!t.to_lowercase().contains("aarav") && t.contains("Keep it short"), "{t}");
         assert_eq!(strip_sign_off_instruction("Confirm receipt"), "Confirm receipt");
+        for keep in ["Ask them to sign with DocuSign.", "The contract was signed by the CEO.", "Remind them to sign the form."] {
+            assert_eq!(strip_sign_off_instruction(keep), keep, "{keep}");
+        }
+        assert!(!strip_sign_off_instruction("Thank them. Sign it as Aarav.").contains("Aarav"));
     }
 
     #[test]
@@ -53,5 +59,7 @@ mod tests {
         assert!(b.ends_with("Best regards,\nPriya, HR") && !b.contains("Aarav"), "{b}");
         let mut ok = "Hi,\n\nBest,\nPriya".to_string();
         assert!(!replace_agent_sign_off(&mut ok, "Aarav", "Priya"));
+        let mut mention = "Hi,\n\nThanks.\n\nHR team, with help from Aarav".to_string();
+        assert!(!replace_agent_sign_off(&mut mention, "Aarav", "Priya"), "only a line that is just the name");
     }
 }

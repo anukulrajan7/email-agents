@@ -52,6 +52,8 @@ export interface Approval {
   agent?: AgentBadge | null;
   working_for?: WorkingFor | null;
   automation?: SuggestedAutomation | null;
+  /** What the draft could not confirm (it says it will confirm later). */
+  unanswered?: string[];
 }
 
 export type AgentColor = 'slate' | 'sage' | 'plum' | 'ochre' | 'teal' | 'postmark' | 'ink';
