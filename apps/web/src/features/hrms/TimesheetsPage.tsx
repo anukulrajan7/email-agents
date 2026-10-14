@@ -28,7 +28,7 @@ function PolicyForm({ ws, settings }: { ws: string; settings: TeamSettings }) {
     <Card>
       <form onSubmit={submit} className="flex flex-col gap-4">
         <p className="text-sm text-ink-muted">
-          Billable people's mail is read only when it arrives through the company HR mailbox. Pick that mailbox here; mail to or from a billable person in any other mailbox is not stored.
+          Billable people's mail is read only when it arrives through the company HR mailbox. Pick that mailbox here; mail sent by a billable person outside that mailbox is held back: kept safely, but not shown or read by the AI until the policy allows it.
         </p>
         <div className="flex flex-wrap gap-6">
           <div className="flex flex-col gap-1">

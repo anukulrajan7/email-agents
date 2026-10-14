@@ -78,7 +78,7 @@ export function BrandPanel() {
       className="relative flex flex-col overflow-hidden border-b border-rule-strong bg-surface px-4 py-6 sm:px-8 lg:border-r lg:border-b-0 lg:px-14 lg:py-14"
     >
       <div className="rise" style={{ '--i': 0 } as CSSProperties}>
-        <p className="kicker hidden lg:block">The sorting office for HR mail</p>
+        <p className="kicker hidden lg:block">The sorting office for your email</p>
         <p className="type-display text-[2.5rem] leading-none tracking-[-0.035em] text-ink sm:text-5xl lg:mt-4 lg:text-[5.5rem]">
           Post <span className="text-accent">Room</span>
         </p>
