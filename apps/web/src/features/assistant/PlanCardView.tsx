@@ -12,6 +12,12 @@ function MessagePreview({ preview }: { preview: PlanPreview }) {
           {preview.address && <span className="text-ink-muted"> ({preview.address})</span>}
         </dd>
       </div>
+      {preview.source && (
+        <div className="flex gap-2">
+          <dt className="kicker shrink-0">Address from</dt>
+          <dd className="text-ink-muted">{preview.source}</dd>
+        </div>
+      )}
       <div className="flex gap-2">
         <dt className="kicker shrink-0">Who sees it</dt>
         <dd className={preview.outside ? 'font-semibold text-ink' : 'text-ink-muted'}>{preview.audience}</dd>

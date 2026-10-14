@@ -797,7 +797,11 @@ impl Session<'_> {
         );
         let params = json!({
             "channel": channel, "to": to, "subject": subject, "body": body, "ask": ask, "wait_hours": wait_hours,
-            "preview": { "to": target.label(), "address": address, "audience": audience, "outside": outside, "subject": subject, "body": body },
+            "pinned": messaging::recipients::pin(&target),
+            "preview": {
+                "to": target.label(), "address": address, "audience": audience, "outside": outside, "subject": subject, "body": body,
+                "source": people.first().map(|p| messaging::recipients::source_words(to, p)),
+            },
         });
         self.add_plan("send_message", summary, params).await
     }
@@ -837,7 +841,7 @@ impl Session<'_> {
         let summary = format!("Write to {company} support ({address}, {source}): “{}”", sentence(subject, 80));
         let params = json!({
             "message_id": row.id, "company": company, "address": address, "address_source": source, "subject": subject, "body": body, "wait_hours": wait_hours,
-            "preview": { "to": format!("{company} support"), "address": address, "audience": format!("outside your workspace; address {source}"), "outside": true, "subject": subject, "body": body },
+            "preview": { "to": format!("{company} support"), "address": address, "audience": "outside your workspace", "outside": true, "subject": subject, "body": body, "source": source },
         });
         self.add_plan("contact_support", summary, params).await
     }

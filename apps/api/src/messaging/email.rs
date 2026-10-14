@@ -68,6 +68,25 @@ pub async fn mailbox_for(state: &AppState, ws: &str, owner: Option<&str>) -> App
     }))
 }
 
+/// The mailbox an email was stored against, if it is still connected and can send. Never any other mailbox.
+pub async fn mailbox_by_source(state: &AppState, ws: &str, source_id: &str) -> AppResult<Mailbox> {
+    let row: Option<(Option<String>, Option<String>, Option<String>, String)> = sqlx::query_as(
+        "SELECT external_connection_id, provider_config_key, mailbox_address, capabilities_json FROM email_sources
+         WHERE id = ?1 AND workspace_id = ?2 AND kind = 'nango_gmail' AND status = 'connected'",
+    )
+    .bind(source_id)
+    .bind(ws)
+    .fetch_optional(&state.db)
+    .await?;
+    if let Some((Some(connection_id), Some(config_key), address, caps)) = row {
+        let caps: Capabilities = serde_json::from_str(&caps).unwrap_or_else(|_| crate::sources::capabilities("nango_gmail"));
+        if crate::ai::policy::can_send(&caps) {
+            return Ok(Mailbox { source_id: source_id.to_string(), connection_id, config_key, address: address.filter(|a| !a.is_empty()) });
+        }
+    }
+    Err(AppError::Conflict("The mailbox this email was written for is not connected any more.".into()))
+}
+
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct Outbound {
     pub id: String,
@@ -151,8 +170,8 @@ pub struct NewEmail<'a> {
     pub provider_thread_id: Option<&'a str>,
 }
 
-/// Stores the email, waiting for a person's OK or for `schedule`. Nothing is sent.
-pub async fn create(state: &AppState, new: NewEmail<'_>) -> AppResult<Outbound> {
+/// The mailbox and the checks for a new email. Nothing is stored.
+pub async fn validate(state: &AppState, new: &NewEmail<'_>) -> AppResult<Mailbox> {
     let mailbox = mailbox_for(state, new.ws, new.owner_user_id).await?;
     let owner_email: Option<String> = match new.owner_user_id {
         Some(u) => sqlx::query_scalar("SELECT email FROM users WHERE id = ?1").bind(u).fetch_optional(&state.db).await?,
@@ -163,6 +182,11 @@ pub async fn create(state: &AppState, new: NewEmail<'_>) -> AppResult<Outbound> 
     if report.is_blocked() {
         return Err(report.into_error());
     }
+    Ok(mailbox)
+}
+
+/// Stores a validated email inside the caller's transaction, waiting for a person's OK or for `schedule`.
+pub async fn insert(conn: &mut sqlx::SqliteConnection, new: &NewEmail<'_>, mailbox: &Mailbox) -> sqlx::Result<String> {
     let id = new_id("out");
     let now = now_ms();
     sqlx::query(
@@ -185,8 +209,17 @@ pub async fn create(state: &AppState, new: NewEmail<'_>) -> AppResult<Outbound> 
     .bind(new.in_reply_to)
     .bind(new.provider_thread_id)
     .bind(now)
-    .execute(&state.db)
+    .execute(conn)
     .await?;
+    Ok(id)
+}
+
+/// Stores the email, waiting for a person's OK or for `schedule`. Nothing is sent.
+pub async fn create(state: &AppState, new: NewEmail<'_>) -> AppResult<Outbound> {
+    let mailbox = validate(state, &new).await?;
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
+    let id = insert(&mut tx, &new, &mailbox).await?;
+    tx.commit().await?;
     get(state, new.ws, &id).await?.ok_or(AppError::NotFound)
 }
 
@@ -198,7 +231,7 @@ pub struct Scheduled {
 
 /// Holds the email for at least the undo window (`hold_secs` when longer) and queues the send. `auto` = nobody
 /// asked for this send: a person's own words are refused, and the send is checked again when it comes due.
-pub async fn schedule(state: &AppState, ws: &str, id: &str, actor: Actor<'_>, hold_secs: i64, auto: bool) -> AppResult<Scheduled> {
+pub async fn schedule(state: &AppState, ws: &str, id: &str, actor: Actor<'_>, hold_secs: i64, auto: bool, daily_cap: Option<i64>) -> AppResult<Scheduled> {
     let row = get(state, ws, id).await?.ok_or(AppError::NotFound)?;
     if row.status != "awaiting_approval" {
         return Err(AppError::Conflict(match row.status.as_str() {
@@ -236,6 +269,11 @@ pub async fn schedule(state: &AppState, ws: &str, id: &str, actor: Actor<'_>, ho
         Actor::System => None,
     };
     let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
+    if let (true, Some(cap), Some(owner)) = (auto, daily_cap, row.owner_user_id.as_deref())
+        && auto_sent_today_in(&mut tx, ws, owner).await? >= cap
+    {
+        return Err(AppError::Conflict("today's limit for messages sent on their own is reached".into()));
+    }
     let claimed = sqlx::query(
         "UPDATE outbound_emails SET status = 'scheduled', send_at = ?1, send_requested_by = ?2, auto_sent = ?3, send_error = NULL, updated_at = ?4
          WHERE id = ?5 AND workspace_id = ?6 AND status = 'awaiting_approval'",
@@ -331,6 +369,7 @@ pub async fn stop(state: &AppState, ws: &str, id: &str, user_id: &str) -> AppRes
             None => AppError::NotFound,
         });
     }
+    super::watch::close_for_outbound(&mut tx, ws, id, "You stopped the email before it went out.").await?;
     audit::record(
         &mut tx,
         Entry {
@@ -354,7 +393,7 @@ pub async fn approve(state: &AppState, ws: &str, id: &str, user_id: &str) -> App
     if row.owner_user_id.as_deref() != Some(user_id) {
         return Err(AppError::NotFound);
     }
-    schedule(state, ws, id, Actor::User(user_id), 0, false).await
+    schedule(state, ws, id, Actor::User(user_id), 0, false, None).await
 }
 
 // ---------------------------------------------------------------- the send
@@ -411,9 +450,8 @@ fn job_err(e: AppError) -> JobError {
 
 /// An automatic send is checked again when it comes due. Why it must wait for a person instead, if it must.
 async fn auto_stopped(state: &AppState, row: &Outbound) -> sqlx::Result<Option<&'static str>> {
-    if let Some(owner) = row.owner_user_id.as_deref()
-        && super::rules::personal_level(state, &row.workspace_id, owner).await? < 2
-    {
+    let Some(owner) = row.owner_user_id.as_deref() else { return Ok(Some("there is no mailbox owner to answer for it")) };
+    if super::rules::personal_level(state, &row.workspace_id, owner).await? < 2 {
         return Ok(Some("the assistant no longer has permission to send on its own"));
     }
     let person = recipients::classify(&state.db, &row.workspace_id, &row.to_address).await?;
@@ -421,6 +459,11 @@ async fn auto_stopped(state: &AppState, row: &Outbound) -> sqlx::Result<Option<&
         return Ok(Some("the recipient is not inside your workspace"));
     }
     Ok(None)
+}
+
+async fn is_personal_agent(state: &AppState, agent_id: Option<&str>) -> sqlx::Result<bool> {
+    let Some(id) = agent_id else { return Ok(false) };
+    Ok(sqlx::query_scalar::<_, String>("SELECT scope FROM agents WHERE id = ?1").bind(id).fetch_optional(&state.db).await?.as_deref() == Some("personal"))
 }
 
 /// `SEND_OUTBOUND`: at `send_at`, send the email unless it was stopped.
@@ -433,7 +476,10 @@ pub async fn run_scheduled(state: &AppState, payload: &Value) -> Result<(), JobE
     if row.status != "scheduled" || row.send_at != Some(send_at) {
         return Ok(());
     }
-    let mailbox = mailbox_for(state, &ws, row.owner_user_id.as_deref()).await.map_err(job_err)?;
+    if row.owner_user_id.is_none() && is_personal_agent(state, row.agent_id.as_deref()).await? {
+        return give_up(state, &row, "Not sent: the person this assistant works for is gone, and a personal assistant never uses the shared mailbox.").await;
+    }
+    let mailbox = mailbox_by_source(state, &ws, &row.source_id).await.map_err(job_err)?;
     if let Some(attempt) = row.send_attempt_id.clone() {
         match reconcile(state, &row, &mailbox).await {
             Outcome::Sent { message_id, thread_id } => return finalize_sent(state, &row, &message_id, thread_id.as_deref()).await.map_err(job_err),
@@ -619,6 +665,7 @@ async fn give_up(state: &AppState, row: &Outbound, reason: &str) -> Result<(), J
     .bind(&row.id)
     .execute(&mut *tx)
     .await?;
+    super::watch::close_for_outbound(&mut tx, &row.workspace_id, &row.id, "The email could not be sent.").await?;
     audit::record(
         &mut tx,
         Entry {
@@ -672,6 +719,12 @@ pub async fn list_for(state: &AppState, ws: &str, user_id: &str) -> sqlx::Result
 
 /// Emails sent on their own today for one person, against the daily cap.
 pub async fn auto_sent_today(state: &AppState, ws: &str, owner: &str) -> sqlx::Result<i64> {
+    let mut conn = state.db.acquire().await?;
+    auto_sent_today_in(&mut conn, ws, owner).await
+}
+
+/// The same count inside a transaction, so the cap and the send it allows are one step.
+pub async fn auto_sent_today_in(conn: &mut sqlx::SqliteConnection, ws: &str, owner: &str) -> sqlx::Result<i64> {
     const DAY_MS: i64 = 86_400_000;
     let since = now_ms() / DAY_MS * DAY_MS;
     sqlx::query_scalar(
@@ -681,6 +734,6 @@ pub async fn auto_sent_today(state: &AppState, ws: &str, owner: &str) -> sqlx::R
     .bind(AUTO_SENT_ACTION)
     .bind(since)
     .bind(owner)
-    .fetch_one(&state.db)
+    .fetch_one(conn)
     .await
 }

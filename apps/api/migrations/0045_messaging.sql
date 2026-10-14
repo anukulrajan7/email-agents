@@ -40,6 +40,8 @@ CREATE TABLE in_app_messages (
   via TEXT NOT NULL,
   deliver_at INTEGER NOT NULL,
   cancelled_at INTEGER,
+  -- 1 while an automatic message waits for its due-time re-check; the recipient sees it only at 0.
+  needs_check INTEGER NOT NULL DEFAULT 0,
   read_at INTEGER,
   created_at INTEGER NOT NULL
 );

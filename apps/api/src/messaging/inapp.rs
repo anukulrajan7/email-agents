@@ -10,6 +10,7 @@ use crate::{
     db::{iso, new_id, now_ms},
     error::{AppError, AppResult},
     http::AppState,
+    jobs::handlers::JobError,
     mailer::OutgoingEmail,
     sources::normalize::truncate_chars,
 };
@@ -77,7 +78,7 @@ struct InboxRow {
     deliver_at: i64,
 }
 
-const VISIBLE: &str = "m.deliver_at <= ?3 AND m.cancelled_at IS NULL";
+const VISIBLE: &str = "m.deliver_at <= ?3 AND m.cancelled_at IS NULL AND m.needs_check = 0";
 
 /// The caller's own messages and notices, newest first.
 pub async fn inbox(db: &SqlitePool, ws: &str, user_id: &str) -> sqlx::Result<Vec<Value>> {
@@ -121,7 +122,7 @@ pub async fn unread_count(db: &SqlitePool, ws: &str, user_id: &str) -> sqlx::Res
 pub async fn mark_read(db: &SqlitePool, ws: &str, user_id: &str, id: &str) -> AppResult<()> {
     let done = sqlx::query(
         "UPDATE in_app_messages SET read_at = COALESCE(read_at, ?1)
-         WHERE id = ?2 AND workspace_id = ?3 AND recipient_user_id = ?4 AND deliver_at <= ?1 AND cancelled_at IS NULL",
+         WHERE id = ?2 AND workspace_id = ?3 AND recipient_user_id = ?4 AND deliver_at <= ?1 AND cancelled_at IS NULL AND needs_check = 0",
     )
     .bind(now_ms())
     .bind(id)
@@ -145,10 +146,11 @@ pub async fn sent(db: &SqlitePool, ws: &str, user_id: &str) -> sqlx::Result<Vec<
         email: Option<String>,
         deliver_at: i64,
         cancelled_at: Option<i64>,
+        needs_check: bool,
         read_at: Option<i64>,
     }
     let rows: Vec<SentRow> = sqlx::query_as(
-        "SELECT m.id, m.subject, m.body, m.via, u.name AS name, u.email AS email, m.deliver_at, m.cancelled_at, m.read_at
+        "SELECT m.id, m.subject, m.body, m.via, u.name AS name, u.email AS email, m.deliver_at, m.cancelled_at, m.needs_check, m.read_at
          FROM in_app_messages m JOIN users u ON u.id = m.recipient_user_id
          WHERE m.workspace_id = ?1 AND m.sender_user_id = ?2 AND m.kind = 'message' ORDER BY m.created_at DESC, m.id DESC LIMIT 100",
     )
@@ -160,10 +162,10 @@ pub async fn sent(db: &SqlitePool, ws: &str, user_id: &str) -> sqlx::Result<Vec<
     Ok(rows
         .into_iter()
         .map(|r| {
-            let SentRow { id, subject, body, via, name, email, deliver_at, cancelled_at, read_at } = r;
+            let SentRow { id, subject, body, via, name, email, deliver_at, cancelled_at, needs_check, read_at } = r;
             let status = if cancelled_at.is_some() {
                 "stopped"
-            } else if deliver_at > now {
+            } else if deliver_at > now || needs_check {
                 "held"
             } else if read_at.is_some() {
                 "read"
@@ -183,7 +185,7 @@ pub async fn stop(db: &SqlitePool, ws: &str, user_id: &str, id: &str) -> AppResu
     let mut tx = db.begin_with("BEGIN IMMEDIATE").await?;
     let done = sqlx::query(
         "UPDATE in_app_messages SET cancelled_at = ?1
-         WHERE id = ?2 AND workspace_id = ?3 AND sender_user_id = ?4 AND deliver_at > ?1 AND cancelled_at IS NULL",
+         WHERE id = ?2 AND workspace_id = ?3 AND sender_user_id = ?4 AND (deliver_at > ?1 OR needs_check = 1) AND cancelled_at IS NULL",
     )
     .bind(now_ms())
     .bind(id)
@@ -195,6 +197,7 @@ pub async fn stop(db: &SqlitePool, ws: &str, user_id: &str, id: &str) -> AppResu
     if done == 0 {
         return Err(AppError::Conflict("too late: this message was already delivered".into()));
     }
+    super::watch::close_if_nothing_delivered(&mut tx, ws, id).await?;
     audit::record(
         &mut tx,
         Entry {
@@ -224,7 +227,7 @@ pub async fn reply(state: &AppState, ws: &str, user_id: &str, id: &str, body: &s
     }
     let original: Option<(String, Option<String>, String, String)> = sqlx::query_as(
         "SELECT thread_key, sender_user_id, subject, kind FROM in_app_messages
-         WHERE id = ?1 AND workspace_id = ?2 AND recipient_user_id = ?3 AND deliver_at <= ?4 AND cancelled_at IS NULL",
+         WHERE id = ?1 AND workspace_id = ?2 AND recipient_user_id = ?3 AND deliver_at <= ?4 AND cancelled_at IS NULL AND needs_check = 0",
     )
     .bind(id)
     .bind(ws)
@@ -275,11 +278,10 @@ pub async fn reply(state: &AppState, ws: &str, user_id: &str, id: &str, body: &s
     Ok(reply_id)
 }
 
-/// Tells a person something in their Post Room notifications, and (if asked) emails them a one-line version.
-/// Returns the notice id.
+/// The notice itself, inside the caller's transaction.
 #[allow(clippy::too_many_arguments)]
-pub async fn notify_owner(
-    state: &AppState,
+pub async fn notify_in(
+    conn: &mut SqliteConnection,
     ws: &str,
     user_id: &str,
     agent_id: Option<&str>,
@@ -288,9 +290,8 @@ pub async fn notify_owner(
     link: Value,
     email_line: bool,
 ) -> sqlx::Result<String> {
-    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     let (id, _) = insert(
-        &mut tx,
+        conn,
         NewMessage {
             ws,
             thread_key: None,
@@ -308,7 +309,7 @@ pub async fn notify_owner(
     )
     .await?;
     audit::record(
-        &mut tx,
+        conn,
         Entry {
             workspace_id: ws,
             actor: Actor::System,
@@ -320,6 +321,24 @@ pub async fn notify_owner(
         },
     )
     .await?;
+    Ok(id)
+}
+
+/// Tells a person something in their Post Room notifications, and (if asked) emails them a one-line version.
+/// Returns the notice id.
+#[allow(clippy::too_many_arguments)]
+pub async fn notify_owner(
+    state: &AppState,
+    ws: &str,
+    user_id: &str,
+    agent_id: Option<&str>,
+    subject: &str,
+    body: &str,
+    link: Value,
+    email_line: bool,
+) -> sqlx::Result<String> {
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
+    let id = notify_in(&mut tx, ws, user_id, agent_id, subject, body, link, email_line).await?;
     tx.commit().await?;
     if email_line && let Some(mailer) = &state.alert_mailer {
         let email: Option<String> = sqlx::query_scalar("SELECT email FROM users WHERE id = ?1").bind(user_id).fetch_optional(&state.db).await?;
@@ -334,4 +353,68 @@ pub async fn notify_owner(
         }
     }
     Ok(id)
+}
+
+/// `INAPP_DUE`: an automatic in-app message is checked again when it comes due. It is delivered only if the
+/// sender's assistant is still on at level 2 or more and the recipient is still in the workspace.
+pub async fn due_job(state: &AppState, payload: &Value) -> Result<(), JobError> {
+    let field = |k: &str| payload.get(k).and_then(Value::as_str).map(str::to_string);
+    let (Some(ws), Some(id)) = (field("workspace_id"), field("message_id")) else {
+        return Err(JobError::Permanent("payload missing workspace_id/message_id".into()));
+    };
+    let row: Option<(Option<String>, String, String)> = sqlx::query_as(
+        "SELECT sender_user_id, recipient_user_id, subject FROM in_app_messages WHERE id = ?1 AND workspace_id = ?2 AND needs_check = 1 AND cancelled_at IS NULL",
+    )
+    .bind(&id)
+    .bind(&ws)
+    .fetch_optional(&state.db)
+    .await?;
+    let Some((sender, recipient, subject)) = row else { return Ok(()) };
+    let why = match &sender {
+        Some(owner) if super::rules::personal_level(state, &ws, owner).await? < 2 => Some("the assistant no longer has permission to send on its own"),
+        None => Some("there is nobody to check it for"),
+        _ => None,
+    };
+    let why = match why {
+        Some(w) => Some(w),
+        None if super::recipients::member(&state.db, &ws, &recipient).await?.is_none() => Some("the recipient is no longer in your workspace"),
+        None => None,
+    };
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
+    match why {
+        None => {
+            sqlx::query("UPDATE in_app_messages SET needs_check = 0 WHERE id = ?1 AND needs_check = 1 AND cancelled_at IS NULL").bind(&id).execute(&mut *tx).await?;
+        }
+        Some(why) => {
+            let held = sqlx::query("UPDATE in_app_messages SET cancelled_at = ?1, needs_check = 0 WHERE id = ?2 AND needs_check = 1 AND cancelled_at IS NULL")
+                .bind(now_ms())
+                .bind(&id)
+                .execute(&mut *tx)
+                .await?
+                .rows_affected();
+            if held == 1 {
+                super::watch::close_if_nothing_delivered(&mut tx, &ws, &id).await?;
+                audit::record(
+                    &mut tx,
+                    Entry {
+                        workspace_id: &ws,
+                        actor: Actor::System,
+                        action: "message.in_app_held",
+                        entity_type: "in_app_message",
+                        entity_id: &id,
+                        message_id: None,
+                        metadata: json!({ "reason": why }),
+                    },
+                )
+                .await?;
+                if let Some(owner) = sender.as_deref() {
+                    let text = format!("I did not send “{}”: {why}. Ask me again if you still want it to go.", crate::agents::sentence(&subject, 80));
+                    notify_in(&mut tx, &ws, owner, None, "A message was not sent", &text, json!({ "kind": "meera" }), false).await?;
+                    super::report_in(&mut tx, &ws, owner, &text, &[], &json!([])).await?;
+                }
+            }
+        }
+    }
+    tx.commit().await?;
+    Ok(())
 }

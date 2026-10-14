@@ -26,3 +26,8 @@ use crate::{
 pub async fn report(state: &AppState, ws: &str, user_id: &str, text: &str, citations: &[Citation], links: &Value) -> sqlx::Result<()> {
     history::append_with_links(&state.db, ws, user_id, "assistant", text, citations, &[], links).await
 }
+
+/// Same, inside the caller's transaction, so the report and the work it reports commit together.
+pub async fn report_in(conn: &mut sqlx::SqliteConnection, ws: &str, user_id: &str, text: &str, citations: &[Citation], links: &Value) -> sqlx::Result<()> {
+    history::append_with_links(conn, ws, user_id, "assistant", text, citations, &[], links).await
+}

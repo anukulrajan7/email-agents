@@ -18,6 +18,8 @@ pub const LIST_UNSUBSCRIBE: &str = "list_unsubscribe";
 pub const PRECEDENCE: &str = "precedence";
 pub const AUTO_SUBMITTED: &str = "auto_submitted";
 pub const GMAIL_CATEGORY: &str = "gmail_category";
+pub const AUTO_REPLY: &str = "auto_reply";
+pub const DELIVERY_STATUS: &str = "delivery_status";
 pub const NO_REPLY_SENDER: &str = "no_reply_sender";
 
 const GMAIL_CATEGORIES: &[&str] = &["CATEGORY_PROMOTIONS", "CATEGORY_SOCIAL", "CATEGORY_UPDATES", "CATEGORY_FORUMS"];
@@ -45,6 +47,15 @@ pub fn header_signals(header: &dyn Fn(&str) -> Option<String>, label_ids: &[Stri
     }
     if header("Auto-Submitted").is_some_and(|v| !v.trim().eq_ignore_ascii_case("no")) {
         out.push(AUTO_SUBMITTED.to_string());
+    }
+    if header("X-Autoreply").is_some() || header("X-Autorespond").is_some() {
+        out.push(AUTO_REPLY.to_string());
+    }
+    if header("Content-Type").is_some_and(|v| {
+        let v = v.to_ascii_lowercase();
+        v.contains("report-type=delivery-status") || v.contains("multipart/report")
+    }) {
+        out.push(DELIVERY_STATUS.to_string());
     }
     if label_ids.iter().any(|l| GMAIL_CATEGORIES.contains(&l.as_str())) {
         out.push(GMAIL_CATEGORY.to_string());

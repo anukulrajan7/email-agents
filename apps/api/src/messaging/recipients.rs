@@ -5,6 +5,7 @@
 use serde::Serialize;
 use sqlx::SqlitePool;
 
+use serde_json::Value;
 use crate::send_safety::{bare_address, valid_address};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -101,7 +102,8 @@ pub async fn classify(db: &SqlitePool, ws: &str, raw: &str) -> sqlx::Result<Pers
     .fetch_optional(db)
     .await?;
     if let Some(name) = listed {
-        return Ok(Person { label: name, address: Some(address), user_id: None, kind: Kind::Directory });
+        let kind = if same_domain_as_a_member(db, ws, &address).await? { Kind::Directory } else { Kind::KnownExternal };
+        return Ok(Person { label: name, address: Some(address), user_id: None, kind });
     }
     let known: Option<Option<String>> = sqlx::query_scalar("SELECT display_name FROM contacts WHERE workspace_id = ?1 AND lower(email) = ?2")
         .bind(ws)
@@ -120,6 +122,24 @@ pub async fn classify(db: &SqlitePool, ws: &str, raw: &str) -> sqlx::Result<Pers
         return Ok(Person { label, address: Some(address), user_id: None, kind: Kind::KnownExternal });
     }
     Ok(Person { label: address.clone(), address: Some(address), user_id: None, kind: Kind::NewExternal })
+}
+
+/// A people-directory address counts as inside the workspace only when it is on a domain a member of the workspace uses.
+async fn same_domain_as_a_member(db: &SqlitePool, ws: &str, address: &str) -> sqlx::Result<bool> {
+    let Some(domain) = address.rsplit_once('@').map(|(_, d)| d.to_lowercase()).filter(|d| !d.is_empty()) else { return Ok(false) };
+    sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM memberships m JOIN users u ON u.id = m.user_id
+                        WHERE m.workspace_id = ?1 AND lower(substr(u.email, instr(u.email, '@') + 1)) = ?2)",
+    )
+    .bind(ws)
+    .bind(domain)
+    .fetch_one(db)
+    .await
+}
+
+/// `%`, `_` and `\` in a name are plain characters in a LIKE pattern.
+pub fn escape_like(text: &str) -> String {
+    text.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")
 }
 
 async fn member_by_id(db: &SqlitePool, ws: &str, user_id: &str) -> sqlx::Result<Option<Person>> {
@@ -197,10 +217,11 @@ pub async fn resolve(db: &SqlitePool, ws: &str, text: &str) -> Result<Target, St
     let lowered = text.to_lowercase();
     let members: Vec<String> = sqlx::query_scalar(
         "SELECT u.id FROM memberships m JOIN users u ON u.id = m.user_id
-         WHERE m.workspace_id = ?1 AND (lower(u.name) = ?2 OR lower(u.email) LIKE ?2 || '@%')",
+         WHERE m.workspace_id = ?1 AND (lower(u.name) = ?2 OR lower(u.email) LIKE ?3 || '@%' ESCAPE '\\')",
     )
     .bind(ws)
     .bind(&lowered)
+    .bind(escape_like(&lowered))
     .fetch_all(db)
     .await
     .map_err(db_err)?;
@@ -237,6 +258,35 @@ pub async fn resolve(db: &SqlitePool, ws: &str, text: &str) -> Result<Target, St
         [one] => classify(db, ws, one).await.map(Target::Person).map_err(db_err),
         [] => Err(format!("I could not find anyone called {text}. Give me their email address.")),
         _ => Err(format!("More than one contact is called {text}. Use their email address.")),
+    }
+}
+
+/// The exact recipients a card was prepared for: an address, or a member's id, for each person.
+pub fn pin(target: &Target) -> Value {
+    let mut keys: Vec<String> = target.people().iter().map(|p| pin_key(p)).collect();
+    keys.sort();
+    serde_json::json!(keys)
+}
+
+fn pin_key(p: &Person) -> String {
+    p.user_id.as_deref().map(|u| format!("user:{u}")).or_else(|| p.address.as_deref().map(|a| format!("address:{a}"))).unwrap_or_default()
+}
+
+/// Does this target still go to exactly the people the card named?
+pub fn matches_pin(target: &Target, pinned: Option<&Value>) -> bool {
+    pinned.is_some_and(|p| *p == pin(target))
+}
+
+/// Plain words for where a recipient's address came from.
+pub fn source_words(typed: &str, p: &Person) -> &'static str {
+    if typed.contains('@') {
+        return "the address you gave me";
+    }
+    match p.kind {
+        Kind::Member => "a member of this workspace",
+        Kind::Directory => "your people directory",
+        Kind::KnownExternal => "someone you have written with before",
+        Kind::NewExternal => "an address nobody here has written to before",
     }
 }
 

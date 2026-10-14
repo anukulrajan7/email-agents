@@ -57,6 +57,7 @@ pub mod kind {
     pub const SEND_OUTBOUND: &str = "send_outbound";
     pub const WATCH_REPLY: &str = "watch_reply";
     pub const WATCH_NUDGE: &str = "watch_nudge";
+    pub const INAPP_DUE: &str = "inapp_due";
 }
 
 #[derive(Debug, Clone, FromRow)]

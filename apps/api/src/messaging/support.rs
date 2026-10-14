@@ -30,9 +30,16 @@ static RESOLVED: LazyLock<Regex> = LazyLock::new(|| {
 static NOT_RESOLVED: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)\b(?:not|n't|yet to be|un)\s*(?:yet\s*)?(?:been\s*)?(?:resolved|refunded|processed|fixed|credited)\b").expect("valid regex"));
 
-/// Does the company's reply say the case is closed?
+static FUTURE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?i)\b(?:will|shall|should|going to|expected to|to be|can be|may be|would|once|until|if)\b[^.!?]{0,40}\b(?:be )?(?:resolved|refunded|reversed|credited|processed|fixed|activated|completed|corrected|closed)\b|\b(?:within|in|by|after)\s+(?:the next\s+)?\d+\s*(?:-\s*\d+\s*)?(?:business\s+|working\s+)?(?:hours?|hrs?|days?|weeks?)\b|\b(?:within|in|by)\s+(?:a|one|two|three|few|couple)\s+(?:business\s+|working\s+)?(?:hours?|days?|weeks?)\b",
+    )
+    .expect("valid regex")
+});
+
+/// Does the company's reply say the case is closed? A promise ("will be resolved within 48 hours") is not.
 pub fn looks_resolved(text: &str) -> bool {
-    RESOLVED.is_match(text) && !NOT_RESOLVED.is_match(text)
+    RESOLVED.is_match(text) && !NOT_RESOLVED.is_match(text) && !FUTURE.is_match(text)
 }
 
 #[derive(Debug, Clone)]
@@ -79,9 +86,9 @@ pub async fn find_address(db: &SqlitePool, ws: &str, message_id: &str) -> sqlx::
     }
     let domain = sender.rsplit('@').next().unwrap_or_default().to_string();
     if !domain.is_empty() {
-        let contacts: Vec<String> = sqlx::query_scalar("SELECT email FROM contacts WHERE workspace_id = ?1 AND lower(email) LIKE ?2 ORDER BY message_count DESC")
+        let contacts: Vec<String> = sqlx::query_scalar("SELECT email FROM contacts WHERE workspace_id = ?1 AND lower(email) LIKE ?2 ESCAPE '\\' ORDER BY message_count DESC")
             .bind(ws)
-            .bind(format!("%@{domain}"))
+            .bind(format!("%@{}", super::recipients::escape_like(&domain)))
             .fetch_all(db)
             .await?;
         if let Some(found) = contacts.into_iter().map(|c| bare_address(&c)).find(|c| ok(c)) {
@@ -148,18 +155,28 @@ pub async fn set_status(state: &AppState, ws: &str, user_id: &str, id: &str, sta
     if !matches!(status, "open" | "waiting" | "resolved") {
         return Err(AppError::BadRequest("status must be open, waiting or resolved".into()));
     }
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     let done = sqlx::query("UPDATE support_tickets SET status = ?1, last_update_at = ?2 WHERE id = ?3 AND workspace_id = ?4 AND user_id = ?5")
         .bind(status)
         .bind(now_ms())
         .bind(id)
         .bind(ws)
         .bind(user_id)
-        .execute(&state.db)
+        .execute(&mut *tx)
         .await?
         .rows_affected();
     if done == 0 {
         return Err(AppError::NotFound);
     }
+    if status == "resolved" {
+        sqlx::query("UPDATE watches SET status = 'closed', last_update_at = ?1 WHERE workspace_id = ?2 AND status != 'closed' AND id = (SELECT watch_id FROM support_tickets WHERE id = ?3)")
+            .bind(now_ms())
+            .bind(ws)
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+    }
+    tx.commit().await?;
     Ok(())
 }
 
@@ -173,6 +190,9 @@ mod tests {
         assert!(looks_resolved("We've resolved this. Closing this ticket."));
         assert!(!looks_resolved("Your refund has not been processed yet."));
         assert!(!looks_resolved("We are looking into it and will update you."));
+        assert!(!looks_resolved("The refund will be processed within 48 hours."));
+        assert!(!looks_resolved("This will be resolved in 2 business days."));
+        assert!(!looks_resolved("Once it is fixed we will close the ticket."));
     }
 
     #[test]

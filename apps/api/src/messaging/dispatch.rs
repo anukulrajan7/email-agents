@@ -17,9 +17,10 @@ use crate::{
     db::now_ms,
     error::{AppError, AppResult},
     http::AppState,
+    jobs::{self, kind},
 };
 
-pub const MAX_RECIPIENTS: usize = 20;
+pub const MAX_RECIPIENTS: usize = 50;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Channel {
@@ -94,28 +95,26 @@ async fn send_email(state: &AppState, req: &Request<'_>, person: &Person) -> App
         return Err(AppError::BadRequest(format!("I do not have an email address for {}.", person.label)));
     };
     let actor = req.approver.map_or(Actor::System, Actor::User);
-    let row = email::create(
-        state,
-        NewEmail {
-            ws: req.ws,
-            owner_user_id: req.owner,
-            agent_id: req.agent_id,
-            to_address: address,
-            to_label: &person.label,
-            kind: person.kind,
-            subject: req.subject,
-            body: req.body,
-            authored_by: "agent",
-            approval_reason: None,
-            in_reply_to: None,
-            provider_thread_id: None,
-        },
-    )
-    .await?;
+    let new = NewEmail {
+        ws: req.ws,
+        owner_user_id: req.owner,
+        agent_id: req.agent_id,
+        to_address: address,
+        to_label: &person.label,
+        kind: person.kind,
+        subject: req.subject,
+        body: req.body,
+        authored_by: "agent",
+        approval_reason: None,
+        in_reply_to: None,
+        provider_thread_id: None,
+    };
+    let mailbox = email::validate(state, &new).await?;
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
+    let out_id = email::insert(&mut tx, &new, &mailbox).await?;
     let mut watch_id = None;
     let mut ticket_id = None;
     if let (Some(spec), Some(owner)) = (&req.watch, req.owner) {
-        let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
         let id = watch::create(
             &mut tx,
             NewWatch {
@@ -123,12 +122,12 @@ async fn send_email(state: &AppState, req: &Request<'_>, person: &Person) -> App
                 user_id: owner,
                 agent_id: req.agent_id,
                 kind: if req.support.is_some() { "ticket" } else { "ask" },
-                title: req.support.as_ref().map_or(req.subject, |_| req.subject),
+                title: req.subject,
                 channel: "email",
                 counterpart: req.support.as_ref().map_or(person.label.as_str(), |s| s.company),
-                outbound_email_id: Some(&row.id),
+                outbound_email_id: Some(&out_id),
                 thread_key: None,
-                source_id: Some(&row.source_id),
+                source_id: Some(&mailbox.source_id),
                 case_id: None,
                 question: spec.question,
                 nudge_hours: spec.nudge_hours,
@@ -153,10 +152,11 @@ async fn send_email(state: &AppState, req: &Request<'_>, person: &Person) -> App
                 .await?,
             );
         }
-        tx.commit().await?;
         watch_id = Some(id);
     }
-    let scheduled = match email::schedule(state, req.ws, &row.id, actor, req.hold_secs, req.approver.is_none()).await {
+    tx.commit().await?;
+    let row = email::get(state, req.ws, &out_id).await?.ok_or(AppError::NotFound)?;
+    let scheduled = match email::schedule(state, req.ws, &row.id, actor, req.hold_secs, req.approver.is_none(), req.approver.is_none().then_some(state.config.agent_auto_send_daily_cap)).await {
         Ok(s) => s,
         Err(e) => {
             discard(state, req.ws, &row.id, watch_id.as_deref()).await;
@@ -204,6 +204,11 @@ async fn send_in_app(state: &AppState, req: &Request<'_>, people: &[&Person]) ->
         Target::Person(_) => None,
     };
     let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
+    if let (None, Some(owner)) = (req.approver, req.owner)
+        && email::auto_sent_today_in(&mut tx, req.ws, owner).await? >= state.config.agent_auto_send_daily_cap
+    {
+        return Err(AppError::Conflict("today's limit for messages sent on their own is reached".into()));
+    }
     let mut thread_key: Option<String> = None;
     let mut first_id = String::new();
     for (person, user) in &members {
@@ -225,6 +230,19 @@ async fn send_in_app(state: &AppState, req: &Request<'_>, people: &[&Person]) ->
             },
         )
         .await?;
+        if req.approver.is_none() {
+            sqlx::query("UPDATE in_app_messages SET needs_check = 1 WHERE id = ?1").bind(&id).execute(&mut *tx).await?;
+            jobs::enqueue_at(
+                &mut tx,
+                kind::INAPP_DUE,
+                &format!("inapp_due:{id}"),
+                Some(req.ws),
+                &json!({ "workspace_id": req.ws, "message_id": id }),
+                jobs::DEFAULT_MAX_ATTEMPTS,
+                deliver_at,
+            )
+            .await?;
+        }
         if first_id.is_empty() {
             first_id = id.clone();
         }
@@ -284,6 +302,9 @@ async fn send_in_app(state: &AppState, req: &Request<'_>, people: &[&Person]) ->
         );
     }
     tx.commit().await?;
+    if req.approver.is_none() {
+        state.jobs_notify.notify_one();
+    }
     let who = req.target.label();
     let held = deliver_at > now_ms();
     let summary = if held {

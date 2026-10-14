@@ -3,6 +3,9 @@
 //! Meera conversation, with the email it came from. If nobody answers within the nudge time she nudges once and
 //! tells the person; a later answer still gets through.
 
+use std::sync::LazyLock;
+
+use regex::Regex;
 use serde_json::{Value, json};
 use sqlx::SqliteConnection;
 
@@ -15,6 +18,7 @@ use crate::{
     error::{AppError, AppResult},
     http::AppState,
     jobs::{self, handlers::JobError, kind},
+    send_safety::is_automated_address,
     knowledge,
 };
 
@@ -131,8 +135,46 @@ async fn wake(conn: &mut SqliteConnection, ws: &str, watch_ids: Vec<String>, wha
     Ok(())
 }
 
-/// An email arrived in a stored thread: a watch on that Gmail thread wakes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Automatic {
+    /// A delivery failure notice: the message did not arrive.
+    Bounce,
+    /// An out-of-office or other automatic answer: nobody has read it yet.
+    AutoReply,
+}
+
+static BOUNCE_SUBJECT: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)^\s*(?:undeliverable|undelivered mail|delivery status notification|mail delivery (?:failed|failure|subsystem)|returned mail|delivery has failed|failure notice|message not delivered)")
+        .expect("valid regex")
+});
+static AUTO_SUBJECT: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)^\s*(?:(?:automatic|auto)[ -]?(?:reply|response|answer)|autoreply|out of (?:the )?office|away from (?:the )?office|on (?:annual )?leave|vacation (?:reply|response))")
+        .expect("valid regex")
+});
+
+/// Is this mail a machine talking: a bounce, or an automatic answer? Neither is the answer someone is waiting for.
+pub fn automatic(sender: &str, subject: &str, signals_json: &str) -> Option<Automatic> {
+    let signals: Vec<String> = serde_json::from_str(signals_json).unwrap_or_default();
+    let has = |s: &str| signals.iter().any(|x| x == s);
+    let local = sender.split('@').next().unwrap_or_default().to_lowercase();
+    if matches!(local.as_str(), "mailer-daemon" | "postmaster") || has(crate::bulk::DELIVERY_STATUS) || BOUNCE_SUBJECT.is_match(subject) {
+        return Some(Automatic::Bounce);
+    }
+    if is_automated_address(sender) || has(crate::bulk::AUTO_SUBMITTED) || has(crate::bulk::AUTO_REPLY) || AUTO_SUBJECT.is_match(subject) {
+        return Some(Automatic::AutoReply);
+    }
+    None
+}
+
+/// An email arrived in a stored thread: a watch on that Gmail thread wakes. A bounce tells the owner instead,
+/// and an automatic answer is ignored; both leave the watch waiting.
 pub async fn on_inbound_email(conn: &mut SqliteConnection, ws: &str, source_id: &str, thread_id: &str, message_id: &str) -> sqlx::Result<()> {
+    let head: Option<(String, String, String)> =
+        sqlx::query_as("SELECT sender_address, subject, bulk_signals FROM email_messages WHERE id = ?1").bind(message_id).fetch_optional(&mut *conn).await?;
+    let auto = head.and_then(|(sender, subject, signals)| automatic(&sender, &subject, &signals));
+    if auto == Some(Automatic::AutoReply) {
+        return Ok(());
+    }
     let ids: Vec<String> = sqlx::query_scalar(&format!(
         "SELECT w.id FROM watches w JOIN email_threads t ON t.provider_thread_id = w.provider_thread_id AND t.source_id = w.source_id
          WHERE w.workspace_id = ?1 AND w.source_id = ?2 AND t.id = ?3 AND {LISTENING}"
@@ -142,7 +184,7 @@ pub async fn on_inbound_email(conn: &mut SqliteConnection, ws: &str, source_id: 
     .bind(thread_id)
     .fetch_all(&mut *conn)
     .await?;
-    wake(conn, ws, ids, "email", message_id).await
+    wake(conn, ws, ids, if auto == Some(Automatic::Bounce) { "bounce" } else { "email" }, message_id).await
 }
 
 /// A recipient answered an in-app message in this thread.
@@ -222,6 +264,10 @@ async fn read_answer(state: &AppState, w: &Watch, what: &str, reference: &str) -
             .bind(&w.workspace_id)
             .fetch_optional(&state.db)
             .await?;
+            let signals: Option<String> = sqlx::query_scalar("SELECT bulk_signals FROM email_messages WHERE id = ?1").bind(reference).fetch_optional(&state.db).await?;
+            if row.as_ref().is_some_and(|(address, _, subject, _)| automatic(address, subject, signals.as_deref().unwrap_or("[]")).is_some()) {
+                return Ok(None);
+            }
             Ok(row.map(|(address, name, subject, body)| {
                 let clean = knowledge::clean_body(&body);
                 Answer {
@@ -274,12 +320,16 @@ async fn read_answer(state: &AppState, w: &Watch, what: &str, reference: &str) -
     }
 }
 
-/// `WATCH_REPLY`: post the answer into the person's Meera conversation.
+/// `WATCH_REPLY`: post the answer into the person's Meera conversation. The status change and the report are one
+/// transaction, so a failure is retried instead of dropped.
 pub async fn reply_job(state: &AppState, payload: &Value) -> Result<(), JobError> {
     let (ws, id) = job_fields(payload)?;
     let what = payload.get("what").and_then(Value::as_str).unwrap_or_default();
     let reference = payload.get("ref").and_then(Value::as_str).unwrap_or_default();
     let Some(w) = get(state, &ws, &id).await? else { return Ok(()) };
+    if what == "bounce" {
+        return bounce_job(state, &w, reference).await;
+    }
     if w.status == "closed" || (w.status == "replied" && w.kind != "ticket") {
         return Ok(());
     }
@@ -335,25 +385,117 @@ pub async fn reply_job(state: &AppState, payload: &Value) -> Result<(), JobError
         },
     )
     .await?;
-    tx.commit().await?;
     let citations: Vec<Citation> = answer.citation.into_iter().collect();
-    super::report(state, &ws, &w.user_id, &text, &citations, &answer.links).await?;
+    super::report_in(&mut tx, &ws, &w.user_id, &text, &citations, &answer.links).await?;
     let headline = if w.kind == "ticket" { format!("{} replied", w.counterpart) } else { format!("{} answered", answer.who) };
-    super::inapp::notify_owner(state, &ws, &w.user_id, w.agent_id.as_deref(), &headline, &sentence(&text, 300), json!({ "kind": "meera" }), false).await?;
+    super::inapp::notify_in(&mut tx, &ws, &w.user_id, w.agent_id.as_deref(), &headline, &sentence(&text, 300), json!({ "kind": "meera" }), false).await?;
+    tx.commit().await?;
     Ok(())
 }
 
-/// `WATCH_NUDGE`: nobody answered in time. Nudge once, then tell the person.
+/// The email bounced: tell the person. The watch keeps waiting (a bounce is not an answer).
+async fn bounce_job(state: &AppState, w: &Watch, reference: &str) -> Result<(), JobError> {
+    if w.status == "closed" {
+        return Ok(());
+    }
+    let text = format!(
+        "Your message to {} bounced: “{}”. Nobody has read it, so the address may be wrong or the mailbox full.",
+        w.counterpart,
+        sentence(&w.title, 80)
+    );
+    let now = now_ms();
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
+    if w.kind == "ticket" {
+        sqlx::query("UPDATE support_tickets SET status = 'open', last_summary = 'The email bounced.', last_update_at = ?1 WHERE workspace_id = ?2 AND watch_id = ?3")
+            .bind(now)
+            .bind(&w.workspace_id)
+            .bind(&w.id)
+            .execute(&mut *tx)
+            .await?;
+    }
+    audit::record(
+        &mut tx,
+        Entry {
+            workspace_id: &w.workspace_id,
+            actor: Actor::System,
+            action: "message.bounced",
+            entity_type: "watch",
+            entity_id: &w.id,
+            message_id: Some(reference),
+            metadata: json!({ "kind": w.kind }),
+        },
+    )
+    .await?;
+    super::report_in(&mut tx, &w.workspace_id, &w.user_id, &text, &[], &json!([{ "kind": "message", "id": reference, "label": "Open the bounce notice" }])).await?;
+    let headline = format!("Your message to {} bounced", w.counterpart);
+    super::inapp::notify_in(&mut tx, &w.workspace_id, &w.user_id, w.agent_id.as_deref(), &headline, &text, json!({ "kind": "message", "id": reference }), false).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+/// The reminder text a nudge would send, and whether the same rules as the original message let it go on its own.
+fn reminder_needs_person(subject: &str, body: &str, kinds: &[Kind]) -> Option<String> {
+    let injected = super::rules::injection_signal(&[subject, body]);
+    super::rules::approval_reason(&super::rules::Facts { recipients: kinds, level: 2, subject, body, attachments_out: false, injected, person_authored: false })
+}
+
+struct FollowUp {
+    to_address: String,
+    to_label: String,
+    kind: Kind,
+    subject: String,
+    body: String,
+    reason: String,
+    in_reply_to: Option<String>,
+    thread: Option<String>,
+    mailbox: super::email::Mailbox,
+}
+
+enum Plan {
+    /// The original was never delivered (stopped, still waiting for an OK, not sent): there is nothing to nudge.
+    Close,
+    Text(String),
+    InApp { recipients: Vec<String>, subject: String, body: String },
+    Email(Box<FollowUp>),
+}
+
+/// `WATCH_NUDGE`: nobody answered in time. Nudge once, then tell the person. Only a delivered message is nudged;
+/// the nudge follows the same approval rules as the original, and the nudge and the report are one transaction.
 pub async fn nudge_job(state: &AppState, payload: &Value) -> Result<(), JobError> {
     let (ws, id) = job_fields(payload)?;
     let Some(w) = get(state, &ws, &id).await? else { return Ok(()) };
     if w.status != "waiting" || w.nudged_at.is_some() {
         return Ok(());
     }
+    let plan = match w.channel.as_str() {
+        "in_app" => plan_in_app(state, &w).await?,
+        "email" => plan_email(state, &w).await?,
+        _ => Plan::Text(format!("It is still with {}.", w.counterpart)),
+    };
+    let now = now_ms();
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
+    if matches!(plan, Plan::Close) {
+        let closed = sqlx::query("UPDATE watches SET status = 'closed', last_update_at = ?1 WHERE id = ?2 AND status = 'waiting'").bind(now).bind(&id).execute(&mut *tx).await?.rows_affected();
+        if closed == 1 {
+            sqlx::query("UPDATE support_tickets SET status = 'resolved', last_summary = 'The message was never delivered.', last_update_at = ?1 WHERE workspace_id = ?2 AND watch_id = ?3")
+                .bind(now)
+                .bind(&ws)
+                .bind(&id)
+                .execute(&mut *tx)
+                .await?;
+            audit::record(
+                &mut tx,
+                Entry { workspace_id: &ws, actor: Actor::System, action: "message.nudge_skipped", entity_type: "watch", entity_id: &id, message_id: None, metadata: json!({ "reason": "not delivered" }) },
+            )
+            .await?;
+        }
+        tx.commit().await?;
+        return Ok(());
+    }
     let claimed = sqlx::query("UPDATE watches SET status = 'nudged', nudged_at = ?1, last_update_at = ?1 WHERE id = ?2 AND status = 'waiting' AND nudged_at IS NULL")
-        .bind(now_ms())
+        .bind(now)
         .bind(&id)
-        .execute(&state.db)
+        .execute(&mut *tx)
         .await?
         .rows_affected()
         == 1;
@@ -362,129 +504,201 @@ pub async fn nudge_job(state: &AppState, payload: &Value) -> Result<(), JobError
     }
     let hours = w.nudge_hours;
     let waited = if hours % 24 == 0 && hours >= 24 { format!("{} day{}", hours / 24, if hours == 24 { "" } else { "s" }) } else { format!("{hours} hours") };
-    let done = match w.channel.as_str() {
-        "in_app" => nudge_in_app(state, &w).await?,
-        "email" => nudge_email(state, &w).await?,
-        _ => format!("It is still with {}.", w.counterpart),
+    let done = match plan {
+        Plan::Close => unreachable!("handled above"),
+        Plan::Text(t) => t,
+        Plan::InApp { recipients, subject, body } => {
+            let key = w.thread_key.as_deref();
+            for r in &recipients {
+                super::inapp::insert(
+                    &mut tx,
+                    super::inapp::NewMessage {
+                        ws: &ws,
+                        thread_key: key,
+                        sender_user_id: Some(&w.user_id),
+                        sender_agent_id: w.agent_id.as_deref(),
+                        recipient: r,
+                        team_id: None,
+                        kind: "message",
+                        subject: &subject,
+                        body: &body,
+                        link: Value::Null,
+                        via: "agent",
+                        deliver_at: now,
+                    },
+                )
+                .await?;
+            }
+            format!("I nudged {} once. I will tell you as soon as they answer.", w.counterpart)
+        }
+        Plan::Email(f) => {
+            let new = super::email::NewEmail {
+                ws: &ws,
+                owner_user_id: Some(&w.user_id),
+                agent_id: w.agent_id.as_deref(),
+                to_address: &f.to_address,
+                to_label: &f.to_label,
+                kind: f.kind,
+                subject: &f.subject,
+                body: &f.body,
+                authored_by: "agent",
+                approval_reason: Some(&f.reason),
+                in_reply_to: f.in_reply_to.as_deref(),
+                provider_thread_id: f.thread.as_deref(),
+            };
+            let out = super::email::insert(&mut tx, &new, &f.mailbox).await?;
+            sqlx::query("UPDATE outbound_emails SET watch_id = ?1 WHERE id = ?2").bind(&id).bind(&out).execute(&mut *tx).await?;
+            format!("I wrote a short follow-up to {}. It needs your OK before it goes, because {}: open Messages to send it.", w.counterpart, f.reason)
+        }
     };
     let text = format!("No answer yet on “{}” after {waited}. {done}", w.title);
-    super::report(state, &ws, &w.user_id, &text, &[], &json!([])).await?;
-    super::inapp::notify_owner(state, &ws, &w.user_id, w.agent_id.as_deref(), &format!("Still waiting: {}", sentence(&w.title, 80)), &text, json!({ "kind": "meera" }), false).await?;
-    let mut conn = state.db.acquire().await?;
+    super::report_in(&mut tx, &ws, &w.user_id, &text, &[], &json!([])).await?;
+    super::inapp::notify_in(&mut tx, &ws, &w.user_id, w.agent_id.as_deref(), &format!("Still waiting: {}", sentence(&w.title, 80)), &text, json!({ "kind": "meera" }), false).await?;
     audit::record(
-        &mut conn,
-        Entry {
-            workspace_id: &ws,
-            actor: Actor::System,
-            action: "message.nudged",
-            entity_type: "watch",
-            entity_id: &id,
-            message_id: None,
-            metadata: json!({ "kind": w.kind, "channel": w.channel }),
-        },
+        &mut tx,
+        Entry { workspace_id: &ws, actor: Actor::System, action: "message.nudged", entity_type: "watch", entity_id: &id, message_id: None, metadata: json!({ "kind": w.kind, "channel": w.channel }) },
     )
     .await?;
+    tx.commit().await?;
     Ok(())
 }
 
-async fn nudge_in_app(state: &AppState, w: &Watch) -> Result<String, JobError> {
-    let Some(key) = w.thread_key.as_deref() else { return Ok("I could not find who to nudge.".into()) };
+async fn plan_in_app(state: &AppState, w: &Watch) -> Result<Plan, JobError> {
+    let Some(key) = w.thread_key.as_deref() else { return Ok(Plan::Close) };
     let recipients: Vec<String> = sqlx::query_scalar(
-        "SELECT DISTINCT recipient_user_id FROM in_app_messages WHERE workspace_id = ?1 AND thread_key = ?2 AND sender_user_id = ?3",
+        "SELECT DISTINCT recipient_user_id FROM in_app_messages
+         WHERE workspace_id = ?1 AND thread_key = ?2 AND sender_user_id = ?3 AND cancelled_at IS NULL AND needs_check = 0 AND deliver_at <= ?4",
     )
     .bind(&w.workspace_id)
     .bind(key)
     .bind(&w.user_id)
+    .bind(now_ms())
     .fetch_all(&state.db)
     .await?;
-    let body = format!("A gentle reminder about this question: {}", w.question);
-    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
-    for r in &recipients {
-        super::inapp::insert(
-            &mut tx,
-            super::inapp::NewMessage {
-                ws: &w.workspace_id,
-                thread_key: Some(key),
-                sender_user_id: Some(&w.user_id),
-                sender_agent_id: w.agent_id.as_deref(),
-                recipient: r,
-                team_id: None,
-                kind: "message",
-                subject: &format!("Reminder: {}", sentence(&w.title, 120)),
-                body: &body,
-                link: Value::Null,
-                via: "agent",
-                deliver_at: now_ms(),
-            },
-        )
-        .await?;
+    if recipients.is_empty() {
+        return Ok(Plan::Close);
     }
-    tx.commit().await?;
-    Ok(format!("I nudged {} once. I will tell you as soon as they answer.", w.counterpart))
+    let subject = format!("Reminder: {}", sentence(&w.title, 120));
+    let body = format!("A gentle reminder about this question: {}", w.question);
+    let kinds = vec![Kind::Member; recipients.len()];
+    let Some(reason) = reminder_needs_person(&subject, &body, &kinds) else { return Ok(Plan::InApp { recipients, subject, body }) };
+    if let [only] = recipients.as_slice()
+        && let Some(person) = super::recipients::member(&state.db, &w.workspace_id, only).await?
+    {
+        return follow_up_email(state, w, person, subject, body, &reason, None, None).await;
+    }
+    Ok(Plan::Text(format!("I did not send a reminder, because {reason}.")))
 }
 
-async fn nudge_email(state: &AppState, w: &Watch) -> Result<String, JobError> {
-    let Some(out) = &w.outbound_email_id else { return Ok("I could not find the email to follow up.".into()) };
-    let Some(sent) = super::email::get(state, &w.workspace_id, out).await? else { return Ok("I could not find the email to follow up.".into()) };
+async fn plan_email(state: &AppState, w: &Watch) -> Result<Plan, JobError> {
+    let Some(out) = &w.outbound_email_id else { return Ok(Plan::Close) };
+    let Some(sent) = super::email::get(state, &w.workspace_id, out).await? else { return Ok(Plan::Close) };
+    if sent.status != "sent" {
+        return Ok(Plan::Close);
+    }
     let person = super::recipients::classify(&state.db, &w.workspace_id, &sent.to_address).await?;
+    let subject = format!("Re: {}", sent.subject.trim_start_matches("Re: "));
+    let body = format!("Hello,\n\nI am following up on my earlier email “{}”. Could you let me know where this stands?\n\nThank you.", sentence(&sent.subject, 120));
     if let (Kind::Member, Some(uid)) = (person.kind, person.user_id.as_deref()) {
-        let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
-        super::inapp::insert(
-            &mut tx,
-            super::inapp::NewMessage {
-                ws: &w.workspace_id,
-                thread_key: None,
-                sender_user_id: Some(&w.user_id),
-                sender_agent_id: w.agent_id.as_deref(),
-                recipient: uid,
-                team_id: None,
-                kind: "message",
-                subject: &format!("Reminder: {}", sentence(&sent.subject, 120)),
-                body: &format!("A gentle reminder about my email “{}”: {}", sentence(&sent.subject, 80), w.question),
-                link: Value::Null,
-                via: "agent",
-                deliver_at: now_ms(),
-            },
-        )
-        .await?;
-        tx.commit().await?;
-        return Ok(format!("I nudged {} once. I will tell you as soon as they answer.", w.counterpart));
-    }
-    let body = format!(
-        "Hello,\n\nI am following up on my earlier email “{}”. Could you let me know where this stands?\n\nThank you.",
-        sentence(&sent.subject, 120)
-    );
-    let reason = "it is a follow-up to someone outside your workspace";
-    let follow_up = super::email::create(
-        state,
-        super::email::NewEmail {
-            ws: &w.workspace_id,
-            owner_user_id: Some(&w.user_id),
-            agent_id: w.agent_id.as_deref(),
-            to_address: &sent.to_address,
-            to_label: &sent.to_label,
-            kind: person.kind,
-            subject: &format!("Re: {}", sent.subject.trim_start_matches("Re: ")),
-            body: &body,
-            authored_by: "agent",
-            approval_reason: Some(reason),
-            in_reply_to: sent.rfc_message_id.as_deref(),
-            provider_thread_id: sent.provider_thread_id.as_deref(),
-        },
-    )
-    .await
-    .map_err(|e| match e {
-        AppError::Internal(_) | AppError::Unavailable => JobError::Retry(e.to_string()),
-        other => JobError::Permanent(other.to_string()),
-    });
-    match follow_up {
-        Ok(f) => {
-            sqlx::query("UPDATE outbound_emails SET watch_id = ?1 WHERE id = ?2").bind(&w.id).bind(&f.id).execute(&state.db).await?;
-            Ok(format!("I wrote a short follow-up to {}. It needs your OK before it goes, because {reason}: open Messages to send it.", w.counterpart))
+        let reminder_subject = format!("Reminder: {}", sentence(&sent.subject, 120));
+        let reminder_body = format!("A gentle reminder about my email “{}”: {}", sentence(&sent.subject, 80), w.question);
+        if reminder_needs_person(&reminder_subject, &reminder_body, &[Kind::Member]).is_none() {
+            return Ok(Plan::InApp { recipients: vec![uid.to_string()], subject: reminder_subject, body: reminder_body });
         }
-        Err(JobError::Retry(m)) => Err(JobError::Retry(m)),
-        Err(_) => Ok("I could not prepare a follow-up automatically.".into()),
     }
+    let reason = reminder_needs_person(&subject, &body, &[person.kind]).unwrap_or_else(|| "it is a follow-up to someone outside your workspace".into());
+    follow_up_email(state, w, person, subject, body, &reason, sent.rfc_message_id.clone(), sent.provider_thread_id.clone()).await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn follow_up_email(
+    state: &AppState,
+    w: &Watch,
+    person: super::recipients::Person,
+    subject: String,
+    body: String,
+    reason: &str,
+    in_reply_to: Option<String>,
+    thread: Option<String>,
+) -> Result<Plan, JobError> {
+    let Some(address) = person.address.clone() else { return Ok(Plan::Text("I could not prepare a follow-up automatically.".into())) };
+    let check = super::email::NewEmail {
+        ws: &w.workspace_id,
+        owner_user_id: Some(&w.user_id),
+        agent_id: w.agent_id.as_deref(),
+        to_address: &address,
+        to_label: &person.label,
+        kind: person.kind,
+        subject: &subject,
+        body: &body,
+        authored_by: "agent",
+        approval_reason: Some(reason),
+        in_reply_to: in_reply_to.as_deref(),
+        provider_thread_id: thread.as_deref(),
+    };
+    match super::email::validate(state, &check).await {
+        Ok(mailbox) => Ok(Plan::Email(Box::new(FollowUp {
+            to_address: address,
+            to_label: person.label,
+            kind: person.kind,
+            subject,
+            body,
+            reason: reason.to_string(),
+            in_reply_to,
+            thread,
+            mailbox,
+        }))),
+        Err(AppError::Internal(e)) => Err(JobError::Retry(e.to_string())),
+        Err(AppError::Unavailable) => Err(JobError::Retry("unavailable".into())),
+        Err(_) => Ok(Plan::Text("I could not prepare a follow-up automatically.".into())),
+    }
+}
+
+/// An email that never went out (stopped, blocked) is not waiting on anyone: close what watched it.
+pub async fn close_for_outbound(conn: &mut SqliteConnection, ws: &str, outbound_id: &str, note: &str) -> sqlx::Result<()> {
+    let now = now_ms();
+    let ids: Vec<String> = sqlx::query_scalar(
+        "UPDATE watches SET status = 'closed', last_update_at = ?1 WHERE workspace_id = ?2 AND outbound_email_id = ?3 AND status IN ('waiting','nudged') RETURNING id",
+    )
+    .bind(now)
+    .bind(ws)
+    .bind(outbound_id)
+    .fetch_all(&mut *conn)
+    .await?;
+    for id in ids {
+        sqlx::query("UPDATE support_tickets SET status = 'resolved', last_summary = ?1, last_update_at = ?2 WHERE workspace_id = ?3 AND watch_id = ?4")
+            .bind(note)
+            .bind(now)
+            .bind(ws)
+            .bind(id)
+            .execute(&mut *conn)
+            .await?;
+    }
+    Ok(())
+}
+
+/// After an in-app message was stopped or held back: when nothing of that conversation reached anyone, stop watching it.
+pub async fn close_if_nothing_delivered(conn: &mut SqliteConnection, ws: &str, message_id: &str) -> sqlx::Result<()> {
+    let row: Option<(String, Option<String>)> =
+        sqlx::query_as("SELECT thread_key, sender_user_id FROM in_app_messages WHERE id = ?1 AND workspace_id = ?2").bind(message_id).bind(ws).fetch_optional(&mut *conn).await?;
+    let Some((key, sender)) = row else { return Ok(()) };
+    let left: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM in_app_messages WHERE workspace_id = ?1 AND thread_key = ?2 AND sender_user_id IS ?3 AND cancelled_at IS NULL",
+    )
+    .bind(ws)
+    .bind(&key)
+    .bind(&sender)
+    .fetch_one(&mut *conn)
+    .await?;
+    if left == 0 {
+        sqlx::query("UPDATE watches SET status = 'closed', last_update_at = ?1 WHERE workspace_id = ?2 AND thread_key = ?3 AND channel = 'in_app' AND status IN ('waiting','nudged')")
+            .bind(now_ms())
+            .bind(ws)
+            .bind(key)
+            .execute(&mut *conn)
+            .await?;
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------- what the person sees

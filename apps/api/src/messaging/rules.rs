@@ -22,7 +22,7 @@ use crate::{
 /// Money, banks and security: never sent without a person, whoever it goes to.
 static MONEY_SECURITY: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-        r"(?i)(₹|\$|€|£|\b(inr|usd|eur|rs\.?|lakhs?|crores?|salary|salaries|payroll|payments?|invoices?|refunds?|wire|transfers?|neft|rtgs|imps|upi|ifsc|swift|iban|bank|banking|account (number|no\.?)|a/c|card (number|no\.?|ending)|credit card|debit card|cvv|otp|one[- ]time (password|code)|pin|password|passcode|passwords|credentials?|api[- ]keys?|secrets?|tokens?|2fa|two[- ]factor|login|sign[- ]in)\b)",
+        r"(?i)(₹|\$|€|£|\b(inr|usd|eur|rs\.?|lakhs?|crores?|salary|salaries|payroll|pay|paid|payments?|amount|invoices?|refunds?|wire|transfers?|neft|rtgs|imps|upi|ifsc|swift|iban|bank|banking|account (number|no\.?)|a/c|card (number|no\.?|ending)|credit card|debit card|cvv|otp|one[- ]time (password|code)|pin|password|passcode|passwords|credentials?|api[- ]keys?|secrets?|tokens?|2fa|two[- ]factor|login|sign[- ]in)\b)",
     )
     .expect("valid regex")
 });

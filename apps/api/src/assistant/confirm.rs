@@ -249,6 +249,9 @@ async fn personal_agent_id(state: &AppState, ws: &str, user: &AuthUser) -> AppRe
 async fn send_message(state: &AppState, ws: &str, user: &AuthUser, params: &Value) -> AppResult<Done> {
     let to = str_param(params, "to")?;
     let target = messaging::recipients::resolve(&state.db, ws, to).await.map_err(AppError::BadRequest)?;
+    if !messaging::recipients::matches_pin(&target, params.get("pinned")) {
+        return Err(AppError::Conflict("who this goes to has changed since the card was prepared. Ask me again so you can check it.".into()));
+    }
     let ask = params.get("ask").and_then(Value::as_bool) == Some(true);
     let body = str_param(params, "body")?;
     let agent_id = personal_agent_id(state, ws, user).await?;

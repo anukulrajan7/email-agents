@@ -34,8 +34,8 @@ pub async fn append(
 
 /// Like `append`, with links under the message (the email Meera sent, the in-app message).
 #[allow(clippy::too_many_arguments)]
-pub async fn append_with_links(
-    db: &SqlitePool,
+pub async fn append_with_links<'e, E: sqlx::SqliteExecutor<'e>>(
+    db: E,
     ws: &str,
     user_id: &str,
     role: &str,

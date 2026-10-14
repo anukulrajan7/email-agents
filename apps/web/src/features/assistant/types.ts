@@ -2,7 +2,7 @@ export type Citation = { message_id: string; subject: string; attachment_id?: st
 
 export type PlanAction = 'draft_reply' | 'start_agent' | 'approve' | 'decline' | 'create_automation' | 'snooze_alert' | 'send_message' | 'contact_support' | 'hand_to_desk';
 
-export type PlanPreview = { to: string; address?: string | null; audience: string; outside: boolean; subject: string; body: string };
+export type PlanPreview = { to: string; address?: string | null; audience: string; outside: boolean; subject: string; body: string; source?: string | null };
 
 export type PlanItem = {
   id: string;
