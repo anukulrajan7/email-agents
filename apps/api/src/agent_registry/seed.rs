@@ -265,37 +265,42 @@ async fn repoint_work(conn: &mut SqliteConnection, ws: &str, from: &str, to: &Ag
     Ok(())
 }
 
-/// Meera and the field experts act on their own by default. A workspace whose admin never saved the
-/// agent's settings moves to "send automatically" and its untuned helpers to level 3 (behind the hold and
-/// the sensitive-case floor); a workspace whose admin chose is left alone, and so is any helper an
-/// incident demoted. Idempotent: it only acts while the send setting is still the untouched "ask".
-pub async fn adopt_automatic_defaults(conn: &mut SqliteConnection, ws: &str) -> sqlx::Result<()> {
-    let flipped = sqlx::query(
-        "UPDATE workspace_agents SET permissions_json = json_set(permissions_json, '$.send', 'auto')
-         WHERE workspace_id = ?1 AND updated_by IS NULL AND json_valid(permissions_json) AND json_extract(permissions_json, '$.send') = 'ask'",
-    )
-    .bind(ws)
-    .execute(&mut *conn)
-    .await?
-    .rows_affected();
-    if flipped == 0 {
-        return Ok(());
-    }
+/// Active, untuned helpers that should be acting on their own but are not: Meera (lead and personal) and the
+/// experts seeded at level 3, still at their seeded cap, in a workspace whose send setting is "auto".
+/// Anyone a person touched (a user-actor level or limit change) or an incident demoted is left alone.
+async fn automatic_candidates(conn: &mut SqliteConnection, ws: &str) -> sqlx::Result<Vec<(String, i64)>> {
     let keys: Vec<&str> = templates::TEMPLATES.iter().filter(|t| t.initial_level >= 3).map(|t| t.key).collect();
-    let candidates: Vec<(String, i64)> = sqlx::query_as(
+    sqlx::query_as(
         "SELECT a.id, a.autonomy_level FROM agents a
          WHERE a.workspace_id = ?1 AND a.status = 'active' AND a.tuned = 0 AND a.autonomy_level < 3 AND a.autonomy_cap BETWEEN 1 AND 2
+           AND EXISTS (SELECT 1 FROM workspace_agents w WHERE w.workspace_id = a.workspace_id AND json_valid(w.permissions_json)
+                       AND json_extract(w.permissions_json, '$.send') = 'auto')
            AND (a.kind = 'lead' OR a.scope = 'personal' OR a.template_key IN (SELECT value FROM json_each(?2)))
            AND NOT EXISTS (SELECT 1 FROM autonomy_changes c WHERE c.agent_id = a.id AND (c.actor LIKE 'user:%' OR (c.to_level < c.from_level AND c.actor = 'system')))",
     )
     .bind(ws)
     .bind(serde_json::json!(keys).to_string())
-    .fetch_all(&mut *conn)
+    .fetch_all(conn)
+    .await
+}
+
+/// Meera and the field experts act on their own by default. A workspace whose admin never saved the
+/// agent's settings moves from "ask" to "send automatically". Whoever chose "auto", the untuned helpers
+/// still at their seeded limit then move to level 3 (behind the hold and the sensitive-case floor), each
+/// change recorded. A workspace whose admin chose "ask" is left alone, and so is any helper a person
+/// limited or an incident demoted. Idempotent.
+pub async fn adopt_automatic_defaults(conn: &mut SqliteConnection, ws: &str) -> sqlx::Result<()> {
+    sqlx::query(
+        "UPDATE workspace_agents SET permissions_json = json_set(permissions_json, '$.send', 'auto')
+         WHERE workspace_id = ?1 AND updated_by IS NULL AND json_valid(permissions_json) AND json_extract(permissions_json, '$.send') = 'ask'",
+    )
+    .bind(ws)
+    .execute(&mut *conn)
     .await?;
-    for (id, level) in candidates {
+    for (id, level) in automatic_candidates(conn, ws).await? {
         store::set_autonomy_cap(conn, ws, &id, 3).await?;
         if store::set_autonomy_level(conn, ws, &id, 3).await? {
-            crate::evals::gate::record_change(conn, ws, &id, level, 3, "Helpers act on their own by default", serde_json::json!({}), "system").await?;
+            crate::evals::gate::record_change(conn, ws, &id, level, 3, "Automatic by default", serde_json::json!({}), "system").await?;
         }
     }
     Ok(())
@@ -343,7 +348,7 @@ async fn incomplete(conn: &mut SqliteConnection, ws: &str) -> sqlx::Result<bool>
     .bind(serde_json::json!(retired).to_string())
     .fetch_one(&mut *conn)
     .await?;
-    if pending {
+    if pending || !automatic_candidates(conn, ws).await?.is_empty() {
         return Ok(true);
     }
     let have: Vec<(String, Option<i64>, bool)> =

@@ -114,7 +114,7 @@ async fn the_migration_backfills_lead_personal_agents_and_the_hrms_roster() {
     }
     db::migrate(&pool).await.unwrap();
 
-    for (ws, level) in [("ws_auto", 2), ("ws_ask", 1), ("ws_default", 3)] {
+    for (ws, level) in [("ws_auto", 3), ("ws_ask", 1), ("ws_default", 3)] {
         let lead = store::lead(&pool, ws).await.unwrap().expect("a lead");
         assert_eq!((lead.name.as_str(), lead.avatar.as_str(), lead.autonomy_level, lead.autonomy_cap), ("Asha", "AS", level, level), "{ws}: an admin's choice is kept, an untouched default moves to acting on its own");
         assert_eq!(lead.active_version, Some(2), "the template upgrade follows the migration");
