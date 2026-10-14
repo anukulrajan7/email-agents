@@ -271,6 +271,16 @@ export type MessageDetail = {
   contact_memories: Memory[];
   insight?: Insight | null;
   replied?: boolean;
+  timesheet_records?: TimesheetChip[];
+};
+
+/** A timesheet recorded from an email (the full record is in the HRMS Timesheets page). */
+export type TimesheetChip = {
+  id: string;
+  status: 'recorded' | 'replaced' | 'needs_check';
+  period_start: string;
+  period_end: string;
+  total_hours: number | null;
 };
 
 export type ReviewItem = {

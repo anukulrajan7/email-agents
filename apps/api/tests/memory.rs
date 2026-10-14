@@ -92,13 +92,13 @@ async fn memory_learns_profiles_retrieves_notes_and_learns_from_edits() {
     let base = format!("/api/v1/workspaces/{ws}");
 
     // 1. Contact profile is learned from the email itself.
-    h.email(&ws, &src, json!({})).await; // default: "Priya Sharma <priya.sharma@example.com>", September timesheet
+    h.email(&ws, &src, json!({"subject": "Leave request for Friday", "body_text": "Hi, may I take Friday off? Thanks, Priya"})).await;
     let (_, contacts) = h.call("GET", &format!("{base}/contacts"), ADMIN, None).await;
     let priya = &contacts["items"][0];
     assert_eq!(priya["email"], "priya.sharma@example.com");
     assert_eq!(priya["display_name"], "Priya Sharma");
     assert_eq!(priya["message_count"], 1);
-    assert_eq!(priya["top_categories"][0], json!({"category":"timesheet","count":1}));
+    assert_eq!(priya["top_categories"][0], json!({"category":"leave","count":1}));
     let detail = h.latest_message(&ws).await;
     assert_eq!(detail["contact"]["display_name"], "Priya Sharma");
     assert_eq!(detail["contact_memories"], json!([]));

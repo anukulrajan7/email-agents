@@ -28,6 +28,7 @@ pub struct Person {
     pub client: Option<String>,
     pub manager_id: Option<String>,
     pub role: Option<String>,
+    pub employee_code: Option<String>,
     pub joining_date: Option<String>,
     pub daily_target: Option<i64>,
     pub weekly_target: Option<i64>,
@@ -60,6 +61,7 @@ struct PersonRow {
     client: Option<String>,
     manager_id: Option<String>,
     role: Option<String>,
+    employee_code: Option<String>,
     joining_date: Option<String>,
     daily_target: Option<i64>,
     weekly_target: Option<i64>,
@@ -67,7 +69,7 @@ struct PersonRow {
     active: bool,
 }
 
-const COLUMNS: &str = "id, name, employee_type, client, manager_id, role, joining_date, daily_target, weekly_target, source_id, active";
+const COLUMNS: &str = "id, name, employee_type, client, manager_id, role, employee_code, joining_date, daily_target, weekly_target, source_id, active";
 
 async fn load(db: &SqlitePool, workspace_id: &str, only: Option<&str>, include_inactive: bool) -> sqlx::Result<Vec<Person>> {
     let rows: Vec<PersonRow> = sqlx::query_as(&format!(
@@ -99,6 +101,7 @@ async fn load(db: &SqlitePool, workspace_id: &str, only: Option<&str>, include_i
             client: r.client,
             manager_id: r.manager_id,
             role: r.role,
+            employee_code: r.employee_code,
             joining_date: r.joining_date,
             daily_target: r.daily_target,
             weekly_target: r.weekly_target,
@@ -140,6 +143,8 @@ pub struct Fields {
     #[serde(default, deserialize_with = "nullable")]
     pub role: Option<Option<String>>,
     #[serde(default, deserialize_with = "nullable")]
+    pub employee_code: Option<Option<String>>,
+    #[serde(default, deserialize_with = "nullable")]
     pub joining_date: Option<Option<String>>,
     #[serde(default, deserialize_with = "nullable")]
     pub daily_target: Option<Option<i64>>,
@@ -176,6 +181,7 @@ pub struct Draft {
     pub client: Option<String>,
     pub manager_id: Option<String>,
     pub role: Option<String>,
+    pub employee_code: Option<String>,
     pub joining_date: Option<String>,
     pub daily_target: Option<i64>,
     pub weekly_target: Option<i64>,
@@ -192,6 +198,7 @@ impl Draft {
             client: None,
             manager_id: None,
             role: None,
+            employee_code: None,
             joining_date: None,
             daily_target: None,
             weekly_target: None,
@@ -208,6 +215,7 @@ impl Draft {
             client: p.client.clone(),
             manager_id: p.manager_id.clone(),
             role: p.role.clone(),
+            employee_code: p.employee_code.clone(),
             joining_date: p.joining_date.clone(),
             daily_target: p.daily_target,
             weekly_target: p.weekly_target,
@@ -267,6 +275,9 @@ pub fn merge(base: Draft, f: Fields, ctx: &Context) -> Result<Draft, FieldError>
     if let Some(r) = f.role {
         d.role = blank_to_none(r);
     }
+    if let Some(c) = f.employee_code {
+        d.employee_code = blank_to_none(c);
+    }
     if let Some(j) = f.joining_date {
         d.joining_date = blank_to_none(j);
     }
@@ -311,6 +322,22 @@ pub async fn validate(conn: &mut SqliteConnection, workspace_id: &str, id: Optio
             && Some(other.as_str()) != id
         {
             return err("emails", format!("{e} already belongs to {name}"));
+        }
+    }
+    if let Some(code) = &d.employee_code {
+        if code.chars().count() > 24 || code.contains(char::is_whitespace) {
+            return err("employee_code", "an employee ID is at most 24 characters with no spaces");
+        }
+        let owner: Option<(String, String)> = sqlx::query_as("SELECT id, name FROM people WHERE workspace_id = ?1 AND lower(employee_code) = lower(?2)")
+            .bind(workspace_id)
+            .bind(code)
+            .fetch_optional(&mut *conn)
+            .await
+            .map_err(db_err)?;
+        if let Some((other, name)) = owner
+            && Some(other.as_str()) != id
+        {
+            return err("employee_code", format!("{code} already belongs to {name}"));
         }
     }
     if d.role.as_ref().is_some_and(|r| r.chars().count() > 60) || d.client.as_ref().is_some_and(|c| c.chars().count() > 100) {
@@ -386,8 +413,8 @@ pub async fn insert(conn: &mut SqliteConnection, workspace_id: &str, d: &Draft) 
     let now = now_ms();
     sqlx::query(
         "INSERT INTO people (id, workspace_id, name, employee_type, client, manager_id, role, joining_date, daily_target,
-                             weekly_target, source_id, active, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?13)",
+                             weekly_target, source_id, active, created_at, updated_at, employee_code)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?13, ?14)",
     )
     .bind(&id)
     .bind(workspace_id)
@@ -402,6 +429,7 @@ pub async fn insert(conn: &mut SqliteConnection, workspace_id: &str, d: &Draft) 
     .bind(&d.source_id)
     .bind(d.active)
     .bind(now)
+    .bind(&d.employee_code)
     .execute(&mut *conn)
     .await?;
     write_emails(conn, workspace_id, &id, &d.emails).await?;
@@ -411,7 +439,7 @@ pub async fn insert(conn: &mut SqliteConnection, workspace_id: &str, d: &Draft) 
 pub async fn update(conn: &mut SqliteConnection, workspace_id: &str, id: &str, d: &Draft) -> sqlx::Result<()> {
     sqlx::query(
         "UPDATE people SET name = ?1, employee_type = ?2, client = ?3, manager_id = ?4, role = ?5, joining_date = ?6,
-                daily_target = ?7, weekly_target = ?8, source_id = ?9, active = ?10, updated_at = ?11
+                daily_target = ?7, weekly_target = ?8, source_id = ?9, active = ?10, updated_at = ?11, employee_code = ?14
          WHERE id = ?12 AND workspace_id = ?13",
     )
     .bind(&d.name)
@@ -427,6 +455,7 @@ pub async fn update(conn: &mut SqliteConnection, workspace_id: &str, id: &str, d
     .bind(now_ms())
     .bind(id)
     .bind(workspace_id)
+    .bind(&d.employee_code)
     .execute(&mut *conn)
     .await?;
     // An archived person keeps their numbers but releases their addresses.
@@ -469,7 +498,7 @@ fn int_cell(v: &str, field: &'static str) -> Result<Option<i64>, FieldError> {
 }
 
 /// Imports a CSV in one transaction. Rows with problems are skipped and listed; `dry_run` rolls everything back.
-/// Columns: name, email (several separated by `;`), employee_type, client, manager_email, role, joining_date,
+/// Columns: name, email (several separated by `;`), employee_type, client, manager_email, role, employee_code, joining_date,
 /// daily_target, weekly_target, mailbox (the connected Gmail address). A person is matched by any of their emails.
 pub async fn import_csv(db: &SqlitePool, workspace_id: &str, csv_text: &str, dry_run: bool, ctx: &Context) -> Result<ImportReport, String> {
     let mut reader = csv::ReaderBuilder::new().trim(csv::Trim::All).flexible(true).from_reader(csv_text.trim_start_matches('\u{feff}').as_bytes());
@@ -484,6 +513,7 @@ pub async fn import_csv(db: &SqlitePool, workspace_id: &str, csv_text: &str, dry
     let client_c = column(&headers, &["client"]);
     let manager_c = column(&headers, &["manager_email", "manager"]);
     let role_c = column(&headers, &["role", "designation"]);
+    let code_c = column(&headers, &["employee_code", "employee_id", "emp_id", "emp_code", "employee_no"]);
     let join_c = column(&headers, &["joining_date", "joined", "doj"]);
     let daily_c = column(&headers, &["daily_target"]);
     let weekly_c = column(&headers, &["weekly_target"]);
@@ -548,6 +578,7 @@ pub async fn import_csv(db: &SqlitePool, workspace_id: &str, csv_text: &str, dry
                                 client: r.client,
                                 manager_id: r.manager_id,
                                 role: r.role,
+                                employee_code: r.employee_code,
                                 joining_date: r.joining_date,
                                 daily_target: r.daily_target,
                                 weekly_target: r.weekly_target,
@@ -572,6 +603,10 @@ pub async fn import_csv(db: &SqlitePool, workspace_id: &str, csv_text: &str, dry
             let r = cell(role_c);
             if !r.is_empty() {
                 fields.role = Some(Some(r));
+            }
+            let code = cell(code_c);
+            if !code.is_empty() {
+                fields.employee_code = Some(Some(code));
             }
             let j = cell(join_c);
             if !j.is_empty() {
@@ -647,6 +682,7 @@ pub async fn import_csv(db: &SqlitePool, workspace_id: &str, csv_text: &str, dry
                 client: r.client.clone(),
                 manager_id: Some(manager),
                 role: r.role.clone(),
+                employee_code: r.employee_code.clone(),
                 joining_date: r.joining_date.clone(),
                 daily_target: r.daily_target,
                 weekly_target: r.weekly_target,

@@ -98,6 +98,10 @@ pub struct Config {
     /// The system agent designer: the best-tier model, and the one that steps in when it fails. Empty: designer off.
     pub designer_model_id: String,
     pub designer_fallback_model_id: String,
+    /// Timesheet reading: the cheap first pass (empty: the classifier model) and the stronger model asked only when
+    /// the first pass fails its checks or the sheet is large. Empty strong model: no second pass.
+    pub timesheet_model_id: String,
+    pub timesheet_escalation_model_id: String,
     /// Replies the agent may send without asking, per mailbox owner per day.
     pub agent_auto_send_daily_cap: i64,
     /// Highest autonomy level any agent may reach (0 to 3).
@@ -200,6 +204,8 @@ impl Config {
             agent_best_model_id: var("AGENT_BEST_MODEL_ID", "deepseek/deepseek-v4-pro"),
             designer_model_id: var("DESIGNER_MODEL_ID", "deepseek/deepseek-v4-pro"),
             designer_fallback_model_id: var("DESIGNER_FALLBACK_MODEL_ID", "moonshotai/kimi-k2.6"),
+            timesheet_model_id: var("TIMESHEET_MODEL_ID", ""),
+            timesheet_escalation_model_id: var("TIMESHEET_ESCALATION_MODEL_ID", "deepseek/deepseek-v4-pro"),
             agent_auto_send_daily_cap: var("AGENT_AUTO_SEND_DAILY_CAP", "20").parse().context("AGENT_AUTO_SEND_DAILY_CAP")?,
             agent_max_autonomy: var("AGENT_MAX_AUTONOMY", "3").parse::<i64>().context("AGENT_MAX_AUTONOMY")?.clamp(0, 3),
             evals_on_version: var("EVALS_ON_VERSION", "1") != "0",
@@ -287,6 +293,8 @@ impl Config {
             agent_best_model_id: String::new(),
             designer_model_id: String::new(),
             designer_fallback_model_id: String::new(),
+            timesheet_model_id: String::new(),
+            timesheet_escalation_model_id: String::new(),
             agent_auto_send_daily_cap: 20,
             agent_max_autonomy: 3,
             agent_auto_send_delay_secs: 0,

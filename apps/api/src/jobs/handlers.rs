@@ -157,6 +157,7 @@ pub async fn handle(state: &AppState, job: &Job) -> Result<(), JobError> {
         kind::INAPP_DUE => crate::messaging::inapp::due_job(state, &payload).await,
         kind::PURGE_SOURCE => crate::deletion::purge_source_job(state, &payload).await,
         kind::STAFFING_SCAN => crate::staffing::scan_job(state, &payload).await,
+        kind::RECORD_TIMESHEET => crate::staffing::record_job(state, &payload).await,
         kind::RUN_EVAL => super::eval_jobs::run_eval(state, &payload).await,
         kind::ROLLUP_AGENT_METRICS => super::eval_jobs::rollup_agent_metrics(state).await,
         kind::DESIGNER_DRY_RUN => super::designer_jobs::designer_dry_run(state, job, &payload).await,
@@ -363,6 +364,22 @@ async fn classify_email(state: &AppState, job: &Job, payload: &Value) -> Result<
         .bind(&message_id)
         .fetch_all(&state.db)
         .await?;
+    if crate::staffing::timesheet_records::looks_like_timesheet(&msg.subject, &attachment_names)
+        && labels::is_active(&state.db, &msg.workspace_id, crate::staffing::timesheet_records::LABEL).await?
+    {
+        let out = ClassifyOutput {
+            category: crate::staffing::timesheet_records::LABEL.into(),
+            priority: Priority::Normal,
+            requires_reply: false,
+            confidence: Some(0.95),
+            source: ClassificationSource::Fallback,
+            model_id: Some(crate::staffing::timesheet_records::MODEL_ID.into()),
+            model_version: None,
+        };
+        persist_classification_with(state, &message_id, &out, Actor::System, Some(&job.id), WriteMode::Upsert, None, false).await?;
+        state.jobs_notify.notify_one();
+        return Ok(());
+    }
     let sender_history = memory::context_for(&state.db, &msg.workspace_id, &msg.sender_address, "").await?.sender_history;
     // Over the global inbound cap, automatic labelling uses the free rules (no model, no embedding).
     let over_global_cap = !job.dedupe_key.contains(":reprocess:")
@@ -683,6 +700,16 @@ async fn persist_classification_with(
         )
         .await?;
     }
+    if out.category == crate::staffing::timesheet_records::LABEL && crate::packs::enabled(&mut *tx, &workspace_id, crate::packs::STAFFING).await? {
+        jobs::enqueue(
+            &mut tx,
+            kind::RECORD_TIMESHEET,
+            &format!("timesheet:{message_id}:{trigger}"),
+            Some(&workspace_id),
+            &json!({ "message_id": message_id }),
+        )
+        .await?;
+    }
     tx.commit().await?;
     Ok(Some(needs_review))
 }
@@ -758,6 +785,13 @@ async fn execute_workflow(state: &AppState, payload: &Value) -> Result<(), JobEr
     };
     if source_status == "disconnected" {
         return Ok(());
+    }
+    if category == crate::staffing::timesheet_records::LABEL && crate::packs::enabled(&state.db, &workspace_id, crate::packs::STAFFING).await? {
+        // A timesheet that was recorded cleanly needs no review item; one that needs a look gets the usual one below.
+        let run = crate::staffing::timesheet_records::record_message(state, &workspace_id, &message_id).await?;
+        if !run.needs_attention() {
+            return mark_processed_if_classified(state, &message_id).await;
+        }
     }
     let hr_workflows = crate::packs::has_feature(&state.db, &workspace_id, crate::packs::FEATURE_HR_WORKFLOWS).await?;
     let Some(template) = domain::WORKFLOW_TEMPLATES.iter().find(|t| hr_workflows && t.label_key == category && t.available)
@@ -875,6 +909,10 @@ async fn generate_draft(state: &AppState, job: &Job, payload: &Value) -> Result<
     let auto_reply = crate::reply_settings::load(&state.db, &state.config, &msg.workspace_id).await?.auto_reply;
     if !auto_reply && !job.dedupe_key.contains(":manual:") {
         return finish_without_draft(state, &msg.workspace_id, &message_id, run_id.as_deref(), "automatic drafts are off").await;
+    }
+    // Timesheets are recorded by the timesheet desk, which never replies; only a person asking for a draft gets one.
+    if !job.dedupe_key.contains(":manual:") && crate::staffing::timesheet_records::suppresses_auto_reply(&state.db, &msg.workspace_id, &message_id).await? {
+        return finish_without_draft(state, &msg.workspace_id, &message_id, run_id.as_deref(), "a timesheet was recorded; no reply is needed").await;
     }
     let insight = analyze_message(state, &json!({ "message_id": message_id })).await?;
     // Workflows don't draft replies to email that needs none (newsletters, notifications).
@@ -1139,6 +1177,9 @@ pub async fn create_draft_for_message(
         return Ok(existing);
     }
     let msg = load_message(state, message_id).await?;
+    if crate::staffing::timesheet_records::suppresses_auto_reply(&state.db, &msg.workspace_id, message_id).await? {
+        return Ok(None);
+    }
     let insight = analyze_message(state, &json!({ "message_id": message_id })).await?;
     if !insight.needs_reply {
         return Ok(None);
@@ -1211,6 +1252,9 @@ pub async fn create_agent_draft(
         return Ok(existing);
     }
     let msg = load_message(state, message_id).await?;
+    if crate::staffing::timesheet_records::suppresses_auto_reply(&state.db, &msg.workspace_id, message_id).await? {
+        return Ok(None);
+    }
     let insight = analyze_message(state, &json!({ "message_id": message_id })).await?;
     let (out, ctx, quality) = compose_draft(state, message_id, &msg, insight, instructions, requested, true, agent_id).await?;
     if out.body_text.trim().is_empty() {

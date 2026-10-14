@@ -54,7 +54,7 @@ pub fn scope_of_tool(tool: &str) -> Scope {
         "draft_email" => Scope::Draft,
         "send_email" | "submit_candidate" | "send_message" => Scope::Send,
         "save_to_gmail_drafts" => Scope::Draft,
-        "create_task" | "update_case" | "label_email" | "notify_owner" => Scope::Label,
+        "create_task" | "update_case" | "label_email" | "notify_owner" | "record_timesheet" => Scope::Label,
         "schedule_check" | "propose_automation" => Scope::Schedule,
         _ => Scope::ReadMail,
     }
@@ -192,6 +192,8 @@ pub enum Step {
     Label { value: String },
     StartCase,
     Notify { to: String },
+    /// Read a timesheet from the email and keep it as a record (the timesheet desk).
+    RecordTimesheet,
 }
 
 impl Step {
@@ -205,6 +207,7 @@ impl Step {
             Step::SaveToGmailDrafts => &["save_to_gmail_drafts"],
             Step::Label { .. } => &["label_email"],
             Step::StartCase => &["update_case"],
+            Step::RecordTimesheet => &["record_timesheet"],
         }
     }
 
@@ -218,6 +221,7 @@ impl Step {
             Step::Label { value } => format!("label it {value}"),
             Step::StartCase => "start a case".into(),
             Step::Notify { to } => format!("notify {to}"),
+            Step::RecordTimesheet => "record the timesheet".into(),
         }
     }
 }

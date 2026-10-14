@@ -274,6 +274,14 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
         _ => Arc::new(ai::field_extract::RulesFieldExtractor),
     };
 
+    let timesheet_cheap = if config.timesheet_model_id.is_empty() { analyst_model.to_string() } else { config.timesheet_model_id.clone() };
+    let timesheet_reader: Arc<dyn ai::timesheet_reader::TimesheetReader> = match &openrouter {
+        Some(client) if !timesheet_cheap.is_empty() || !config.timesheet_escalation_model_id.is_empty() => {
+            Arc::new(ai::timesheet_reader::OpenRouterTimesheetReader::new(client.clone(), &timesheet_cheap, &config.timesheet_escalation_model_id))
+        }
+        _ => Arc::new(ai::timesheet_reader::NoTimesheetReader),
+    };
+
     // Typed decisions: Jev if configured, else the efficient OpenRouter model, else none (callers fail open).
     let judge: Arc<dyn ai::judge::Judge> = match &openrouter {
         _ if !config.typesafe_api_key.is_empty() => Arc::new(ai::judge::JevJudge::new(
@@ -313,6 +321,7 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
     Ok(AppState {
         designer,
         field_extractor,
+        timesheet_reader,
         assistant_planner,
         transcriber,
         vision,

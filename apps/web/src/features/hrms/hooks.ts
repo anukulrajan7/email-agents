@@ -1,7 +1,7 @@
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '../../api/client';
 import type { ImportReport } from '../team/types';
-import type { MismatchList, Submission, SubmissionList, TimesheetsView } from './types';
+import type { MismatchList, RecordFilters, Submission, SubmissionList, TimesheetGrid, TimesheetRecord, TimesheetsView } from './types';
 
 const hrmsKey = (ws: string) => ['ws', ws, 'hrms'] as const;
 
@@ -49,5 +49,37 @@ export function useReconcile(ws: string) {
       qc.invalidateQueries({ queryKey: hrmsKey(ws) });
       qc.invalidateQueries({ queryKey: ['ws', ws, 'alerts'] });
     },
+  });
+}
+
+export function useTimesheetGrid(ws: string, month: string) {
+  return useQuery({
+    queryKey: [...hrmsKey(ws), 'timesheet-grid', month],
+    queryFn: () => api<TimesheetGrid>(`/workspaces/${ws}/staffing/timesheet-grid`, { query: { month } }),
+  });
+}
+
+export function useTimesheetRecords(ws: string, filters: RecordFilters) {
+  return useQuery({
+    queryKey: [...hrmsKey(ws), 'timesheet-records', filters],
+    queryFn: () => api<{ items: TimesheetRecord[] }>(`/workspaces/${ws}/staffing/timesheet-records`, { query: filters }),
+    placeholderData: keepPreviousData,
+  });
+}
+
+export function useTimesheetRecord(ws: string, id: string | undefined) {
+  return useQuery({
+    queryKey: [...hrmsKey(ws), 'timesheet-record', id],
+    queryFn: () => api<TimesheetRecord>(`/workspaces/${ws}/staffing/timesheet-records/${id}`),
+    enabled: id !== undefined,
+  });
+}
+
+export function useLinkTimesheetRecord(ws: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, person_id }: { id: string; person_id: string }) =>
+      api<TimesheetRecord>(`/workspaces/${ws}/staffing/timesheet-records/${id}/link`, { method: 'POST', body: { person_id } }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: hrmsKey(ws) }),
   });
 }

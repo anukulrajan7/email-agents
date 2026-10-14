@@ -46,12 +46,23 @@ async fn harness() -> Harness {
 }
 
 /// Mock of `GET /emails/receiving/{id}`. Every id resolves to a timesheet email addressed
-/// to the alias encoded in the id: `<anything>__<alias-local-part>`.
+/// to the alias encoded in the id: `<anything>__<alias-local-part>`. An id that starts with `plain` is an ordinary question.
 async fn spawn_mock_resend() -> String {
     let app = Router::new().route(
         "/emails/receiving/{id}",
         get(|Path(id): Path<String>| async move {
             let (_, token) = id.split_once("__").unwrap_or(("", ""));
+            if id.starts_with("plain") {
+                return axum::Json(json!({
+                    "id": id,
+                    "from": "Priya <priya@acme.com>",
+                    "to": [format!("inbox+{token}@inbound.test")],
+                    "subject": "Quick question",
+                    "text": "When is the holiday party?",
+                    "message_id": "<plain@acme.com>",
+                    "created_at": "2026-10-13T11:30:00.000Z",
+                }));
+            }
             axum::Json(json!({
                 "id": id,
                 "from": "Team Lead <lead@acme.com>",
@@ -187,8 +198,10 @@ async fn timesheet_vertical_slice_end_to_end() {
     worker::drain(&h.state).await;
 
     assert_eq!(h.count("SELECT COUNT(*) FROM email_messages").await, 1, "forwarded twice appears once");
+    // The timesheet is read into a record. Nobody in the directory is Priya, so a person is asked to look, and nothing is drafted.
+    assert_eq!(h.count("SELECT COUNT(*) FROM timesheet_records WHERE status = 'needs_check' AND person_id IS NULL").await, 1);
     assert_eq!(h.count("SELECT COUNT(*) FROM review_items").await, 1);
-    assert_eq!(h.count("SELECT COUNT(*) FROM drafts").await, 1);
+    assert_eq!(h.count("SELECT COUNT(*) FROM drafts").await, 0, "the timesheet desk never replies");
     assert_eq!(h.count("SELECT COUNT(*) FROM jobs WHERE status != 'succeeded'").await, 0);
 
     let (s, list) = h.call("GET", &format!("/api/v1/workspaces/{ws}/messages"), Some(ADMIN), None).await;
@@ -207,12 +220,17 @@ async fn timesheet_vertical_slice_end_to_end() {
     assert_eq!(detail["classification"]["needs_review"], false, "labels are applied automatically");
     assert_eq!(detail["review"]["status"], "open");
     assert_eq!(detail["workflow_run"]["status"], "completed");
-    assert_eq!(detail["draft"]["status"], "suggested");
+    assert!(detail["draft"].is_null(), "no automatic reply for a timesheet");
+    assert_eq!(detail["timesheet_records"][0]["status"], "needs_check");
     let actions: Vec<&str> = detail["audit"].as_array().unwrap().iter().map(|a| a["action"].as_str().unwrap()).collect();
-    assert_eq!(
-        actions,
-        ["message.received", "message.classified", "workflow.started", "review.created", "draft.generated", "automation.ran", "workflow.completed"]
-    );
+    assert_eq!(actions, ["message.received", "message.classified", "workflow.started", "review.created", "automation.ran", "draft.skipped"]);
+
+    // A person can still ask for a draft by hand.
+    let (s, _) = h.call("POST", &format!("/api/v1/workspaces/{ws}/messages/{id}/draft"), Some(ADMIN), None).await;
+    assert_eq!(s, StatusCode::ACCEPTED);
+    worker::drain(&h.state).await;
+    let (_, detail) = h.call("GET", &format!("/api/v1/workspaces/{ws}/messages/{id}"), Some(ADMIN), None).await;
+    assert_eq!(detail["draft"]["status"], "suggested");
 
     // Operator edits + approves the draft; "sent" cannot be set by clients.
     let draft_id = detail["draft"]["id"].as_str().unwrap();
@@ -378,7 +396,7 @@ async fn model_failures_retry_then_dead_letter_to_review() {
     let (ws, token) = h.workspace_with_alias(ADMIN).await;
 
     // Webhook still succeeds quickly while AI is down.
-    assert_eq!(h.webhook("d1", &received(&format!("e__{token}")), false).await.0, StatusCode::OK);
+    assert_eq!(h.webhook("d1", &received(&format!("plain__{token}")), false).await.0, StatusCode::OK);
     for _ in 0..10 {
         worker::drain(&h.state).await;
         sqlx::query("UPDATE jobs SET run_at = 0 WHERE status = 'pending'").execute(&h.state.db).await.unwrap();

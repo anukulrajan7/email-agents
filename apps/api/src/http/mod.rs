@@ -85,6 +85,8 @@ pub struct AppState {
     pub designer: Arc<dyn crate::designer::Designer>,
     /// Reads named details out of an email for the workflow `extract` step.
     pub field_extractor: Arc<dyn crate::ai::field_extract::FieldExtractor>,
+    /// Reads timesheets the plain rules could not; a cheap model first, a stronger one only when needed.
+    pub timesheet_reader: Arc<dyn crate::ai::timesheet_reader::TimesheetReader>,
     /// Picks each agent step (tool calling). Disabled without a model: no automatic cases.
     pub planner: Arc<dyn crate::agents::planner::Planner>,
     /// Checks agent proposals before they run or go to a person.

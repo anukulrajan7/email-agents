@@ -57,6 +57,7 @@ export type Person = {
   client?: string | null;
   manager_id: string | null;
   role: string | null;
+  employee_code?: string | null;
   joining_date: string | null;
   daily_target: number | null;
   weekly_target: number | null;
@@ -70,6 +71,7 @@ export type PersonInput = {
   name: string;
   emails: string[];
   role: string | null;
+  employee_code?: string | null;
   manager_id: string | null;
   joining_date: string | null;
   daily_target: number | null;

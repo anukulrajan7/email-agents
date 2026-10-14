@@ -143,13 +143,15 @@ pub fn parse_hours(text: &str) -> Option<f64> {
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct Timesheet {
+    /// Empty when the email has been removed from Post Room and only the record is left.
     pub message_id: String,
+    pub record_id: Option<String>,
     pub subject: String,
     pub received_at: i64,
     pub hours: Option<f64>,
 }
 
-const MONTHS: [(&str, &str); 12] = [
+pub const MONTHS: [(&str, &str); 12] = [
     ("jan", "january"), ("feb", "february"), ("mar", "march"), ("apr", "april"), ("may", "may"), ("jun", "june"),
     ("jul", "july"), ("aug", "august"), ("sep", "september"), ("oct", "october"), ("nov", "november"), ("dec", "december"),
 ];
@@ -180,11 +182,44 @@ pub fn period_of(subject: &str, received_at: i64, tz_min: i64, grace_days: i64) 
     clock::month_of(received_at - grace_days * DAY_MS, tz_min)
 }
 
+#[derive(sqlx::FromRow)]
+struct RecordedSheet {
+    id: String,
+    message_id: Option<String>,
+    email_subject: Option<String>,
+    email_received_at: Option<i64>,
+    total_hours: Option<f64>,
+    created_at: i64,
+}
+
 /// The newest `timesheet` mail from this person that is for `month` (see `period_of`), with hours read from the
 /// mail and its attachments. A late timesheet still counts for its own month; another month's never does.
 pub async fn timesheet_mail(db: &SqlitePool, workspace_id: &str, person_id: &str, month: &str) -> sqlx::Result<Option<Timesheet>> {
     let s = settings::load(db, workspace_id).await?;
     let Some((start, end)) = clock::month_bounds(month, s.tz_offset_minutes) else { return Ok(None) };
+    if let Some((first, last)) = super::timesheet_parse::month_dates(month) {
+        // A recorded timesheet counts as submitted, even when its email is gone.
+        let recorded: Option<RecordedSheet> = sqlx::query_as(
+            "SELECT id, message_id, email_subject, email_received_at, total_hours, created_at FROM timesheet_records
+             WHERE workspace_id = ?1 AND person_id = ?2 AND status != 'replaced' AND period_start <= ?4 AND period_end >= ?3
+             ORDER BY COALESCE(email_received_at, created_at) DESC LIMIT 1",
+        )
+        .bind(workspace_id)
+        .bind(person_id)
+        .bind(first)
+        .bind(last)
+        .fetch_optional(db)
+        .await?;
+        if let Some(r) = recorded {
+            return Ok(Some(Timesheet {
+                message_id: r.message_id.unwrap_or_default(),
+                record_id: Some(r.id),
+                subject: r.email_subject.unwrap_or_default(),
+                received_at: r.email_received_at.unwrap_or(r.created_at),
+                hours: r.total_hours,
+            }));
+        }
+    }
     let rows: Vec<(String, String, i64, String)> = sqlx::query_as(
         "SELECT m.id, m.subject, m.received_at, m.body_text
          FROM email_messages m JOIN classifications c ON c.message_id = m.id
@@ -208,7 +243,7 @@ pub async fn timesheet_mail(db: &SqlitePool, workspace_id: &str, person_id: &str
     let attachments: Vec<String> =
         sqlx::query_scalar("SELECT text_content FROM attachments WHERE message_id = ?1 AND text_content IS NOT NULL").bind(&message_id).fetch_all(db).await?;
     let hours = parse_hours(&format!("{subject}\n{body}")).or_else(|| attachments.iter().find_map(|t| parse_hours(t)));
-    Ok(Some(Timesheet { message_id, subject, received_at, hours }))
+    Ok(Some(Timesheet { message_id, record_id: None, subject, received_at, hours }))
 }
 
 #[derive(Debug, Clone, Serialize)]

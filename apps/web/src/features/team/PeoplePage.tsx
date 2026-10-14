@@ -49,7 +49,7 @@ export function PeoplePage() {
         <ImportPanel
           importer={importer}
           label="People CSV"
-          columns={`name,email,role,manager_email,joining_date,daily_target,weekly_target${staffing ? ',employee_type,client' : ''}`}
+          columns={`name,email,employee_id,role,manager_email,joining_date,daily_target,weekly_target${staffing ? ',employee_type,client' : ''}`}
         />
       )}
       {people.data &&
@@ -72,6 +72,7 @@ export function PeoplePage() {
                 <tr>
                   <Th>Name</Th>
                   <Th>Emails</Th>
+                  <Th>Employee ID</Th>
                   <Th>Role</Th>
                   <Th>Manager</Th>
                   <Th>Joined</Th>
@@ -87,6 +88,7 @@ export function PeoplePage() {
                   <tr key={p.id}>
                     <Td className="font-semibold text-ink">{p.name}</Td>
                     <Td>{p.emails.join(', ')}</Td>
+                    <Td>{p.employee_code ?? '–'}</Td>
                     <Td>{p.role ?? '–'}</Td>
                     <Td>{nameOf(p.manager_id)}</Td>
                     <Td>{p.joining_date ?? '–'}</Td>

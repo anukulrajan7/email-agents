@@ -136,7 +136,7 @@ async fn harness(undo_seconds: i64) -> H {
         .call(
             "POST",
             &format!("/api/v1/workspaces/{}/sources/{src}/test-email", h.ws),
-            Some(json!({"from": format!("Priya Sharma <{CLIENT}>"), "subject": "September timesheet",
+            Some(json!({"from": format!("Priya Sharma <{CLIENT}>"), "subject": "September hours",
                         "body_text": "Hi, my timesheet is attached. Can you confirm you got it? Call me on +91 98765 43210."})),
         )
         .await;
@@ -303,7 +303,7 @@ async fn warning_only_send_goes_out_threaded() {
     let sent = h.mock.lock().unwrap().sends[0].clone();
     assert_eq!(sent["threadId"], "thr1");
     let raw = String::from_utf8(URL_SAFE_NO_PAD.decode(sent["raw"].as_str().unwrap()).unwrap()).unwrap();
-    assert!(raw.contains("Subject: Re: September timesheet") && raw.contains(CLIENT) && raw.contains("@postroom.mail>"), "{raw}");
+    assert!(raw.contains("Subject: Re: September hours") && raw.contains(CLIENT) && raw.contains("@postroom.mail>"), "{raw}");
     let (_, detail) = h.call("GET", &format!("/api/v1/workspaces/{}/messages/{}", h.ws, h.msg), None).await;
     assert!(detail["audit"].as_array().unwrap().iter().any(|a| a["action"] == "draft.send_scheduled"));
 }

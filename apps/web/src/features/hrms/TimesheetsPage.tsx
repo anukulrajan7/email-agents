@@ -1,15 +1,14 @@
 import { useId, useState, type FormEvent } from 'react';
-import { Link } from 'react-router';
-import { Badge, Button, Card, EmptyState, Input, Label, Page, PageHeader, Select, SkeletonList, Table, Td, Th, useToast } from '../../components/ui';
+import { useSearchParams } from 'react-router';
+import { Button, Card, Dialog, Input, Label, Page, PageHeader, Select, Tabs, useToast } from '../../components/ui';
 import { ErrorNote } from '../../components/ErrorNote';
 import { useWorkspace } from '../../app/useWorkspace';
-import { riseStyle } from '../../lib/motion';
 import { useSaveTeamSettings, useTeamAccess, useTeamSettings } from '../team/hooks';
 import type { TeamSettings } from '../team/types';
-import { useTimesheets } from './hooks';
-
-const TONE = { received: 'success', pending: 'neutral', missing: 'danger' } as const;
-const LABEL = { received: 'Received', pending: 'Not due yet', missing: 'Missing' } as const;
+import { RecordById } from './RecordDetail';
+import { TimesheetGridView } from './TimesheetGridView';
+import { TimesheetRecordsView } from './TimesheetRecordsView';
+import type { GridRow } from './types';
 
 function PolicyForm({ ws, settings }: { ws: string; settings: TeamSettings }) {
   const uid = useId();
@@ -62,66 +61,53 @@ function PolicyForm({ ws, settings }: { ws: string; settings: TeamSettings }) {
   );
 }
 
+type View = 'grid' | 'records';
+
 export function TimesheetsPage() {
   const { ws } = useWorkspace();
   const access = useTeamAccess(ws);
   const settings = useTeamSettings(ws);
-  const sheets = useTimesheets(ws);
-  const items = sheets.data?.items ?? [];
   const owner = access.data?.level === 'super_admin';
+  const [params, setParams] = useSearchParams();
+  const [view, setView] = useState<View>(params.get('record') ? 'records' : 'grid');
+  const [row, setRow] = useState<GridRow>();
+  const recordParam = params.get('record') ?? undefined;
+  const closeRecord = () => setParams((p) => { p.delete('record'); return p; }, { replace: true });
 
   return (
     <Page className="gap-6">
       <PageHeader
         kicker="HRMS · Timesheets"
         title="Timesheets"
-        description="Billable people send a timesheet each month. If one has not arrived three days after month end, the person is told and then their manager and HR."
+        description="Timesheets that arrive, pasted in an email or attached, are read and kept here by person and day. If one has not arrived three days after month end, the person is told and then their manager and HR."
       />
-      <ErrorNote error={sheets.error ?? settings.error} />
-      {sheets.isLoading && <SkeletonList rows={3} label="Loading timesheets" />}
-      {owner && settings.data && <PolicyForm key={JSON.stringify(settings.data)} ws={ws} settings={settings.data} />}
-      {sheets.data &&
-        (items.length === 0 ? (
-          <Card>
-            <EmptyState
-              title="No billable people yet"
-              description="Mark people as Billable in People, then name the HR mailbox above. Each month's timesheet status for them shows up here."
-              action={
-                <Link to={`/w/${ws}/people`}>
-                  <Button variant="secondary">Go to People</Button>
-                </Link>
-              }
-            />
-          </Card>
-        ) : (
-          <div className="rise flex flex-col gap-2" style={riseStyle(1)}>
-            <p className="text-sm text-ink-muted">
-              {sheets.data.month}: {sheets.data.missing === 0 ? 'nothing is missing.' : `${sheets.data.missing} missing.`}
-            </p>
-            <Table>
-              <thead>
-                <tr>
-                  <Th>Person</Th>
-                  <Th>Status</Th>
-                  <Th>Hours in the mail</Th>
-                  <Th>Received</Th>
-                </tr>
-              </thead>
-              <tbody>
-                {items.map((r) => (
-                  <tr key={r.person_id}>
-                    <Td className="font-semibold text-ink">{r.name}</Td>
-                    <Td>
-                      <Badge tone={TONE[r.status]}>{LABEL[r.status]}</Badge>
-                    </Td>
-                    <Td>{r.timesheet?.hours ?? '–'}</Td>
-                    <Td>{r.timesheet ? new Date(r.timesheet.received_at).toLocaleDateString('en-GB') : '–'}</Td>
-                  </tr>
-                ))}
-              </tbody>
-            </Table>
+      <ErrorNote error={settings.error} />
+      <Tabs
+        label="Timesheet views"
+        value={view}
+        onChange={setView}
+        tabs={[
+          { id: 'grid', label: 'Team grid' },
+          { id: 'records', label: 'Records' },
+        ]}
+      >
+        {view === 'grid' ? <TimesheetGridView ws={ws} onOpen={setRow} /> : <TimesheetRecordsView ws={ws} canLink={owner} />}
+      </Tabs>
+      {row && (
+        <Dialog title={`${row.name}'s timesheets`} variant="drawer" onClose={() => setRow(undefined)}>
+          <div className="flex flex-col gap-6">
+            {row.record_ids.map((id) => (
+              <RecordById key={id} ws={ws} id={id} canLink={owner} />
+            ))}
           </div>
-        ))}
+        </Dialog>
+      )}
+      {recordParam && (
+        <Dialog title="Timesheet record" variant="drawer" onClose={closeRecord}>
+          <RecordById ws={ws} id={recordParam} canLink={owner} />
+        </Dialog>
+      )}
+      {owner && settings.data && <PolicyForm key={JSON.stringify(settings.data)} ws={ws} settings={settings.data} />}
     </Page>
   );
 }

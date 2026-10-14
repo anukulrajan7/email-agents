@@ -458,6 +458,8 @@ pub async fn detail(
     let to: Vec<String> =
         serde_json::from_str::<Vec<String>>(&m.recipients_json).unwrap_or_default().into_iter().filter(|a| !cc.contains(a)).collect();
 
+    let timesheet_records = crate::staffing::timesheet_records::for_message(&state.db, &ws, &m.id).await?;
+
     Ok(Json(json!({
         "id": m.id,
         "source": {
@@ -487,6 +489,7 @@ pub async fn detail(
         "contact_memories": contact_memories,
         "review": review.map(|(id, status, kind)| json!({ "id": id, "status": status, "kind": kind })),
         "workflow_run": run.map(|(id, status, error)| json!({ "id": id, "status": status, "error": error })),
+        "timesheet_records": timesheet_records,
         "audit": audit_rows.into_iter().map(|a| json!({
             "id": a.id, "actor_type": a.actor_type, "actor_id": a.actor_id, "action": a.action,
             "entity_type": a.entity_type, "entity_id": a.entity_id, "created_at": iso(a.created_at),

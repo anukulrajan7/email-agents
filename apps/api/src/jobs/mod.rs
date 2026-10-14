@@ -51,6 +51,7 @@ pub mod kind {
     pub const SEND_DRAFT: &str = "send_draft";
     pub const BACKUP_DATABASE: &str = "backup_database";
     pub const STAFFING_SCAN: &str = "staffing_scan";
+    pub const RECORD_TIMESHEET: &str = "record_timesheet";
     pub const RUN_EVAL: &str = "run_eval";
     pub const ROLLUP_AGENT_METRICS: &str = "rollup_agent_metrics";
     pub const DESIGNER_DRY_RUN: &str = "designer_dry_run";

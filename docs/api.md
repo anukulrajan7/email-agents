@@ -514,7 +514,8 @@ Adds:
   from_name: string | null;        // sender display name ("Priya Sharma"); `from` stays the address
   cc: string[];                    // `to` lists To recipients only (older rows may still hold To+Cc, Cc is removed)
   direction: "inbound" | "outbound";
-  draft: { ...; unanswered: string[] } | null }   // asks the draft could not answer; each is "[NEEDS: ...]" in body_text
+  draft: { ...; unanswered: string[] } | null;    // asks the draft could not answer; each is "[NEEDS: ...]" in body_text
+  timesheet_records: { id, status, period_start, period_end, total_hours, ... }[] }   // records read from this email (not replaced); the reader shows a chip
 ```
 Already present and used for the Gmail-style header: `from`, `to`, `received_at` (ISO 8601).
 `body_html_safe` is filled for every Gmail message whose original has an HTML part (older rows are re-fetched, see below).
@@ -997,3 +998,47 @@ back to the separate calls.
 Bulk mail (two or more of List-Unsubscribe, Precedence bulk/list, Auto-Submitted, Gmail promotions/social/updates/forums, or a
 no-reply sender; unknown sender; not billing, legal or security content) is filed by rules with no model call
 (`classifications.model_id = 'bulk-rules-v1'`, `source = 'fallback'`). Opening it (`POST …/messages/:id/insight`) runs the full pipeline.
+
+## Timesheet records (HR and recruiting pack)
+
+Mail labelled `timesheet` (by the model, or by the plain rule: "timesheet / time sheet / timecard / hours report" in the subject
+or an attachment name; a person's label is never overridden) is read into `timesheet_records`: the body and each attachment's
+extracted text. Plain rules first (tables with a date and an hours column, "Total hours: 168", one line per day); a cheap model
+only when they find nothing or the days do not add up to the stated total; a stronger model (`TIMESHEET_ESCALATION_MODEL_ID`,
+default `deepseek/deepseek-v4-pro`; cheap model `TIMESHEET_MODEL_ID`, default the classifier model) only when the cheap answer
+fails those checks or the sheet is large. Numbers a model returns must appear in the sheet. Calls are in the AI usage ledger as
+"Timesheets". Records keep a snapshot of the email (sender, subject, date, file name), so they stay when the email is deleted or
+its mailbox is disconnected (`message_id` and `attachment_id` become `null`).
+
+The person is matched by employee ID (`people.employee_code`, or a remembered link), then email (written in the sheet, then the
+original sender, then the sender when it agrees with the name written), then a unique name match. A forwarder never owns a sheet
+that names someone else. Unmatched: `person_id = null` and the issue "Who is this? (name as written)".
+
+Shape (`status`: `recorded | replaced | needs_check`; `match_method`: `code | alias | email | name | manual | none`):
+```ts
+{ id, person_id: string | null, person_name: string | null, name_as_written: string | null, employee_code: string | null,
+  client: string | null, period_start: "YYYY-MM-DD", period_end: "YYYY-MM-DD", total_hours: number | null,
+  status, source: "pasted" | "attachment", source_label: "Pasted" | "Excel" | "CSV" | "PDF" | "Word" | "Image" | "File",
+  attachment_filename: string | null, match_method, match_confidence: number | null, needs_person: boolean,
+  issues: { code, message, severity: "check" | "note" }[], replaces_id: string | null,
+  email: { message_id: string | null, available: boolean, subject, from, received_at },
+  created_at, updated_at,
+  entries?: { date: string | null, hours: number, project?, note? }[],   // detail only
+  identity?: { code?, name?, email?, client?, manager?, location? } }    // detail only: as written in the sheet
+```
+A new record for the same person and an overlapping period marks the older one `replaced` (the new one's `replaces_id` points to
+it); reading the same email again changes nothing. Any `check` issue (days not adding up, no hours read, unreadable file, nobody
+matched) makes the record `needs_check`.
+
+| Method | Path | Role | Response |
+|---|---|---|---|
+| GET | `/api/v1/workspaces/:ws/staffing/timesheet-grid?month=YYYY-MM` | HR pack, within your scope | `{month, days: [{date, weekday, weekend}], rows: [{person_id, name, employee_code, client, cells: {date: hours}, total, status: "recorded"\|"needs_check"\|"missing"\|"pending", record_ids}], due_at, summary: {recorded, needs_check, missing}}`. One row per expected person (active billable people; everyone active when nobody is billable) plus one per unmatched sheet. `pending` = no timesheet yet but not due. Replaced records never count. |
+| GET | `/api/v1/workspaces/:ws/staffing/timesheet-records?person_id=&month=&status=&q=` | HR pack, within your scope | `{items: Record[]}` newest period first, at most 500. `q` searches name, employee ID, client, subject, file name, sender. |
+| GET | `/api/v1/workspaces/:ws/staffing/timesheet-records/:id` | within your scope | One record with `entries` and `identity`; 404 when not in this workspace or out of scope. |
+| POST | `/api/v1/workspaces/:ws/staffing/timesheet-records/:id/link` | super admin | Body `{person_id}`. Links an unmatched record to a person (`match_method = "manual"`), remembers the link for its employee ID and name, and links the other unmatched records that carry them. |
+
+`GET .../staffing/timesheets` (month status per billable person) now counts a recorded timesheet as submitted, even when its email
+is gone; its `timesheet` object gains `record_id`. People take an optional `employee_code` (unique per workspace, case-insensitive;
+CSV column `employee_code` or `employee_id`). The agent tool `record_timesheet` and the workflow step of the same name run the
+same reading; the timesheet desk (Rohan) never drafts or sends a reply, and no automatic path drafts one for a timesheet.
+

@@ -94,3 +94,24 @@ describe('EmailReader', () => {
     expect(textRegion.className).toBe(htmlRegion.className);
   });
 });
+
+describe('timesheet chip', () => {
+  it('shows what was recorded from the email and links to the record', () => {
+    setup(message({ timesheet_records: [{ id: 'tsr1', status: 'recorded', period_start: '2026-09-01', period_end: '2026-09-30', total_hours: 168 }] }));
+    const chip = screen.getByRole('link', { name: 'Timesheet recorded · Sep 2026 · 168 h' });
+    expect(chip).toHaveAttribute('href', '/w/w1/timesheets?record=tsr1');
+  });
+
+  it('says when a timesheet needs a check, and shows nothing for a replaced one', () => {
+    setup(
+      message({
+        timesheet_records: [
+          { id: 'a', status: 'replaced', period_start: '2026-09-01', period_end: '2026-09-30', total_hours: 100 },
+          { id: 'b', status: 'needs_check', period_start: '2026-09-01', period_end: '2026-09-12', total_hours: null },
+        ],
+      }),
+    );
+    expect(screen.getByRole('link', { name: 'Timesheet needs a check · 1 Sep – 12 Sep 2026' })).toBeInTheDocument();
+    expect(screen.getAllByRole('link', { name: /Timesheet/ })).toHaveLength(1);
+  });
+});

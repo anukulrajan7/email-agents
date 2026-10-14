@@ -235,6 +235,7 @@ Sales, Finance and Personal are optional. **HR and recruiting** (`staffing`) add
 | Submissions | Detects a recruiter's sent mail with a CV, links it to a requirement and candidate, tracks the outcome. Ambiguous links wait for a person. | `staffing/submissions.rs` |
 | Performance | Today and week against target, interview rate, team view for managers, corner widget. | `staffing/metrics.rs`, `team/metrics.rs` |
 | Timesheets policy | Month-end "timesheet missing" for billable staff. | `staffing/policy.rs` |
+| Timesheet records | Reads timesheet mail (body and attachment text) into `timesheet_records`, matches the person, replaces older records, survives email deletion. | `staffing/timesheet_records.rs`, `staffing/timesheet_parse.rs`, `ai/timesheet_reader.rs` |
 | Portal reconciliation | Compares portal CSV exports with mail and raises mismatch alerts. | `staffing/portal.rs` |
 | Escalation | Alerts go to the owner first, then the manager, then the final recipients, on configurable delays. | `team/escalation.rs`, `alerts.rs` |
 | Matching | Referral profiles against client requirements: extraction, skill taxonomy, vector recall, explainable score, daily digest. | `matching.rs`, `jobs/matching_jobs.rs` |
