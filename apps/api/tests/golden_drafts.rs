@@ -17,7 +17,7 @@ fn role(title: &str, skills: &[&str], location: &str) -> Opening {
 fn final_text(raw: &str, category: &str, subject: &str, email: &str, notes: &[&str], openings: &[Opening]) -> String {
     let notes: Vec<String> = notes.iter().map(|n| n.to_string()).collect();
     let src = Sources { ws: "w", staffing: true, subject, email_body: email, category, notes: &notes };
-    let (mut text, _, _) = finalize_text(raw, &src, openings);
+    let (mut text, _, _) = finalize_text(raw, &src, openings, !openings.is_empty());
     signoff::replace_agent_sign_off(&mut text, "Aarav", SIGNATURE);
     text
 }

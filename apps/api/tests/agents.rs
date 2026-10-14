@@ -592,13 +592,12 @@ async fn job_seeker_draft_says_none_right_now_only_when_nothing_is_open() {
 }
 
 #[tokio::test]
-async fn an_unrelated_opening_does_not_make_the_draft_deny_other_openings() {
+async fn an_unrelated_opening_does_not_stop_the_draft_saying_there_is_none_for_this_skill() {
     let env = auto_reply_env(drafting_script()).await;
     add_opening(&env, "Java Developer", json!(["Java"])).await;
     let msg = env.receive("js3", "t-js3", "dev@gmail.com", "Looking for a job", SEEKER, 1).await;
     let body = draft_body(&env, &msg).await;
-    assert!(!body.contains("[NEEDS") && !body.contains("Java Developer") && !body.contains("don't have a matching opening"), "{body}");
-    assert!(body.contains("We'll confirm the current openings shortly."), "left for a person, not denied: {body}");
+    assert!(!body.contains("[NEEDS") && !body.contains("Java Developer") && body.contains("don't have a matching opening"), "{body}");
 }
 
 #[tokio::test]

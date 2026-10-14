@@ -426,25 +426,19 @@ async fn gather(state: &AppState, input: &CheckInput<'_>) -> AppResult<(Facts, V
     .fetch_one(&state.db)
     .await?;
     let mut trusted_notes = team_notes;
-    let stored: Option<(Option<String>, Option<String>)> =
-        sqlx::query_as("SELECT instructions_by_user, instructions_user_id FROM drafts WHERE id = ?1 AND workspace_id = ?2").bind(&r.draft_id).bind(ws).fetch_optional(&state.db).await?;
-    let mut said: Option<String> = None;
-    if let Some((Some(text), author)) = stored {
-        // One member's words never support another member's send; an automatic send follows the request's author.
-        if input.actor_user.is_none() || author.as_deref() == input.actor_user {
-            said = Some(text);
-        }
-    }
+    // A send is supported only by its own author's words (and the shared team notes above).
+    let mut spoken = crate::owner_said::for_send(&state.db, &r.draft_id, input.actor_user).await?;
     if input.actor_user.is_some() && input.body != r.body_text {
         let typed = crate::owner_said::added_by_edit(&r.body_text, input.body);
         if !typed.is_empty() {
-            said = Some(crate::owner_said::merge(said.as_deref(), &typed));
+            spoken.push(typed);
         }
     }
-    if let Some(said) = &said {
+    if !spoken.is_empty() {
+        let said = spoken.join("\n");
         trusted_notes.push_str(&format!("\nThe owner said (a supported fact, whatever the language): {said}"));
         known.push('\n');
-        known.push_str(said);
+        known.push_str(&said);
     }
     let mailbox_owner: Option<String> = sqlx::query_scalar("SELECT connected_by_user_id FROM email_sources WHERE id = ?1").bind(&r.source_id).fetch_optional(&state.db).await?.flatten();
     let profile: Option<(String, String, String)> = match mailbox_owner.as_deref() {

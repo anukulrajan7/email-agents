@@ -22,10 +22,12 @@ impl GapKind {
     }
 }
 
-const OPENING_WORDS: &[&str] = &[
-    "opening", "vacanc", "job posting", "job opportunit", "open position", "open role", "available position", "available role",
-    "any jobs", "job openings", "hiring", "current jobs", "current positions",
-];
+static OPENING_ASK: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+    regex::Regex::new(
+        r"(?i)\b(open (?:roles?|positions?)|job (?:openings?|postings?|opportunit(?:y|ies))|vacanc(?:y|ies)|(?:roles?|positions?) available|(?:any|current|available|new)(?:\s+[\w+#.-]+){0,3}\s+(?:openings?|vacanc(?:y|ies)|jobs?))\b",
+    )
+    .expect("valid regex")
+});
 const MONEY_WORDS: &[&str] = &["salary", "rate", "price", "pricing", "cost", "ctc", "fee", "budget", "date", "how much"];
 const GENERIC_WORDS: &[&str] = &[
     "job", "jobs", "opening", "openings", "position", "positions", "role", "roles", "vacancy", "vacancies", "current", "currently",
@@ -40,7 +42,7 @@ pub fn classify(context: &str) -> GapKind {
     if MONEY_WORDS.iter().any(|w| contains_phrase(&c, w)) {
         return GapKind::Other;
     }
-    if OPENING_WORDS.iter().any(|w| c.contains(w)) { GapKind::JobOpenings } else { GapKind::Other }
+    if OPENING_ASK.is_match(&c) { GapKind::JobOpenings } else { GapKind::Other }
 }
 
 const JOB_SEEKER_LABELS: &[&str] = &["candidate_referral", "job_seeker", "candidate"];
@@ -128,12 +130,13 @@ pub fn pick_openings<'a>(openings: &'a [Opening], ask_context: &str, email_text:
     openings.iter().filter(|o| matches_text(o, &text)).collect()
 }
 
-/// The sentence a job seeker gets when nothing is open. Its presence in a sent reply starts the candidate watch.
+/// The sentence a job seeker gets when nothing is open. The whole sentence in a sent reply starts the candidate watch.
+pub const NONE_SENTENCE: &str = "Thanks for sharing your profile. We don't have a matching opening right now; we've saved your details and, as soon as a matching role comes in, we'll send it to you.";
 pub const NONE_PHRASE: &str = "We don't have a matching opening right now";
 
 fn answer(found: &[&Opening]) -> String {
     if found.is_empty() {
-        return format!("Thanks for sharing your profile. {NONE_PHRASE}; we've saved your details and, as soon as a matching role comes in, we'll send it to you.");
+        return NONE_SENTENCE.to_string();
     }
     let list: Vec<String> = found
         .iter()
@@ -165,7 +168,7 @@ pub fn strip_filler(body: &str) -> String {
 }
 
 /// Rewrites job-opening gaps using `openings`. Returns the new body and the ids it cited.
-pub fn resolve_text(body: &str, email_text: &str, openings: &[Opening], category: &str) -> (String, Vec<String>) {
+pub fn resolve_text(body: &str, email_text: &str, openings: &[Opening], any_open: bool, category: &str) -> (String, Vec<String>) {
     let mut text = body.to_string();
     let mut cited = Vec::new();
     let mut from = 0;
@@ -178,7 +181,7 @@ pub fn resolve_text(body: &str, email_text: &str, openings: &[Opening], category
         let line = text[line_start..line_end].to_string();
         let question = text[start + OPEN.len()..end - 1].trim().to_string();
         let found = pick_openings(openings, &line, email_text);
-        if (classify_gap(&question, &line).answerable_by_none() || job_seeker_asks_for_work(category, &question, &line)) && (!found.is_empty() || openings.is_empty()) {
+        if (classify_gap(&question, &line).answerable_by_none() || job_seeker_asks_for_work(category, &question, &line)) && (!found.is_empty() || !any_open) {
             cited.extend(found.iter().map(|o| o.id.clone()));
             let answer = answer(&found);
             let (s, e) = (sentence_start(&text, start), sentence_end(&text, end));
@@ -334,7 +337,7 @@ pub fn soften(body: &str) -> (String, Vec<Gap>) {
             let q_lc = question.to_lowercase();
             let vague = q_lc.split_whitespace().count() < 2 && GENERIC_QUESTIONS.contains(&q_lc.as_str());
             let basis = if vague { line.to_lowercase() } else { q_lc.clone() };
-            let asks = ASKS_SENDER.is_match(&sentence);
+            let asks = ASKS_SENDER.is_match(&sentence) || sentence.trim_end().ends_with('?');
             let (phrase, ask_sender) = if asks {
                 (sender_phrase(&basis).unwrap_or("a few more details"), true)
             } else {
@@ -396,6 +399,7 @@ pub struct Sources<'a> {
     pub notes: &'a [String],
 }
 
+const ROLE_FILLER: &[&str] = &["developer", "developers", "engineer", "engineers", "senior", "junior", "lead", "years", "year", "experience", "experienced", "software", "profile", "resume", "looking", "hello", "thanks", "regards", "interested", "opportunity", "opportunities"];
 const NOTE_STOP: &[&str] = &["what", "which", "when", "where", "your", "from", "with", "that", "this", "have", "about", "does", "need", "needs", "answer"];
 
 fn note_words(text: &str) -> Vec<String> {
@@ -409,7 +413,7 @@ pub fn note_for<'a>(question: &str, notes: &'a [String]) -> Option<&'a String> {
     if q.is_empty() {
         return None;
     }
-    let need = if q.len() <= 2 { 1 } else { 2 };
+    let need = 2.max(q.len().div_ceil(2));
     notes
         .iter()
         .map(|n| (n, note_words(n).iter().filter(|w| q.contains(w)).count()))
@@ -431,10 +435,10 @@ pub fn fill_from_notes(body: &str, notes: &[String]) -> (String, usize) {
         let s = sentence_start(&text, start);
         let e = sentence_end(&text, end);
         let question = text[start + OPEN.len()..end - 1].trim().to_string();
-        let asks = ASKS_SENDER.is_match(&text[s..e].to_lowercase());
+        let asks = ASKS_SENDER.is_match(&text[s..e].to_lowercase()) || text[s..e].trim_end().ends_with('?');
         let vague = question.split_whitespace().count() < 2 && GENERIC_QUESTIONS.contains(&question.to_lowercase().as_str());
         let basis = if vague { text[s..e].replace(&text[start..end], "") } else { question };
-        match (!asks).then(|| note_for(&basis, notes)).flatten() {
+        match (!asks && !is_hard(&basis)).then(|| note_for(&basis, notes)).flatten() {
             Some(note) => {
                 let mut fact = note.trim().trim_end_matches('.').to_string();
                 fact.push('.');
@@ -450,11 +454,11 @@ pub fn fill_from_notes(body: &str, notes: &[String]) -> (String, usize) {
 
 /// The pure part of the pipeline, in order: job openings, filler removal, team notes, then the rewrite of
 /// whatever is left. Returns the final text, the gaps it could not answer and how many it resolved.
-pub fn finalize_text(body: &str, src: &Sources<'_>, openings: &[Opening]) -> (String, Vec<Gap>, usize) {
+pub fn finalize_text(body: &str, src: &Sources<'_>, openings: &[Opening], any_open: bool) -> (String, Vec<Gap>, usize) {
     let mut text = body.to_string();
     let mut resolved = 0;
     if src.staffing {
-        let (t, _) = resolve_text(&text, &format!("{}\n{}", src.subject, src.email_body), openings, src.category);
+        let (t, _) = resolve_text(&text, &format!("{}\n{}", src.subject, src.email_body), openings, any_open, src.category);
         resolved += text.matches(OPEN).count() - t.matches(OPEN).count();
         text = if resolved > 0 { strip_filler(&t) } else { t };
     }
@@ -464,24 +468,42 @@ pub fn finalize_text(body: &str, src: &Sources<'_>, openings: &[Opening]) -> (St
     (t, gaps, resolved)
 }
 
+/// Open requirements that share a meaningful word with the gaps or the email (found by the query over every open
+/// requirement, never cut off by a row limit), and whether any is related enough that "none" would be a guess.
+async fn open_roles_matching(db: &SqlitePool, src: &Sources<'_>, body: &str) -> sqlx::Result<(Vec<Opening>, bool)> {
+    let gap_lines: String = body.lines().filter(|l| l.contains(OPEN)).collect::<Vec<_>>().join(" ");
+    let text = format!("{gap_lines} {} {}", src.subject, src.email_body).to_lowercase();
+    let mut tokens: Vec<String> = text
+        .split(|c: char| !c.is_alphanumeric() && c != '+' && c != '#')
+        .filter(|w| w.len() >= 2 && !GENERIC_WORDS.contains(w) && !NOTE_STOP.contains(w) && !ROLE_FILLER.contains(w))
+        .map(str::to_string)
+        .collect();
+    tokens.sort();
+    tokens.dedup();
+    tokens.truncate(80);
+    let openings: Vec<Opening> = sqlx::query_as(
+        "SELECT r.id, r.role_title, r.location, r.must_have_skills_json AS skills_json FROM requirements r
+         WHERE r.workspace_id = ?1 AND r.status = 'open'
+           AND EXISTS (SELECT 1 FROM json_each(?2) t WHERE instr(lower(r.role_title || ' ' || r.must_have_skills_json || ' ' || r.nice_to_have_skills_json), t.value) > 0)
+         ORDER BY r.created_at DESC LIMIT 500",
+    )
+    .bind(src.ws)
+    .bind(serde_json::json!(tokens).to_string())
+    .fetch_all(db)
+    .await?;
+    // Some open requirement shares a meaningful word with the ask but did not match: not safe to say "none".
+    let related = !openings.is_empty();
+    Ok((openings, related))
+}
+
 /// Resolves what it can in a fresh draft, then rewrites what is left so no blank is ever shown.
 /// Job-opening answers are staffing only: elsewhere "no openings" isn't something the system knows.
 pub async fn resolve_draft(db: &SqlitePool, src: &Sources<'_>, draft: &mut crate::ai::DraftOutput) -> sqlx::Result<usize> {
     if !draft.body_text.contains(OPEN) {
         return Ok(0);
     }
-    let openings: Vec<Opening> = if src.staffing {
-        sqlx::query_as(
-            "SELECT id, role_title, location, must_have_skills_json AS skills_json FROM requirements
-             WHERE workspace_id = ?1 AND status = 'open' ORDER BY created_at DESC LIMIT 100",
-        )
-        .bind(src.ws)
-        .fetch_all(db)
-        .await?
-    } else {
-        vec![]
-    };
-    let (body, gaps, resolved) = finalize_text(&draft.body_text, src, &openings);
+    let (openings, any_open) = if src.staffing { open_roles_matching(db, src, &draft.body_text).await? } else { (vec![], true) };
+    let (body, gaps, resolved) = finalize_text(&draft.body_text, src, &openings, any_open);
     if resolved > 0 {
         tracing::info!(resolved, "draft gaps filled from open requirements and team notes");
     }
@@ -503,7 +525,7 @@ mod tests {
     #[test]
     fn names_a_matching_open_requirement() {
         let o = [opening("req_1", "React Native Developer", &["React Native", "TypeScript"]), opening("req_2", "Java Developer", &["Java"])];
-        let (body, cited) = resolve_text(ASK, "Looking for a job", &o, "");
+        let (body, cited) = resolve_text(ASK, "Looking for a job", &o, true, "");
         assert!(!body.contains("[NEEDS") && body.contains("React Native Developer (Pune)") && !body.contains("Java Developer"), "{body}");
         assert!(body.contains("We currently have an open role that may fit"), "{body}");
         assert_eq!(cited, ["req_1"]);
@@ -511,7 +533,7 @@ mod tests {
 
     #[test]
     fn says_none_right_now_instead_of_asking() {
-        let (body, cited) = resolve_text(ASK, "I know Java too", &[], "");
+        let (body, cited) = resolve_text(ASK, "I know Java too", &[], false, "");
         assert!(!body.contains("[NEEDS") && body.contains("don't have a matching opening right now"), "{body}");
         assert!(cited.is_empty());
     }
@@ -519,7 +541,7 @@ mod tests {
     #[test]
     fn prices_and_dates_are_never_invented_or_shown_as_blanks() {
         let body = "Hi,\n\nThe fee for the premium plan is [NEEDS: price of the premium plan]. Thanks for asking.\n\nBest regards,\nHR";
-        let (out, _) = resolve_text(body, "", &[], "");
+        let (out, _) = resolve_text(body, "", &[], false, "");
         assert_eq!(out, body, "the resolver leaves facts it cannot know");
         assert_eq!(classify("hiring date [NEEDS: start date]"), GapKind::Other);
         let (soft, gaps) = soften(&out);
@@ -565,9 +587,9 @@ mod tests {
     #[test]
     fn a_closed_door_is_not_claimed_when_openings_exist() {
         let o = [opening("req_2", "Java Developer", &["Java"])];
-        let (kept, _) = resolve_text(ASK, "I know Java too", &o, "");
+        let (kept, _) = resolve_text(ASK, "I know Java too", &o, true, "");
         assert!(kept.contains("[NEEDS"), "left for approval, not denied: {kept}");
-        let (none, _) = resolve_text(ASK, "x", &[], "");
+        let (none, _) = resolve_text(ASK, "x", &[], false, "");
         assert!(none.contains(NONE_PHRASE) || none.contains("we don't have a matching opening"), "{none}");
     }
 
@@ -597,7 +619,30 @@ mod tests {
         assert!(!job_seeker_asks_for_work("candidate_referral", "salary for the role", ""));
         assert!(!job_seeker_asks_for_work("timesheet", "roles that suit a React dev", ""));
         let body = "Hello,\n\nYou asked about roles for you: [NEEDS: suitable roles].\n\nBest,\nHR";
-        let (out, _) = resolve_text(body, "x", &[], "candidate_referral");
+        let (out, _) = resolve_text(body, "x", &[], false, "candidate_referral");
         assert!(out.contains("matching opening right now") || out.contains("matching opening"), "{out}");
+    }
+
+    #[test]
+    fn only_real_openings_questions_count_as_openings_questions() {
+        for yes in ["current React Native job openings", "any React Native openings", "is there a vacancy", "positions available for me", "open roles in Pune", "new openings"] {
+            assert_eq!(classify(yes), GapKind::JobOpenings, "{yes}");
+        }
+        for no in ["role of the hiring manager", "who is hiring", "what job title do you hold", "the opening hours", "start date for the role"] {
+            assert_eq!(classify(no), GapKind::Other, "{no}");
+        }
+    }
+
+    #[test]
+    fn a_sentence_that_ends_in_a_question_mark_is_an_ask() {
+        let (soft, gaps) = soften("Hello,\n\nWhich city are you based in [NEEDS: city]?\n\nBest,\nHR");
+        assert!(soft.contains("Could you please share the location?") && gaps[0].ask_sender, "{soft}");
+    }
+
+    #[test]
+    fn notes_need_a_strong_match_and_never_answer_hard_facts() {
+        let notes = vec!["Our office is in Pune near the station".to_string(), "Refund terms: 30 days".to_string()];
+        assert_eq!(fill_from_notes("Hi,\n\nOur office is [NEEDS: office parking details].\n\nBest,\nHR", &notes).1, 0, "one shared word is not enough");
+        assert_eq!(fill_from_notes("Hi,\n\nRefunds take [NEEDS: refund amount and terms].\n\nBest,\nHR", &notes).1, 0, "hard facts are never filled from a loose match");
     }
 }

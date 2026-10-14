@@ -149,6 +149,8 @@ pub async fn handle(state: &AppState, job: &Job) -> Result<(), JobError> {
         kind::AGENT_STEP => super::agent_jobs::agent_step(state, job, &payload).await,
         kind::AGENT_SCHEDULE_TICK => crate::agents::triggers::schedule_tick_job(state, job).await,
         kind::SEND_DRAFT => crate::replies::send_scheduled(state, &payload).await,
+        kind::ENROL_CANDIDATE_WATCH => crate::candidate_watch::enrol_job(state, &payload).await,
+        kind::NOTIFY_CANDIDATE_WATCH => crate::candidate_watch::notify_job(state, &payload).await,
         kind::SEND_OUTBOUND => crate::messaging::email::run_scheduled(state, &payload).await,
         kind::WATCH_REPLY => crate::messaging::watch::reply_job(state, &payload).await,
         kind::WATCH_NUDGE => crate::messaging::watch::nudge_job(state, &payload).await,
@@ -918,13 +920,14 @@ async fn generate_draft(state: &AppState, job: &Job, payload: &Value) -> Result<
         .rows_affected()
             == 1;
         if inserted {
-            let said = [payload.get("owner_said"), payload.get("instructions")]
-                .into_iter()
-                .flatten()
-                .filter_map(Value::as_str)
-                .fold(None::<String>, |acc, t| Some(crate::owner_said::merge(acc.as_deref(), t)));
             let author = payload.get("owner_user_id").and_then(Value::as_str);
-            crate::owner_said::record(&mut tx, &msg.workspace_id, &draft_id, &message_id, author, said.as_deref()).await?;
+            let words: Vec<&str> = [payload.get("owner_said"), payload.get("instructions")].into_iter().flatten().filter_map(Value::as_str).collect();
+            if words.is_empty() {
+                crate::owner_said::record(&mut tx, &msg.workspace_id, &draft_id, &message_id, author, None).await?;
+            }
+            for w in words {
+                crate::owner_said::record(&mut tx, &msg.workspace_id, &draft_id, &message_id, author, Some(w)).await?;
+            }
             audit::record(
                 &mut tx,
                 Entry {
@@ -1074,16 +1077,15 @@ async fn compose_draft(
         thread_digest: thread_digest(state, message_id).await?,
     };
     let mut out = state.drafter.draft(&input).await?;
-    if let Some(agent_id) = agent.agent_id.as_deref()
-        && let Some(name) = sqlx::query_scalar::<_, String>("SELECT name FROM agents WHERE id = ?1 AND workspace_id = ?2")
-            .bind(agent_id)
-            .bind(&msg.workspace_id)
-            .fetch_optional(&state.db)
-            .await?
     {
+        // Nobody signs as an assistant: any of the workspace's agent names as the closing line becomes the owner's sign-off.
+        let names: Vec<String> = sqlx::query_scalar("SELECT DISTINCT name FROM agents WHERE workspace_id = ?1").bind(&msg.workspace_id).fetch_all(&state.db).await?;
         let own = input.signature.as_deref().filter(|s| !s.trim().is_empty()).unwrap_or(&input.default_sign_off);
-        if crate::signoff::replace_agent_sign_off(&mut out.body_text, &name, own) {
-            tracing::info!(message_id, "an agent's own name at the end of a draft was replaced with the owner's sign-off");
+        for name in names {
+            if crate::signoff::replace_agent_sign_off(&mut out.body_text, &name, own) {
+                tracing::info!(message_id, "an agent's own name at the end of a draft was replaced with the owner's sign-off");
+                break;
+            }
         }
     }
     // The critic: anything the verified context pack doesn't support becomes a [NEEDS: ...] for a person.

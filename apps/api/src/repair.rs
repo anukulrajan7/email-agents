@@ -96,6 +96,12 @@ pub fn repaired_body(body: &str, report: &SafetyReport) -> Option<String> {
         return None;
     }
     paras.retain(|p| !p.trim().is_empty());
+    // Dropping the claim must leave a real reply behind, not just a greeting and a sign-off.
+    let last = paras.len().saturating_sub(1);
+    let substantive = paras.iter().enumerate().take(last).skip(1).any(|(_, p)| sentences(p).iter().any(|s| s.trim().chars().count() >= 25));
+    if !substantive {
+        return None;
+    }
     let at = paras.len().saturating_sub(1);
     paras.insert(at, "We'll confirm the details shortly.".to_string());
     Some(paras.join("\n\n"))
@@ -104,9 +110,17 @@ pub fn repaired_body(body: &str, report: &SafetyReport) -> Option<String> {
 /// Writes the repair, records a low-severity incident and the audit trail. `true` when the draft changed.
 pub async fn apply(state: &AppState, ws: &str, ctx: &ReplyContext, report: &SafetyReport) -> sqlx::Result<bool> {
     let Some(body) = repaired_body(&ctx.body_text, report) else { return Ok(false) };
+    // A reply that already promises to confirm an amount, date or commitment is not made sendable by a repair.
+    let existing: String = sqlx::query_scalar("SELECT unanswered_json FROM drafts WHERE id = ?1 AND workspace_id = ?2").bind(&ctx.draft_id).bind(ws).fetch_optional(&state.db).await?.unwrap_or_default();
+    let mut topics = if existing.is_empty() { vec![] } else { crate::gap_resolver::parse_unanswered(&existing) };
+    if topics.iter().any(|t| crate::gap_resolver::is_hard(t)) {
+        return Ok(false);
+    }
+    topics.push("details".to_string());
+    topics.dedup();
     let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     let changed = sqlx::query(
-        "UPDATE drafts SET body_text = ?1, unanswered_json = '[\"details\"]', updated_at = ?2
+        "UPDATE drafts SET body_text = ?1, unanswered_json = ?6, updated_at = ?2
          WHERE id = ?3 AND workspace_id = ?4 AND body_text = ?5 AND send_at IS NULL AND status != 'sent'",
     )
     .bind(&body)
@@ -114,6 +128,7 @@ pub async fn apply(state: &AppState, ws: &str, ctx: &ReplyContext, report: &Safe
     .bind(&ctx.draft_id)
     .bind(ws)
     .bind(&ctx.body_text)
+    .bind(serde_json::json!(topics).to_string())
     .execute(&mut *tx)
     .await?
     .rows_affected()
@@ -153,13 +168,9 @@ pub async fn hand_off(state: &AppState, ws: &str, ctx: &ReplyContext, report: &S
         return Ok(());
     }
     let title = format!("I couldn't send this reply safely - please read it and send it yourself: {}", crate::sources::normalize::truncate_chars(&ctx.subject, 120));
-    let exists: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM review_items WHERE workspace_id = ?1 AND message_id = ?2 AND kind = 'agent_task' AND title = ?3 AND status = 'open')")
-        .bind(ws)
-        .bind(&ctx.message_id)
-        .bind(&title)
-        .fetch_one(&state.db)
-        .await?;
-    if exists {
+    // The mark is unique per draft, so two sends racing to hand off create one task between them.
+    let first = sqlx::query("INSERT OR IGNORE INTO handoff_marks (draft_id, created_at) VALUES (?1, ?2)").bind(&ctx.draft_id).bind(now_ms()).execute(&state.db).await?.rows_affected() == 1;
+    if !first {
         return Ok(());
     }
     let owner: Option<String> = sqlx::query_scalar("SELECT connected_by_user_id FROM email_sources WHERE id = ?1").bind(&ctx.source_id).fetch_optional(&state.db).await?.flatten();
@@ -176,4 +187,36 @@ pub async fn hand_off(state: &AppState, ws: &str, ctx: &ReplyContext, report: &S
     .execute(&state.db)
     .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::send_safety::{Issue, SafetyReport};
+
+    fn report(reason: &str) -> SafetyReport {
+        SafetyReport {
+            blocking: vec![Issue { code: "unsupported_promise", message: format!("The reply may promise something unsupported ({reason})."), fix: None }],
+            warnings: vec![],
+        }
+    }
+
+    #[test]
+    fn the_named_sentence_goes_and_a_real_reply_stays() {
+        let body = "Hello Priya,\n\nThanks for your note about the timesheet.\n\nZeta Corp is hiring and your profile is a fit for Zeta Corp.\n\nBest regards,\nHR";
+        let fixed = repaired_body(body, &report("It promises a hiring company Zeta Corp and a profile fit")).unwrap();
+        assert!(!fixed.contains("Zeta") && fixed.contains("Thanks for your note about the timesheet.") && fixed.contains("We'll confirm the details shortly."), "{fixed}");
+    }
+
+    #[test]
+    fn a_repair_that_leaves_nothing_substantive_is_refused() {
+        let body = "Hello Priya,\n\nZeta Corp is hiring and your profile is a fit for Zeta Corp.\n\nBest regards,\nHR";
+        assert_eq!(repaired_body(body, &report("It promises a hiring company Zeta Corp and a profile fit")), None);
+    }
+
+    #[test]
+    fn money_and_dates_are_never_repaired() {
+        let body = "Hello Priya,\n\nThanks for your note about the timesheet.\n\nYour payment arrives on Friday for the project.\n\nBest regards,\nHR";
+        assert_eq!(repaired_body(body, &report("It promises payment on Friday for the project")), None);
+    }
 }

@@ -373,12 +373,10 @@ async fn finalize_sent(state: &AppState, ws: &str, ctx: &ReplyContext, provider_
         .execute(&mut *tx)
         .await?;
     }
-    tx.commit().await?;
-    if ctx.body_text.to_lowercase().contains(&crate::gap_resolver::NONE_PHRASE.to_lowercase())
-        && let Err(e) = crate::candidate_watch::enroll(state, ws, &ctx.message_id, &ctx.sender_address, &ctx.subject, &ctx.original_body).await
-    {
-        tracing::warn!(error = %e, "could not start watching for matching roles");
+    if ctx.body_text.to_lowercase().contains(&crate::gap_resolver::NONE_PHRASE.to_lowercase()) {
+        crate::candidate_watch::queue_enrol(&mut tx, ws, &ctx.message_id, &ctx.draft_id).await?;
     }
+    tx.commit().await?;
     if let Err(e) = jobs::learning_jobs::enqueue_reply_learning(&state.db, &ctx.draft_id).await {
         tracing::warn!(error = %e, "could not schedule learning from the sent reply");
     }
@@ -763,6 +761,13 @@ pub async fn send_scheduled(state: &AppState, payload: &Value) -> Result<(), Job
             }
             Reconciled::Unsure(why) => return Err(JobError::Retry(format!("confirming the previous send attempt: {why}"))),
         }
+    }
+    if requester.is_none()
+        && let Some(reason) = crate::candidate_watch::stop_reason(state, &ws, &ctx.draft_id).await.map_err(|e| job_err(e.into()))?
+    {
+        tracing::info!(draft_id = %ctx.draft_id, reason, "a watch email is cancelled");
+        crate::candidate_watch::discard(state, &ws, &ctx.draft_id).await.map_err(|e| job_err(e.into()))?;
+        return Ok(());
     }
     if requester.is_none()
         && let Some(reason) = crate::agents::autonomy::automated_send_stopped(state, &ws, &ctx.draft_id).await.map_err(|e| job_err(e.into()))?

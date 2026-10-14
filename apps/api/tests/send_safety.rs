@@ -593,7 +593,7 @@ async fn the_judge_is_told_what_the_owner_said_and_which_roles_are_open() {
     let h = harness(0).await;
     let d = h.draft("Hello Ananth,\n\nA UK company is hiring React Native developers, and your 2 years fit well.\n\nRegards, HR").await;
     let me: String = sqlx::query_scalar("SELECT id FROM users WHERE email = 'admin@acme.test'").fetch_one(&h.state.db).await.unwrap();
-    sqlx::query("UPDATE drafts SET instructions_by_user = 'bol do UK wali company hiring kar rahi hai', instructions_user_id = ?2 WHERE id = ?1").bind(&d).bind(&me).execute(&h.state.db).await.unwrap();
+    owner_said(&h, &d, "bol do UK wali company hiring kar rahi hai", &me).await;
     sqlx::query(
         "INSERT INTO requirements (id, workspace_id, message_id, client, role_title, location, status, source, created_at)
          VALUES ('req_x', ?1, ?2, 'Acme UK', 'React Native Developer', 'London', 'open', 'manual', ?3)",
@@ -684,7 +684,7 @@ async fn admin_id(h: &H) -> String {
 }
 
 async fn owner_said(h: &H, draft: &str, text: &str, author: &str) {
-    sqlx::query("UPDATE drafts SET instructions_by_user = ?1, instructions_user_id = ?2 WHERE id = ?3").bind(text).bind(author).bind(draft).execute(&h.state.db).await.unwrap();
+    sqlx::query("INSERT INTO draft_owner_words (workspace_id, draft_id, user_id, text, created_at) VALUES (?1, ?2, ?3, ?4, ?5)").bind(&h.ws).bind(draft).bind(author).bind(text).bind(now_ms()).execute(&h.state.db).await.unwrap();
 }
 
 fn warned(report: &Value, code: &str) -> bool {
@@ -705,16 +705,24 @@ async fn what_the_owner_told_meera_supports_the_claim_and_an_invented_one_is_fla
 }
 
 #[tokio::test]
-async fn an_earlier_meera_turn_counts_and_only_the_persons_own_turns() {
+async fn an_earlier_meera_turn_counts_when_it_is_about_this_email_and_only_the_persons_own_turns() {
     let h = harness(0).await;
     let me = admin_id(&h).await;
     sqlx::query("INSERT INTO users (id, external_auth_subject, email, created_at) VALUES ('usr_other', 'dev:other@acme.test', 'other@acme.test', 1)").execute(&h.state.db).await.unwrap();
-    for (user, role, text) in [(me.as_str(), "user", "FYI a UK company is hiring React Native devs"), ("usr_other", "user", "secret: Zeta Corp pays double"), (me.as_str(), "user", "reply to Priya please")] {
-        sqlx::query("INSERT INTO assistant_messages (workspace_id, user_id, role, text, citations_json, plan_json, created_at, links_json) VALUES (?1, ?2, ?3, ?4, '[]', '[]', ?5, '[]')")
-            .bind(&h.ws).bind(user).bind(role).bind(text).bind(now_ms()).execute(&h.state.db).await.unwrap();
+    let long_ago = now_ms() - 30 * 86_400_000;
+    let turns = [
+        (me.as_str(), "FYI a UK company is hiring for the September timesheet crowd", long_ago),
+        (me.as_str(), "what is the weather on Friday", long_ago),
+        ("usr_other", "secret: Zeta Corp pays double", now_ms()),
+        (me.as_str(), "reply to Priya please", now_ms()),
+    ];
+    for (user, text, at) in turns {
+        sqlx::query("INSERT INTO assistant_messages (workspace_id, user_id, role, text, citations_json, plan_json, created_at, links_json) VALUES (?1, ?2, 'user', ?3, '[]', '[]', ?4, '[]')")
+            .bind(&h.ws).bind(user).bind(text).bind(at).execute(&h.state.db).await.unwrap();
     }
-    let said = email_ai_api::owner_said::conversation(&h.state.db, &h.ws, &me).await.unwrap();
-    assert!(said.contains("UK company is hiring") && said.contains("reply to Priya"), "{said}");
+    let said = email_ai_api::owner_said::conversation(&h.state.db, &h.ws, &me, &h.msg).await.unwrap();
+    assert!(said.contains("UK company is hiring") && said.contains("reply to Priya"), "an older turn about this email (it names the subject) and a turn after it arrived: {said}");
+    assert!(!said.contains("weather"), "an old turn about something else is not evidence for this email: {said}");
     assert!(!said.contains("Zeta"), "another member's words are not mine: {said}");
 }
 
@@ -730,8 +738,8 @@ async fn the_owners_edit_is_the_source_and_the_check_is_fresh() {
     // Saved edit: recorded with its author.
     let (s, _) = h.call("PATCH", &format!("/api/v1/workspaces/{}/drafts/{d}", h.ws), Some(json!({"body_text": UK}))).await;
     assert_eq!(s, StatusCode::OK);
-    let (said, author): (Option<String>, Option<String>) = sqlx::query_as("SELECT instructions_by_user, instructions_user_id FROM drafts WHERE id = ?1").bind(&d).fetch_one(&h.state.db).await.unwrap();
-    assert!(said.unwrap().contains("UK company is hiring") && author.is_some());
+    let (said, author): (String, String) = sqlx::query_as("SELECT text, user_id FROM draft_owner_words WHERE draft_id = ?1").bind(&d).fetch_one(&h.state.db).await.unwrap();
+    assert!(said.contains("UK company is hiring") && !author.is_empty());
     assert!(!warned(&h.check(&d, None).await, "unsupported_promise"));
 }
 
@@ -778,10 +786,20 @@ async fn the_owner_wins_over_the_data_with_a_one_line_note() {
 async fn one_members_words_never_support_another_members_send() {
     let h = harness(0).await;
     h.judge.flag_unless_noted("UK company", "It promises a hiring company that is not supported");
+    let me = admin_id(&h).await;
     let d = h.draft(UK).await;
+    // A (someone else) asked for it; B (the admin checking and sending) said nothing about it.
     owner_said(&h, &d, "tell Priya a UK company is hiring", "usr_someone_else").await;
-    assert!(warned(&h.check(&d, None).await, "unsupported_promise"), "the admin did not say it");
-    assert!(replies::send_draft(&h.state, &h.ws, &d, Actor::System).await.is_ok(), "the request's own automatic send follows its author");
+    assert!(warned(&h.check(&d, None).await, "unsupported_promise"), "B's check does not count A's words");
+    assert!(replies::send_draft(&h.state, &h.ws, &d, Actor::System).await.is_ok(), "the request's own automatic send follows its author (A)");
+    // Both said something different: each send is judged on its own author's words only.
+    h.judge.flag_unless_noted("Zeta Corp", "It promises a hiring company that is not supported");
+    let d2 = h.draft("Hello Priya,\n\nThanks for your note.\n\nZeta Corp is hiring and could suit you.\n\nBest regards,\nHR").await;
+    owner_said(&h, &d2, "Zeta Corp is hiring", "usr_someone_else").await;
+    owner_said(&h, &d2, "I like cats", &me).await;
+    assert!(warned(&h.check(&d2, None).await, "unsupported_promise"), "B's words are about cats");
+    owner_said(&h, &d2, "Zeta Corp is hiring too", &me).await;
+    assert!(!warned(&h.check(&d2, None).await, "unsupported_promise"), "now B said it");
 }
 
 #[tokio::test]
@@ -804,6 +822,37 @@ async fn a_second_draft_of_the_same_request_keeps_the_provenance() {
     let mut conn = h.state.db.acquire().await.unwrap();
     email_ai_api::owner_said::record(&mut conn, &h.ws, &second, &h.msg, None, None).await.unwrap();
     drop(conn);
-    let (said, author): (Option<String>, Option<String>) = sqlx::query_as("SELECT instructions_by_user, instructions_user_id FROM drafts WHERE id = ?1").bind(&second).fetch_one(&h.state.db).await.unwrap();
-    assert_eq!((said.as_deref(), author.as_deref()), (Some("tell Priya a UK company is hiring"), Some(me.as_str())));
+    let (said, author): (String, String) = sqlx::query_as("SELECT text, user_id FROM draft_owner_words WHERE draft_id = ?1").bind(&second).fetch_one(&h.state.db).await.unwrap();
+    assert_eq!((said.as_str(), author.as_str()), ("tell Priya a UK company is hiring", me.as_str()));
+}
+
+#[tokio::test]
+async fn racing_hand_offs_create_one_task_and_a_hard_promise_is_not_repaired() {
+    let h = harness(0).await;
+    let d = h.draft("Hello Priya,\n\nThanks for your note.\n\nWe guarantee a quick outcome for you.\n\nBest regards,\nHR").await;
+    let ctx = replies::load(&h.state, &h.ws, &d).await.unwrap();
+    let report = email_ai_api::send_safety::SafetyReport {
+        blocking: vec![email_ai_api::send_safety::Issue { code: "unsupported_promise", message: "may promise (x)".into(), fix: None }],
+        warnings: vec![],
+    };
+    let (a, b, c) = tokio::join!(
+        email_ai_api::repair::hand_off(&h.state, &h.ws, &ctx, &report),
+        email_ai_api::repair::hand_off(&h.state, &h.ws, &ctx, &report),
+        email_ai_api::repair::hand_off(&h.state, &h.ws, &ctx, &report)
+    );
+    assert!(a.is_ok() && b.is_ok() && c.is_ok());
+    let tasks: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM review_items WHERE kind = 'agent_task'").fetch_one(&h.state.db).await.unwrap();
+    assert_eq!(tasks, 1);
+
+    // A draft that already promises to confirm a hard fact is not made sendable by a repair; soft topics merge.
+    h.judge.flag_unless_noted("Zeta Corp", "It promises a hiring company Zeta Corp and a profile fit");
+    let body = "Hello Priya,\n\nThanks for your note about the timesheet.\n\nZeta Corp is hiring and your profile is a fit for Zeta Corp.\n\nIf you are interested, reply to this email.\n\nBest regards,\nHR";
+    let hard = h.draft(body).await;
+    sqlx::query("UPDATE drafts SET unanswered_json = '[\"invoice amount\"]' WHERE id = ?1").bind(&hard).execute(&h.state.db).await.unwrap();
+    assert!(replies::send_draft(&h.state, &h.ws, &hard, Actor::System).await.is_err(), "a hard 'we'll confirm' promise stays with a person");
+    let soft = h.draft(body).await;
+    sqlx::query("UPDATE drafts SET unanswered_json = '[\"office hours\"]' WHERE id = ?1").bind(&soft).execute(&h.state.db).await.unwrap();
+    replies::send_draft(&h.state, &h.ws, &soft, Actor::System).await.unwrap();
+    let merged: String = sqlx::query_scalar("SELECT unanswered_json FROM drafts WHERE id = ?1").bind(&soft).fetch_one(&h.state.db).await.unwrap();
+    assert!(merged.contains("office hours") && merged.contains("details"), "{merged}");
 }
