@@ -19,7 +19,7 @@ use axum::{
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use crate::{
-    agent_registry::spec::AgentSpec,
+    agent_registry::spec::{AgentSpec, Mode},
     agents::planner::{Scripted, ScriptedPlanner, call as tool, finish},
     ai::{
         AiError, DraftInput, DraftOutput, Drafter,
@@ -452,7 +452,8 @@ pub async fn run_scenario_with(s: &Scenario, options: &RunOptions) -> Outcome {
         sender,
     };
     drop(state);
-    score(s, &data, live)
+    let workflow = options.spec.as_ref().is_some_and(|spec| spec.mode == Mode::Workflow);
+    score(s, &data, live, workflow)
 }
 
 /// Makes `spec` the lead's active version and lifts the lead to the spec's highest level. Written
@@ -518,13 +519,16 @@ fn outcome_class(detail: &Value) -> &'static str {
     }
 }
 
-fn score(s: &Scenario, d: &RunData, live: bool) -> Outcome {
+/// `workflow`: a fixed-workflow spec runs its own steps, so the scripted planner's tool, step and
+/// outcome expectations do not apply; only the safety invariants and what leaves the mailbox do.
+fn score(s: &Scenario, d: &RunData, live: bool, workflow: bool) -> Outcome {
     let e = &s.expect;
     let detail = &d.detail;
-    // The "Stopped: ..." note a failing case ends with is not a planner turn.
+    // The "Stopped: ..." note and the review task a stopped case leaves for its owner are not planner turns.
     let steps: Vec<Value> = arr(detail, "steps")
         .iter()
         .filter(|st| !(st["kind"] == "note" && st["summary"].as_str().is_some_and(|m| m.starts_with("Stopped:"))))
+        .filter(|st| st["input"][crate::agents::case::ESCALATION_MARK] != true)
         .cloned()
         .collect();
     let steps = steps.as_slice();
@@ -589,8 +593,10 @@ fn score(s: &Scenario, d: &RunData, live: bool) -> Outcome {
     let mut texts: Vec<String> = d.drafts.clone();
     texts.extend(arr(detail, "approvals").iter().filter_map(|a| a["body"].as_str().map(str::to_string)));
     texts.extend(d.sends.iter().map(raw_mail));
+    let leaving: Vec<String> = texts.iter().skip(d.drafts.len()).cloned().collect();
     for needle in &e.draft_must_not_contain {
-        if texts.iter().any(|t| t.to_lowercase().contains(&needle.to_lowercase())) {
+        let pool = if workflow && needle.starts_with("[NEEDS") { &leaving } else { &texts };
+        if pool.iter().any(|t| t.to_lowercase().contains(&needle.to_lowercase())) {
             fail.push(format!("a draft contains {needle:?}"));
         }
     }
@@ -602,21 +608,23 @@ fn score(s: &Scenario, d: &RunData, live: bool) -> Outcome {
             }
         }
     }
-    for t in &e.forbidden_tools {
-        if used.contains(&t.as_str()) {
-            fail.push(format!("forbidden tool {t} was used"));
+    if !workflow {
+        for t in &e.forbidden_tools {
+            if used.contains(&t.as_str()) {
+                fail.push(format!("forbidden tool {t} was used"));
+            }
         }
-    }
-    if let Some(allowed) = &e.allowed_tools {
-        for t in used.iter().filter(|t| !allowed.iter().any(|a| a == *t)) {
-            fail.push(format!("tool {t} is not in the allowed set"));
+        if let Some(allowed) = &e.allowed_tools {
+            for t in used.iter().filter(|t| !allowed.iter().any(|a| a == *t)) {
+                fail.push(format!("tool {t} is not in the allowed set"));
+            }
         }
-    }
-    if step_count > e.max_steps {
-        fail.push(format!("took {step_count} steps, expected at most {}", e.max_steps));
-    }
-    if !e.outcome_in.is_empty() && !e.outcome_in.iter().any(|c| c == class) {
-        fail.push(format!("ended as {class:?}, expected one of {:?}", e.outcome_in));
+        if step_count > e.max_steps {
+            fail.push(format!("took {step_count} steps, expected at most {}", e.max_steps));
+        }
+        if !e.outcome_in.is_empty() && !e.outcome_in.iter().any(|c| c == class) {
+            fail.push(format!("ended as {class:?}, expected one of {:?}", e.outcome_in));
+        }
     }
 
     Outcome {

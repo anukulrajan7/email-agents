@@ -395,7 +395,7 @@ pub async fn resolve_version(conn: &mut SqliteConnection, ws: &str, agent_id: &s
     }
     let status_of = |r: &Option<run::EvalRun>| r.as_ref().map(|r| r.status.clone());
     let (status, cap, reason) = match (status_of(&safety).as_deref(), status_of(&replay).as_deref()) {
-        (Some("failed"), _) => ("failed", Some(0), "The safety checks failed for the new version"),
+        (Some("failed"), _) => ("failed", Some(0), SAFETY_DEMOTION_REASON),
         (Some("error"), _) | (_, Some("error")) | (None, _) => return Ok(()),
         (_, Some("failed")) => ("failed", Some(1), "Replies drafted by the new version are worse than the previous version's"),
         _ => ("passed", None, ""),
@@ -413,6 +413,46 @@ pub async fn resolve_version(conn: &mut SqliteConnection, ws: &str, agent_id: &s
         demote(conn, ws, agent_id, cap, reason, json!({"version": version}), "system").await?;
     }
     Ok(())
+}
+
+/// Why `resolve_version` demotes an agent whose new version failed the safety suite.
+pub const SAFETY_DEMOTION_REASON: &str = "The safety checks failed for the new version";
+pub const RESTORED_REASON: &str = "Restored after gate fix";
+
+/// Startup repair. Before the safety gate understood fixed workflows, a template upgrade of a
+/// workflow agent failed scenarios written for the planner and dropped the agent to level 0. Puts
+/// those agents back at the level they had, once: only when the demoting version came from a
+/// template (not an admin or designer edit), is still active, and nobody has changed the level
+/// since. Returns the number of agents restored.
+pub async fn repair_template_demotions(db: &SqlitePool) -> sqlx::Result<usize> {
+    let rows: Vec<(String, String, String, i64, i64, i64)> = sqlx::query_as(
+        "SELECT c.id, c.workspace_id, c.agent_id, c.from_level, c.to_level, CAST(json_extract(c.evidence_json, '$.version') AS INTEGER)
+         FROM autonomy_changes c
+         JOIN agents a ON a.id = c.agent_id AND a.workspace_id = c.workspace_id
+         JOIN agent_versions v ON v.agent_id = c.agent_id AND v.version = CAST(json_extract(c.evidence_json, '$.version') AS INTEGER)
+         WHERE c.reason = ?1 AND c.actor = 'system' AND v.source = 'template' AND a.active_version = v.version
+           AND a.autonomy_level = c.to_level AND a.status != 'archived'
+           AND NOT EXISTS (SELECT 1 FROM autonomy_changes later WHERE later.agent_id = c.agent_id AND later.id != c.id AND later.created_at >= c.created_at)",
+    )
+    .bind(SAFETY_DEMOTION_REASON)
+    .fetch_all(db)
+    .await?;
+    let mut restored = 0;
+    for (change_id, ws, agent_id, from, to, version) in rows {
+        let mut tx = db.begin_with("BEGIN IMMEDIATE").await?;
+        if from > to && store::set_autonomy_level(&mut tx, &ws, &agent_id, from).await? {
+            record_change(&mut tx, &ws, &agent_id, to, from, RESTORED_REASON, json!({"version": version, "restored_change": change_id}), "system").await?;
+            sqlx::query("UPDATE agent_versions SET gate_status = 'passed' WHERE agent_id = ?1 AND version = ?2 AND gate_status = 'failed'")
+                .bind(&agent_id)
+                .bind(version)
+                .execute(&mut *tx)
+                .await?;
+            run::enqueue(&mut tx, &ws, &agent_id, Some(version), "safety", "manual", None).await?;
+            restored += 1;
+        }
+        tx.commit().await?;
+    }
+    Ok(restored)
 }
 
 #[derive(Debug, PartialEq, Eq)]

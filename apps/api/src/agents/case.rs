@@ -312,7 +312,7 @@ pub async fn set_status(conn: &mut SqliteConnection, ws: &str, case_id: &str, to
     Ok(changed)
 }
 
-const ESCALATION_MARK: &str = "unresolved_reply";
+pub const ESCALATION_MARK: &str = "unresolved_reply";
 
 fn open_needs(body: &str) -> Vec<String> {
     let mut found = Vec::new();
