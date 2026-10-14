@@ -185,7 +185,7 @@ pub async fn save_draft(state: &AppState, ws: &str, draft_id: &str, actor: Actor
         None => state.nango.gmail_call(Method::POST, conn, pck, "drafts", Some(&json!({ "message": message }))).await,
     }?;
     let provider_draft_id = result.get("id").and_then(Value::as_str).unwrap_or_default().to_string();
-    let mut tx = state.db.begin().await?;
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     sqlx::query("UPDATE drafts SET provider_draft_id = ?1, updated_at = ?2 WHERE id = ?3")
         .bind(&provider_draft_id)
         .bind(now_ms())
@@ -326,7 +326,7 @@ async fn clear_attempt(state: &AppState, draft_id: &str, attempt: &str) -> sqlx:
 
 /// Records a confirmed send (idempotent): status, audit, indexing, learning.
 async fn finalize_sent(state: &AppState, ws: &str, ctx: &ReplyContext, provider_message_id: &str, actor: Actor<'_>) -> AppResult<()> {
-    let mut tx = state.db.begin().await?;
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     let changed = sqlx::query(
         "UPDATE drafts SET status = 'sent', provider_message_id = ?1, send_at = NULL, send_error = NULL, updated_at = ?2
          WHERE id = ?3 AND status != 'sent'",
@@ -500,7 +500,7 @@ pub async fn send_draft_held(state: &AppState, ws: &str, draft_id: &str, actor: 
     }
     let now = now_ms();
     let send_at = now + state.config.send_undo_seconds.max(hold_secs).max(0) * 1_000;
-    let mut tx = state.db.begin().await?;
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     let claimed = sqlx::query(
         "UPDATE drafts SET send_at = ?1, send_requested_by = ?2, send_error = NULL, updated_at = ?3
          WHERE id = ?4 AND workspace_id = ?5 AND status != 'sent' AND send_at IS NULL AND send_attempt_id IS NULL",
@@ -576,7 +576,7 @@ pub async fn undo_send(
     .bind(&ws)
     .fetch_optional(&state.db)
     .await?;
-    let mut tx = state.db.begin().await?;
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     let undone = sqlx::query(
         "UPDATE drafts SET send_at = NULL, send_requested_by = NULL, updated_at = ?1
          WHERE id = ?2 AND workspace_id = ?3 AND status != 'sent' AND send_at IS NOT NULL AND send_attempt_id IS NULL",
@@ -634,7 +634,7 @@ fn job_err(e: AppError) -> JobError {
 
 /// The scheduled send didn't go out: clear the schedule, say why on the draft, audit, and alert the team.
 async fn hold(state: &AppState, ws: &str, ctx: &ReplyContext, action: &str, reason: &str, metadata: Value) -> Result<(), JobError> {
-    let mut tx = state.db.begin().await?;
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     sqlx::query(
         "UPDATE drafts SET send_at = NULL, send_requested_by = NULL, send_error = ?1, updated_at = ?2
          WHERE id = ?3 AND status != 'sent'",

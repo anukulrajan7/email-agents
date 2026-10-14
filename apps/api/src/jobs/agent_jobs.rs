@@ -25,7 +25,7 @@ pub async fn agent_step(state: &AppState, job: &Job, payload: &Value) -> Result<
 pub async fn on_dead(state: &AppState, job: &Job, payload: &Value, _error: &str) -> Result<(), JobError> {
     let (case_id, _) = case_and_turn(payload)?;
     let Some(case) = agents::case::get_in(&state.db, workspace_of(job)?, &case_id).await? else { return Ok(()) };
-    let mut tx = state.db.begin().await?;
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     agents::case::fail(&mut tx, &case, "the AI service could not be reached for this step").await?;
     tx.commit().await?;
     Ok(())

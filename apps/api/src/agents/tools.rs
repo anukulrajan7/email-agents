@@ -670,7 +670,7 @@ impl Tool for CreateTask {
         };
         let msg = message_in_ws(ctx, message_id).await?;
         let review_id = new_id("rev");
-        let mut tx = ctx.state.db.begin().await?;
+        let mut tx = ctx.state.db.begin_with("BEGIN IMMEDIATE").await?;
         let created = sqlx::query(
             "INSERT INTO review_items (id, workspace_id, message_id, workflow_run_id, kind, title, status, created_at)
              SELECT ?1, ?2, ?3, NULL, 'agent_task', ?4, 'open', ?5

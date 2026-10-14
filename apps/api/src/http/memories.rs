@@ -207,7 +207,7 @@ pub async fn create(
     };
     let id = new_id("mem");
     let now = now_ms();
-    let mut tx = state.db.begin().await?;
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     let row: MemoryRow = sqlx::query_as(&format!(
         "INSERT INTO memories (id, workspace_id, scope, contact_email, kind, content, status, source, created_by, created_at, updated_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'active', 'user', ?7, ?8, ?8)
@@ -273,7 +273,7 @@ pub async fn update(
     if content.is_none() && body.kind.is_none() && body.status.is_none() && body.pinned.is_none() && !confirmed {
         return Err(AppError::BadRequest("nothing to update".into()));
     }
-    let mut tx = state.db.begin().await?;
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     // A person accepting, confirming or rewriting a memory vouches for it (confidence 1).
     let row: MemoryRow = sqlx::query_as(&format!(
         "UPDATE memories SET content = COALESCE(?1, content), kind = COALESCE(?2, kind),

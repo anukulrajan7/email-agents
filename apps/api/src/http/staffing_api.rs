@@ -107,7 +107,7 @@ pub async fn decide(State(state): State<AppState>, user: AuthUser, Path((ws, id)
     if !submissions::may_decide(&a, &person) {
         return Err(AppError::NotFound);
     }
-    let mut tx = state.db.begin().await?;
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     if let Some(c) = &body.candidate_id {
         if let Some(c) = c {
             let ok: Option<i64> = sqlx::query_scalar("SELECT 1 FROM candidates WHERE id = ?1 AND workspace_id = ?2").bind(c).bind(&ws).fetch_optional(&mut *tx).await?;

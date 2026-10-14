@@ -285,7 +285,7 @@ async fn fetch_forwarded_email(state: &AppState, payload: &Value) -> Result<(), 
         email_norm.source_message_id = payload.get("email_id").and_then(Value::as_str).unwrap_or(&event_id).to_string();
     }
 
-    let mut tx = state.db.begin().await?;
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     // First statement is a write, so the dedupe check in persist_message runs under the write lock.
     sqlx::query("UPDATE inbound_events SET status = 'processed' WHERE id = ?1").bind(&event_id).execute(&mut *tx).await?;
     let created = ingest::persist_message(&mut tx, &source_id, &workspace_id, &email_norm, None, json!({ "event_id": event_id }))
@@ -541,7 +541,7 @@ async fn persist_classification_with(
          WHERE classifications.source != 'manual' OR excluded.source = 'manual'"
         }
     };
-    let mut tx = state.db.begin().await?;
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     let written = sqlx::query(&format!(
         "INSERT INTO classifications
            (message_id, category, priority, requires_reply, confidence, needs_review, source, model_id, model_version,
@@ -694,7 +694,7 @@ async fn continue_pipeline(state: &AppState, job: &Job, payload: &Value) -> Resu
     let (Some(trigger), Some(ws)) = (payload.get("trigger").and_then(Value::as_str), job.workspace_id.as_deref()) else {
         return Ok(());
     };
-    let mut tx = state.db.begin().await?;
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     enqueue_after_analysis(&mut tx, ws, &str_field(payload, "message_id")?, trigger).await?;
     tx.commit().await?;
     state.jobs_notify.notify_one();
@@ -763,7 +763,7 @@ async fn execute_workflow(state: &AppState, payload: &Value) -> Result<(), JobEr
     };
 
     let now = now_ms();
-    let mut tx = state.db.begin().await?;
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     let created = sqlx::query(
         "INSERT OR IGNORE INTO workflow_runs (id, workspace_id, workflow_id, message_id, status, created_at)
          VALUES (?1, ?2, ?3, ?4, 'running', ?5)",
@@ -892,7 +892,7 @@ async fn generate_draft(state: &AppState, job: &Job, payload: &Value) -> Result<
 
     let now = now_ms();
     let draft_id = new_id("drf");
-    let mut tx = state.db.begin().await?;
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     if let Some((out, ctx, quality)) = &generated {
         let inserted = sqlx::query(
             "INSERT OR IGNORE INTO drafts (id, workspace_id, message_id, body_text, original_body_text, status, model_id,
@@ -1098,7 +1098,7 @@ pub async fn create_draft_for_message(
     let origin_key = format!("automation-draft:{message_id}");
     let draft_id = new_id("drf");
     let now = now_ms();
-    let mut tx = state.db.begin().await?;
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     let inserted = sqlx::query(
         "INSERT OR IGNORE INTO drafts (id, workspace_id, message_id, body_text, original_body_text, status, model_id,
                                        origin_key, memory_ids_json, unanswered_json, created_at, updated_at)
@@ -1165,7 +1165,7 @@ pub async fn create_agent_draft(
     }
     let draft_id = new_id("drf");
     let now = now_ms();
-    let mut tx = state.db.begin().await?;
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     let inserted = sqlx::query(
         "INSERT OR IGNORE INTO drafts (id, workspace_id, message_id, body_text, original_body_text, status, model_id,
                                        origin_key, memory_ids_json, unanswered_json, created_at, updated_at)
@@ -1399,7 +1399,7 @@ async fn finish_without_draft(
     run_id: Option<&str>,
     reason: &str,
 ) -> Result<(), JobError> {
-    let mut tx = state.db.begin().await?;
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     if let Some(run_id) = run_id {
         sqlx::query("UPDATE workflow_runs SET status = 'completed', error = NULL WHERE id = ?1").bind(run_id).execute(&mut *tx).await?;
         sqlx::query("UPDATE email_messages SET processing_status = 'workflow_completed', processing_error = NULL WHERE id = ?1")

@@ -108,7 +108,7 @@ pub async fn create(
     let seeds = if blank { vec![(None, &OTHER_SEED)] } else { packs::labels_with_source(&chosen) };
     let id = new_id("ws");
     let now = now_ms();
-    let mut tx = state.db.begin().await?;
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     // Write first so SQLite takes the write lock: the cap check below can't race another create.
     sqlx::query("INSERT INTO workspaces (id, name, created_at, goal) VALUES (?1, ?2, ?3, ?4)")
         .bind(&id)
@@ -207,7 +207,7 @@ pub async fn put_packs(
     let chosen = parse_packs(&body.packs)?;
     let dry_run = matches!(q.dry_run.as_deref(), Some("1" | "true"));
     // Read inside the transaction: a concurrent save makes this one fail instead of diffing a stale list.
-    let mut tx = state.db.begin().await?;
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     let before = packs::enabled_keys(&mut *tx, &ws).await?;
     let added: Vec<&str> = chosen.iter().copied().filter(|k| !before.contains(k)).collect();
     let removed: Vec<&str> = before.iter().copied().filter(|k| !chosen.contains(k)).collect();
@@ -290,7 +290,7 @@ pub async fn add_member(
     .fetch_optional(&state.db)
     .await?;
     let Some(member_id) = member_id else {
-        let mut tx = state.db.begin().await?;
+        let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
         sqlx::query(
             "INSERT INTO invitations (workspace_id, email, role, invited_by, created_at) VALUES (?1, ?2, ?3, ?4, ?5)
              ON CONFLICT(workspace_id, email) DO UPDATE SET role = excluded.role, invited_by = excluded.invited_by",
@@ -318,7 +318,7 @@ pub async fn add_member(
         tx.commit().await?;
         return Ok((StatusCode::ACCEPTED, Json(json!({ "invited": true, "email": email, "role": role.as_str() }))));
     };
-    let mut tx = state.db.begin().await?;
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     // Write first, so the owner check below and the role change are one atomic step.
     sqlx::query("UPDATE workspaces SET name = name WHERE id = ?1").bind(&ws).execute(&mut *tx).await?;
     let owner: Option<String> = match sqlx::query_scalar("SELECT user_id FROM workspace_owners WHERE workspace_id = ?1").bind(&ws).fetch_optional(&mut *tx).await? {

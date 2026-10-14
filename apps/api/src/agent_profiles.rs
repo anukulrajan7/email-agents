@@ -178,8 +178,9 @@ pub async fn agent(db: &SqlitePool, config: &Config, ws: &str) -> sqlx::Result<W
         return Ok(a);
     }
     let settings = crate::reply_settings::load(db, config, ws).await?;
+    let persona = default_persona(crate::packs::reply_style(db, ws).await?, &settings.reply_instructions);
     let now = now_ms();
-    let mut tx = db.begin().await?;
+    let mut tx = db.begin_with("BEGIN IMMEDIATE").await?;
     let created = sqlx::query(
         "INSERT OR IGNORE INTO workspace_agents (workspace_id, name, avatar, color, persona, signature, created_at, updated_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)",
@@ -188,7 +189,7 @@ pub async fn agent(db: &SqlitePool, config: &Config, ws: &str) -> sqlx::Result<W
     .bind(DEFAULT_NAME)
     .bind(DEFAULT_AVATAR)
     .bind(DEFAULT_COLOR)
-    .bind(default_persona(crate::packs::reply_style(db, ws).await?, &settings.reply_instructions))
+    .bind(persona)
     .bind(settings.signature.map(|s| truncate_chars(&s, MAX_SIGNATURE_CHARS)))
     .bind(now)
     .execute(&mut *tx)
@@ -223,7 +224,7 @@ async fn agent_row_send(conn: &mut sqlx::SqliteConnection, ws: &str) -> sqlx::Re
 }
 
 pub async fn save_agent(db: &SqlitePool, ws: &str, f: &AgentFields, user_id: &str) -> sqlx::Result<()> {
-    let mut tx = db.begin().await?;
+    let mut tx = db.begin_with("BEGIN IMMEDIATE").await?;
     let previous_send = agent_row_send(&mut tx, ws).await?;
     sqlx::query(
         "UPDATE workspace_agents SET name = ?1, avatar = ?2, color = ?3, persona = ?4, signature = ?5, tasks_json = ?6,

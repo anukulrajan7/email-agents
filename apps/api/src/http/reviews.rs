@@ -60,7 +60,7 @@ pub async fn update(
     if body.status != "open" && body.status != "closed" {
         return Err(AppError::BadRequest("status must be open or closed".into()));
     }
-    let mut tx = state.db.begin().await?;
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     let message_id: String =
         sqlx::query_scalar("UPDATE review_items SET status = ?1 WHERE id = ?2 AND workspace_id = ?3 RETURNING message_id")
             .bind(&body.status)

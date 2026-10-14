@@ -68,7 +68,7 @@ pub async fn raise(pool: &SqlitePool, a: NewAlert<'_>) -> sqlx::Result<(String, 
     let level = a.level.clamp(1, MAX_LEVEL);
     let now = now_ms();
     let id = new_id("alr");
-    let mut tx = pool.begin().await?;
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     let created = sqlx::query(
         "INSERT INTO alerts (id, workspace_id, kind, severity, title, body, message_id, dedupe_key, escalation_level,
                              level_since, created_at, updated_at)
@@ -431,7 +431,7 @@ pub struct EvalReport {
 }
 
 async fn resolve(pool: &SqlitePool, workspace_id: &str, id: &str, message_id: Option<&str>, now: i64) -> sqlx::Result<bool> {
-    let mut tx = pool.begin().await?;
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     let done = sqlx::query(
         "UPDATE alerts SET status = 'resolved', resolved_at = ?1, resolved_by = 'system', snoozed_until = NULL, updated_at = ?1
          WHERE id = ?2 AND status != 'resolved'",

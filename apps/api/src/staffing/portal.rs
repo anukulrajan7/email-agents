@@ -72,7 +72,7 @@ pub async fn import_hours(db: &SqlitePool, workspace_id: &str, csv_text: &str, d
     };
     let people = people_by_email(db, workspace_id).await.map_err(|x| x.to_string())?;
     let mut report = ImportReport { dry_run, ..Default::default() };
-    let mut tx = db.begin().await.map_err(|x| x.to_string())?;
+    let mut tx = db.begin_with("BEGIN IMMEDIATE").await.map_err(|x| x.to_string())?;
     for (i, r) in rows.iter().enumerate() {
         let row = i + 2;
         report.total_rows += 1;
@@ -131,7 +131,7 @@ pub async fn import_submissions(db: &SqlitePool, workspace_id: &str, csv_text: &
     let client_c = col(&headers, &["client"]);
     let people = people_by_email(db, workspace_id).await.map_err(|x| x.to_string())?;
     let mut report = ImportReport { dry_run, ..Default::default() };
-    let mut tx = db.begin().await.map_err(|x| x.to_string())?;
+    let mut tx = db.begin_with("BEGIN IMMEDIATE").await.map_err(|x| x.to_string())?;
     for (i, r) in rows.iter().enumerate() {
         let row = i + 2;
         report.total_rows += 1;

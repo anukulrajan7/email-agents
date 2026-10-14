@@ -536,7 +536,7 @@ pub async fn register_connection(
         return Err(AppError::Forbidden);
     }
 
-    let mut tx = state.db.begin().await?;
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     sqlx::query(
         "INSERT INTO email_sources
            (id, workspace_id, kind, status, external_connection_id, provider_config_key, capabilities_json,
@@ -727,7 +727,7 @@ pub async fn sync_source(state: &AppState, payload: &Value) -> Result<(), JobErr
     for i in 0..total_chunks {
         let chunk = chunks.get(i).copied().unwrap_or(&[]);
         let last = i + 1 == total_chunks;
-        let mut tx = state.db.begin().await?;
+        let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
         // Write first (takes the lock); the cursor only advances with the final chunk, so a
         // crash mid-way re-imports from the old cursor and dedupe absorbs the repeats.
         sqlx::query(
@@ -846,7 +846,7 @@ async fn pull_from_gmail(
 
     let mut changed = 0usize;
     for chunk in records.chunks(PERSIST_CHUNK) {
-        let mut tx = state.db.begin().await?;
+        let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
         sqlx::query("UPDATE email_sources SET last_synced_at = ?1 WHERE id = ?2")
             .bind(now_ms())
             .bind(source_id)

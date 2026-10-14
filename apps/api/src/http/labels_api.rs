@@ -120,7 +120,7 @@ pub async fn create(
         return Err(AppError::Conflict(format!("a workspace can have at most {MAX_ACTIVE_LABELS} active labels")));
     }
     let id = new_id("lbl");
-    let mut tx = state.db.begin().await?;
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     let inserted = sqlx::query(
         "INSERT OR IGNORE INTO labels (id, workspace_id, key, name, description, color, position, created_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, (SELECT COALESCE(MAX(position), 0) + 1 FROM labels WHERE workspace_id = ?2), ?7)",
@@ -206,7 +206,7 @@ pub async fn update(
         }
         _ => {}
     }
-    let mut tx = state.db.begin().await?;
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     // Reordering: whoever holds the target position takes this label's old position (swap).
     if let Some(target) = body.position {
         sqlx::query(

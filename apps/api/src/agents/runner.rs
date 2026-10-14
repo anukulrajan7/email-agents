@@ -152,7 +152,7 @@ pub async fn run_step(state: &AppState, ws: &str, case_id: &str, turn: i64) -> R
     if !crate::ai_ledger::within_budget(&state.db, state.config.ai_daily_budget_usd, &case.workspace_id).await {
         const DAY_MS: i64 = 86_400_000;
         let resume_at = (crate::db::now_ms() / DAY_MS + 1) * DAY_MS;
-        let mut tx = state.db.begin().await?;
+        let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
         sqlx::query("UPDATE cases SET status = 'waiting_event', next_wake_at = ?1, updated_at = ?2 WHERE id = ?3 AND status = 'running'")
             .bind(resume_at)
             .bind(crate::db::now_ms())
@@ -174,7 +174,7 @@ pub async fn run_step(state: &AppState, ws: &str, case_id: &str, turn: i64) -> R
         return Ok(());
     }
     if let Some(reason) = limit_reached(case.step_count, case.max_steps, case.spent_usd, case.budget_usd) {
-        let mut tx = state.db.begin().await?;
+        let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
         if case.shadow {
             end_observation(&mut tx, &case, &reason).await?;
         } else {
@@ -228,7 +228,7 @@ pub async fn run_step(state: &AppState, ws: &str, case_id: &str, turn: i64) -> R
             Err(AiError::Permanent(e)) => {
                 // The same request fails the same way: stop now instead of retrying it.
                 tracing::warn!(case_id = %case.id, error = %e, "planner refused the request");
-                let mut tx = state.db.begin().await?;
+                let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
                 case::fail(&mut tx, &case, &format!("The AI model couldn't take this request ({e})")).await?;
                 tx.commit().await?;
                 return Ok(());
@@ -295,7 +295,7 @@ async fn end_observation(conn: &mut sqlx::SqliteConnection, case: &Case, reason:
 /// A paused agent does no work: its cases wait and pick up again when it is switched back on.
 /// An agent that was archived or never activated ends its case instead.
 async fn park_while_inactive(state: &AppState, case: &Case, agent: &CaseAgent, turn: i64) -> Result<(), JobError> {
-    let mut tx = state.db.begin().await?;
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     if agent.row.status != "paused" {
         let reason = format!("{} is not active", agent.row.name);
         if case.shadow {
@@ -473,7 +473,7 @@ async fn commit(state: &AppState, case: &Case, turn: i64, usage: &Usage, result:
         TurnResult::Ran { out, .. } => out.cost_usd,
         _ => 0.0,
     };
-    let mut tx = state.db.begin().await?;
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     // Fence: only one run of this turn may record it, and never after a cancel.
     let taken = sqlx::query(
         "UPDATE cases SET step_count = ?1, spent_usd = spent_usd + ?2, updated_at = ?3, next_wake_at = NULL,

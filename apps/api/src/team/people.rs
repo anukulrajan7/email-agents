@@ -490,7 +490,7 @@ pub async fn import_csv(db: &SqlitePool, workspace_id: &str, csv_text: &str, dry
     let mailbox_c = column(&headers, &["mailbox", "mailbox_email"]);
 
     let mut report = ImportReport { dry_run, ..Default::default() };
-    let mut tx = db.begin().await.map_err(|e| e.to_string())?;
+    let mut tx = db.begin_with("BEGIN IMMEDIATE").await.map_err(|e| e.to_string())?;
     // (row number, person id, manager email) resolved after every person exists.
     let mut managers: Vec<(usize, String, String)> = vec![];
     for (i, record) in reader.records().enumerate() {

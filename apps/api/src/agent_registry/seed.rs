@@ -245,7 +245,7 @@ pub async fn ensure_workspace(db: &SqlitePool, ws: &str) -> sqlx::Result<()> {
         return Ok(());
     }
     drop(conn);
-    let mut tx = db.begin().await?;
+    let mut tx = db.begin_with("BEGIN IMMEDIATE").await?;
     seed_workspace(&mut tx, ws).await?;
     tx.commit().await
 }

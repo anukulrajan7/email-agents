@@ -83,7 +83,7 @@ pub async fn auth_rate_limit(State(state): State<AppState>, ClientIp(ip): Client
 /// `false` = over the limit (nothing recorded). Survives restarts.
 pub async fn take(db: &SqlitePool, scope: &str, key: &str, limit: i64, window_ms: i64) -> sqlx::Result<bool> {
     let now = now_ms();
-    let mut tx = db.begin().await?;
+    let mut tx = db.begin_with("BEGIN IMMEDIATE").await?;
     // A write first, so SQLite takes the write lock before the count below.
     sqlx::query("DELETE FROM rate_events WHERE scope = ?1 AND key = ?2 AND created_at <= ?3")
         .bind(scope)
