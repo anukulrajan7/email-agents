@@ -53,14 +53,15 @@ pub async fn list(State(state): State<AppState>, user: AuthUser, Path(ws): Path<
 
 pub async fn resolve(State(state): State<AppState>, user: AuthUser, Path((ws, id)): Path<(String, String)>) -> AppResult<Json<Value>> {
     require_role(&state.db, &ws, &user, Role::Admin).await?;
-    if !incidents::resolve(&state.db, &ws, &id, &user.id).await? {
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
+    if !incidents::resolve(&mut tx, &ws, &id, &user.id).await? {
         return Err(AppError::NotFound);
     }
-    let mut conn = state.db.acquire().await?;
     audit::record(
-        &mut conn,
+        &mut tx,
         Entry { workspace_id: &ws, actor: Actor::User(&user.id), action: "ai_incident.resolved", entity_type: "ai_incident", entity_id: &id, message_id: None, metadata: json!({}) },
     )
     .await?;
+    tx.commit().await?;
     Ok(Json(json!({ "id": id, "resolved": true })))
 }

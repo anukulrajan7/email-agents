@@ -28,8 +28,10 @@ const HOUR_MS: i64 = 3_600_000;
 const MAX_OPEN_SHOWN: i64 = 100;
 
 /// Spend today against the previous seven days' total. Pure.
-pub fn cost_spike(today_usd: f64, prior_7d_usd: f64) -> bool {
-    today_usd > COST_SPIKE_FLOOR_USD && today_usd > COST_SPIKE_FACTOR * (prior_7d_usd / 7.0)
+const COST_MIN_DAYS: i64 = 3;
+
+pub fn cost_spike(today_usd: f64, prior_7d_usd: f64, days_with_data: i64) -> bool {
+    prior_7d_usd > 0.0 && days_with_data >= COST_MIN_DAYS && today_usd > COST_SPIKE_FLOOR_USD && today_usd > COST_SPIKE_FACTOR * (prior_7d_usd / 7.0)
 }
 
 /// The last hour's p95 against the baseline p95 for one task. Pure.
@@ -258,6 +260,14 @@ pub async fn cost_health(db: &SqlitePool, ws: &str, now: i64) -> sqlx::Result<Co
     let end = now + 1;
     let today_usd = total_spend(db, ws, today, end).await?;
     let prior = total_spend(db, ws, today - 7 * DAY_MS, today).await?;
+    let days_with_data: i64 = sqlx::query_scalar(
+        "SELECT COUNT(DISTINCT created_at / 86400000) FROM ai_calls WHERE workspace_id = ?1 AND created_at >= ?2 AND created_at < ?3 AND cost_usd > 0",
+    )
+    .bind(ws)
+    .bind(today - 7 * DAY_MS)
+    .bind(today)
+    .fetch_one(db)
+    .await?;
     let (auto_today, emails_today) = automatic_spend(db, ws, today, end).await?;
     let (auto_7d, emails_7d) = automatic_spend(db, ws, today - 6 * DAY_MS, end).await?;
     let per = |usd: f64, n: i64| if n > 0 { round6(usd / n as f64) } else { 0.0 };
@@ -266,7 +276,7 @@ pub async fn cost_health(db: &SqlitePool, ws: &str, now: i64) -> sqlx::Result<Co
         per_email_today_usd: per(auto_today, emails_today),
         per_email_7d_usd: per(auto_7d, emails_7d),
         avg_daily_7d_usd: round6(prior / 7.0),
-        spike: cost_spike(today_usd, prior),
+        spike: cost_spike(today_usd, prior, days_with_data),
     })
 }
 
@@ -374,7 +384,6 @@ pub async fn evaluate_spikes(db: &SqlitePool, ws: &str, now: i64) -> sqlx::Resul
         let bucket = if is_recent { &mut recent } else { &mut base };
         bucket.entry(task).or_default().push(latency as f64);
     }
-    let hour = now / HOUR_MS;
     for (task, r) in &recent {
         let Some(b) = base.get(task) else { continue };
         let Some((p95, baseline)) = latency_spike(r, b) else { continue };
@@ -401,7 +410,7 @@ pub async fn evaluate_spikes(db: &SqlitePool, ws: &str, now: i64) -> sqlx::Resul
         incidents::record(
             db,
             NewIncident::new(ws, Kind::LatencySpike, json!({"task": task, "p95_ms": p95, "baseline_p95_ms": baseline}))
-                .dedupe(format!("latency_spike:{task}:{hour}")),
+                .dedupe(format!("latency_spike:{task}:{day}")),
         )
         .await;
     }
@@ -414,11 +423,13 @@ mod tests {
 
     #[test]
     fn cost_spike_needs_double_the_average_and_the_floor() {
-        assert!(cost_spike(2.5, 7.0));
-        assert!(!cost_spike(2.0, 7.0));
-        assert!(!cost_spike(1.9, 7.0 * 1.0));
-        assert!(!cost_spike(0.4, 0.0));
-        assert!(cost_spike(0.6, 0.0));
+        assert!(cost_spike(2.5, 7.0, 7));
+        assert!(!cost_spike(2.0, 7.0, 7));
+        assert!(!cost_spike(1.9, 7.0, 7));
+        assert!(!cost_spike(0.4, 1.0, 7));
+        assert!(!cost_spike(5.0, 0.0, 0), "no baseline, no spike");
+        assert!(!cost_spike(5.0, 0.7, 2), "fewer than three days of data");
+        assert!(cost_spike(5.0, 0.7, 3));
     }
 
     #[test]

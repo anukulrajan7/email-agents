@@ -473,9 +473,11 @@ async fn record_send_blocked(state: &AppState, ws: &str, ctx: &ReplyContext, rep
         None
     };
     let codes: Vec<&str> = report.blocking.iter().map(|i| i.code).collect();
+    let severity = crate::incidents::send_block_severity(&codes);
     crate::incidents::record(
         &state.db,
         crate::incidents::NewIncident::new(ws, crate::incidents::Kind::SendBlocked, serde_json::json!({"codes": codes, "automated": automated}))
+            .severity(severity)
             .agent(agent_id.as_deref())
             .message(Some(&ctx.message_id))
             .dedupe(format!("blocked:{}:{}", ctx.draft_id, codes.join(","))),

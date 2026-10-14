@@ -66,14 +66,21 @@ impl Kind {
         }
     }
 
+    /// The default for the kind; a detection point may override it per incident (`NewIncident::severity`).
     /// High: a person-visible harm was only just avoided, so the agent loses a level.
     pub fn severity(self) -> &'static str {
         match self {
-            Kind::LeakBlocked | Kind::SendBlocked => "high",
-            Kind::InjectionDetected | Kind::CostSpike | Kind::LatencySpike => "medium",
+            Kind::LeakBlocked => "high",
+            Kind::SendBlocked | Kind::InjectionDetected | Kind::CostSpike | Kind::LatencySpike => "medium",
             Kind::Refusal | Kind::SchemaFailure | Kind::UnsupportedClaim => "low",
         }
     }
+}
+
+/// A blocked send is high only when the guard found real harm (data from nowhere, an unsupported promise);
+/// a duplicate, a too-short text, open gaps, an automated recipient or an unavailable reviewer is not.
+pub fn send_block_severity(codes: &[&str]) -> &'static str {
+    if codes.iter().any(|c| matches!(*c, "possible_leak" | "unsupported_promise")) { "high" } else { "medium" }
 }
 
 pub struct NewIncident<'a> {
@@ -85,11 +92,12 @@ pub struct NewIncident<'a> {
     pub details: Value,
     /// Same key twice in a workspace records once.
     pub dedupe_key: Option<String>,
+    pub severity: Option<&'static str>,
 }
 
 impl<'a> NewIncident<'a> {
     pub fn new(workspace_id: &'a str, kind: Kind, details: Value) -> Self {
-        Self { workspace_id, agent_id: None, case_id: None, message_id: None, kind, details, dedupe_key: None }
+        Self { workspace_id, agent_id: None, case_id: None, message_id: None, kind, details, dedupe_key: None, severity: None }
     }
 
     pub fn agent(mut self, agent_id: Option<&'a str>) -> Self {
@@ -104,6 +112,11 @@ impl<'a> NewIncident<'a> {
 
     pub fn message(mut self, message_id: Option<&'a str>) -> Self {
         self.message_id = message_id;
+        self
+    }
+
+    pub fn severity(mut self, severity: &'static str) -> Self {
+        self.severity = Some(severity);
         self
     }
 
@@ -146,6 +159,7 @@ pub async fn record(db: &SqlitePool, i: NewIncident<'_>) -> Option<String> {
 
 async fn try_record(db: &SqlitePool, i: &NewIncident<'_>) -> sqlx::Result<Option<String>> {
     let id = new_id("inc");
+    let severity = i.severity.unwrap_or_else(|| i.kind.severity());
     let created = sqlx::query(
         "INSERT INTO ai_incidents (id, workspace_id, agent_id, case_id, message_id, kind, severity, details_json, dedupe_key, created_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
@@ -157,7 +171,7 @@ async fn try_record(db: &SqlitePool, i: &NewIncident<'_>) -> sqlx::Result<Option
     .bind(i.case_id)
     .bind(i.message_id)
     .bind(i.kind.as_str())
-    .bind(i.kind.severity())
+    .bind(severity)
     .bind(scrub(i.details.clone()).to_string())
     .bind(&i.dedupe_key)
     .bind(now_ms())
@@ -168,43 +182,71 @@ async fn try_record(db: &SqlitePool, i: &NewIncident<'_>) -> sqlx::Result<Option
     if !created {
         return Ok(None);
     }
-    if let (Some(agent_id), "high") = (i.agent_id, i.kind.severity()) {
+    if let (Some(agent_id), "high") = (i.agent_id, severity) {
         demote_agent(db, i.workspace_id, agent_id, i.kind, &id).await?;
     }
     Ok(Some(id))
 }
 
 async fn demote_agent(db: &SqlitePool, ws: &str, agent_id: &str, kind: Kind, incident_id: &str) -> sqlx::Result<()> {
+    let mut tx = db.begin_with("BEGIN IMMEDIATE").await?;
+    let now = now_ms();
     let recently: bool = sqlx::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM autonomy_changes WHERE workspace_id = ?1 AND agent_id = ?2 AND to_level < from_level AND created_at > ?3)",
     )
     .bind(ws)
     .bind(agent_id)
-    .bind(now_ms() - DEMOTION_COOLDOWN_MS)
-    .fetch_one(db)
+    .bind(now - DEMOTION_COOLDOWN_MS)
+    .fetch_one(&mut *tx)
     .await?;
     if recently {
-        return Ok(());
+        return tx.commit().await;
     }
-    let mut tx = db.begin_with("BEGIN IMMEDIATE").await?;
     if let Some(agent) = store::get_in(&mut *tx, ws, agent_id).await?
         && agent.autonomy_level >= 1
     {
+        let consumed: Vec<String> = sqlx::query_scalar(
+            "SELECT id FROM ai_incidents WHERE workspace_id = ?1 AND agent_id = ?2 AND severity = 'high' AND created_at > ?3",
+        )
+        .bind(ws)
+        .bind(agent_id)
+        .bind(now - DEMOTION_COOLDOWN_MS)
+        .fetch_all(&mut *tx)
+        .await?;
         let reason = format!("AI incident: {}", kind.label());
-        gate::demote(&mut tx, ws, agent_id, agent.autonomy_level - 1, &reason, json!({"incident_id": incident_id, "kind": kind.as_str()}), "system")
-            .await?;
+        gate::demote(
+            &mut tx,
+            ws,
+            agent_id,
+            agent.autonomy_level - 1,
+            &reason,
+            json!({"incident_id": incident_id, "incident_ids": consumed, "kind": kind.as_str()}),
+            "system",
+        )
+        .await?;
     }
     tx.commit().await
 }
 
-/// High-severity, unresolved-or-not incidents on one agent after `since` (used by the hourly demotion sweep).
+/// High-severity incidents on one agent after `since` that no demotion has used yet (used by the hourly
+/// sweep). An incident already named in a demotion's evidence, or raised inside a demotion's cooldown
+/// window, belongs to that burst and does not cost another level.
 pub async fn high_since(db: &SqlitePool, ws: &str, agent_id: &str, since: i64) -> sqlx::Result<i64> {
-    sqlx::query_scalar("SELECT COUNT(*) FROM ai_incidents WHERE workspace_id = ?1 AND agent_id = ?2 AND severity = 'high' AND created_at > ?3")
-        .bind(ws)
-        .bind(agent_id)
-        .bind(since)
-        .fetch_one(db)
-        .await
+    sqlx::query_scalar(
+        "SELECT COUNT(*) FROM ai_incidents i
+         WHERE i.workspace_id = ?1 AND i.agent_id = ?2 AND i.severity = 'high' AND i.created_at > ?3
+           AND NOT EXISTS (SELECT 1 FROM autonomy_changes c
+                            WHERE c.workspace_id = i.workspace_id AND c.agent_id = i.agent_id AND c.to_level < c.from_level
+                              AND i.created_at > c.created_at - ?4 AND i.created_at <= c.created_at + ?4)
+           AND NOT EXISTS (SELECT 1 FROM autonomy_changes c, json_each(c.evidence_json, '$.incident_ids') j
+                            WHERE c.workspace_id = i.workspace_id AND c.agent_id = i.agent_id AND j.value = i.id)",
+    )
+    .bind(ws)
+    .bind(agent_id)
+    .bind(since)
+    .bind(DEMOTION_COOLDOWN_MS)
+    .fetch_one(db)
+    .await
 }
 
 #[derive(Debug, Serialize, sqlx::FromRow)]
@@ -234,13 +276,13 @@ pub async fn list(db: &SqlitePool, ws: &str, open_only: bool, limit: i64) -> sql
 }
 
 /// Marks an incident handled. False when it does not exist in this workspace or was already resolved.
-pub async fn resolve(db: &SqlitePool, ws: &str, id: &str, user_id: &str) -> sqlx::Result<bool> {
+pub async fn resolve(conn: &mut sqlx::SqliteConnection, ws: &str, id: &str, user_id: &str) -> sqlx::Result<bool> {
     Ok(sqlx::query("UPDATE ai_incidents SET resolved_at = ?3, resolved_by = ?4 WHERE id = ?1 AND workspace_id = ?2 AND resolved_at IS NULL")
         .bind(id)
         .bind(ws)
         .bind(now_ms())
         .bind(user_id)
-        .execute(db)
+        .execute(conn)
         .await?
         .rows_affected()
         == 1)

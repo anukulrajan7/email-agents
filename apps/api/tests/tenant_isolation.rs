@@ -13,6 +13,13 @@ use serde_json::{Value, json};
 
 const SENTINEL: &str = "a-confidential-sentinel";
 
+/// Routes whose request cannot be built as plain JSON: the extractor rejects the call before the handler's
+/// membership check, so the cross-tenant call returns 400. The handler checks membership first thing.
+const SHADOW_OK: [&str; 1] = ["POST /workspaces/{ws}/assistant/transcribe"];
+
+/// Id routes the owner may not read with 200 in the fixture. Empty on purpose: add a line with the reason.
+const OWNER_GET_EXCEPTIONS: [&str; 0] = [];
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct Route {
     method: &'static str,
@@ -269,6 +276,7 @@ fn body_for(method: &str, template: &str, fx: &Fixture) -> Option<Value> {
         (_, "/team/ownership") => json!({"email": "nobody@x.test"}),
         (_, "/packs") => json!({"packs": ["general"]}),
         (_, "/alert-settings") => json!({"enabled": true, "recipients": [], "escalate_to": [], "unanswered_hours": 4, "escalate_after_hours": 24, "daily_digest": false, "digest_hour": 9}),
+        (_, "/automations") => json!({"name": "Rule", "kind": "auto_reply"}),
         (_, "/reply-settings") => json!({"auto_reply": false}),
         (_, "/team/settings") => json!({"tz_offset_minutes": 0, "below_target_hour": 9, "weekly_check_hour": 9}),
         (_, "/agent/preview") => json!({"message_id": id("email_messages")}),
@@ -301,13 +309,18 @@ async fn a_member_of_b_gets_nothing_of_a_on_any_workspace_route() {
         let method = r.method;
         let (path_a, has_id) = fill(&r.path, &env.ws, &fx);
         let (path_b, _) = fill(&r.path, &ws_b, &fx);
+        if path_a.contains("missing_id") {
+            failures.push(format!("{method} {} has no fixture id", r.path));
+        }
 
         let (s, body) = call(&env.app, method, &format!("/api/v1{path_a}"), OUTSIDER, body_for(method, &r.path, &fx)).await;
         match s {
             StatusCode::FORBIDDEN | StatusCode::NOT_FOUND => under_a += 1,
             StatusCode::BAD_REQUEST | StatusCode::UNSUPPORTED_MEDIA_TYPE | StatusCode::UNPROCESSABLE_ENTITY => {
                 shadowed += 1;
-                println!("shadowed {method} {path_a} {s}");
+                if !SHADOW_OK.contains(&format!("{method} {}", r.path).as_str()) {
+                    failures.push(format!("{method} {path_a} as B -> {s}: the body is rejected before the handler runs; fix body_for(): {body}"));
+                }
             }
             other => failures.push(format!("{method} {path_a} as B -> {other}: {body}")),
         }
@@ -328,25 +341,53 @@ async fn a_member_of_b_gets_nothing_of_a_on_any_workspace_route() {
             failures.push(format!("{method} {path_b}: A's data under B's path: {body}"));
         }
     }
+    assert!(fx.empty.is_empty(), "no fixture row for {:?}; an id route would be tested with a made-up id", fx.empty);
+    assert!(!failures.iter().any(|f| f.contains("missing_id")), "missing ids: {failures:?}");
     println!("routes {} | A-path refused {under_a} | A-path stopped by body validation {shadowed} | B-path checked {under_b} | fixtures missing {:?}", all.len(), fx.empty);
+    assert!(shadowed <= SHADOW_OK.len(), "{shadowed} routes were stopped by body validation");
     assert!(failures.is_empty(), "tenant isolation failures:\n{}", failures.join("\n"));
 }
 
 #[tokio::test]
-async fn the_owner_still_reads_their_own_data_so_the_fixtures_prove_something() {
+async fn the_owner_reads_every_id_route_of_their_own_workspace() {
     let env = Env::new(Opts::packs(&["general"])).await;
     let fx = fixture(&env).await;
-    let mut ok_reads = 0;
+    let mut bad = vec![];
     let mut with_ids = 0;
     for r in routes().iter().filter(|r| r.method == "GET") {
         let (path, has_id) = fill(&r.path, &env.ws, &fx);
-        if !has_id || path.contains("missing_id") {
+        if !has_id || OWNER_GET_EXCEPTIONS.contains(&r.path.as_str()) {
             continue;
         }
         with_ids += 1;
-        let (s, _) = call(&env.app, "GET", &format!("/api/v1{path}"), ADMIN, None).await;
-        ok_reads += usize::from(s == StatusCode::OK);
+        let (s, body) = call(&env.app, "GET", &format!("/api/v1{path}"), ADMIN, None).await;
+        if s != StatusCode::OK {
+            bad.push(format!("GET {} -> {s}: {body}", r.path));
+        }
     }
-    println!("owner read {ok_reads} of {with_ids} id routes");
-    assert!(ok_reads * 2 >= with_ids, "fixtures are too thin: {ok_reads} of {with_ids}");
+    println!("owner read {with_ids} id routes");
+    assert!(with_ids >= 15, "only {with_ids} id routes");
+    assert!(bad.is_empty(), "the owner cannot read their own fixtures, so the cross-tenant result proves nothing:\n{}", bad.join("\n"));
+}
+
+/// The owner's own calls to every mutating route must get past role and body checks (201/200/204, or a
+/// state answer such as 409). If these were refused for the wrong reason, B's 403/404 would prove nothing.
+#[tokio::test]
+async fn the_owner_reaches_the_handler_of_every_mutating_route() {
+    let env = Env::new(Opts::packs(&["general"])).await;
+    let fx = fixture(&env).await;
+    let mut all: Vec<Route> = routes().into_iter().filter(|r| r.method != "GET").collect();
+    all.sort_by_key(|r| r.method == "DELETE");
+    let mut bad = vec![];
+    for r in &all {
+        let (path, _) = fill(&r.path, &env.ws, &fx);
+        let (s, body) = call(&env.app, r.method, &format!("/api/v1{path}"), ADMIN, body_for(r.method, &r.path, &fx)).await;
+        let code = body["error"]["code"].as_str().unwrap_or_default().to_string();
+        let shape_refused = matches!(s.as_u16(), 401 | 403 | 415 | 422) || s.is_server_error() && s != StatusCode::SERVICE_UNAVAILABLE;
+        let unparsed = s == StatusCode::BAD_REQUEST && (code == "invalid_json" || body.to_string().contains("missing field"));
+        if (shape_refused || unparsed) && !SHADOW_OK.contains(&format!("{} {}", r.method, r.path).as_str()) {
+            bad.push(format!("{} {} -> {s}: {body}", r.method, r.path));
+        }
+    }
+    assert!(bad.is_empty(), "owner calls that never reached a handler:\n{}", bad.join("\n"));
 }

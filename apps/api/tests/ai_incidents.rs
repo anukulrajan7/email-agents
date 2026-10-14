@@ -51,7 +51,7 @@ async fn a_leak_on_an_agent_is_logged_without_mail_text_and_lowers_its_level_onc
 
     let again = incidents::record(&env.state.db, NewIncident::new(&env.ws, Kind::LeakBlocked, json!({})).agent(Some(&lead)).dedupe("leak:d1")).await;
     assert!(again.is_none(), "the same key records once");
-    incidents::record(&env.state.db, NewIncident::new(&env.ws, Kind::SendBlocked, json!({"codes": ["possible_leak"]})).agent(Some(&lead)).dedupe("blocked:d1")).await;
+    incidents::record(&env.state.db, NewIncident::new(&env.ws, Kind::SendBlocked, json!({"codes": ["possible_leak"]})).severity("high").agent(Some(&lead)).dedupe("blocked:d1")).await;
     assert_eq!(level(&env, &lead).await, 1, "one burst costs one level");
 
     let stored: String = sqlx::query_scalar("SELECT details_json FROM ai_incidents WHERE id = ?1").bind(first.unwrap()).fetch_one(&env.state.db).await.unwrap();
@@ -188,4 +188,53 @@ async fn a_latency_spike_needs_a_clear_jump_over_the_week_before() {
     assert_eq!(ai_health::evaluate_spikes(&env.state.db, &env.ws, now).await.unwrap(), 1);
     assert_eq!(env.count("SELECT COUNT(*) FROM alerts WHERE workspace_id = ?1 AND kind = 'ai_latency_spike'").await, 1);
     assert_eq!(env.count("SELECT COUNT(*) FROM ai_incidents WHERE workspace_id = ?1 AND kind = 'latency_spike'").await, 1);
+}
+
+#[tokio::test]
+async fn one_burst_costs_exactly_one_level_even_when_incidents_race_and_the_sweep_runs() {
+    let env = Env::new(Opts::packs(&["general"])).await;
+    let lead = env.agent_id(ADMIN, "general.lead").await;
+    set_level(&env, &lead, 3).await;
+    let mut tasks = vec![];
+    for i in 0..6 {
+        let (db, ws, lead) = (env.state.db.clone(), env.ws.clone(), lead.clone());
+        tasks.push(tokio::spawn(async move {
+            incidents::record(&db, NewIncident::new(&ws, Kind::LeakBlocked, json!({"n": i})).agent(Some(&lead)).dedupe(format!("race:{i}"))).await
+        }));
+    }
+    for t in tasks {
+        t.await.unwrap();
+    }
+    assert_eq!(level(&env, &lead).await, 2);
+    assert_eq!(env.count("SELECT COUNT(*) FROM autonomy_changes WHERE workspace_id = ?1 AND to_level < from_level").await, 1);
+    let evidence: String = sqlx::query_scalar("SELECT evidence_json FROM autonomy_changes WHERE workspace_id = ?1 AND to_level < from_level")
+        .bind(&env.ws)
+        .fetch_one(&env.state.db)
+        .await
+        .unwrap();
+    assert!(evidence.contains("incident_ids"), "{evidence}");
+
+    incidents::record(&env.state.db, NewIncident::new(&env.ws, Kind::LeakBlocked, json!({})).agent(Some(&lead)).dedupe("late")).await;
+    email_ai_api::evals::gate::sweep(&env.state.db).await.unwrap();
+    assert_eq!(level(&env, &lead).await, 2, "the sweep does not charge the same burst again");
+}
+
+#[tokio::test]
+async fn a_send_block_is_high_only_for_real_safety_findings() {
+    assert_eq!(incidents::send_block_severity(&["duplicate"]), "medium");
+    assert_eq!(incidents::send_block_severity(&["too_short", "open_gaps", "automated_recipient", "ai_review_unavailable"]), "medium");
+    assert_eq!(incidents::send_block_severity(&["duplicate", "possible_leak"]), "high");
+    assert_eq!(incidents::send_block_severity(&["unsupported_promise"]), "high");
+}
+
+#[tokio::test]
+async fn a_spend_spike_needs_a_baseline_of_at_least_three_days() {
+    let env = Env::new(Opts::packs(&["general"])).await;
+    let now = now_ms();
+    call_row(&env, "classify", 0.01, 100, now - 86_400_000).await;
+    call_row(&env, "classify", 0.01, 100, now - 2 * 86_400_000).await;
+    call_row(&env, "draft", 3.0, 100, now - 1_000).await;
+    assert_eq!(ai_health::evaluate_spikes(&env.state.db, &env.ws, now).await.unwrap(), 0);
+    call_row(&env, "classify", 0.01, 100, now - 3 * 86_400_000).await;
+    assert_eq!(ai_health::evaluate_spikes(&env.state.db, &env.ws, now).await.unwrap(), 1);
 }

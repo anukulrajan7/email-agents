@@ -126,10 +126,11 @@ pub struct SendFacts<'a> {
 
 const LEAK_REASON: &str = "it mentions an address or number that is not from this conversation";
 
-async fn record_for_case(state: &AppState, case: &Case, kind: Kind, details: Value) {
+async fn record_for_case(state: &AppState, case: &Case, kind: Kind, details: Value, severity: &'static str) {
     incidents::record(
         &state.db,
         NewIncident::new(&case.workspace_id, kind, details)
+            .severity(severity)
             .agent(case.agent_id.as_deref())
             .case(Some(&case.id))
             .message(case.message_id.as_deref())
@@ -286,10 +287,10 @@ pub async fn may_send_on_its_own(state: &AppState, case: &Case, ctx: &AgentConte
     };
     let blocked = blocker(&facts);
     if let Some(why) = injected {
-        record_for_case(state, case, Kind::InjectionDetected, json!({"gate": "send", "why": why})).await;
+        record_for_case(state, case, Kind::InjectionDetected, json!({"gate": "send", "why": why}), "medium").await;
     }
     if blocked == Some(LEAK_REASON) {
-        record_for_case(state, case, Kind::LeakBlocked, json!({"check": "autonomy_leak_rule"})).await;
+        record_for_case(state, case, Kind::LeakBlocked, json!({"check": "autonomy_leak_rule"}), "medium").await;
     }
     match blocked {
         None => Ok(true),

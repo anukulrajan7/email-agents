@@ -319,8 +319,8 @@ flowchart LR
 
   | Kind | Raised when | Severity |
   |---|---|---|
-  | `leak_blocked` | An automatic reply would name data from nowhere in the conversation | high |
-  | `send_blocked` | The send guard refused a reply | high |
+  | `leak_blocked` | An automatic reply would name data from nowhere in the thread, signature, agent memory or examples (high); the autonomy rule's cruder heuristic (medium) | high / medium |
+  | `send_blocked` | The send guard refused a reply: high for a possible leak or unsupported promise, medium for duplicates, short text, gaps, automated recipients, reviewer unavailable | medium / high |
   | `injection_detected` | Mail tried to instruct the agent on a send path | medium |
   | `cost_spike`, `latency_spike` | Spend or speed jumped (below) | medium |
   | `refusal` | The model declined, or the planner refused the request | low |
@@ -328,8 +328,7 @@ flowchart LR
   | `unsupported_claim` | A draft claimed something the context pack did not support | low |
 
   Details hold ids and short facts only, and `scrub` drops body-like keys and cuts long strings. The same event twice
-  (a retried job) records once. A **high** incident on an agent lowers its level by one at once, and the hourly sweep
-  re-checks; a burst costs one level, not several.
+  (a retried job) records once. Severity is set per incident, not per kind: a `send_blocked` is high only for a possible leak or an unsupported promise. A **high** incident on an agent lowers its level by one at once, inside one `BEGIN IMMEDIATE` transaction that also checks the 10-minute cooldown and records the incident ids it used in the demotion evidence. The hourly sweep skips incidents already named there or raised inside the cooldown, so a burst costs exactly one level. Incidents are best-effort and separate from the audit trail.
 - **AI health page** (admin, `ai-health` route; API `GET /workspaces/{ws}/ai-health`): open incidents with a "Mark
   handled" button, incidents per day by kind, cost per email today and over seven days, typical and slowest-5% speed per
   task, failure, refusal and unusable-answer rates, the understanding v2 shadow agreement and "ready to switch", and the
@@ -340,6 +339,7 @@ flowchart LR
 - **Daily self-test** (`.github/workflows/daily-selftest.yml`, 03:30 UTC). Clippy and the full Rust suite, web typecheck
   and tests and build, and a smoke job on the VPS (container up, health endpoints, a tool-calling probe of every
   configured model). On failure it emails the owner the failing step and output (`docs/selftest.md`).
+- **Database limits.** One SQLite file in WAL mode; a pool of 8 connections; `busy_timeout` 15 s; every write transaction starts with `BEGIN IMMEDIATE` so a writer queues instead of failing at commit. Never hold a transaction across a model or HTTP call.
 - **Health endpoints.** `/health/live` and `/health/ready` (database reachable).
 
 ## 13. Deploy and backups
