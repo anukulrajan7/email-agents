@@ -467,15 +467,10 @@ async fn suggested_automations_need_an_admins_approval() {
     let id = a["id"].as_str().unwrap();
     assert_eq!(env.req("POST", &format!("/approvals/{id}"), OPERATOR, Some(json!({"decision": "approve"}))).await.0, StatusCode::FORBIDDEN);
     env.ok("POST", &format!("/approvals/{id}"), ADMIN, Some(json!({"decision": "approve"}))).await;
-    assert_eq!(count().await, 1);
-    let created = env.ok("GET", "/automations", ADMIN, None).await["items"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|x| x["name"] == "Draft replies to status updates")
-        .cloned()
-        .unwrap();
-    assert_eq!(created["enabled"], true);
+    assert_eq!(count().await, 0, "approving opens the designer; nothing runs until an admin saves");
+    let sessions: Vec<(String, String)> = sqlx::query_as("SELECT goal, status FROM designer_sessions").fetch_all(&env.state.db).await.unwrap();
+    assert_eq!(sessions.len(), 1);
+    assert!(sessions[0].0.contains("Draft replies to status updates"), "{sessions:?}");
     assert!(env.sends().is_empty());
 }
 

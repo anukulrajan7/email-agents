@@ -269,7 +269,7 @@ pub async fn run_step(state: &AppState, ws: &str, case_id: &str, turn: i64) -> R
 fn permission_block(agent: &AgentContext, tool: &str) -> Option<String> {
     let name = &agent.agent.name;
     match tool {
-        "draft_email" if !agent.agent.permissions.draft => {
+        "draft_email" | "save_to_gmail_drafts" if !agent.agent.permissions.draft => {
             Some(format!("Writing drafts is switched off for {name}; create a task for a person instead."))
         }
         "send_email" | "submit_candidate" if agent.agent.permissions.send == "never" => {

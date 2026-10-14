@@ -99,6 +99,20 @@ impl OpenRouterClient {
         schema: Value,
         max_tokens: u32,
     ) -> Result<(String, String), AiError> {
+        let (content, answered_by, _) = self.chat_json_usage(model, system, user, schema_name, schema, max_tokens).await?;
+        Ok((content, answered_by))
+    }
+
+    /// Like `chat_json`, and also returns the token usage (with the provider's cost when it reports one).
+    pub(crate) async fn chat_json_usage(
+        &self,
+        model: &str,
+        system: &str,
+        user: String,
+        schema_name: &str,
+        schema: Value,
+        max_tokens: u32,
+    ) -> Result<(String, String, ChatUsage), AiError> {
         let body = json!({
             "model": model,
             "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
@@ -112,7 +126,8 @@ impl OpenRouterClient {
             // return null content (seen live with Qwen 3.8 Flash).
             "reasoning": {"enabled": false},
             // Only providers that don't retain/train on prompts, and that honour the schema.
-            "provider": {"data_collection": "deny", "require_parameters": true}
+            "provider": {"data_collection": "deny", "require_parameters": true},
+            "usage": {"include": true}
         });
         let started = std::time::Instant::now();
         let sent = async {
@@ -148,7 +163,12 @@ impl OpenRouterClient {
             Ok(content) => {
                 self.log_call(model, started, Some(&body), None).await;
                 let answered_by = body.get("model").and_then(Value::as_str).unwrap_or(model).to_string();
-                Ok((content.to_string(), answered_by))
+                let usage = ChatUsage {
+                    tokens_in: body.pointer("/usage/prompt_tokens").and_then(Value::as_i64).unwrap_or(0),
+                    tokens_out: body.pointer("/usage/completion_tokens").and_then(Value::as_i64).unwrap_or(0),
+                    cost_usd: body.pointer("/usage/cost").and_then(Value::as_f64),
+                };
+                Ok((content.to_string(), answered_by, usage))
             }
             Err(e) => {
                 self.log_call(model, started, Some(&body), Some(&e.to_string())).await;

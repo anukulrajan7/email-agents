@@ -6,6 +6,7 @@ mod alerts_api;
 mod assistant_api;
 mod auth_api;
 mod automations_api;
+mod designer_api;
 mod dto;
 mod jobs_api;
 mod label_health;
@@ -70,6 +71,10 @@ pub struct AppState {
     pub memory_extractor: Arc<dyn crate::ai::memory_extractor::MemoryExtractor>,
     /// Sends alert emails; `None` = alerts stay in-app only.
     pub alert_mailer: Option<Arc<dyn crate::mailer::Mailer>>,
+    /// Drafts agents and workflows from a plain-English description; `None` model = off.
+    pub designer: Arc<dyn crate::designer::Designer>,
+    /// Reads named details out of an email for the workflow `extract` step.
+    pub field_extractor: Arc<dyn crate::ai::field_extract::FieldExtractor>,
     /// Picks each agent step (tool calling). Disabled without a model: no automatic cases.
     pub planner: Arc<dyn crate::agents::planner::Planner>,
     /// Checks agent proposals before they run or go to a person.
@@ -158,6 +163,7 @@ pub fn router(state: AppState) -> Router {
         .merge(agents_api::routes())
         .merge(agent_profiles_api::routes())
         .merge(agent_registry_api::routes())
+        .merge(designer_api::routes())
         .merge(assistant_api::routes())
         .fallback(|| async { AppError::NotFound })
         .layer(middleware::from_fn(crate::ai_ledger::attach_context))

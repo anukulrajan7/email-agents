@@ -14,6 +14,7 @@ import { AlertsPage } from '../features/alerts/AlertsPage';
 import { AgentsPage } from '../features/agents/AgentsPage';
 import { PacksPage } from '../features/packs/PacksPage';
 import { UsagePage } from '../features/usage/UsagePage';
+import { AgentBuilderPage } from '../features/agent-builder/AgentBuilderPage';
 import { AppShell } from './AppShell';
 
 const IntegrationsPage = lazy(() => import('../features/sources/IntegrationsPage').then((m) => ({ default: m.IntegrationsPage })));
@@ -33,6 +34,7 @@ export function AppRoutes() {
           <Route path="inbox" element={<InboxPage />} />
           <Route path="inbox/:messageId" element={<InboxPage />} />
           <Route path="agents" element={<AgentsPage />} />
+          <Route path="agents/new" element={<AgentBuilderPage />} />
           <Route path="agents/:caseId" element={<CaseDetailPage />} />
           <Route path="matching" element={<MatchingPage />} />
           <Route path="labels" element={<LabelsPage />} />

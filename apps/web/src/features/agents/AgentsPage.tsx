@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Card, EmptyState, Page, PageHeader, SkeletonList, Tabs, type TabItem } from '../../components/ui';
+import { Card, EmptyState, Page, PageHeader, SkeletonList, Tabs, TextLink, type TabItem } from '../../components/ui';
 import { ErrorNote } from '../../components/ErrorNote';
 import { useWorkspace } from '../../app/useWorkspace';
 import { riseStyle } from '../../lib/motion';
@@ -79,6 +79,7 @@ export function AgentsPage() {
         kicker="Work that follows through"
         title="Agents"
         description="Agents take an email or a client requirement from start to finish. They always ask you before sending anything important."
+        actions={isAdmin ? <TextLink to="new">Create an agent</TextLink> : undefined}
       />
       <div className="rise grid grid-cols-1 items-stretch gap-4 lg:grid-cols-2" style={riseStyle(1)}>
         <LeadAgentCard ws={ws} />

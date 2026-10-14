@@ -202,7 +202,7 @@ fn qualifier() -> AgentSpec {
             Step::DraftReply { quality: QualityTier::Balanced },
             Step::CreateReview { title: "Review the qualified lead".into() },
         ],
-        tools(&["draft_email", "create_task", "update_case", "send_email"]),
+        tools(&["extract_fields", "draft_email", "create_task", "update_case", "send_email"]),
         perms(SendMode::Earned, 2),
     )
 }
@@ -250,7 +250,7 @@ fn invoices() -> AgentSpec {
                 Step::DraftReply { quality: QualityTier::Balanced },
                 Step::CreateReview { title: "Approve this invoice".into() },
             ],
-            tools(&["draft_email", "create_task", "update_case"]),
+            tools(&["extract_fields", "draft_email", "create_task", "update_case"]),
             perms(SendMode::Ask, 1),
         ),
         &["Acknowledge receipt only"],

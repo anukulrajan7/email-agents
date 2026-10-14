@@ -154,6 +154,7 @@ pub async fn update(
     .bind(&ws)
     .execute(&mut *tx)
     .await?;
+    automations::record_version(&mut tx, &ws, &id, Some(&user.id)).await?;
     audit::record(
         &mut tx,
         Entry {
