@@ -285,6 +285,29 @@ async fn send_reply_is_skipped_when_the_mail_tries_to_instruct_the_agent() {
 }
 
 #[tokio::test]
+async fn send_reply_never_sends_a_draft_a_person_wrote_or_requested() {
+    let env = setup().await;
+    let (_, a) = call(&env.app, "POST", &format!("{}/automations", env.base), ADMIN, Some(json!({
+        "name":"Ack","enabled":false,"conditions":[{"field":"subject","op":"contains","value":"thanks"}],
+        "actions":[{"type":"draft_reply"},{"type":"send_reply","daily_cap":5,"allowed_domains":["example.com"]}]
+    }))).await;
+    let aid = a["id"].as_str().unwrap();
+    let id = env.email("Just saying thanks", "Thanks for the quick help.").await;
+    let (s, _) = call(&env.app, "POST", &format!("{}/messages/{id}/draft", env.base), ADMIN, Some(json!({}))).await;
+    assert!(s.is_success(), "{s}");
+    let (s, _) = call(&env.app, "PATCH", &format!("{}/automations/{aid}", env.base), ADMIN, Some(json!({"enabled": true}))).await;
+    assert_eq!(s, StatusCode::OK);
+    sqlx::query("UPDATE drafts SET origin_key = NULL WHERE message_id = ?1").bind(&id).execute(&env.state.db).await.unwrap();
+
+    email_ai_api::jobs::automation_jobs::run_automations(&env.state, &json!({"message_id": id})).await.unwrap();
+    let runs = env.runs(aid).await;
+    let send = runs.iter().flat_map(|r| r["actions"].as_array().cloned().unwrap_or_default()).find(|x| x["type"] == "send_reply").expect("a send_reply action ran");
+    assert_eq!(send["status"], "skipped", "{send}");
+    assert!(send["detail"].as_str().unwrap().contains("a person has edited or scheduled"), "{send}");
+    assert_eq!(env.count("SELECT COUNT(*) FROM audit_events WHERE action = 'automation.sent_reply'").await, 0);
+}
+
+#[tokio::test]
 async fn reminder_opens_a_review_only_if_nobody_replied() {
     let env = setup().await;
     let id = env.email("Urgent: contract question", "Hi, this is urgent. Can you confirm the contract terms?").await;

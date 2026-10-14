@@ -411,7 +411,9 @@ async fn evaluate(
                 if ctx.hold_secs > 0
                     && let (Some(draft_id), Some(at)) = (out.value.get("draft_id").and_then(Value::as_str), out.value.get("send_at_ms").and_then(Value::as_i64))
                 {
-                    autonomy::record_hold(state, &case.workspace_id, draft_id, at, ctx.hold_secs).await?;
+                    if let Err(e) = autonomy::record_hold(state, &case.workspace_id, draft_id, at, ctx.hold_secs).await {
+                        tracing::warn!(case_id = %case.id, draft_id, error = %e, "could not note the send hold in the audit trail; the send stays scheduled");
+                    }
                     out.value["held_until"] = json!(crate::db::iso(at));
                     out.summary = format!("{} Held until {} so you can stop it.", out.summary, crate::db::iso(at));
                 }

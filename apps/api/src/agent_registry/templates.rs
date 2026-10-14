@@ -36,6 +36,9 @@ impl AgentTemplate {
 
 pub const LEAD_KEY: &str = "general.lead";
 pub const INBOX_KEY: &str = "general.inbox";
+/// The placeholder name in the personal template; real rows show as "<lead name> (personal)".
+pub const GENERIC_PERSONAL_NAME: &str = "My assistant";
+
 pub const PERSONAL_KEY: &str = "personal.mailbox";
 pub const REQUIREMENTS_KEY: &str = "hrms.requirements";
 
@@ -367,7 +370,7 @@ fn payroll() -> AgentSpec {
 fn mailbox() -> AgentSpec {
     let mut spec = build(
         Base {
-            name: "My assistant",
+            name: GENERIC_PERSONAL_NAME,
             key: "my_assistant",
             category: "personal",
             description: "Works on your own mailbox, in your voice, using your profile and preferences.",
@@ -415,7 +418,7 @@ pub const TEMPLATES: &[AgentTemplate] = &[
     template!("hrms.onboarding", "hrms", "staffing", "system", "workspace", 0, "Onboarding", "🧭", "plum", onboarding),
     template!(REQUIREMENTS_KEY, "hrms", "staffing", "system", "workspace", 1, "Candidates & Requirements", "🧩", "postmark", requirements),
     template!("hrms.payroll", "hrms", "staffing", "system", "workspace", 0, "Payroll queries", "💼", "teal", payroll),
-    template!(PERSONAL_KEY, "personal", "general", "system", "personal", 1, "My assistant", "🙋", "sage", mailbox),
+    template!(PERSONAL_KEY, "personal", "general", "system", "personal", 1, GENERIC_PERSONAL_NAME, "🙋", "sage", mailbox),
 ];
 
 pub fn template(key: &str) -> Option<&'static AgentTemplate> {

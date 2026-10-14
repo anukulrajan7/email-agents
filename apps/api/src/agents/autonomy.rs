@@ -182,12 +182,27 @@ pub async fn sent_today(state: &AppState, ws: &str, owner_id: &str) -> sqlx::Res
     .await
 }
 
+/// The standing conditions for sending without a person, shared by the decision to send and the check
+/// when a held send comes due: the agent is switched on, its effective permission is "auto" and its level is 2 or more.
+pub fn standing_block(enabled: bool, send: &str, level: i64) -> Option<&'static str> {
+    if !enabled {
+        return Some("the agent is switched off");
+    }
+    if send != "auto" {
+        return Some("the agent no longer has permission to send on its own");
+    }
+    if level < 2 {
+        return Some("the agent's level no longer allows sending on its own");
+    }
+    None
+}
+
 /// True when this `send_email` may go without a person: the workspace allows routine sends, the
 /// mailbox owner chose "let routine replies go", the agent's effective level allows it, today's cap
 /// isn't reached, the conversation passed the injection gate and every fixed rule passes.
 pub async fn may_send_on_its_own(state: &AppState, case: &Case, ctx: &AgentContext, agent: &CaseAgent, preview: &Preview) -> sqlx::Result<bool> {
     let Some(owner) = ctx.owner.as_ref().filter(|o| o.routine_ok()) else { return Ok(false) };
-    if !ctx.agent.enabled || ctx.agent.permissions.send != "auto" || agent.level.level < 2 {
+    if standing_block(ctx.agent.enabled, &ctx.agent.permissions.send, agent.level.level).is_some() {
         return Ok(false);
     }
     let cap = state.config.agent_auto_send_daily_cap.min(i64::from(agent.spec.permissions.daily_send_cap));
@@ -282,7 +297,7 @@ pub async fn record_hold(state: &AppState, ws: &str, draft_id: &str, send_at: i6
 }
 
 /// Why a held automatic send must not go out any more, if it must: the agent that wrote it was
-/// paused or archived, its effective level fell below 2, or the workspace no longer lets routine
+/// paused or archived, switched off, its effective level fell below 2, or the workspace or its spec no longer lets routine
 /// replies go. The send then waits for a person. Drafts that no agent wrote are not checked.
 pub async fn automated_send_stopped(state: &AppState, ws: &str, draft_id: &str) -> sqlx::Result<Option<&'static str>> {
     let agent_id: Option<String> = sqlx::query_scalar("SELECT agent_id FROM drafts WHERE id = ?1 AND workspace_id = ?2")
@@ -292,6 +307,18 @@ pub async fn automated_send_stopped(state: &AppState, ws: &str, draft_id: &str) 
         .await?
         .flatten();
     let Some(agent_id) = agent_id else { return Ok(None) };
+    let conversation: Option<(Option<String>, String)> = sqlx::query_as(
+        "SELECT m.thread_id, m.id FROM drafts d JOIN email_messages m ON m.id = d.message_id WHERE d.id = ?1 AND d.workspace_id = ?2",
+    )
+    .bind(draft_id)
+    .bind(ws)
+    .fetch_optional(&state.db)
+    .await?;
+    if let Some((thread, message)) = conversation
+        && super::injection::scan_conversation(&state.db, ws, thread.as_deref(), Some(&message)).await?.is_some()
+    {
+        return Ok(Some("mail in the conversation tries to instruct the agent"));
+    }
     let Some(row) = crate::agent_registry::store::get_in(&state.db, ws, &agent_id).await? else { return Ok(Some("the agent no longer exists")) };
     if row.status != "active" {
         return Ok(Some("the agent is not active"));
@@ -317,11 +344,14 @@ pub async fn automated_send_stopped(state: &AppState, ws: &str, draft_id: &str) 
         profile_asks_first: !routine_ok,
         active: true,
     });
-    if level.level < 2 {
-        return Ok(Some("the agent's level no longer allows sending on its own"));
-    }
-    if crate::agent_profiles::agent(&state.db, &state.config, ws).await?.permissions.send != "auto" {
-        return Ok(Some("the workspace no longer lets routine replies go"));
+    let workspace = crate::agent_profiles::agent(&state.db, &state.config, ws).await?;
+    let send = if row.kind == "lead" {
+        workspace.permissions.send.clone()
+    } else {
+        crate::agent_registry::runtime::effective_send(&workspace.permissions.send, spec.permissions.send).to_string()
+    };
+    if let Some(why) = standing_block(workspace.enabled, &send, level.level) {
+        return Ok(Some(why));
     }
     Ok(None)
 }

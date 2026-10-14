@@ -29,6 +29,7 @@ async fn ensure_template_agent(
     key: &str,
     owner: Option<&str>,
     level: i64,
+    name: &str,
 ) -> sqlx::Result<Option<String>> {
     let spec = template_spec(t, key);
     let created = store::insert(
@@ -43,7 +44,7 @@ async fn ensure_template_agent(
             template_key: Some(t.key),
             template_version: Some(i64::from(t.version)),
             cloned_from: None,
-            name: t.name,
+            name,
             avatar: t.avatar,
             color: t.color,
             description: &spec.description,
@@ -64,7 +65,7 @@ async fn ensure_template_agent(
 /// migration; it only needs its first version.
 pub async fn ensure_lead(conn: &mut SqliteConnection, ws: &str) -> sqlx::Result<()> {
     let t = templates::lead_template();
-    ensure_template_agent(conn, ws, t, "lead", None, t.initial_level).await?;
+    ensure_template_agent(conn, ws, t, "lead", None, t.initial_level, t.name).await?;
     Ok(())
 }
 
@@ -72,8 +73,27 @@ pub async fn ensure_lead(conn: &mut SqliteConnection, ws: &str) -> sqlx::Result<
 /// replies go keeps that behaviour for every mailbox.
 pub async fn ensure_personal(conn: &mut SqliteConnection, ws: &str, user_id: &str) -> sqlx::Result<()> {
     ensure_lead(conn, ws).await?;
-    let level = store::lead(&mut *conn, ws).await?.map_or(1, |l| l.autonomy_level.clamp(1, 2));
-    ensure_template_agent(conn, ws, templates::personal_template(), &personal_key(user_id), Some(user_id), level).await?;
+    let lead = store::lead(&mut *conn, ws).await?;
+    let level = lead.as_ref().map_or(1, |l| l.autonomy_level.clamp(1, 2));
+    let name = personal_name(lead.as_ref().map_or(templates::lead_template().name, |l| l.name.as_str()));
+    ensure_template_agent(conn, ws, templates::personal_template(), &personal_key(user_id), Some(user_id), level, &name).await?;
+    Ok(())
+}
+
+/// A member's own agent shows as "<lead name> (personal)", e.g. "Meera (personal)".
+pub fn personal_name(lead_name: &str) -> String {
+    format!("{} (personal)", lead_name.trim())
+}
+
+/// Renames personal agents still carrying the old generic name to "<lead name> (personal)".
+async fn rename_generic_personal(conn: &mut SqliteConnection, ws: &str) -> sqlx::Result<()> {
+    let Some(lead) = store::lead(&mut *conn, ws).await? else { return Ok(()) };
+    sqlx::query("UPDATE agents SET name = ?2 WHERE workspace_id = ?1 AND scope = 'personal' AND name = ?3")
+        .bind(ws)
+        .bind(personal_name(&lead.name))
+        .bind(templates::GENERIC_PERSONAL_NAME)
+        .execute(&mut *conn)
+        .await?;
     Ok(())
 }
 
@@ -81,7 +101,7 @@ pub async fn ensure_personal(conn: &mut SqliteConnection, ws: &str, user_id: &st
 pub async fn seed_for_packs(conn: &mut SqliteConnection, ws: &str, keys: &[&str]) -> sqlx::Result<()> {
     for t in templates::for_packs(keys) {
         let key = t.spec().key;
-        ensure_template_agent(conn, ws, t, &key, None, t.initial_level).await?;
+        ensure_template_agent(conn, ws, t, &key, None, t.initial_level, t.name).await?;
         if t.key == templates::REQUIREMENTS_KEY {
             adopt_requirement_cases(conn, ws).await?;
         }
@@ -187,6 +207,7 @@ pub async fn seed_workspace(conn: &mut SqliteConnection, ws: &str) -> sqlx::Resu
     }
     ensure_versions(conn, ws).await?;
     upgrade_templates(conn, ws, templates::TEMPLATES).await?;
+    rename_generic_personal(conn, ws).await?;
     Ok(())
 }
 
@@ -195,6 +216,7 @@ async fn incomplete(conn: &mut SqliteConnection, ws: &str) -> sqlx::Result<bool>
     let gaps: i64 = sqlx::query_scalar(
         "SELECT (NOT EXISTS (SELECT 1 FROM agents WHERE workspace_id = ?1 AND kind = 'lead'))
              + EXISTS (SELECT 1 FROM agents WHERE workspace_id = ?1 AND active_version IS NULL)
+             + EXISTS (SELECT 1 FROM agents WHERE workspace_id = ?1 AND scope = 'personal' AND name = 'My assistant')
              + EXISTS (SELECT 1 FROM memberships m WHERE m.workspace_id = ?1 AND NOT EXISTS
                          (SELECT 1 FROM agents a WHERE a.workspace_id = ?1 AND a.scope = 'personal' AND a.owner_user_id = m.user_id))",
     )

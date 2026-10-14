@@ -110,9 +110,12 @@ pub async fn pending_count(db: &SqlitePool, ws: &str, viewer: &str) -> sqlx::Res
     .await
 }
 
-/// Fingerprint of exactly what the person approved: recipient, subject and the final text.
-fn approved_hash(approval: &ApprovalRow, edited: Option<&str>) -> String {
-    fingerprint(approval.to_address.as_deref(), approval.subject.as_deref(), edited.unwrap_or(&approval.body))
+/// Fingerprint of exactly what the person approved: the live outgoing recipient and subject, and the final text.
+fn approved_hash(approval: &ApprovalRow, live: Option<&tools::Preview>, body: &str) -> String {
+    match live {
+        Some(p) => fingerprint(p.to.as_deref(), p.subject.as_deref(), body),
+        None => fingerprint(approval.to_address.as_deref(), approval.subject.as_deref(), body),
+    }
 }
 
 fn fingerprint(to: Option<&str>, subject: Option<&str>, body: &str) -> String {
@@ -121,15 +124,44 @@ fn fingerprint(to: Option<&str>, subject: Option<&str>, body: &str) -> String {
     Sha256::digest(material.as_bytes()).iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// Does the reply that is about to go out still match what the person approved?
-async fn matches_approval(state: &AppState, ws: &str, approval: &ApprovalRow, approved: &str) -> sqlx::Result<bool> {
-    let Some(draft_id) = approval.draft_id.as_deref() else { return Ok(true) };
-    let body: Option<String> = sqlx::query_scalar("SELECT body_text FROM drafts WHERE id = ?1 AND workspace_id = ?2")
-        .bind(draft_id)
-        .bind(ws)
-        .fetch_optional(&state.db)
+/// What the tool would send right now (recipient, subject, body), for approvals that send a draft.
+async fn live_preview(state: &AppState, case: &case::Case, approval: &ApprovalRow, user_id: &str) -> Option<tools::Preview> {
+    approval.draft_id.as_ref()?;
+    let tool = tools::registry().get(tools::tool_for_approval(&approval.action))?;
+    let args: Value = serde_json::from_str(&approval.input_json).unwrap_or_else(|_| json!({}));
+    let ctx = ToolCtx { state, case, turn: case.step_count, actor: Actor::User(user_id), hold_secs: 0 };
+    tool.preview(&ctx, &args).await.ok().flatten()
+}
+
+/// Puts a decision back to pending so a person can look at the changed reply and decide again.
+async fn reopen(state: &AppState, ws: &str, approval_id: &str, user_id: &str, case_id: &str) -> sqlx::Result<()> {
+    let mut tx = state.db.begin().await?;
+    let reopened = sqlx::query(
+        "UPDATE agent_approvals SET status = 'pending', decided_by = NULL, decided_at = NULL, approved_hash = NULL
+         WHERE id = ?1 AND workspace_id = ?2 AND status = 'approved'",
+    )
+    .bind(approval_id)
+    .bind(ws)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected()
+        == 1;
+    if reopened {
+        audit::record(
+            &mut tx,
+            Entry {
+                workspace_id: ws,
+                actor: Actor::User(user_id),
+                action: "agent_approval.reopened",
+                entity_type: "agent_approval",
+                entity_id: approval_id,
+                message_id: None,
+                metadata: json!({"case_id": case_id, "reason": "the reply changed after it was approved"}),
+            },
+        )
         .await?;
-    Ok(body.is_none_or(|b| fingerprint(approval.to_address.as_deref(), approval.subject.as_deref(), &b) == approved))
+    }
+    tx.commit().await
 }
 
 pub struct Decision<'a> {
@@ -158,6 +190,8 @@ pub async fn decide(state: &AppState, ws: &str, approval_id: &str, user_id: &str
     };
     let note = d.note.map(|n| sentence(n, 300)).filter(|n| !n.is_empty());
     let now = now_ms();
+    let live = if d.approve { live_preview(state, &case, &approval, user_id).await } else { None };
+    let hash = d.approve.then(|| approved_hash(&approval, live.as_ref(), edited.as_deref().unwrap_or(&approval.body)));
 
     let mut tx = state.db.begin().await?;
     let decided = sqlx::query(
@@ -170,7 +204,7 @@ pub async fn decide(state: &AppState, ws: &str, approval_id: &str, user_id: &str
     .bind(&note)
     .bind(&edited)
     .bind(approval_id)
-    .bind(d.approve.then(|| approved_hash(&approval, edited.as_deref())))
+    .bind(&hash)
     .execute(&mut *tx)
     .await?
     .rows_affected()
@@ -238,13 +272,13 @@ pub async fn decide(state: &AppState, ws: &str, approval_id: &str, user_id: &str
         let tool = tools::registry().get(tools::tool_for_approval(&approval.action)).ok_or_else(|| AppError::Internal(anyhow::anyhow!("unknown approval action")))?;
         let args: Value = serde_json::from_str(&approval.input_json).unwrap_or_else(|_| json!({}));
         let ctx = ToolCtx { state, case: &case, turn: case.step_count, actor: Actor::User(user_id), hold_secs: 0 };
-        let approved = approved_hash(&approval, edited.as_deref());
-        let unchanged = approval.action != "send_email" || matches_approval(state, ws, &approval, &approved).await?;
-        let ran = if unchanged {
-            tool.run(&ctx, &args).await
-        } else {
-            Err(ToolError::Failed("the reply changed after it was approved; it needs to be approved again".into()))
-        };
+        let now_live = live_preview(state, &case, &approval, user_id).await;
+        let unchanged = now_live.as_ref().is_none_or(|p| Some(approved_hash(&approval, Some(p), &p.body)) == hash);
+        if !unchanged {
+            reopen(state, ws, approval_id, user_id, &case.id).await?;
+            return get(&state.db, ws, user_id, approval_id).await?.ok_or(AppError::NotFound);
+        }
+        let ran = tool.run(&ctx, &args).await;
         match ran {
             Ok(out) => (format!("Approved by a person. {}", out.summary), out.value, "ok", out.state),
             Err(ToolError::Failed(m)) => {
@@ -289,4 +323,49 @@ pub async fn decide(state: &AppState, ws: &str, approval_id: &str, user_id: &str
     tx.commit().await?;
     state.jobs_notify.notify_one();
     get(&state.db, ws, user_id, approval_id).await?.ok_or(AppError::NotFound)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn approval() -> ApprovalRow {
+        ApprovalRow {
+            id: "apr_1".into(),
+            case_id: "case_1".into(),
+            case_title: "t".into(),
+            step_seq: None,
+            action: "send_email".into(),
+            summary: "s".into(),
+            to_address: Some("old@client.com".into()),
+            subject: Some("Re: Old".into()),
+            body: "Hello".into(),
+            draft_id: Some("drf_1".into()),
+            candidates_json: "[]".into(),
+            input_json: "{}".into(),
+            status: "pending".into(),
+            decided_by_email: None,
+            decided_at: None,
+            created_at: 0,
+            agent_user_id: None,
+            agent_id: None,
+        }
+    }
+
+    fn live(to: &str, subject: &str) -> tools::Preview {
+        tools::Preview { to: Some(to.into()), subject: Some(subject.into()), body: "Hello".into(), ..Default::default() }
+    }
+
+    #[test]
+    fn the_approved_hash_covers_the_live_recipient_subject_and_body() {
+        let a = approval();
+        let now = live("ravi@client.com", "Re: Status");
+        let hash = approved_hash(&a, Some(&now), "Hello");
+        assert_eq!(hash, fingerprint(Some("ravi@client.com"), Some("Re: Status"), "Hello"), "the live values, not the request-time snapshot");
+        assert_ne!(hash, approved_hash(&a, None, "Hello"));
+        assert_ne!(hash, approved_hash(&a, Some(&live("other@client.com", "Re: Status")), "Hello"), "recipient");
+        assert_ne!(hash, approved_hash(&a, Some(&live("ravi@client.com", "Re: Else")), "Hello"), "subject");
+        assert_ne!(hash, approved_hash(&a, Some(&now), "Hello there"), "body");
+        assert_eq!(hash, approved_hash(&a, Some(&now), "  Hello  "), "surrounding space is not a change");
+    }
 }

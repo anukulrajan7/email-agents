@@ -606,6 +606,7 @@ dependencies = [
  "tower-http",
  "tracing",
  "tracing-subscriber",
+ "unicode-normalization",
  "uuid",
  "zip 2.4.2",
 ]

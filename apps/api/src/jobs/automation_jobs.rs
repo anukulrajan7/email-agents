@@ -282,17 +282,24 @@ async fn send_reply(
     let Some(draft_id) = draft_id else {
         return Ok(skipped(K, "no draft to send"));
     };
-    let draft: Option<(String, String, String)> =
-        sqlx::query_as("SELECT body_text, unanswered_json, status FROM drafts WHERE id = ?1 AND workspace_id = ?2")
+    let draft: Option<(String, String, String, bool)> =
+        sqlx::query_as(
+            "SELECT body_text, unanswered_json, status,
+                    (status = 'suggested' AND send_at IS NULL AND COALESCE(origin_key, '') LIKE 'automation-draft:%') AS untouched
+             FROM drafts WHERE id = ?1 AND workspace_id = ?2",
+        )
             .bind(draft_id)
             .bind(workspace_id)
             .fetch_optional(&state.db)
             .await?;
-    let Some((body, unanswered, status)) = draft else {
+    let Some((body, unanswered, status, untouched)) = draft else {
         return Ok(skipped(K, "draft not found"));
     };
     if status == "sent" {
         return Ok(skipped(K, "reply was already sent"));
+    }
+    if !untouched {
+        return Ok(skipped(K, "a person has edited or scheduled this draft; it is not sent automatically"));
     }
     if replies::has_open_gaps(&body) || !matches!(unanswered.trim(), "" | "[]") {
         return Ok(skipped(K, "draft has unanswered questions ([NEEDS: ...])"));

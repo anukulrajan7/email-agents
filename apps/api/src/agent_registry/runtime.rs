@@ -97,6 +97,17 @@ fn playbook(spec: &AgentSpec, persona: &str, personal: bool) -> String {
     format!("{}\n\n{out}", persona.trim())
 }
 
+/// The send permission an agent really has: the workspace ceiling and the agent's own spec, whichever is stricter.
+pub fn effective_send(workspace_send: &str, spec_send: SendMode) -> &'static str {
+    if workspace_send == "never" || spec_send == SendMode::Never {
+        "never"
+    } else if workspace_send == "auto" && spec_send == SendMode::Earned {
+        "auto"
+    } else {
+        "ask"
+    }
+}
+
 /// The workspace agent as this agent: its own name, look, rules and permissions, inside the
 /// workspace's permission ceiling (sending off, or routine sends off, applies to every agent).
 pub fn adapt(mut ctx: AgentContext, agent: &CaseAgent) -> AgentContext {
@@ -104,13 +115,7 @@ pub fn adapt(mut ctx: AgentContext, agent: &CaseAgent) -> AgentContext {
         return ctx;
     }
     let ws = &ctx.agent;
-    let send = if ws.permissions.send == "never" || agent.spec.permissions.send == SendMode::Never {
-        "never"
-    } else if ws.permissions.send == "auto" && agent.spec.permissions.send == SendMode::Earned {
-        "auto"
-    } else {
-        "ask"
-    };
+    let send = effective_send(&ws.permissions.send, agent.spec.permissions.send);
     let quality = match agent.spec.drafting.quality_tier.as_str() {
         "balanced" => ws.quality.clone(),
         tier => tier.to_string(),
