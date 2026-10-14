@@ -302,10 +302,13 @@ pub async fn set_status(conn: &mut SqliteConnection, ws: &str, case_id: &str, to
         .bind(case_id)
         .bind(&from)
         .bind(ws)
-        .execute(conn)
+        .execute(&mut *conn)
         .await?
         .rows_affected()
         == 1;
+    if changed && is_terminal(to) {
+        crate::messaging::watch::on_case_ended(&mut *conn, ws, case_id).await?;
+    }
     Ok(changed)
 }
 

@@ -272,7 +272,7 @@ fn permission_block(agent: &AgentContext, tool: &str) -> Option<String> {
         "draft_email" | "save_to_gmail_drafts" if !agent.agent.permissions.draft => {
             Some(format!("Writing drafts is switched off for {name}; create a task for a person instead."))
         }
-        "send_email" | "submit_candidate" if agent.agent.permissions.send == "never" => {
+        "send_email" | "submit_candidate" | "send_message" if agent.agent.permissions.send == "never" => {
             Some(format!("Sending is switched off for {name}; create a task for a person instead."))
         }
         _ => None,
@@ -393,7 +393,12 @@ async fn evaluate(
     let mut auto_sent = false;
     if tool.risk() == Risk::High {
         let preview = preview.unwrap_or_default();
-        if tool.name() != "send_email" || !autonomy::may_send_on_its_own(state, case, agent, case_agent, &preview).await? {
+        let on_its_own = match tool.name() {
+            "send_email" => autonomy::may_send_on_its_own(state, case, agent, case_agent, &preview).await?,
+            "send_message" => crate::messaging::rules::may_send_on_its_own(state, case, agent, case_agent, &args).await?,
+            _ => false,
+        };
+        if !on_its_own {
             return Ok(TurnResult::Approval { tool: tool_name, input: args, preview });
         }
         // A fixed workflow only asks the critic when a send would go out without a person.
@@ -628,6 +633,7 @@ async fn commit(state: &AppState, case: &Case, turn: i64, usage: &Usage, result:
                 .bind(&case.workspace_id)
                 .execute(&mut *tx)
                 .await?;
+            crate::messaging::watch::on_case_ended(&mut tx, &case.workspace_id, &case.id).await?;
             audit::record(
                 &mut tx,
                 Entry {

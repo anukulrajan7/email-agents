@@ -17,6 +17,7 @@ mod matching_api;
 mod memories;
 mod metrics_api;
 mod messages;
+mod messaging_api;
 mod reply_settings_api;
 mod reviews;
 mod search_api;
@@ -176,6 +177,7 @@ pub fn router(state: AppState) -> Router {
         .merge(evals_api::routes())
         .merge(designer_api::routes())
         .merge(assistant_api::routes())
+        .merge(messaging_api::routes())
         .merge(team_api::routes())
         .merge(staffing_api::routes())
         .fallback(|| async { AppError::NotFound })

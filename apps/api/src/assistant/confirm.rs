@@ -5,6 +5,10 @@ use serde_json::{Value, json};
 
 use crate::{
     agents::{approvals, triggers},
+    messaging::{
+        self,
+        dispatch::{self, Channel, Request, SupportSpec, WatchSpec},
+    },
     audit::{self, Actor, Entry},
     auth::{AuthUser, require_role},
     automations::{self, AutomationInput},
@@ -75,6 +79,9 @@ pub async fn confirm(state: &AppState, ws: &str, user: &AuthUser, plan_item_id: 
         "decline" => decide(state, ws, user, &params, false).await,
         "create_automation" => create_automation(state, ws, user, &params).await,
         "snooze_alert" => snooze_alert(state, ws, user, &params).await,
+        "send_message" => send_message(state, ws, user, &params).await,
+        "contact_support" => contact_support(state, ws, user, &params).await,
+        "hand_to_desk" => hand_to_desk(state, ws, user, &params).await,
         _ => Err(AppError::BadRequest("unknown action".into())),
     };
     let Done { message, link } = match outcome {
@@ -224,4 +231,83 @@ async fn snooze_alert(state: &AppState, ws: &str, user: &AuthUser, params: &Valu
     .await?;
     tx.commit().await?;
     Ok(done(&format!("Alert snoozed for {hours} hours."), Some(json!({ "kind": "alerts" }))))
+}
+
+fn wait_hours(params: &Value) -> i64 {
+    params.get("wait_hours").and_then(Value::as_i64).filter(|h| (1..=messaging::watch::MAX_NUDGE_HOURS).contains(h)).unwrap_or(messaging::watch::DEFAULT_NUDGE_HOURS)
+}
+
+fn done_from(sent: dispatch::Dispatched) -> Done {
+    Done { message: sent.summary, link: Some(sent.link) }
+}
+
+async fn personal_agent_id(state: &AppState, ws: &str, user: &AuthUser) -> AppResult<Option<String>> {
+    Ok(crate::agent_registry::store::personal_of(&state.db, ws, &user.id).await?.map(|a| a.id))
+}
+
+/// The person confirmed: that is the approval, whoever the message goes to.
+async fn send_message(state: &AppState, ws: &str, user: &AuthUser, params: &Value) -> AppResult<Done> {
+    let to = str_param(params, "to")?;
+    let target = messaging::recipients::resolve(&state.db, ws, to).await.map_err(AppError::BadRequest)?;
+    let ask = params.get("ask").and_then(Value::as_bool) == Some(true);
+    let body = str_param(params, "body")?;
+    let agent_id = personal_agent_id(state, ws, user).await?;
+    let sent = dispatch::send(
+        state,
+        Request {
+            ws,
+            owner: Some(&user.id),
+            agent_id: agent_id.as_deref(),
+            channel: if params.get("channel").and_then(Value::as_str) == Some("in_app") { Channel::InApp } else { Channel::Email },
+            target: &target,
+            subject: str_param(params, "subject")?,
+            body,
+            approver: Some(&user.id),
+            hold_secs: 0,
+            watch: ask.then(|| WatchSpec { question: body, nudge_hours: wait_hours(params) }),
+            support: None,
+            via: "assistant",
+        },
+    )
+    .await?;
+    Ok(done_from(sent))
+}
+
+async fn contact_support(state: &AppState, ws: &str, user: &AuthUser, params: &Value) -> AppResult<Done> {
+    let message_id = str_param(params, "message_id")?;
+    let address = str_param(params, "address")?;
+    let person = messaging::recipients::classify(&state.db, ws, address).await?;
+    let target = messaging::recipients::Target::Person(messaging::recipients::Person { label: str_param(params, "company")?.to_string(), ..person });
+    let body = str_param(params, "body")?;
+    let agent_id = personal_agent_id(state, ws, user).await?;
+    let sent = dispatch::send(
+        state,
+        Request {
+            ws,
+            owner: Some(&user.id),
+            agent_id: agent_id.as_deref(),
+            channel: Channel::Email,
+            target: &target,
+            subject: str_param(params, "subject")?,
+            body,
+            approver: Some(&user.id),
+            hold_secs: 0,
+            watch: Some(WatchSpec { question: body, nudge_hours: wait_hours(params) }),
+            support: Some(SupportSpec {
+                company: str_param(params, "company")?,
+                address_source: str_param(params, "address_source")?,
+                source_message_id: Some(message_id),
+            }),
+            via: "assistant",
+        },
+    )
+    .await?;
+    Ok(done_from(sent))
+}
+
+async fn hand_to_desk(state: &AppState, ws: &str, user: &AuthUser, params: &Value) -> AppResult<Done> {
+    let message_id = str_param(params, "message_id")?;
+    let note = params.get("note").and_then(Value::as_str).unwrap_or_default();
+    let sent = dispatch::hand_to_desk(state, ws, &user.id, message_id, note, messaging::watch::DEFAULT_NUDGE_HOURS).await?;
+    Ok(done_from(sent))
 }

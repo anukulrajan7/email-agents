@@ -26,6 +26,7 @@ pub mod learning;
 pub mod labels;
 pub mod mailer;
 pub mod matching;
+pub mod messaging;
 pub mod metrics;
 pub mod packs;
 pub mod replies;
