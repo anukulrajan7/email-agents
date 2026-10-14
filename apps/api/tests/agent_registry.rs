@@ -23,7 +23,7 @@ fn names(agents: &[Value], category: &str) -> Vec<String> {
 async fn a_support_workspace_shows_general_and_support_agents() {
     let env = Env::new(Opts::packs(&["general", "support"])).await;
     let agents = env.agents(ADMIN).await;
-    assert_eq!(names(&agents, "general"), ["Routing"], "the routing lead is internal and is the only general agent");
+    assert_eq!(names(&agents, "general"), ["Meera"], "the coordinator is hidden and stored as Meera and is the only general agent");
     assert_eq!(names(&agents, "support"), ["Ishaan"], "one expert per field");
     assert_eq!(agents[0]["hidden"], true, "the hub never shows the lead");
     assert!(names(&agents, "hrms").is_empty() && names(&agents, "sales").is_empty());
@@ -471,7 +471,7 @@ async fn old_default_names_move_to_the_new_team_but_edited_or_tuned_agents_keep_
     assert_eq!(name("support.resolver").await, "Ishaan", "an untuned default is renamed");
     assert_eq!(name("sales.qualifier").await, "Zoya", "a name an admin chose is never overridden");
     assert_eq!(name("personal.mailbox").await, "Meera");
-    assert_eq!(name("general.lead").await, "Routing", "the lead is internal routing now");
+    assert_eq!(name("general.lead").await, "Meera", "an old coordinator name becomes Meera");
     let profile: String = sqlx::query_scalar("SELECT name FROM workspace_agents WHERE workspace_id = ?1").bind(&ws).fetch_one(&env.state.db).await.unwrap();
     assert_eq!(profile, "Meera", "the workspace agent that answers is Meera");
 }

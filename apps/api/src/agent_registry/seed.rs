@@ -241,9 +241,11 @@ pub async fn consolidate_roster(conn: &mut SqliteConnection, ws: &str) -> sqlx::
                 Some(t) => Some(t),
                 None => store::lead(&mut *conn, ws).await?,
             };
-            if let Some(target) = target {
-                repoint_work(conn, ws, &agent.id, &target).await?;
-            }
+            let Some(target) = target else {
+                tracing::warn!(workspace = ws, agent = %agent.id, "no agent to take over from a merged desk; leaving it active");
+                continue;
+            };
+            repoint_work(conn, ws, &agent.id, &target).await?;
             store::set_status(conn, ws, &agent.id, "archived", None).await?;
         }
     }
@@ -282,9 +284,9 @@ pub async fn adopt_automatic_defaults(conn: &mut SqliteConnection, ws: &str) -> 
     let keys: Vec<&str> = templates::TEMPLATES.iter().filter(|t| t.initial_level >= 3).map(|t| t.key).collect();
     let candidates: Vec<(String, i64)> = sqlx::query_as(
         "SELECT a.id, a.autonomy_level FROM agents a
-         WHERE a.workspace_id = ?1 AND a.status = 'active' AND a.tuned = 0 AND a.autonomy_level < 3 AND a.autonomy_cap < 4
+         WHERE a.workspace_id = ?1 AND a.status = 'active' AND a.tuned = 0 AND a.autonomy_level < 3 AND a.autonomy_cap BETWEEN 1 AND 2
            AND (a.kind = 'lead' OR a.scope = 'personal' OR a.template_key IN (SELECT value FROM json_each(?2)))
-           AND NOT EXISTS (SELECT 1 FROM autonomy_changes c WHERE c.agent_id = a.id AND c.to_level < c.from_level AND c.actor = 'system')",
+           AND NOT EXISTS (SELECT 1 FROM autonomy_changes c WHERE c.agent_id = a.id AND (c.actor LIKE 'user:%' OR (c.to_level < c.from_level AND c.actor = 'system')))",
     )
     .bind(ws)
     .bind(serde_json::json!(keys).to_string())

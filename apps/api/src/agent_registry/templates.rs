@@ -42,7 +42,7 @@ pub const INBOX_KEY: &str = "general.inbox";
 pub const PERSONAL_NAME: &str = "Meera";
 /// Names this agent carried before the team got its own names; only untuned agents still holding one are renamed.
 pub const OLD_DEFAULT_NAMES: &[(&str, &[&str])] = &[
-    ("general.lead", &["Meera", "Aarav"]),
+    ("general.lead", &["Aarav", "Routing"]),
     ("personal.mailbox", &["My assistant", "Meera (personal)"]),
     ("support.resolver", &["Ticket Resolver"]),
     ("support.escalation", &["Escalations"]),
@@ -130,10 +130,10 @@ fn lead() -> AgentSpec {
     ];
     build(
         Base {
-            name: "Routing",
+            name: "Meera",
             key: "lead",
             category: "general",
-            description: "Routes mail inside the workspace and answers, as Meera, what no expert owns.",
+            description: "Hands mail to the expert whose job it is and answers, as Meera, what no expert owns.",
             goal: "Resolve each email that no other desk owns: reply, or hand it to a person",
             mode: Mode::Agent,
         },
@@ -425,7 +425,7 @@ macro_rules! template {
 /// How each agent thinks. Shapes judgement and checks; outgoing mail is still written in the mailbox owner's voice and signed by them.
 pub fn persona(template_key: &str) -> &'static str {
     match template_key {
-        LEAD_KEY => "You are Routing, the quiet step that looks at who is writing and what they need and sends the mail to the expert whose job it is. \
+        LEAD_KEY => "You are Meera, the team's assistant. You look at who is writing and what they need and send the mail to the expert whose job it is. \
             Check first: is this one person's own matter, a client, a vendor or a colleague, and is an expert already on it. When unsure, hand it to a person with a one-line summary rather than guess. \
             Never: reply to something an expert owns, promise dates, amounts or decisions.",
         INBOX_KEY => "You are a careful all-rounder for mail that waits for an answer. Answer the question that was asked, in as few words as it takes. \
@@ -470,7 +470,7 @@ pub fn persona(template_key: &str) -> &'static str {
 }
 
 pub const TEMPLATES: &[AgentTemplate] = &[
-    template!(LEAD_KEY, "general", "general", "lead", "workspace", 3, "Routing", "🌼", "ochre", lead, 3),
+    template!(LEAD_KEY, "general", "general", "lead", "workspace", 3, "Meera", "🌼", "ochre", lead, 4),
     template!("support.resolver", "support", "support", "system", "workspace", 3, "Ishaan", "🎧", "teal", resolver, 3),
     template!("sales.qualifier", "sales", "sales", "system", "workspace", 3, "Kabir", "🎯", "sage", qualifier, 3),
     template!("finance.invoices", "finance", "finance", "system", "workspace", 1, "Vikram", "🧾", "teal", invoices, 3),
@@ -590,12 +590,12 @@ mod tests {
         let names: Vec<&str> = TEMPLATES.iter().map(|t| t.name).collect();
         assert_eq!(
             names,
-            ["Routing", "Ishaan", "Kabir", "Vikram", "Nisha", "Ananya", "Rohan", "Sneha", "Arjun", "Aditya", "Meera"]
+            ["Meera", "Ishaan", "Kabir", "Vikram", "Nisha", "Ananya", "Rohan", "Sneha", "Arjun", "Aditya", "Meera"]
         );
-        let mut distinct = names.clone();
+        let mut distinct = names[1..].to_vec();
         distinct.sort_unstable();
         distinct.dedup();
-        assert_eq!(distinct.len(), names.len());
+        assert_eq!(distinct.len(), names.len() - 1, "the lead is Meera too");
         for t in TEMPLATES {
             let p = t.spec().persona;
             assert!(!p.trim().is_empty() && p.chars().count() <= 1200, "{}", t.key);
@@ -604,7 +604,7 @@ mod tests {
                 assert!(p.contains(&format!("You are {}", t.name)), "{}", t.key);
             }
         }
-        assert!(template(LEAD_KEY).unwrap().spec().persona.contains("sends the mail"));
+        assert!(template(LEAD_KEY).unwrap().spec().persona.contains("send the mail"));
         assert!(template("hrms.payroll").unwrap().spec().persona.contains("never guess amounts"));
     }
 
@@ -612,7 +612,7 @@ mod tests {
     fn templates_match_the_migration_backfill() {
         let lead = template(LEAD_KEY).unwrap();
         let personal = template(PERSONAL_KEY).unwrap();
-        assert_eq!((lead.name, lead.avatar, lead.color), ("Routing", "🌼", "ochre"));
+        assert_eq!((lead.name, lead.avatar, lead.color), ("Meera", "🌼", "ochre"));
         assert_eq!((personal.name, personal.avatar, personal.color), ("Meera", "🙋", "sage"));
                 assert_eq!(personal.spec().description, "Works on your own mailbox, in your voice, using your profile and preferences.");
     }

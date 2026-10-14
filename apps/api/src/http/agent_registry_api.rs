@@ -327,6 +327,9 @@ async fn update(
             return Err(AppError::BadRequest(format!("autonomy_cap must be 0 to {ceiling}")));
         }
         store::set_autonomy_cap(&mut tx, &ws, &id, cap).await?;
+        if cap != agent.autonomy_cap {
+            crate::evals::gate::record_limit_change(&mut tx, &ws, &id, agent.autonomy_cap, cap, &user.id).await?;
+        }
     }
     if body.status.as_deref().is_some_and(|s| s != "active") || body.autonomy_cap.is_some_and(|c| c < 2) {
         store::release_held_sends(&mut tx, &ws, Some(&id), None).await?;

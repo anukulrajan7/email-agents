@@ -35,7 +35,7 @@ async fn each_pack_brings_one_expert_and_hr_keeps_its_team() {
         let agents = env.agents(ADMIN).await;
         assert_eq!(visible(&agents), expected, "{pack}");
         let lead = agents.iter().find(|a| a["kind"] == "lead").unwrap();
-        assert_eq!((lead["name"].as_str(), lead["hidden"].as_bool()), (Some("Routing"), Some(true)), "{pack}: the coordinator is not a visible agent");
+        assert_eq!((lead["name"].as_str(), lead["hidden"].as_bool()), (Some("Meera"), Some(true)), "{pack}: the coordinator is not a visible agent");
         assert_eq!(agents.iter().filter(|a| a["scope"] == "personal").count(), 1, "{pack}: Meera for the member");
     }
 }
@@ -311,4 +311,108 @@ async fn every_expert_spec_passes_the_safety_suite_at_its_highest_level() {
         let unsafe_cases: Vec<_> = result.outcomes.iter().filter(|o| !o.safe()).map(|o| (&o.id, &o.failures)).collect();
         assert!(result.all_safe(), "{key}: a roster change must not fail the gate: {unsafe_cases:?}");
     }
+}
+
+#[tokio::test]
+async fn an_agent_whose_limit_a_person_set_is_never_raised_by_the_default_change() {
+    let env = Env::new(Opts::packs(&["general"])).await;
+    env.ok("GET", "/agent", ADMIN, None).await;
+    let mine = env.personal_id(OPERATOR).await;
+    env.ok("PATCH", &format!("/agents/{mine}"), OPERATOR, Some(json!({"autonomy_cap": 2}))).await;
+    let recorded: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM autonomy_changes WHERE agent_id = ?1 AND actor LIKE 'user:%'").bind(&mine).fetch_one(&env.state.db).await.unwrap();
+    assert_eq!(recorded, 1, "a person's limit is recorded");
+    sqlx::query("UPDATE workspace_agents SET permissions_json = '{\"draft\":true,\"send\":\"ask\"}', updated_by = NULL WHERE workspace_id = ?1").bind(&env.ws).execute(&env.state.db).await.unwrap();
+    sqlx::query("UPDATE agents SET autonomy_level = 1, autonomy_cap = 1 WHERE workspace_id = ?1").bind(&env.ws).execute(&env.state.db).await.unwrap();
+    sqlx::query("UPDATE agents SET autonomy_cap = 2 WHERE id = ?1").bind(&mine).execute(&env.state.db).await.unwrap();
+    let mut conn = env.state.db.acquire().await.unwrap();
+    seed::seed_workspace(&mut conn, &env.ws).await.unwrap();
+    drop(conn);
+    let level_of = |id: String| {
+        let pool = env.state.db.clone();
+        async move { sqlx::query_as::<_, (i64, i64)>("SELECT autonomy_level, autonomy_cap FROM agents WHERE id = ?1").bind(id).fetch_one(&pool).await.unwrap() }
+    };
+    assert_eq!(level_of(mine.clone()).await, (1, 2), "the person's choice stands");
+    let lead = env.agent_id(ADMIN, "general.lead").await;
+    assert_eq!(level_of(lead).await, (3, 3), "an untouched agent moves to acting on its own");
+}
+
+#[tokio::test]
+async fn an_untuned_lead_never_shows_routing_or_aarav() {
+    let env = Env::new(Opts::packs(&["general", "support"])).await;
+    let lead = env.agent_id(ADMIN, "general.lead").await;
+    env.ok("GET", "/agent", ADMIN, None).await;
+    sqlx::query("UPDATE agents SET name = 'Aarav', template_version = 1 WHERE id = ?1").bind(&lead).execute(&env.state.db).await.unwrap();
+    sqlx::query("UPDATE workspace_agents SET name = 'Aarav' WHERE workspace_id = ?1").bind(&env.ws).execute(&env.state.db).await.unwrap();
+    let mut conn = env.state.db.acquire().await.unwrap();
+    seed::seed_workspace(&mut conn, &env.ws).await.unwrap();
+    drop(conn);
+    let msg = env.receive(&env.shared_src, "m1", "t1", CLIENT, "Hello there", "Hello", "general").await;
+    env.route(&msg).await;
+    for path in [
+        "/agents".to_string(),
+        format!("/agents/{lead}"),
+        "/agent".to_string(),
+        "/scorecard".to_string(),
+        "/cases".to_string(),
+        format!("/messages/{msg}/route"),
+        format!("/agents/{lead}/metrics"),
+        format!("/agents/{lead}/evals"),
+        "/ai-health".to_string(),
+    ] {
+        let (status, body) = env.req("GET", &path, ADMIN, None).await;
+        let text = body.to_string();
+        assert!(!text.contains("Routing") && !text.contains("Aarav"), "{path} ({status}): {text}");
+    }
+    assert_eq!(env.ok("GET", &format!("/agents/{lead}"), ADMIN, None).await["name"], "Meera");
+}
+
+#[tokio::test]
+async fn a_desk_with_nobody_to_take_over_stays_active() {
+    let env = Env::new(Opts::packs(&["general"])).await;
+    let old = install_old_desk(&env, ESCALATION_KEY, false).await;
+    sqlx::query("DELETE FROM agents WHERE workspace_id = ?1 AND kind = 'lead'").bind(&env.ws).execute(&env.state.db).await.unwrap();
+    let mut conn = env.state.db.acquire().await.unwrap();
+    seed::consolidate_roster(&mut conn, &env.ws).await.unwrap();
+    drop(conn);
+    assert_eq!(status_of(&env, &old).await.0, "active", "nothing to hand the work to, so the desk keeps it");
+}
+
+#[tokio::test]
+async fn a_harmless_reply_to_a_sensitive_ask_still_needs_a_person() {
+    let env = fresh(0).await;
+    env.drafter.set("Hello Ravi,\n\nSure, will do.\n\nPriya");
+    let msg = env.receive(&env.op_src, "m1", "t1", CLIENT, "Quick one", "Hi Priya, please wire the refund and sign the NDA.", "general").await;
+    to_lead(&env, &msg).await;
+    let case = env.case(ADMIN, &env.start(&msg).await).await;
+    assert!(env.sends().is_empty(), "{case}");
+    let stopped = case["status"] == "waiting_approval" || case["steps"].as_array().unwrap().iter().any(|s| s["tool"] == "send_email" && s["status"] == "blocked");
+    assert!(stopped, "{case}");
+}
+
+fn privileged_spec() -> email_ai_api::agent_registry::spec::AgentSpec {
+    let mut s = templates::personal_template().spec();
+    s.permissions.daily_send_cap = 7;
+    s
+}
+
+#[tokio::test]
+async fn a_permissions_only_template_upgrade_does_not_drop_an_earned_level_unrecorded() {
+    let env = Env::new(Opts::packs(&["general"]).config(|c| c.evals_on_version = true)).await;
+    let mine = env.personal_id(OPERATOR).await;
+    let t = templates::personal_template();
+    let upgraded = [email_ai_api::agent_registry::templates::AgentTemplate {
+        key: t.key, category: t.category, pack: t.pack, version: 99, kind: t.kind, scope: t.scope, initial_level: t.initial_level, name: t.name, avatar: t.avatar, color: t.color, spec: privileged_spec_fn,
+    }];
+    let mut conn = env.state.db.acquire().await.unwrap();
+    assert_eq!(seed::upgrade_templates(&mut conn, &env.ws, &upgraded).await.unwrap(), 2, "one per member");
+    drop(conn);
+    email_ai_api::jobs::worker::drain(&env.state).await;
+    let level: i64 = sqlx::query_scalar("SELECT autonomy_level FROM agents WHERE id = ?1").bind(&mine).fetch_one(&env.state.db).await.unwrap();
+    let changes: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM autonomy_changes WHERE agent_id = ?1").bind(&mine).fetch_one(&env.state.db).await.unwrap();
+    assert!(level == 3 || changes > 0, "a level change always leaves a record (level {level}, records {changes})");
+    assert_eq!(level, 3, "the safe permission change keeps the earned level");
+}
+
+fn privileged_spec_fn() -> email_ai_api::agent_registry::spec::AgentSpec {
+    privileged_spec()
 }

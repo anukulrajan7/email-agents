@@ -255,6 +255,24 @@ pub async fn record_change(conn: &mut SqliteConnection, ws: &str, agent_id: &str
     .await
 }
 
+/// Notes that a person set the agent's limit, so later automatic changes leave it alone.
+pub async fn record_limit_change(conn: &mut SqliteConnection, ws: &str, agent_id: &str, from: i64, to: i64, user_id: &str) -> sqlx::Result<()> {
+    sqlx::query(
+        "INSERT INTO autonomy_changes (id, workspace_id, agent_id, from_level, to_level, reason, evidence_json, actor, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, 'Limit set by a person', '{\"kind\":\"cap\"}', ?6, ?7)",
+    )
+    .bind(new_id("auc"))
+    .bind(ws)
+    .bind(agent_id)
+    .bind(from)
+    .bind(to)
+    .bind(format!("user:{user_id}"))
+    .bind(now_ms())
+    .execute(conn)
+    .await?;
+    Ok(())
+}
+
 /// Lowers the agent to at most `to` and records why. Returns true when the level changed.
 pub async fn demote(conn: &mut SqliteConnection, ws: &str, agent_id: &str, to: i64, reason: &str, evidence: Value, actor: &str) -> sqlx::Result<bool> {
     let Some(agent) = store::get_in(&mut *conn, ws, agent_id).await? else { return Ok(false) };

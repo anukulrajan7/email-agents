@@ -60,10 +60,15 @@ pub fn effective_level(i: LevelInputs) -> Effective {
 /// Money, rates, rejections, legal, security and attachments: never sent without a person.
 static SENSITIVE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-        r"(?i)(₹|\$|€|£|\b(inr|usd|eur|rs\.?|lakhs?|lpa|ctc|salary|salaries|rates?|payments?|amounts?|bank(ing)?|wire|iban|ifsc|invoice|budget|legal|lawyers?|attorneys?|lawsuit|sue|contracts?|agreements?|terminat\w*|security|password|passcode|otp|credentials?|attach(ed|ments?)|offer letter|unfortunately|regret|reject(ed|ion)?|not (been )?(selected|shortlisted)|decline[ds]?)\b)",
+        r"(?i)(₹|\$|€|£|\b(inr|usd|eur|rs)\.?\s?\d|\b\d+(\.\d+)?\s?k\b|\b(inr|usd|eur|rs\.?|lakhs?|lpa|ctc|salary|salaries|rates?|payments?|pay(ing|able)?|paid|owe[sd]?|amounts?|bank(ing)?|wire( transfer)?|iban|ifsc|invoice|budget|refunds?|prices?|pricing|quote[ds]?|discount|fees?|costs?|rupees?|dollars?|legal|lawyers?|attorneys?|lawsuit|sue|contracts?|agreements?|nda|confidential|visa|gdpr|harassment|terminat\w*|security|password|passcode|otp|credentials?|attach(ed|ments?)|offer letter|unfortunately|regret|reject(ed|ion)?|not (been )?(selected|shortlisted)|decline[ds]?)\b)",
     )
     .expect("valid regex")
 });
+
+/// Does this text touch money, legal, security or attachments?
+pub fn is_sensitive(text: &str) -> bool {
+    SENSITIVE.is_match(text)
+}
 
 /// Words too common to mean anything when matching a "never do" rule against a draft.
 const COMMON_WORDS: &[&str] = &[
@@ -122,6 +127,8 @@ pub struct SendFacts<'a> {
     pub injected: Option<&'static str>,
     /// Addresses the draft may mention: the conversation's and our own.
     pub known_addresses: &'a [String],
+    /// Subject and body of the inbound mail of the conversation: a sensitive ask needs a person even when the reply looks harmless.
+    pub inbound_text: &'a str,
 }
 
 const LEAK_REASON: &str = "it mentions an address or number that is not from this conversation";
@@ -169,6 +176,9 @@ pub fn blocker(f: &SendFacts<'_>) -> Option<&'static str> {
     }
     if SENSITIVE.is_match(f.body) {
         return Some("it mentions money, rates or a decision about someone");
+    }
+    if SENSITIVE.is_match(f.inbound_text) {
+        return Some("the conversation is about money, legal or security matters");
     }
     if leaks(f.body, f.known_addresses) {
         return Some(LEAK_REASON);
@@ -268,6 +278,17 @@ pub async fn may_send_on_its_own(state: &AppState, case: &Case, ctx: &AgentConte
     .fetch_one(&state.db)
     .await?;
     let injected = super::injection::scan_case(&state.db, case).await?;
+    let inbound: Vec<(String, String)> = sqlx::query_as(
+        "SELECT subject, body_text FROM email_messages
+         WHERE workspace_id = ?1 AND direction = 'inbound' AND (thread_id = ?2 OR (?2 IS NULL AND id = ?3))
+         ORDER BY received_at DESC, id DESC LIMIT 12",
+    )
+    .bind(&case.workspace_id)
+    .bind(&case.thread_id)
+    .bind(&case.message_id)
+    .fetch_all(&state.db)
+    .await?;
+    let inbound_text = inbound.iter().map(|(s, b)| format!("{s}\n{b}")).collect::<Vec<_>>().join("\n");
     let mut known_addresses = participants.clone();
     known_addresses.push(to.clone());
     known_addresses.extend(ctx.mailbox.clone());
@@ -284,6 +305,7 @@ pub async fn may_send_on_its_own(state: &AppState, case: &Case, ctx: &AgentConte
         never_do: &agent.spec.drafting.never_do,
         injected,
         known_addresses: &known_addresses,
+        inbound_text: &inbound_text,
     };
     let blocked = blocker(&facts);
     if let Some(why) = injected {
@@ -404,12 +426,29 @@ mod tests {
             never_do: &[],
             injected: None,
             known_addresses: &[],
+            inbound_text: "",
         }
     }
 
     #[test]
     fn routine_reply_to_the_original_sender_passes() {
         assert_eq!(blocker(&facts("Ravi@Client.com", "Hello Ravi,\n\nThanks, we got your leave request.\n\nMeera")), None);
+    }
+
+    #[test]
+    fn the_wider_sensitive_floor_and_the_inbound_mail_ask_a_person() {
+        for body in [
+            "Hello,\n\nThe refund is on its way.", "Hello,\n\nOur pricing is simple.", "Hello,\n\nWe will send the quote.", "Hello,\n\nA discount applies.",
+            "Hello,\n\nThe fee is small.", "Hello,\n\nWe will pay soon.", "Hello,\n\nIt is paid.", "Hello,\n\nYou owe nothing.", "Hello,\n\nPlease sign the NDA.",
+            "Hello,\n\nThis is confidential.", "Hello,\n\nYour visa is ready.", "Hello,\n\nGDPR applies.", "Hello,\n\nThat is harassment.",
+            "Hello,\n\nIt costs Rs500.", "Hello,\n\nIt costs USD500.", "Hello,\n\nIt costs \u{20b9}500.", "Hello,\n\nIt costs INR 500.", "Hello,\n\nIt is 5k.",
+            "Hello,\n\nThree rupees.", "Hello,\n\nTen dollars.", "Hello,\n\nA wire transfer.",
+        ] {
+            assert!(blocker(&facts("ravi@client.com", body)).is_some(), "{body}");
+        }
+        let harmless = SendFacts { inbound_text: "Please wire the refund and sign the NDA", ..facts("ravi@client.com", "Hello Ravi,\n\nSure, will do.\n\nPriya") };
+        assert!(blocker(&harmless).is_some(), "a sensitive ask in the inbound mail needs a person");
+        assert_eq!(blocker(&SendFacts { inbound_text: "Is the meeting still on?", ..harmless }), None);
     }
 
     #[test]
