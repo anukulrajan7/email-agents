@@ -481,9 +481,9 @@ impl AgentContext {
     }
 
     /// How drafts for this email should sound: the agent's persona plus the owner's profile,
-    /// the owner's signature (else the agent's) and the quality tier's model.
+    /// the owner's signature (never the agent's own) and the quality tier's model.
     pub fn draft_style(&self, config: &Config) -> DraftStyle {
-        let signature = self.owner.as_ref().and_then(|o| o.profile.as_ref()).and_then(|p| p.tone.sign_off.clone()).or_else(|| self.agent.signature.clone());
+        let signature = self.owner.as_ref().and_then(|o| o.profile.as_ref()).and_then(|p| p.tone.sign_off.clone());
         let model = Some(tier_model(config, effective_tier(&self.agent.quality, false)).to_string()).filter(|m| !m.is_empty());
         let premium_model = Some(tier_model(config, effective_tier(&self.agent.quality, true)).to_string()).filter(|m| !m.is_empty());
         DraftStyle { instructions: Some(self.blocks().drafter).filter(|i| !i.trim().is_empty()), signature, model, premium_model }

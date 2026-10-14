@@ -641,7 +641,11 @@ pub async fn request_draft(
     };
     let premium = request.quality == Some(DraftQuality::Premium);
     let key = format!("draft:{id}:manual:{}", new_id("req"));
-    let payload = if premium { json!({ "message_id": id, "quality": "premium" }) } else { json!({ "message_id": id }) };
+    let payload = if premium {
+        json!({ "message_id": id, "quality": "premium", "owner_user_id": user.id })
+    } else {
+        json!({ "message_id": id, "owner_user_id": user.id })
+    };
     let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     jobs::enqueue(&mut tx, kind::GENERATE_DRAFT, &key, Some(&ws), &payload).await?;
     audit::record(
@@ -755,6 +759,7 @@ pub async fn update_draft(
     if in_flight == Some(true) {
         return Err(AppError::Conflict("this reply is scheduled to send; undo the send before editing".into()));
     }
+    let before_text: String = sqlx::query_scalar("SELECT body_text FROM drafts WHERE id = ?1 AND workspace_id = ?2").bind(&id).bind(&ws).fetch_optional(&state.db).await?.unwrap_or_default();
     let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     let row: DraftRow = sqlx::query_as(
         "UPDATE drafts SET body_text = COALESCE(?1, body_text), status = COALESCE(?2, status), updated_at = ?3
@@ -770,6 +775,10 @@ pub async fn update_draft(
     .fetch_optional(&mut *tx)
     .await?
     .ok_or(AppError::NotFound)?;
+    if let Some(new_text) = &body.body_text {
+        let added = crate::owner_said::added_by_edit(&before_text, new_text);
+        crate::owner_said::record(&mut tx, &ws, &row.id, &row.message_id, Some(&user.id), Some(&added)).await?;
+    }
     audit::record(
         &mut tx,
         Entry {

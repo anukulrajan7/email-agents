@@ -355,6 +355,27 @@ async fn finalize_sent(state: &AppState, ws: &str, ctx: &ReplyContext, provider_
         },
     )
     .await?;
+    let promised: Option<String> = sqlx::query_scalar("SELECT unanswered_json FROM drafts WHERE id = ?1").bind(&ctx.draft_id).fetch_optional(&mut *tx).await?;
+    let promised = promised.map(|j| crate::gap_resolver::parse_unanswered(&j)).unwrap_or_default();
+    if !promised.is_empty() && ctx.body_text.to_lowercase().contains("we'll confirm") {
+        let owner: Option<String> = sqlx::query_scalar("SELECT connected_by_user_id FROM email_sources WHERE id = ?1").bind(&ctx.source_id).fetch_optional(&mut *tx).await?.flatten();
+        let title = crate::sources::normalize::truncate_chars(&format!("Follow up: you told {} we'd confirm {}", ctx.sender_address, promised.join(", ")), 200);
+        sqlx::query(
+            "INSERT INTO review_items (id, workspace_id, message_id, workflow_run_id, kind, title, status, assigned_user_id, created_at)
+             VALUES (?1, ?2, ?3, NULL, 'agent_task', ?4, 'open', ?5, ?6)",
+        )
+        .bind(new_id("rev"))
+        .bind(ws)
+        .bind(&ctx.message_id)
+        .bind(title)
+        .bind(owner)
+        .bind(now_ms())
+        .execute(&mut *tx)
+        .await?;
+    }
+    if ctx.body_text.to_lowercase().contains(&crate::gap_resolver::NONE_PHRASE.to_lowercase()) {
+        crate::candidate_watch::queue_enrol(&mut tx, ws, &ctx.message_id, &ctx.draft_id).await?;
+    }
     tx.commit().await?;
     if let Err(e) = jobs::learning_jobs::enqueue_reply_learning(&state.db, &ctx.draft_id).await {
         tracing::warn!(error = %e, "could not schedule learning from the sent reply");
@@ -520,8 +541,16 @@ pub async fn send_draft_held(state: &AppState, ws: &str, draft_id: &str, actor: 
         }
     }
     let automated = matches!(actor, Actor::System);
-    let report = send_safety::check(state, &CheckInput { workspace_id: ws, reply: &ctx, body: &ctx.body_text, automated }).await?;
+    let mut report = send_safety::check(state, &CheckInput { actor_user: requested_by(actor), workspace_id: ws, reply: &ctx, body: &ctx.body_text, automated }).await?;
+    // An automatic send gets one repair of an unsupported claim; a person's send never needs it (warning only).
+    if report.is_blocked() && automated && crate::repair::apply(state, ws, &ctx, &report).await? {
+        ctx = load(state, ws, draft_id).await?;
+        report = send_safety::check(state, &CheckInput { actor_user: requested_by(actor), workspace_id: ws, reply: &ctx, body: &ctx.body_text, automated }).await?;
+    }
     if report.is_blocked() {
+        if automated {
+            crate::repair::hand_off(state, ws, &ctx, &report).await?;
+        }
         record_send_blocked(state, ws, &ctx, &report, automated).await;
         return Err(report.into_error());
     }
@@ -734,6 +763,13 @@ pub async fn send_scheduled(state: &AppState, payload: &Value) -> Result<(), Job
         }
     }
     if requester.is_none()
+        && let Some(reason) = crate::candidate_watch::stop_reason(state, &ws, &ctx.draft_id).await.map_err(|e| job_err(e.into()))?
+    {
+        tracing::info!(draft_id = %ctx.draft_id, reason, "a watch email is cancelled");
+        crate::candidate_watch::discard(state, &ws, &ctx.draft_id).await.map_err(|e| job_err(e.into()))?;
+        return Ok(());
+    }
+    if requester.is_none()
         && let Some(reason) = crate::agents::autonomy::automated_send_stopped(state, &ws, &ctx.draft_id).await.map_err(|e| job_err(e.into()))?
     {
         sqlx::query("UPDATE drafts SET send_at = NULL, updated_at = ?1 WHERE id = ?2 AND workspace_id = ?3 AND send_attempt_id IS NULL")
@@ -746,7 +782,7 @@ pub async fn send_scheduled(state: &AppState, payload: &Value) -> Result<(), Job
         tracing::info!(draft_id = %ctx.draft_id, reason, "held automatic send cancelled; it needs a person");
         return Ok(());
     }
-    let input = CheckInput { workspace_id: &ws, reply: &ctx, body: &ctx.body_text, automated: requester.is_none() };
+    let input = CheckInput { actor_user: requester.as_deref(), workspace_id: &ws, reply: &ctx, body: &ctx.body_text, automated: requester.is_none() };
     let report = send_safety::check(state, &input).await.map_err(job_err)?;
     if report.is_blocked() {
         let reasons: Vec<&str> = report.blocking.iter().map(|i| i.message.as_str()).collect();

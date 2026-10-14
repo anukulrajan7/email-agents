@@ -101,6 +101,10 @@ static LONG_NUMBER: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\d(?:[\s-]?\
 
 /// The leak check, in code: the draft names an email address that is not part of this conversation
 /// or our own, or carries a long number (account, card, phone). Such a reply goes to a person.
+pub fn is_sensitive(body: &str) -> bool {
+    SENSITIVE.is_match(body)
+}
+
 pub fn leaks(body: &str, known: &[String]) -> bool {
     LONG_NUMBER.is_match(body)
         || EMAIL_ADDRESS.find_iter(body).any(|m| !known.iter().any(|k| k.trim().eq_ignore_ascii_case(m.as_str().trim_end_matches('.'))))
@@ -248,6 +252,19 @@ pub async fn may_send_on_its_own(state: &AppState, case: &Case, ctx: &AgentConte
     };
     if !machine_written {
         tracing::info!(case_id = %case.id, "a reply a person wrote or edited never goes out on its own");
+        return Ok(false);
+    }
+    let unconfirmed: String = match preview.draft_id.as_deref() {
+        Some(id) => sqlx::query_scalar("SELECT unanswered_json FROM drafts WHERE id = ?1 AND workspace_id = ?2")
+            .bind(id)
+            .bind(&case.workspace_id)
+            .fetch_optional(&state.db)
+            .await?
+            .unwrap_or_default(),
+        None => String::new(),
+    };
+    if !(unconfirmed.is_empty() || crate::gap_resolver::parse_unanswered(&unconfirmed).is_empty()) {
+        tracing::info!(case_id = %case.id, "the draft promises to confirm something it could not; a person decides");
         return Ok(false);
     }
     let Some(to) = preview.to.as_deref().map(str::to_lowercase) else { return Ok(false) };

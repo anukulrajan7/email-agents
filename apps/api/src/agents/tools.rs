@@ -179,6 +179,7 @@ static REGISTRY: LazyLock<Registry> = LazyLock::new(|| Registry {
         Box::new(ReadEmail),
         Box::new(ReadThread),
         Box::new(FindCandidates),
+        Box::new(FindRequirements),
         Box::new(RecallMemory),
         Box::new(DraftEmail),
         Box::new(CreateTask),
@@ -506,6 +507,70 @@ impl Tool for FindCandidates {
     }
 }
 
+struct FindRequirements;
+
+#[derive(sqlx::FromRow)]
+struct OpenRequirementRow {
+    id: String,
+    role_title: String,
+    location: Option<String>,
+    must_have_skills_json: String,
+    positions: Option<i64>,
+}
+
+#[async_trait]
+impl Tool for FindRequirements {
+    fn name(&self) -> &'static str {
+        "find_requirements"
+    }
+    fn description(&self) -> &'static str {
+        "Open job requirements (current openings), optionally filtered by skill, role or location. Use it to answer a job seeker who asks what is open instead of asking a person; an empty result means there is no such opening."
+    }
+    fn schema(&self) -> Value {
+        object(
+            json!({
+                "skill": {"type": "string", "description": "A skill, e.g. React Native"},
+                "role": {"type": "string", "description": "Part of the role title"},
+                "location": {"type": "string"},
+                "limit": {"type": "integer", "description": "1 to 10, default 5"}
+            }),
+            &[],
+        )
+    }
+    fn risk(&self) -> Risk {
+        Risk::Read
+    }
+    async fn run(&self, ctx: &ToolCtx<'_>, args: &Value) -> Result<ToolOutput, ToolError> {
+        let rows: Vec<OpenRequirementRow> = sqlx::query_as(
+            "SELECT id, role_title, location, must_have_skills_json, positions FROM requirements
+             WHERE workspace_id = ?1 AND status = 'open'
+               AND (?2 IS NULL OR LOWER(must_have_skills_json) LIKE '%' || LOWER(?2) || '%' OR LOWER(nice_to_have_skills_json) LIKE '%' || LOWER(?2) || '%')
+               AND (?3 IS NULL OR LOWER(role_title) LIKE '%' || LOWER(?3) || '%')
+               AND (?4 IS NULL OR LOWER(COALESCE(location, '')) LIKE '%' || LOWER(?4) || '%')
+             ORDER BY created_at DESC LIMIT ?5",
+        )
+        .bind(ctx.ws())
+        .bind(opt_str(args, "skill").map(str::trim).filter(|s| !s.is_empty()))
+        .bind(opt_str(args, "role").map(str::trim).filter(|s| !s.is_empty()))
+        .bind(opt_str(args, "location").map(str::trim).filter(|s| !s.is_empty()))
+        .bind(limit_arg(args, 5, 10))
+        .fetch_all(&ctx.state.db)
+        .await?;
+        let items: Vec<Value> = rows
+            .iter()
+            .map(|r| {
+                let skills: Vec<String> = serde_json::from_str(&r.must_have_skills_json).unwrap_or_default();
+                json!({"requirement_id": r.id, "role": r.role_title, "location": r.location, "skills": skills, "positions": r.positions})
+            })
+            .collect();
+        let summary = match rows.len() {
+            0 => "No open requirement matches".to_string(),
+            n => format!("Found {n} open requirement{}", plural(n)),
+        };
+        Ok(ToolOutput { summary, value: json!({"items": items}), ..Default::default() })
+    }
+}
+
 struct RecallMemory;
 
 #[async_trait]
@@ -556,7 +621,7 @@ impl Tool for DraftEmail {
         "draft_email"
     }
     fn description(&self) -> &'static str {
-        "Draft a reply to an email in this case's conversation. Put every fact the reply must contain (candidate names, scores, next steps) in instructions."
+        "Draft a reply to an email in this case's conversation. Put every fact the reply must contain (candidate names, scores, next steps) in instructions. Never put a sign-off or your own name in instructions; the mailbox owner's signature is added automatically."
     }
     fn schema(&self) -> Value {
         object(
@@ -607,6 +672,9 @@ impl Tool for DraftEmail {
                     _ => None,
                 };
                 let style = agent.draft_style(&ctx.state.config);
+                let owner_said = ctx.case.state().get("owner_said").and_then(|o| {
+                    Some((o.get("user_id")?.as_str()?.to_string(), o.get("text")?.as_str()?.to_string()))
+                });
                 if ctx.case.shadow {
                     let body = crate::agent_profiles::with_draft_style(style, handlers::preview_draft(ctx.state, &msg.id, quality)).await?;
                     if body.trim().is_empty() {
@@ -625,7 +693,7 @@ impl Tool for DraftEmail {
                     Some(text) => format!("agent:{}:{}:{}", ctx.case.id, msg.id, instruction_key(text)),
                     None => format!("agent:{}:{}", ctx.case.id, ctx.turn),
                 };
-                crate::agent_profiles::with_draft_style(style, handlers::create_agent_draft(ctx.state, &msg.id, instructions, quality, &origin, ctx.case.agent_id.as_deref()))
+                crate::agent_profiles::with_draft_style(style, handlers::create_agent_draft(ctx.state, &msg.id, instructions, quality, &origin, ctx.case.agent_id.as_deref(), owner_said.as_ref().map(|(u, t)| (u.as_str(), t.as_str()))))
                     .await?
                     .ok_or_else(|| ToolError::Failed("The writer judged that this email needs no reply.".into()))?
             }
@@ -1409,7 +1477,7 @@ mod tests {
             assert_valid_object_schema(t.name(), &t.schema());
         }
         let expected = [
-            "search_mail", "read_email", "read_thread", "find_candidates", "recall_memory", "draft_email", "create_task",
+            "search_mail", "read_email", "read_thread", "find_candidates", "find_requirements", "recall_memory", "draft_email", "create_task",
             "schedule_check", "update_case", "extract_fields", "label_email", "save_to_gmail_drafts", "send_email", "submit_candidate",
             "propose_automation", "send_message", "notify_owner",
         ];

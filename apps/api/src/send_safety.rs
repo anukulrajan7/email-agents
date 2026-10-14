@@ -266,15 +266,26 @@ pub const Q_ANSWERS_ASK: &str = "answers_ask";
 /// Below this, the reply probably misses the sender's main ask.
 const MIN_ANSWER_SCORE: f64 = 0.5;
 
-pub fn review_questions() -> [Question; 3] {
-    [
+pub const Q_CONTRADICTS: &str = "contradicts_data";
+
+pub fn review_questions(owner_spoke: bool) -> Vec<Question> {
+    let mut questions = vec![
         Question::yes_no(
             Q_PROMISES,
-            "Does the <reply> promise approvals, payments, money amounts, dates or decisions that are not stated in the <email> or the <team_notes>?",
+            "Does the <reply> promise approvals, payments, money amounts, dates or decisions that are not stated in the <email> or the <team_notes>? \
+             Lines in <team_notes> that start with \"The owner said\" are the mailbox owner's own words, in any language or style (Hinglish included): \
+             a claim they back is supported, so answer no for it.",
         ),
         Question::yes_no(Q_PROFESSIONAL, "Is the tone of the <reply> professional and polite?"),
         Question::score(Q_ANSWERS_ASK, "How well does the <reply> answer the main ask of the <email>? 0 = not at all, 1 = fully."),
-    ]
+    ];
+    if owner_spoke {
+        questions.push(Question::yes_no(
+            Q_CONTRADICTS,
+            "Does the <reply> state something that the \"Open roles\" or other facts in <team_notes> contradict? Say in one short line what the owner said and what the records say.",
+        ));
+    }
+    questions
 }
 
 /// Maps judge answers to issues. `automated` = no person reviews this send, so a missing review blocks.
@@ -298,15 +309,31 @@ pub fn review_issues(answers: Result<&judge::Answers, &str>, automated: bool) ->
         Some(true) => {
             let why = a.reason(Q_PROMISES);
             let why = if why.is_empty() { String::new() } else { format!(" ({why})") };
-            r.blocking.push(issue(
-                "unsupported_promise",
-                format!("The reply may promise an approval, payment, date or decision that the email and team notes don't support{why}."),
-                "Remove or soften the promise, or add the fact to team notes first.",
-            ));
+            if automated {
+                r.blocking.push(issue(
+                    "unsupported_promise",
+                    format!("The reply may promise an approval, payment, date or decision that the email and team notes don't support{why}."),
+                    "Remove or soften the promise, or add the fact to team notes first.",
+                ));
+            } else {
+                r.warnings.push(issue(
+                    "unsupported_promise",
+                    format!("This mentions something the email and your notes don't back up{why} - double-check before sending."),
+                    "",
+                ));
+            }
         }
         Some(false) => {}
         None if automated => r.blocking.push(unavailable("no answer about promises")),
         None => r.warnings.push(unavailable("no answer about promises")),
+    }
+    if !automated && a.yes_no(Q_CONTRADICTS) == Some(true) {
+        let why = a.reason(Q_CONTRADICTS);
+        r.warnings.push(issue(
+            "owner_vs_data",
+            format!("Your note and our records disagree{}. Your note was followed - double-check before sending.", if why.is_empty() { String::new() } else { format!(": {why}") }),
+            "",
+        ));
     }
     if a.yes_no(Q_PROFESSIONAL) == Some(false) {
         r.warnings.push(issue("tone", format!("The tone may not be professional. {}", a.reason(Q_PROFESSIONAL)).trim().to_string(), "Reword the reply."));
@@ -324,6 +351,8 @@ pub fn review_issues(answers: Result<&judge::Answers, &str>, automated: bool) ->
 // ---------------------------------------------------------------- the check
 
 pub struct CheckInput<'a> {
+    /// The person sending now; `None` for an automatic send. Their own words (and only theirs) count as facts.
+    pub actor_user: Option<&'a str>,
     pub workspace_id: &'a str,
     pub reply: &'a ReplyContext,
     /// The text to check (the stored draft, or unsaved edits from the send dialog).
@@ -397,6 +426,48 @@ async fn gather(state: &AppState, input: &CheckInput<'_>) -> AppResult<(Facts, V
     .fetch_one(&state.db)
     .await?;
     let mut trusted_notes = team_notes;
+    // A send is supported only by its own author's words (and the shared team notes above).
+    let mut spoken = crate::owner_said::for_send(&state.db, &r.draft_id, input.actor_user).await?;
+    if input.actor_user.is_some() && input.body != r.body_text {
+        let typed = crate::owner_said::added_by_edit(&r.body_text, input.body);
+        if !typed.is_empty() {
+            spoken.push(typed);
+        }
+    }
+    if !spoken.is_empty() {
+        let said = spoken.join("\n");
+        trusted_notes.push_str(&format!("\nThe owner said (a supported fact, whatever the language): {said}"));
+        known.push('\n');
+        known.push_str(&said);
+    }
+    let mailbox_owner: Option<String> = sqlx::query_scalar("SELECT connected_by_user_id FROM email_sources WHERE id = ?1").bind(&r.source_id).fetch_optional(&state.db).await?.flatten();
+    let profile: Option<(String, String, String)> = match mailbox_owner.as_deref() {
+        Some(u) => sqlx::query_as("SELECT display_name, job_title, handles_note FROM user_agent_profiles WHERE workspace_id = ?1 AND user_id = ?2").bind(ws).bind(u).fetch_optional(&state.db).await?,
+        None => None,
+    };
+    if let Some((name, title, handles)) = profile.filter(|(n, t, h)| !(n.is_empty() && t.is_empty() && h.is_empty())) {
+        trusted_notes.push_str(&format!("\nThe mailbox owner's profile: {name} {title}. {handles}"));
+    }
+    let preferences: Vec<String> = sqlx::query_scalar(
+        "SELECT content FROM agent_preferences WHERE workspace_id = ?1 AND status = 'active' AND (user_id IS NULL OR user_id = ?2 OR user_id = ?3) ORDER BY updated_at DESC LIMIT 30",
+    )
+    .bind(ws)
+    .bind(mailbox_owner.as_deref())
+    .bind(input.actor_user)
+    .fetch_all(&state.db)
+    .await?;
+    if !preferences.is_empty() {
+        trusted_notes.push_str(&format!("\nApproved preferences: {}", preferences.join("; ")));
+    }
+    let openings: Vec<(String, Option<String>)> =
+        sqlx::query_as("SELECT role_title, location FROM requirements WHERE workspace_id = ?1 AND status = 'open' ORDER BY created_at DESC LIMIT 20")
+            .bind(ws)
+            .fetch_all(&state.db)
+            .await?;
+    if !openings.is_empty() {
+        let list: Vec<String> = openings.iter().map(|(t, l)| format!("{t} ({})", l.as_deref().unwrap_or("location open"))).collect();
+        trusted_notes.push_str(&format!("\nOpen roles the team really has right now: {}", list.join("; ")));
+    }
     if !settings.reply_instructions.is_empty() {
         trusted_notes.push_str(&format!("\nReply style: {}", settings.reply_instructions));
     }
@@ -518,7 +589,7 @@ pub async fn check(state: &AppState, input: &CheckInput<'_>) -> AppResult<Safety
     if !text_broken {
         let context = review_context(input.reply, &notes, input.body);
         let scope = format!("send_review:v1:{}", input.workspace_id);
-        let answers = judge::ask_cached(&state.db, state.judge.as_ref(), &scope, &context, &review_questions()).await;
+        let answers = judge::ask_cached(&state.db, state.judge.as_ref(), &scope, &context, &review_questions(notes.contains("\nThe owner said"))).await;
         let review = match &answers {
             Ok(a) => review_issues(Ok(a), input.automated),
             Err(e) => {
@@ -552,7 +623,7 @@ pub async fn check_draft(
     if text.chars().count() > 10_000 {
         return Err(AppError::BadRequest("body_text must be at most 10000 characters".into()));
     }
-    let report = check(&state, &CheckInput { workspace_id: &ws, reply: &reply, body: &text, automated: false }).await?;
+    let report = check(&state, &CheckInput { actor_user: Some(&user.id), workspace_id: &ws, reply: &reply, body: &text, automated: false }).await?;
     Ok(Json(report))
 }
 
@@ -669,9 +740,11 @@ mod tests {
     fn judge_review_mapping() {
         assert_eq!(review_issues(Ok(&answers(Some(false), true, 0.9)), false), SafetyReport::default());
         let r = review_issues(Ok(&answers(Some(true), false, 0.2)), false);
-        assert_eq!(codes(&r.blocking), ["unsupported_promise"]);
-        assert!(r.blocking[0].message.contains("promises payment by Friday"));
-        assert_eq!(codes(&r.warnings), ["tone", "misses_ask"]);
+        assert!(r.blocking.is_empty());
+        assert_eq!(codes(&r.warnings), ["unsupported_promise", "tone", "misses_ask"]);
+        assert!(r.warnings[0].message.contains("promises payment by Friday") && r.warnings[0].message.contains("double-check"));
+        let auto = review_issues(Ok(&answers(Some(true), true, 0.9)), true);
+        assert_eq!(codes(&auto.blocking), ["unsupported_promise"]);
         // No answer / no judge: a warning for people, blocking for automated sends.
         assert_eq!(codes(&review_issues(Err("down"), false).warnings), ["ai_review_unavailable"]);
         assert_eq!(codes(&review_issues(Err("down"), true).blocking), ["ai_review_unavailable"]);

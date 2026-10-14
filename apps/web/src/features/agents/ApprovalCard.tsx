@@ -34,6 +34,7 @@ export function ApprovalCard({ ws, approval }: { ws: string; approval: Approval 
   const notify = useToast();
   const decide = useDecideApproval(ws);
   const [body, setBody] = useState(approval.body);
+  const [editing, setEditing] = useState(false);
   const [declining, setDeclining] = useState(false);
   const [note, setNote] = useState('');
   const edited = body !== approval.body;
@@ -113,7 +114,12 @@ export function ApprovalCard({ ws, approval }: { ws: string; approval: Approval 
         ) : (
         <div className="flex flex-col gap-1">
           <Label htmlFor={`${uid}-body`}>Email body</Label>
-          <Textarea id={`${uid}-body`} rows={8} value={body} onChange={(e) => setBody(e.target.value)} disabled={busy} className="text-sm" />
+          <Textarea id={`${uid}-body`} rows={8} value={body} onChange={(e) => setBody(e.target.value)} readOnly={!editing} disabled={busy} className="text-sm" />
+          {(approval.unanswered?.length ?? 0) > 0 && (
+            <p role="note" className="text-sm text-review-ink">
+              Couldn't confirm: {approval.unanswered?.join(', ')}
+            </p>
+          )}
           {HAS_GAPS.test(body) && (
             <p className="text-sm text-review-ink">This draft still has gaps marked [NEEDS: …]. Fill them in before sending.</p>
           )}
@@ -142,7 +148,7 @@ export function ApprovalCard({ ws, approval }: { ws: string; approval: Approval 
           {declining ? (
             <>
               <Button variant="danger" onClick={decline} loading={busy}>
-                Confirm decline
+                Confirm not now
               </Button>
               <Button variant="ghost" onClick={() => setDeclining(false)} disabled={busy}>
                 Back
@@ -151,10 +157,15 @@ export function ApprovalCard({ ws, approval }: { ws: string; approval: Approval 
           ) : (
             <>
               <Button onClick={approve} loading={busy}>
-                {isAutomation ? 'Create automation' : 'Approve & send'}
+                {isAutomation ? 'Create automation' : 'Send'}
               </Button>
-              <Button variant="secondary" onClick={() => setDeclining(true)} disabled={busy}>
-                Decline
+              {!isAutomation && (
+                <Button variant="secondary" onClick={() => setEditing(true)} disabled={busy || editing}>
+                  Edit
+                </Button>
+              )}
+              <Button variant="ghost" onClick={() => setDeclining(true)} disabled={busy}>
+                Not now
               </Button>
             </>
           )}

@@ -130,6 +130,10 @@ impl Env {
 }
 
 async fn env_with(planner: ScriptedPlanner, tweak: impl FnOnce(&mut Config)) -> Env {
+    env_state(planner, tweak, |_| {}).await
+}
+
+async fn env_state(planner: ScriptedPlanner, tweak: impl FnOnce(&mut Config), tweak_state: impl FnOnce(&mut AppState)) -> Env {
     let dir = tempfile::tempdir().unwrap();
     let calls: Calls = Arc::default();
     let mut config = Config::for_tests(&format!("sqlite://{}", dir.path().join("t.db").display()));
@@ -140,6 +144,7 @@ async fn env_with(planner: ScriptedPlanner, tweak: impl FnOnce(&mut Config)) -> 
     db::migrate(&state.db).await.unwrap();
     let planner = Arc::new(planner);
     state.planner = planner.clone();
+    tweak_state(&mut state);
     let app = router(state.clone());
     let (_, ws) = call(&app, "POST", "/api/v1/workspaces", ADMIN, Some(json!({"name": "Acme", "template": "hr"}))).await;
     let ws = ws["id"].as_str().unwrap().to_string();
@@ -408,10 +413,10 @@ async fn inbox_agent_starts_only_when_auto_reply_is_on() {
     assert_eq!(cases.len(), 1, "{cases:?}");
     assert_eq!(cases[0]["message_id"], on.as_str());
     let detail = env.case(cases[0]["id"].as_str().unwrap()).await;
-    assert_eq!(detail["status"], "done");
-    let blocked = detail["steps"].as_array().unwrap().iter().find(|s| s["status"] == "blocked").expect("send with gaps blocked");
-    assert!(blocked["summary"].as_str().unwrap().contains("[NEEDS"));
-    assert_eq!(env.get("/approvals").await["items"].as_array().unwrap().len(), 0);
+    assert_eq!(detail["status"], "waiting_approval", "the gap was rewritten, so the draft goes to the owner to send");
+    let approvals = env.get("/approvals").await;
+    assert_eq!(approvals["items"].as_array().unwrap().len(), 1);
+    assert!(!approvals["items"][0]["body"].as_str().unwrap().contains("[NEEDS"));
     assert!(env.sends().is_empty());
 
     // A person can still hand an email to the agent while auto-reply is off.
@@ -490,7 +495,6 @@ async fn finishing_with_an_unresolved_reply_hands_off_to_the_owner() {
     let blocked_then_finish = vec![
         tool("read_email", json!({"message_id": "$message_id"})),
         tool("draft_email", json!({"message_id": "$message_id"})),
-        tool("send_email", json!({"draft_id": "$draft_id"})),
         finish(None, "Nothing more to do."),
     ];
     let env = env(ScriptedPlanner::new().script("inbox", blocked_then_finish)).await;
@@ -501,7 +505,6 @@ async fn finishing_with_an_unresolved_reply_hands_off_to_the_owner() {
     let detail = env.case(cases[0]["id"].as_str().unwrap()).await;
     assert_eq!(detail["status"], "done");
     let steps = detail["steps"].as_array().unwrap();
-    assert!(steps.iter().any(|s| s["status"] == "blocked" && s["tool"] == "send_email"));
     let tasks: Vec<(String, String)> = sqlx::query_as("SELECT title, status FROM review_items WHERE kind = 'agent_task' AND message_id = ?1")
         .bind(&msg)
         .fetch_all(&env.state.db)
@@ -524,4 +527,186 @@ async fn a_normal_finish_creates_no_task() {
     assert_eq!(env.case(cases[0]["id"].as_str().unwrap()).await["status"], "done");
     let tasks: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM review_items WHERE kind = 'agent_task'").fetch_one(&env.state.db).await.unwrap();
     assert_eq!(tasks, 0);
+}
+
+// ---------------------------------------------------------------- gaps, sign-off, critic outage
+
+use async_trait::async_trait;
+use email_ai_api::{
+    agents::critic::{Critic, CriticInput, Verdict},
+    ai::{AiError, DraftInput, DraftOutput, Drafter},
+};
+
+async fn auto_reply_env(script: Vec<Scripted>) -> Env {
+    let env = env(ScriptedPlanner::new().script("inbox", script)).await;
+    call(&env.app, "PUT", &format!("{}/reply-settings", env.base()), ADMIN, Some(json!({"auto_reply": true, "reply_instructions": "", "signature": null}))).await;
+    env
+}
+
+async fn draft_body(env: &Env, message_id: &str) -> String {
+    sqlx::query_scalar("SELECT body_text FROM drafts WHERE message_id = ?1 ORDER BY created_at DESC LIMIT 1")
+        .bind(message_id)
+        .fetch_one(&env.state.db)
+        .await
+        .unwrap()
+}
+
+async fn add_opening(env: &Env, title: &str, skills: Value) {
+    let anchor = env.receive("o1", "t-o1", CLIENT, "FYI", "Just a note.", 100).await;
+    sqlx::query(
+        "INSERT INTO requirements (id, workspace_id, message_id, client, role_title, must_have_skills_json, location, status, source, created_at)
+         VALUES ('req_open', ?1, ?2, 'Capgemini', ?3, ?4, 'Pune', 'open', 'manual', ?5)",
+    )
+    .bind(&env.ws)
+    .bind(anchor)
+    .bind(title)
+    .bind(skills.to_string())
+    .bind(db::now_ms())
+    .execute(&env.state.db)
+    .await
+    .unwrap();
+}
+
+fn drafting_script() -> Vec<Scripted> {
+    vec![tool("read_email", json!({"message_id": "$message_id"})), tool("draft_email", json!({"message_id": "$message_id"})), finish(None, "Drafted a reply.")]
+}
+
+const SEEKER: &str = "Hi, I am a React Native developer with 4 years of experience. Are there any React Native openings?";
+
+#[tokio::test]
+async fn job_seeker_draft_names_a_matching_open_requirement() {
+    let env = auto_reply_env(drafting_script()).await;
+    add_opening(&env, "React Native Developer", json!(["React Native", "TypeScript"])).await;
+    let msg = env.receive("js1", "t-js1", "dev@gmail.com", "Looking for a job", SEEKER, 1).await;
+    let body = draft_body(&env, &msg).await;
+    assert!(body.contains("React Native Developer") && !body.contains("[NEEDS"), "{body}");
+    assert!(!body.contains("Capgemini"), "the client's name is not shared: {body}");
+}
+
+#[tokio::test]
+async fn job_seeker_draft_says_none_right_now_only_when_nothing_is_open() {
+    let env = auto_reply_env(drafting_script()).await;
+    let msg = env.receive("js2", "t-js2", "dev@gmail.com", "Looking for a job", SEEKER, 1).await;
+    let body = draft_body(&env, &msg).await;
+    assert!(body.contains("don't have a matching opening right now") && !body.contains("[NEEDS"), "{body}");
+}
+
+#[tokio::test]
+async fn an_unrelated_opening_does_not_stop_the_draft_saying_there_is_none_for_this_skill() {
+    let env = auto_reply_env(drafting_script()).await;
+    add_opening(&env, "Java Developer", json!(["Java"])).await;
+    let msg = env.receive("js3", "t-js3", "dev@gmail.com", "Looking for a job", SEEKER, 1).await;
+    let body = draft_body(&env, &msg).await;
+    assert!(!body.contains("[NEEDS") && !body.contains("Java Developer") && body.contains("don't have a matching opening"), "{body}");
+}
+
+#[tokio::test]
+async fn pricing_questions_without_data_are_confirmed_later_never_shown_as_blanks() {
+    let env = auto_reply_env(drafting_script()).await;
+    let msg = env.receive("pr1", "t-pr1", "buyer@acme.com", "Pricing", "What is the price for 50 seats?", 1).await;
+    let body = draft_body(&env, &msg).await;
+    assert!(!body.contains("[NEEDS") && body.contains("We'll confirm"), "{body}");
+    let unanswered: String = sqlx::query_scalar("SELECT unanswered_json FROM drafts WHERE message_id = ?1").bind(&msg).fetch_one(&env.state.db).await.unwrap();
+    assert!(unanswered.contains("price"), "kept as an internal flag: {unanswered}");
+}
+
+struct AgentSigned;
+
+#[async_trait]
+impl Drafter for AgentSigned {
+    async fn draft(&self, input: &DraftInput) -> Result<DraftOutput, AiError> {
+        let notes = input.memory_notes.join(" | ");
+        Ok(DraftOutput { body_text: format!("Hello,\n\nThanks for writing. ({notes})\n\nBest regards,\nAarav"), model_id: "test".into(), unanswered: vec![] })
+    }
+}
+
+#[tokio::test]
+async fn the_agent_never_signs_as_itself() {
+    let script = vec![
+        tool("read_email", json!({"message_id": "$message_id"})),
+        tool("draft_email", json!({"message_id": "$message_id", "instructions": "Thank them, signed off as Aarav."})),
+        finish(None, "Drafted a reply."),
+    ];
+    let env = env_state(ScriptedPlanner::new().script("inbox", script), |_| {}, |s| s.drafter = Arc::new(AgentSigned)).await;
+    call(&env.app, "PUT", &format!("{}/reply-settings", env.base()), ADMIN, Some(json!({"auto_reply": true, "reply_instructions": "", "signature": "Priya, HR Team"}))).await;
+    let msg = env.receive("sg1", "t-sg1", "ravi@acme.com", "Hello", "Thanks for the update on the project.", 1).await;
+    let body = draft_body(&env, &msg).await;
+    assert!(!body.contains("Aarav") && !body.to_lowercase().contains("signed off"), "{body}");
+    assert!(body.ends_with("Best regards,\nPriya, HR Team"), "{body}");
+}
+
+struct DownCritic(Arc<Mutex<u32>>);
+
+#[async_trait]
+impl Critic for DownCritic {
+    async fn review(&self, _: &CriticInput) -> Result<Verdict, AiError> {
+        *self.0.lock().unwrap() += 1;
+        Err(AiError::Retryable("404".into()))
+    }
+}
+
+struct OkCritic;
+
+#[async_trait]
+impl Critic for OkCritic {
+    async fn review(&self, _: &CriticInput) -> Result<Verdict, AiError> {
+        Ok(Verdict::pass())
+    }
+}
+
+fn send_script() -> Vec<Scripted> {
+    vec![
+        tool("read_email", json!({"message_id": "$message_id"})),
+        tool("draft_email", json!({"message_id": "$message_id"})),
+        tool("draft_email", json!({"message_id": "$message_id"})),
+        tool("send_email", json!({"draft_id": "$draft_id"})),
+        finish(None, "Handed the reply to you."),
+    ]
+}
+
+struct Clean;
+
+#[async_trait]
+impl Drafter for Clean {
+    async fn draft(&self, _: &DraftInput) -> Result<DraftOutput, AiError> {
+        Ok(DraftOutput { body_text: "Hello,\n\nThanks, noted.\n\nBest regards,\nHR".into(), model_id: "test".into(), unanswered: vec![] })
+    }
+}
+
+#[tokio::test]
+async fn an_inbox_case_completes_with_a_working_critic() {
+    let env = env_state(ScriptedPlanner::new().script("inbox", send_script()), |_| {}, |s| {
+        s.drafter = Arc::new(Clean);
+        s.critic = Arc::new(OkCritic);
+    })
+    .await;
+    call(&env.app, "PUT", &format!("{}/reply-settings", env.base()), ADMIN, Some(json!({"auto_reply": true, "reply_instructions": "", "signature": null}))).await;
+    env.receive("ok1", "t-ok1", "ravi@acme.com", "Update", "Thanks for the update.", 1).await;
+    let cases = env.cases("inbox").await;
+    let detail = env.case(cases[0]["id"].as_str().unwrap()).await;
+    let k = kinds(&detail);
+    assert!(k.iter().all(|s| !s.contains("blocked")), "{k:?}");
+    assert!(k.contains(&"approval:waiting".to_string()) || detail["steps"].as_array().unwrap().iter().any(|s| s["tool"] == "send_email"), "{k:?}");
+    assert!(k.len() <= 6, "no loop: {k:?}");
+}
+
+#[tokio::test]
+async fn a_critic_outage_hands_off_once_instead_of_looping() {
+    let calls = Arc::new(Mutex::new(0));
+    let c = calls.clone();
+    let env = env_state(ScriptedPlanner::new().script("inbox", send_script()), |_| {}, move |s| {
+        s.drafter = Arc::new(Clean);
+        s.critic = Arc::new(DownCritic(c));
+    })
+    .await;
+    call(&env.app, "PUT", &format!("{}/reply-settings", env.base()), ADMIN, Some(json!({"auto_reply": true, "reply_instructions": "", "signature": null}))).await;
+    env.receive("dn1", "t-dn1", "ravi@acme.com", "Update", "Thanks for the update.", 1).await;
+    let cases = env.cases("inbox").await;
+    let detail = env.case(cases[0]["id"].as_str().unwrap()).await;
+    let k = kinds(&detail);
+    assert!(k.iter().all(|s| !s.contains("blocked")), "no repeated blocked steps: {k:?}");
+    let approvals = env.get("/approvals?status=pending").await;
+    assert_eq!(approvals["items"].as_array().unwrap().len(), 1, "one hand-off to the owner: {k:?}");
+    assert!(approvals["items"][0]["summary"].as_str().unwrap().contains("safety check couldn't run"));
+    assert!(env.sends().is_empty());
 }

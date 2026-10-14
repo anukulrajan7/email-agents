@@ -265,7 +265,11 @@ pub async fn decide(
 
 #[derive(Deserialize)]
 pub struct RequirementPatch {
-    status: String,
+    status: Option<String>,
+    /// A person confirms this requirement is real: candidates on watch may be told about it.
+    confirmed: Option<bool>,
+    /// Marks the client's name as not to be shared outside the team.
+    confidential: Option<bool>,
 }
 
 pub async fn update_requirement(
@@ -275,18 +279,58 @@ pub async fn update_requirement(
     Json(body): Json<RequirementPatch>,
 ) -> AppResult<Json<Value>> {
     require_role(&state.db, &ws, &user, Role::Operator).await?;
-    if !matches!(body.status.as_str(), "open" | "closed") {
+    if body.status.is_none() && body.confirmed.is_none() && body.confidential.is_none() {
+        return Err(AppError::BadRequest("nothing to update".into()));
+    }
+    if let Some(status) = &body.status
+        && !matches!(status.as_str(), "open" | "closed")
+    {
         return Err(AppError::BadRequest("status must be open or closed".into()));
     }
-    let n = sqlx::query("UPDATE requirements SET status = ?1 WHERE id = ?2 AND workspace_id = ?3")
-        .bind(&body.status)
-        .bind(&id)
-        .bind(&ws)
-        .execute(&state.db)
-        .await?
-        .rows_affected();
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
+    let n = sqlx::query(
+        "UPDATE requirements SET status = COALESCE(?1, status),
+           confirmed_at = CASE WHEN ?2 = 1 THEN COALESCE(confirmed_at, ?3) WHEN ?2 = 0 THEN NULL ELSE confirmed_at END,
+           confidential = COALESCE(?4, confidential)
+         WHERE id = ?5 AND workspace_id = ?6",
+    )
+    .bind(&body.status)
+    .bind(body.confirmed.map(i64::from))
+    .bind(now_ms())
+    .bind(body.confidential.map(i64::from))
+    .bind(&id)
+    .bind(&ws)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
     if n == 0 {
         return Err(AppError::NotFound);
     }
-    Ok(Json(json!({ "id": id, "status": body.status })))
+    if body.confirmed == Some(true) {
+        audit::record(
+            &mut tx,
+            Entry {
+                workspace_id: &ws,
+                actor: Actor::User(&user.id),
+                action: "requirement.confirmed",
+                entity_type: "requirement",
+                entity_id: &id,
+                message_id: None,
+                metadata: json!({}),
+            },
+        )
+        .await?;
+        crate::jobs::enqueue(
+            &mut tx,
+            crate::jobs::kind::NOTIFY_CANDIDATE_WATCH,
+            &format!("watch_notify:{id}:confirmed"),
+            Some(&ws),
+            &json!({ "workspace_id": ws, "requirement_id": id }),
+        )
+        .await?;
+    }
+    tx.commit().await?;
+    state.jobs_notify.notify_one();
+    let row: (String, i64, i64) = sqlx::query_as("SELECT status, confirmed_at IS NOT NULL, confidential FROM requirements WHERE id = ?1").bind(&id).fetch_one(&state.db).await?;
+    Ok(Json(json!({ "id": id, "status": row.0, "confirmed": row.1 == 1, "confidential": row.2 == 1 })))
 }

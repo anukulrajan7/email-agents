@@ -19,3 +19,4 @@ export { SegmentedControl } from './SegmentedControl';
 export { CountBadge } from './CountBadge';
 export { RelativeTime } from './RelativeTime';
 export { TextLink, linkClass } from './TextLink';
+export { MoreMenu, type MoreMenuItem } from './MoreMenu';

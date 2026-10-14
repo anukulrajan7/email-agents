@@ -65,15 +65,10 @@ function setup(m: MessageDetail, report: SafetyReport = cleanReport) {
 describe('DraftPanel', () => {
   afterEach(() => vi.unstubAllGlobals());
 
-  it('requires confirming in the dialog before sending, and posts {confirm:true}', async () => {
+  it('sends at once with no dialog and no check step, posting {confirm:true}', async () => {
     const fetchMock = setup(message());
-    await userEvent.click(screen.getByRole('button', { name: 'Send reply…' }));
-    const dialog = screen.getByRole('dialog');
-    expect(dialog).toHaveAttribute('aria-modal', 'true');
-    expect(screen.getByText('Re: Lunch')).toBeInTheDocument();
-    expect(fetchMock).not.toHaveBeenCalledWith('/api/v1/workspaces/w1/drafts/d1/send', expect.anything());
-    expect(await screen.findByText('Checks passed.')).toBeInTheDocument();
     await userEvent.click(screen.getByRole('button', { name: 'Send' }));
+    expect(screen.queryByRole('dialog')).toBeNull();
     await waitFor(() =>
       expect(fetchMock).toHaveBeenCalledWith(
         '/api/v1/workspaces/w1/drafts/d1/send',
@@ -82,53 +77,22 @@ describe('DraftPanel', () => {
     );
   });
 
-  it('closes the dialog with Escape and returns focus to the trigger', async () => {
-    const fetchMock = setup(message());
-    const trigger = screen.getByRole('button', { name: 'Send reply…' });
-    await userEvent.click(trigger);
-    await userEvent.keyboard('{Escape}');
-    expect(screen.queryByRole('dialog')).toBeNull();
-    expect(trigger).toHaveFocus();
-    expect(fetchMock).not.toHaveBeenCalledWith('/api/v1/workspaces/w1/drafts/d1/send', expect.anything());
+  it('checks the draft when it loads and shows a quiet heads-up that never blocks Send', async () => {
+    const fetchMock = setup(message(), { blocking: [], warnings: [{ code: 'unsupported_promise', message: 'This mentions a payment date - double-check before sending.', fix: null }] });
+    expect(await screen.findByText('This mentions a payment date - double-check before sending.')).toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledWith('/api/v1/workspaces/w1/drafts/d1/check', expect.objectContaining({ method: 'POST' }));
+    expect(screen.getByRole('button', { name: 'Send' })).toBeEnabled();
   });
 
-  describe('send safety and undo', () => {
-    it('checks the current text and shows blocking issues in red with fixes, disabling Send', async () => {
-      const fetchMock = setup(message(), {
-        blocking: [{ code: 'placeholder', message: 'The reply still has template placeholders: {name}.', fix: 'Replace each placeholder.' }],
-        warnings: [{ code: 'tone', message: 'The tone may not be professional.', fix: null }],
-      });
-      await userEvent.click(screen.getByRole('button', { name: 'Send reply…' }));
-      await waitFor(() =>
-        expect(fetchMock).toHaveBeenCalledWith(
-          '/api/v1/workspaces/w1/drafts/d1/check',
-          expect.objectContaining({ method: 'POST', body: JSON.stringify({ body_text: draft.body_text }) }),
-        ),
-      );
-      const blocking = await screen.findByRole('region', { name: 'Fix before sending' });
-      expect(within(blocking).getByText(/template placeholders/)).toBeInTheDocument();
-      expect(within(blocking).getByText('Replace each placeholder.')).toBeInTheDocument();
-      expect(blocking.className).toContain('text-danger');
-      expect(screen.getByRole('region', { name: 'Check before sending' }).className).toContain('bg-review-tint');
-      expect(screen.getByRole('button', { name: 'Send' })).toBeDisabled();
-    });
+  it('shows nothing when the check is clean', async () => {
+    const fetchMock = setup(message());
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('/api/v1/workspaces/w1/drafts/d1/check', expect.anything()));
+    expect(screen.queryByRole('list', { name: 'Heads-up' })).toBeNull();
+  });
 
-    it('allows sending with warnings only', async () => {
-      setup(message(), {
-        blocking: [],
-        warnings: [{ code: 'attachment_mentioned', message: 'The reply mentions an attachment.', fix: 'Remove the mention.' }],
-      });
-      await userEvent.click(screen.getByRole('button', { name: 'Send reply…' }));
-      const warnings = await screen.findByRole('region', { name: 'Check before sending' });
-      expect(within(warnings).getByText('The reply mentions an attachment.')).toBeInTheDocument();
-      expect(screen.queryByRole('region', { name: 'Fix before sending' })).toBeNull();
-      expect(screen.getByRole('button', { name: 'Send' })).toBeEnabled();
-    });
-
+  describe('send and undo', () => {
     it('shows "Sending in 30 s · Undo" after sending, and Undo cancels it', async () => {
       const fetchMock = setup(message());
-      await userEvent.click(screen.getByRole('button', { name: 'Send reply…' }));
-      await screen.findByText('Checks passed.');
       await userEvent.click(screen.getByRole('button', { name: 'Send' }));
       expect(await screen.findByText(/Sending in (30|29) s/)).toBeInTheDocument();
       expect(screen.queryByRole('dialog')).toBeNull();
@@ -138,7 +102,7 @@ describe('DraftPanel', () => {
         expect(fetchMock).toHaveBeenCalledWith('/api/v1/workspaces/w1/drafts/d1/undo-send', expect.objectContaining({ method: 'POST' })),
       );
       await waitFor(() => expect(screen.queryByText(/Sending in/)).toBeNull());
-      expect(screen.getByRole('button', { name: 'Send reply…' })).toBeEnabled();
+      expect(screen.getByRole('button', { name: 'Send' })).toBeEnabled();
     });
 
     it('counts down a scheduled draft and switches to "Sending…" at zero', () => {
@@ -146,7 +110,7 @@ describe('DraftPanel', () => {
       try {
         setup(message({ draft: { ...draft, status: 'scheduled', send_at: new Date(Date.now() + 3_000).toISOString() } }));
         expect(screen.getByText('Sending in 3 s')).toBeInTheDocument();
-        expect(screen.queryByRole('button', { name: 'Send reply…' })).toBeNull();
+        expect(screen.queryByRole('button', { name: 'Send' })).toBeNull();
         act(() => vi.advanceTimersByTime(1_000));
         expect(screen.getByText('Sending in 2 s')).toBeInTheDocument();
         act(() => vi.advanceTimersByTime(2_000));
@@ -165,7 +129,8 @@ describe('DraftPanel', () => {
 
   it('saves to Gmail drafts via the provider-draft endpoint', async () => {
     const fetchMock = setup(message());
-    await userEvent.click(screen.getByRole('button', { name: 'Save to Gmail drafts' }));
+    await userEvent.click(screen.getByRole('button', { name: 'More' }));
+    await userEvent.click(screen.getByRole('menuitem', { name: 'Save to Gmail drafts' }));
     await waitFor(() =>
       expect(fetchMock).toHaveBeenCalledWith(
         '/api/v1/workspaces/w1/drafts/d1/provider-draft',
@@ -206,7 +171,7 @@ describe('DraftPanel', () => {
   it('renders sent drafts read-only', () => {
     setup(message({ draft: { ...draft, status: 'sent' } }));
     expect(screen.getByLabelText('Draft reply')).toHaveAttribute('readonly');
-    expect(screen.queryByRole('button', { name: 'Send reply…' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Send' })).toBeNull();
     expect(screen.getByText(/Sent from Gmail on/)).toBeInTheDocument();
   });
 
@@ -217,25 +182,27 @@ describe('DraftPanel', () => {
       unanswered: ['hourly rate for Q4', 'start date'],
     };
 
-    it('highlights placeholders, lists the checklist and disables Send but not Gmail drafts', () => {
+    it('highlights placeholders, lists the checklist and disables Send but not Gmail drafts', async () => {
       setup(message({ draft: needsDraft }));
       const marks = within(screen.getByTestId('draft-highlights')).getAllByText(/\[NEEDS:/);
       expect(marks).toHaveLength(2);
       expect(marks[0]?.tagName).toBe('MARK');
       const checklist = screen.getByRole('region', { name: 'Fill these before sending' });
       expect(within(checklist).getAllByRole('listitem')).toHaveLength(2);
-      const send = screen.getByRole('button', { name: 'Send reply…' });
+      const send = screen.getByRole('button', { name: 'Send' });
       expect(send).toBeDisabled();
       expect(send).toHaveAccessibleDescription(/Fill every dashed/);
-      expect(screen.getByRole('button', { name: 'Save to Gmail drafts' })).toBeEnabled();
+      await userEvent.click(screen.getByRole('button', { name: 'More' }));
+      expect(screen.getByRole('menuitem', { name: 'Save to Gmail drafts' })).toBeEnabled();
     });
 
     it('enables Send once every placeholder is filled and ticks the checklist', async () => {
       setup(message({ draft: { ...needsDraft, body_text: 'Rate is [NEEDS: hourly rate for Q4]', unanswered: ['hourly rate for Q4'] } }));
+      await userEvent.click(screen.getByRole('button', { name: 'Edit' }));
       const field = screen.getByLabelText('Draft reply');
       await userEvent.clear(field);
       await userEvent.type(field, 'Rate is 45 USD');
-      expect(screen.getByRole('button', { name: 'Send reply…' })).toBeEnabled();
+      expect(screen.getByRole('button', { name: 'Send' })).toBeEnabled();
       expect(screen.getByText('(done)')).toBeInTheDocument();
       expect(screen.queryByText(/Fill every dashed/)).toBeNull();
     });
@@ -245,10 +212,17 @@ describe('DraftPanel', () => {
       expect(within(screen.getByRole('region', { name: 'Fill these before sending' })).getAllByRole('listitem')).toHaveLength(2);
     });
 
+    it('shows a short note, not blanks, when a draft could not confirm something', () => {
+      setup(message({ draft: { ...draft, unanswered: ['invoice amount'] } }));
+      expect(screen.getByRole('note')).toHaveTextContent("Couldn't confirm: invoice amount");
+      expect(screen.queryByRole('region', { name: 'Fill these before sending' })).toBeNull();
+      expect(screen.getByRole('button', { name: 'Send' })).toBeEnabled();
+    });
+
     it('does not show the checklist for a clean draft', () => {
       setup(message());
       expect(screen.queryByRole('region', { name: 'Fill these before sending' })).toBeNull();
-      expect(screen.getByRole('button', { name: 'Send reply…' })).toBeEnabled();
+      expect(screen.getByRole('button', { name: 'Send' })).toBeEnabled();
     });
   });
 });

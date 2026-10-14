@@ -45,11 +45,13 @@ pub struct ApprovalRow {
     pub agent_user_id: Option<String>,
     /// The agent that asked.
     pub agent_id: Option<String>,
+    /// What the draft could not confirm (internal flag), as stored.
+    pub unanswered_json: Option<String>,
 }
 
 const APPROVAL_SELECT: &str = "SELECT a.id, a.case_id, c.title AS case_title, a.step_seq, a.action, a.summary, a.to_address, a.subject,
         a.body, a.draft_id, a.candidates_json, a.input_json, a.status, u.email AS decided_by_email, a.decided_at, a.created_at,
-        c.agent_user_id, a.agent_id
+        c.agent_user_id, a.agent_id, (SELECT d.unanswered_json FROM drafts d WHERE d.id = a.draft_id) AS unanswered_json
  FROM agent_approvals a JOIN cases c ON c.id = a.case_id LEFT JOIN users u ON u.id = a.decided_by";
 
 impl ApprovalRow {
@@ -67,6 +69,7 @@ impl ApprovalRow {
             "candidates": serde_json::from_str::<Value>(&self.candidates_json).unwrap_or_else(|_| json!([])),
             "status": self.status, "decided_by": self.decided_by_email, "decided_at": self.decided_at.map(iso),
             "created_at": iso(self.created_at),
+            "unanswered": self.unanswered_json.as_deref().map(crate::gap_resolver::parse_unanswered).unwrap_or_default(),
         })
     }
 }
@@ -349,6 +352,7 @@ mod tests {
             created_at: 0,
             agent_user_id: None,
             agent_id: None,
+            unanswered_json: None,
         }
     }
 

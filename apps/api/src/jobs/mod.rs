@@ -59,6 +59,8 @@ pub mod kind {
     pub const WATCH_NUDGE: &str = "watch_nudge";
     pub const INAPP_DUE: &str = "inapp_due";
     pub const PURGE_SOURCE: &str = "purge_source";
+    pub const ENROL_CANDIDATE_WATCH: &str = "enrol_candidate_watch";
+    pub const NOTIFY_CANDIDATE_WATCH: &str = "notify_candidate_watch";
 }
 
 #[derive(Debug, Clone, FromRow)]

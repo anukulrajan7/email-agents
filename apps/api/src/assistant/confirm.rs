@@ -120,9 +120,13 @@ async fn draft_reply(state: &AppState, ws: &str, user: &AuthUser, params: &Value
         return Err(AppError::NotFound);
     }
     let instructions = params.get("instructions").and_then(Value::as_str).filter(|i| !i.trim().is_empty());
-    let mut payload = json!({ "message_id": message_id });
+    let mut payload = json!({ "message_id": message_id, "owner_user_id": user.id });
     if let Some(i) = instructions {
         payload["instructions"] = json!(i);
+    }
+    let said = crate::owner_said::conversation(&state.db, ws, &user.id, message_id).await?;
+    if !said.is_empty() {
+        payload["owner_said"] = json!(said);
     }
     let key = format!("draft:{message_id}:manual:{}", new_id("req"));
     let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
@@ -159,6 +163,21 @@ async fn start_agent(state: &AppState, ws: &str, user: &AuthUser, params: &Value
         triggers::Started::NotFound => return Err(AppError::NotFound),
         triggers::Started::NotAllowed(why) => return Err(AppError::Conflict(why)),
     };
+    let about_message: Option<String> = match params.get("message_id").and_then(Value::as_str) {
+        Some(m) => Some(m.to_string()),
+        None => match params.get("requirement_id").and_then(Value::as_str) {
+            Some(r) => sqlx::query_scalar("SELECT message_id FROM requirements WHERE id = ?1 AND workspace_id = ?2").bind(r).bind(ws).fetch_optional(&state.db).await?,
+            None => None,
+        },
+    };
+    let said = match about_message {
+        Some(m) => crate::owner_said::conversation(&state.db, ws, &user.id, &m).await?,
+        None => String::new(),
+    };
+    if !said.is_empty() {
+        let mut conn = state.db.acquire().await?;
+        crate::agents::case::merge_state(&mut conn, ws, &case_id, &json!({ "owner_said": { "user_id": user.id, "text": said } })).await?;
+    }
     Ok(done("Agent started. Follow it on the Agents page.", Some(json!({ "kind": "case", "id": case_id }))))
 }
 

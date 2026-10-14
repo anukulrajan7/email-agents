@@ -35,7 +35,7 @@ test('an admin creates the forwarding address once and a test email lands in the
   await row.click();
   await expect(page.getByRole('article', { name: 'Email' })).toContainText('168 hours');
   await expect(page.getByText("Forwarded emails can't create drafts in the original mailbox")).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Send reply…' })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Send', exact: true })).toHaveCount(0);
 });
 
 test('creating the forwarding source again returns the same one (idempotent)', async () => {
