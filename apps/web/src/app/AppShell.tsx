@@ -8,6 +8,7 @@ import { AskMeera } from '../features/assistant/AskMeera';
 import { PerformanceWidget } from '../features/team/PerformanceWidget';
 import { Button, Dialog, EmptyState, Skeleton, SkeletonList, Spinner } from '../components/ui';
 import { cn } from '../lib/cn';
+import { FirstRunTour } from '../features/help/FirstRunTour';
 import { riseStyle } from '../lib/motion';
 import { initialOf } from '../features/inbox/emailText';
 import { navGroups, type NavBadge } from './nav';
@@ -189,6 +190,7 @@ export function AppShell() {
       </div>
       <OnboardingPrompt ws={ws} />
       <PerformanceWidget ws={ws} />
+      <FirstRunTour />
       <AskMeera ws={ws} />
       {menuOpen && (
         <Dialog title="Menu" variant="drawer" side="left" onClose={() => setMenuOpen(false)} className="gap-6 bg-paper">

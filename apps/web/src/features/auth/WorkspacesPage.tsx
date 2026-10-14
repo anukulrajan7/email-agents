@@ -1,38 +1,16 @@
-import { useState, type FormEvent } from 'react';
-import { Link, useNavigate } from 'react-router';
-import { Button, Card, Input, Label, Skeleton, SkeletonList, Stamp } from '../../components/ui';
+import { Link } from 'react-router';
+import { Button, Card, SkeletonList, Stamp } from '../../components/ui';
 import { riseStyle } from '../../lib/motion';
 import { ErrorNote } from '../../components/ErrorNote';
 import { cn } from '../../lib/cn';
-import { PackPicker } from '../packs/PackPicker';
-import { usePackCatalogue } from '../packs/hooks';
-import { useCreateWorkspace, useLogout, useMe } from './hooks';
+import { GoalWizard } from '../onboarding/GoalWizard';
+import { useLogout, useMe } from './hooks';
 
 export function WorkspacesPage() {
   const me = useMe();
-  const create = useCreateWorkspace();
-  const navigate = useNavigate();
   const logout = useLogout();
-  const [name, setName] = useState('');
-  const [chosen, setChosen] = useState<string[]>(['general']);
-  const catalogue = usePackCatalogue();
   const workspaces = me.data?.workspaces ?? [];
   const hasWorkspaces = workspaces.length > 0;
-
-  const submit = (e: FormEvent) => {
-    e.preventDefault();
-    const trimmed = name.trim();
-    if (!trimmed) return;
-    create.mutate(
-      { name: trimmed, packs: chosen },
-      {
-        onSuccess: (w) => {
-          setName('');
-          navigate(`/w/${w.id}/inbox`);
-        },
-      },
-    );
-  };
 
   return (
     <div className="flex h-dvh flex-col overflow-hidden">
@@ -95,35 +73,7 @@ export function WorkspacesPage() {
           )}
 
           <Card className="rise bg-raised p-6 sm:p-8" style={riseStyle(2)}>
-            <form onSubmit={submit} className="flex flex-col gap-6">
-              <div>
-                <h2 className="type-display text-2xl tracking-[-0.01em]">{hasWorkspaces ? 'Start a new workspace' : 'Create workspace'}</h2>
-                <p className="mt-1 text-sm text-ink-muted">You can rename labels and invite people later.</p>
-              </div>
-              <div className="flex flex-col gap-1.5">
-                <Label htmlFor="ws-name">Workspace name</Label>
-                <div className="flex flex-col gap-2 sm:flex-row">
-                  <Input id="ws-name" required placeholder="Acme Talent Desk" value={name} onChange={(e) => setName(e.target.value)} />
-                  <Button type="submit" loading={create.isPending} disabled={!name.trim() || chosen.length === 0} className="shrink-0">
-                    Create
-                  </Button>
-                </div>
-              </div>
-              <fieldset className="flex flex-col gap-3">
-                <legend className="kicker">What is this workspace for?</legend>
-                <p className="-mt-1 text-sm text-ink-muted">Packs set up the labels, automations and reply style. You can change them later in Settings.</p>
-                {catalogue.isLoading && (
-                  <div className="grid gap-3 sm:grid-cols-3">
-                    {[0, 1, 2].map((i) => (
-                      <Skeleton key={i} className="h-28" />
-                    ))}
-                  </div>
-                )}
-                <ErrorNote error={catalogue.error} />
-                {catalogue.data && <PackPicker packs={catalogue.data.items} selected={chosen} onChange={setChosen} />}
-              </fieldset>
-              <ErrorNote error={create.error} />
-            </form>
+            <GoalWizard />
           </Card>
         </div>
       </div>

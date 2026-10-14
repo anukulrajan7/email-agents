@@ -6,6 +6,7 @@ import { useWorkspace } from '../../app/useWorkspace';
 import { useDebounced } from '../../lib/useDebounced';
 import { riseStyle } from '../../lib/motion';
 import { useContacts, useMemories } from './hooks';
+import { HelpPopover } from '../help/HelpPopover';
 import { LabelStamp } from '../labels/LabelStamp';
 import { groupMemories, matchesTab } from './grouping';
 import { LearnedItem } from './LearnedItem';
@@ -156,6 +157,7 @@ export function MemoryPage() {
       <PageHeader
         kicker="The ledger of what we know"
         title="What the assistant has learned"
+        actions={<HelpPopover topic="memory" />}
         description="Facts the assistant picked up from your emails and replies. It uses them when it labels and drafts. Pin what matters, confirm what it is unsure about, delete what is wrong."
       />
       <Learned ws={ws} />

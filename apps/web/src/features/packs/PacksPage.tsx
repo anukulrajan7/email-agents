@@ -3,6 +3,7 @@ import { ErrorNote } from '../../components/ErrorNote';
 import { Button, Card, EmptyState, Page, PageHeader, Skeleton, useToast } from '../../components/ui';
 import { riseStyle } from '../../lib/motion';
 import { useWorkspace } from '../../app/useWorkspace';
+import { HelpPopover } from '../help/HelpPopover';
 import { PackPicker } from './PackPicker';
 import { usePackPreview, useSetPacks, useWorkspacePacks } from './hooks';
 
@@ -35,6 +36,7 @@ export function PacksPage() {
       <PageHeader
         kicker="Settings"
         title="Packs"
+        actions={<HelpPopover topic="packs" />}
         description="A pack is a bundle for one kind of work: labels, automation presets, reply style and features. Turning a pack on adds its labels. Turning it off hides its labels and stops its features; your mail and data stay."
       />
       {packs.isLoading && <Skeleton className="h-40" />}
