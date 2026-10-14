@@ -26,7 +26,8 @@ use crate::{
 /// Sample emails an admin may inject per workspace per day (`ALLOW_TEST_EMAILS`).
 pub const TEST_EMAILS_PER_DAY: i64 = 20;
 
-const SOURCE_COLUMNS: &str ="id, kind, status, inbound_alias, capabilities_json, last_synced_at, last_error, created_at";
+const SOURCE_COLUMNS: &str =
+    "id, kind, status, inbound_alias, capabilities_json, last_synced_at, last_error, created_at, purge_status, purge_total, purge_done, purge_error";
 
 pub async fn list(State(state): State<AppState>, user: AuthUser, Path(ws): Path<String>) -> AppResult<Json<Items<Source>>> {
     require_role(&state.db, &ws, &user, Role::Operator).await?;
@@ -43,7 +44,19 @@ pub async fn create_forwarding(State(state): State<AppState>, user: AuthUser, Pa
     require_role(&state.db, &ws, &user, Role::Admin).await?;
     let id = new_id("src");
     let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
-    let created = sqlx::query(
+    // A forwarding address whose mail was purged is set up again on the same row (one per workspace), with a new alias.
+    let revived = sqlx::query(
+        "UPDATE email_sources SET status = 'pending', inbound_alias = ?2, purge_status = NULL, purge_total = NULL, purge_done = NULL,
+                purge_counts_json = NULL, purge_started_at = NULL, purge_error = NULL, purged_at = NULL, last_error = NULL
+         WHERE workspace_id = ?1 AND kind = 'forwarding' AND purge_status = 'done'",
+    )
+    .bind(&ws)
+    .bind(sources::generate_alias(&state.config.inbound_domain))
+    .execute(&mut *tx)
+    .await?
+    .rows_affected()
+        == 1;
+    let created = revived || sqlx::query(
         "INSERT OR IGNORE INTO email_sources (id, workspace_id, kind, status, inbound_alias, capabilities_json, created_at)
          VALUES (?1, ?2, 'forwarding', 'pending', ?3, ?4, ?5)",
     )
@@ -260,17 +273,42 @@ pub async fn sync(
     Ok((StatusCode::ACCEPTED, Json(json!({ "status": "queued" }))))
 }
 
-/// Stops ingestion. Existing messages stay; Nango access is revoked best-effort.
+#[derive(Deserialize, Default)]
+pub struct DisconnectBody {
+    /// Also delete everything that came from this mailbox, in the background. The web app sends it after the confirm dialog.
+    #[serde(default)]
+    purge: bool,
+}
+
+/// Exact numbers for the "this will be permanently deleted" confirm dialog.
+pub async fn purge_preview(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Path((ws, source_id)): Path<(String, String)>,
+) -> AppResult<Json<Value>> {
+    crate::deletion::authorize_source(&state.db, &ws, &user, &source_id).await?;
+    let c = crate::deletion::source_counts(&state.db, &ws, &source_id).await?;
+    let (scheduled_replies, open_tickets) = crate::deletion::source_loose_ends(&state.db, &ws, &source_id).await?;
+    Ok(Json(json!({
+        "emails": c.emails, "attachments": c.attachments, "drafts": c.drafts, "summaries": c.summaries,
+        "scheduled_replies": scheduled_replies, "open_tickets": open_tickets,
+    })))
+}
+
+/// Stops ingestion and revokes Nango access best-effort. With `purge`, a background job then deletes everything
+/// from the mailbox (see `deletion`); without it, existing messages stay. The mailbox's owner or an admin only.
 pub async fn disconnect(
     State(state): State<AppState>,
     user: AuthUser,
     Path((ws, source_id)): Path<(String, String)>,
+    body: Option<Json<DisconnectBody>>,
 ) -> AppResult<Json<Source>> {
-    require_role(&state.db, &ws, &user, Role::Admin).await?;
+    crate::deletion::authorize_source(&state.db, &ws, &user, &source_id).await?;
+    let purge = body.is_some_and(|Json(b)| b.purge);
     let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
-    let row: SourceRow = sqlx::query_as(&format!(
-        "UPDATE email_sources SET status = 'disconnected' WHERE id = ?1 AND workspace_id = ?2 RETURNING {SOURCE_COLUMNS}"
-    ))
+    let kind_of: String = sqlx::query_scalar(
+        "UPDATE email_sources SET status = 'disconnected' WHERE id = ?1 AND workspace_id = ?2 RETURNING kind",
+    )
     .bind(&source_id)
     .bind(&ws)
     .fetch_optional(&mut *tx)
@@ -291,7 +329,7 @@ pub async fn disconnect(
             entity_type: "email_source",
             entity_id: &source_id,
             message_id: None,
-            metadata: json!({ "kind": row.kind }),
+            metadata: json!({ "kind": kind_of, "purge": purge }),
         },
     )
     .await?;
@@ -301,7 +339,19 @@ pub async fn disconnect(
             .bind(&ws)
             .fetch_optional(&mut *tx)
             .await?;
+    if purge {
+        crate::deletion::start_purge(&mut tx, &ws, &source_id, &user.id).await?;
+    }
+    let row: SourceRow =
+        sqlx::query_as(&format!("SELECT {SOURCE_COLUMNS} FROM email_sources WHERE id = ?1 AND workspace_id = ?2"))
+            .bind(&source_id)
+            .bind(&ws)
+            .fetch_one(&mut *tx)
+            .await?;
     tx.commit().await?;
+    if purge {
+        state.jobs_notify.notify_one();
+    }
     if let Some((Some(cid), Some(pck))) = conn
         && let Err(e) = state.nango.delete_connection(&cid, &pck).await
     {

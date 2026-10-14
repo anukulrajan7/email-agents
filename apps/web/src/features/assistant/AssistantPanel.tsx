@@ -209,7 +209,9 @@ export function AssistantPanel({ ws, onClose }: { ws: string; onClose: () => voi
               <ul className="flex flex-col gap-0.5 text-[13px]">
                 {turn.citations.map((c) => (
                   <li key={`${c.message_id}:${c.attachment_id ?? ''}`} className="truncate">
-                    {c.attachment_name ? (
+                    {c.deleted ? (
+                      <span className="text-ink-muted">Deleted email</span>
+                    ) : c.attachment_name ? (
                       <>
                         <TextLink to={`/w/${ws}/inbox/${c.message_id}`} aria-label={`${c.attachment_name}, attached to ${c.subject || 'an email'}`}>
                           {c.attachment_name}

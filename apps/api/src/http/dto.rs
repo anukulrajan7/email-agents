@@ -52,6 +52,17 @@ pub struct Source {
     pub last_synced_at: Option<String>,
     pub last_error: Option<String>,
     pub created_at: String,
+    /// Present once the mailbox was disconnected with its mail deleted: how far the deletion is.
+    pub purge: Option<SourcePurge>,
+}
+
+#[derive(Serialize)]
+pub struct SourcePurge {
+    /// `running`, `done` or `failed` (see `error`).
+    pub status: String,
+    pub total: i64,
+    pub done: i64,
+    pub error: Option<String>,
 }
 
 #[derive(FromRow)]
@@ -64,6 +75,10 @@ pub struct SourceRow {
     pub last_synced_at: Option<i64>,
     pub last_error: Option<String>,
     pub created_at: i64,
+    pub purge_status: Option<String>,
+    pub purge_total: Option<i64>,
+    pub purge_done: Option<i64>,
+    pub purge_error: Option<String>,
 }
 
 impl From<SourceRow> for Source {
@@ -79,6 +94,12 @@ impl From<SourceRow> for Source {
             last_synced_at: r.last_synced_at.map(iso),
             last_error: r.last_error,
             created_at: iso(r.created_at),
+            purge: r.purge_status.map(|status| SourcePurge {
+                status,
+                total: r.purge_total.unwrap_or(0),
+                done: r.purge_done.unwrap_or(0),
+                error: r.purge_error,
+            }),
         }
     }
 }

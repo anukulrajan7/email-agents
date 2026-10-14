@@ -1,4 +1,4 @@
-export type Citation = { message_id: string; subject: string; attachment_id?: string; attachment_name?: string };
+export type Citation = { message_id: string; subject: string; attachment_id?: string; attachment_name?: string; deleted?: boolean };
 
 export type PlanAction = 'draft_reply' | 'start_agent' | 'approve' | 'decline' | 'create_automation' | 'snooze_alert' | 'send_message' | 'contact_support' | 'hand_to_desk';
 

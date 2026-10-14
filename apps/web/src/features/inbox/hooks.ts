@@ -1,6 +1,6 @@
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '../../api/client';
-import type { Category, Classification, ClassificationPatch, MessageDetail, MessageSummary, Paged } from '../../api/types';
+import type { Category, Classification, ClassificationPatch, DeletePreview, DeleteResult, MessageDetail, MessageSummary, Paged } from '../../api/types';
 
 const PAGE_SIZE = 25;
 export const messagesKey = (ws: string) => ['ws', ws, 'messages'] as const;
@@ -70,4 +70,40 @@ export function useReprocess(ws: string) {
       void qc.invalidateQueries({ queryKey: messagesKey(ws) });
     },
   });
+}
+
+/** Deletes emails from Post Room only (the Gmail copy stays): the given ones, or the whole conversation of one. */
+export function useDeleteMessages(ws: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (target: { ids: string[]; wholeThread?: boolean }) => {
+      const [first] = target.ids;
+      if (target.wholeThread && first !== undefined) {
+        return api<DeleteResult>(`/workspaces/${ws}/messages/${first}/thread`, { method: 'DELETE' });
+      }
+      return api<DeleteResult>(`/workspaces/${ws}/messages/delete`, { method: 'POST', body: { ids: target.ids } });
+    },
+    onSuccess: (_d, target) => {
+      for (const id of target.ids) qc.removeQueries({ queryKey: messageKey(ws, id) });
+      void qc.invalidateQueries({ queryKey: messagesKey(ws) });
+      void qc.invalidateQueries({ queryKey: ['ws', ws, 'contacts'] });
+    },
+  });
+}
+
+export const DELETE_NOTE = 'Your Gmail copy stays.';
+
+/** Asked while the delete confirm is open, so it can warn about replies a person scheduled. */
+export function useDeletePreview(ws: string, ids: string[], wholeThread: boolean, enabled: boolean) {
+  return useQuery({
+    queryKey: ['ws', ws, 'delete-preview', ids, wholeThread],
+    queryFn: () => api<DeletePreview>(`/workspaces/${ws}/messages/delete-preview`, { method: 'POST', body: { ids, whole_thread: wholeThread } }),
+    enabled: enabled && ids.length > 0,
+    gcTime: 0,
+  });
+}
+
+export function scheduledWarning(count: number | undefined): string | undefined {
+  if (!count) return undefined;
+  return `${count} scheduled ${count === 1 ? 'reply' : 'replies'} will be cancelled.`;
 }

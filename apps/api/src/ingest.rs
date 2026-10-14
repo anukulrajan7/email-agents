@@ -24,7 +24,8 @@ async fn is_outbound(conn: &mut SqliteConnection, source_id: &str, email: &Norma
 }
 
 /// Inserts the message (+ thread, attachments, audit, classify job) unless
-/// `(source_id, source_message_id)` already exists. Returns the new message ID.
+/// `(source_id, source_message_id)` already exists, the user deleted it from Post Room (tombstone), or its
+/// mailbox is being purged. Returns the new message ID.
 ///
 /// Caller must hold an open transaction whose first statement was a write, so the
 /// existence check below runs under SQLite's write lock.
@@ -42,7 +43,7 @@ pub async fn persist_message(
             .bind(&email.source_message_id)
             .fetch_optional(&mut *conn)
             .await?;
-    if exists.is_some() {
+    if exists.is_some() || crate::deletion::is_blocked(&mut *conn, source_id, &email.source_message_id).await? {
         return Ok(None);
     }
 

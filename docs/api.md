@@ -48,9 +48,13 @@ JobStatus         = "pending" | "running" | "succeeded" | "dead"
 | POST | `/api/v1/workspaces/:ws/sources/nango-session` | admin | `{provider: "gmail"\|"microsoft"}` | `{token, expires_at, provider_config_key}`; 501 if Nango unconfigured or provider is microsoft |
 | POST | `/api/v1/workspaces/:ws/sources/nango-connections` | admin | `{connection_id, provider_config_key}` | `Source` (server re-verifies connection tags with Nango; 403 if not this workspace/user) |
 | POST | `/api/v1/workspaces/:ws/sources/:id/sync` | admin | – | 202 `{status:"queued"}`; 409 for forwarding or disconnected sources |
-| POST | `/api/v1/workspaces/:ws/sources/:id/disconnect` | admin | – | `Source` (status `disconnected`; Nango connection revoked best-effort) |
+| POST | `/api/v1/workspaces/:ws/sources/:id/disconnect` | admin, or the mailbox's owner | optional `{purge?: bool}` | `Source` (status `disconnected`; Nango connection revoked best-effort). With `purge: true` a background job then deletes everything from the mailbox; `Source.purge = {status: "running"\|"done", total, done}` shows progress. Another member's personal mailbox: 404; a shared mailbox for a non-admin: 403 |
+| GET | `/api/v1/workspaces/:ws/sources/:id/purge-preview` | admin, or the mailbox's owner | – | `{emails, attachments, drafts, summaries}` exact counts for the confirm dialog |
 | GET | `/api/v1/workspaces/:ws/messages?cursor=&category=&q=&limit=&sort=&direction=` | member | – | `{items: MessageSummary[], next_cursor: string\|null}` |
 | GET | `/api/v1/workspaces/:ws/messages/:id` | member | – | `MessageDetail` |
+| DELETE | `/api/v1/workspaces/:ws/messages/:id` | member (owner of the mailbox, admin, or operator in a shared mailbox inside the wall) | – | `{deleted, removed}`. Deletes the email and everything derived from it from Post Room only, and records a tombstone so sync never re-imports it. 404 if not visible or not allowed; 409 while a reply is being sent |
+| DELETE | `/api/v1/workspaces/:ws/messages/:id/thread` | same | – | the same for every email of the conversation |
+| POST | `/api/v1/workspaces/:ws/messages/delete` | same | `{ids: string[]}` (1 to 200) | the same; all-or-nothing: one id the user may not touch makes it 404 and deletes nothing |
 | PATCH | `/api/v1/workspaces/:ws/messages/:id/classification` | member | `{category, priority?, requires_reply?}` | `Classification` |
 | POST | `/api/v1/workspaces/:ws/messages/:id/draft` | member | optional `{quality?: "premium"}` ("Write a better draft"); no body still works | 202 `{status:"queued"}`; 400 on an unknown `quality` |
 | GET | `/api/v1/workspaces/:ws/reply-settings` | member | – | `ReplySettings` + `default_reply_style` |

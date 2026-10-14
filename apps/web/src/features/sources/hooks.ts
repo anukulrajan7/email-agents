@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '../../api/client';
-import type { Items, NangoConnectionBody, NangoProvider, NangoSession, Source, TestEmailBody } from '../../api/types';
+import type { Items, NangoConnectionBody, NangoProvider, NangoSession, PurgePreview, Source, TestEmailBody } from '../../api/types';
 
 const key = (ws: string) => ['ws', ws, 'sources'] as const;
 
@@ -70,10 +70,25 @@ export function useSyncSource(ws: string) {
   });
 }
 
+/** Disconnects the mailbox and deletes everything that came from it, in the background. */
 export function useDisconnectSource(ws: string) {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (sourceId: string) => api<Source>(`/workspaces/${ws}/sources/${sourceId}/disconnect`, { method: 'POST' }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: key(ws) }),
+    mutationFn: (sourceId: string) =>
+      api<Source>(`/workspaces/${ws}/sources/${sourceId}/disconnect`, { method: 'POST', body: { purge: true } }),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: key(ws) });
+      void qc.invalidateQueries({ queryKey: ['ws', ws, 'messages'] });
+    },
+  });
+}
+
+/** Exact counts for the disconnect confirm dialog; only fetched while it is open. */
+export function usePurgePreview(ws: string, sourceId: string, enabled: boolean) {
+  return useQuery({
+    queryKey: [...key(ws), sourceId, 'purge-preview'],
+    queryFn: () => api<PurgePreview>(`/workspaces/${ws}/sources/${sourceId}/purge-preview`),
+    enabled,
+    gcTime: 0,
   });
 }

@@ -517,6 +517,16 @@ pub async fn register_connection(
     if provider_config_key != state.config.nango_gmail_integration {
         return Err(AppError::BadRequest("unsupported integration".into()));
     }
+    let still_purging: Option<i64> = sqlx::query_scalar(
+        "SELECT 1 FROM email_sources WHERE kind = ?1 AND external_connection_id = ?2 AND purge_status = 'running'",
+    )
+    .bind(GMAIL_KIND)
+    .bind(connection_id)
+    .fetch_optional(&state.db)
+    .await?;
+    if still_purging.is_some() {
+        return Err(AppError::Conflict("Deleting the old data from this mailbox. Try again in a minute.".into()));
+    }
     let conn = state.nango.get_connection(connection_id, provider_config_key).await?;
     let workspace_id = conn.tags.get("organization_id").cloned().ok_or(AppError::Forbidden)?;
     let owner = conn.tags.get("end_user_id").cloned().ok_or(AppError::Forbidden)?;
@@ -537,6 +547,16 @@ pub async fn register_connection(
     }
 
     let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
+    let purging: Option<String> = sqlx::query_scalar(
+        "SELECT purge_status FROM email_sources WHERE kind = ?1 AND external_connection_id = ?2 AND purge_status = 'running'",
+    )
+    .bind(GMAIL_KIND)
+    .bind(connection_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if purging.is_some() {
+        return Err(AppError::Conflict("Deleting the old data from this mailbox. Try again in a minute.".into()));
+    }
     sqlx::query(
         "INSERT INTO email_sources
            (id, workspace_id, kind, status, external_connection_id, provider_config_key, capabilities_json,
@@ -711,7 +731,8 @@ pub async fn sync_source(state: &AppState, payload: &Value) -> Result<(), JobErr
     // Skip messages we already have, then fetch full content for the new ones only.
     let ids: Vec<&str> = candidates.iter().map(|r| r.email.source_message_id.as_str()).collect();
     let existing: Vec<String> = sqlx::query_scalar(
-        "SELECT source_message_id FROM email_messages WHERE source_id = ?1 AND source_message_id IN (SELECT value FROM json_each(?2))",
+        "SELECT source_message_id FROM email_messages WHERE source_id = ?1 AND source_message_id IN (SELECT value FROM json_each(?2))
+         UNION SELECT provider_message_id FROM deleted_messages WHERE source_id = ?1 AND provider_message_id IN (SELECT value FROM json_each(?2))",
     )
     .bind(&source_id)
     .bind(json!(ids).to_string())
@@ -827,7 +848,8 @@ async fn pull_from_gmail(
     // Skip what we already have with a full body (incremental runs re-list an hour of overlap).
     let known: Vec<String> = sqlx::query_scalar(
         "SELECT source_message_id FROM email_messages WHERE source_id = ?1 AND content_complete = 1
-           AND source_message_id IN (SELECT value FROM json_each(?2))",
+           AND source_message_id IN (SELECT value FROM json_each(?2))
+         UNION SELECT provider_message_id FROM deleted_messages WHERE source_id = ?1 AND provider_message_id IN (SELECT value FROM json_each(?2))",
     )
     .bind(source_id)
     .bind(json!(ids).to_string())
