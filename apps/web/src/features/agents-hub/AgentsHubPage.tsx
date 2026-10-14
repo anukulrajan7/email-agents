@@ -53,6 +53,7 @@ export function AgentsHubPage() {
   return (
     <Page>
       <PageHeader
+        guide="team-header"
         kicker="Your team"
         title="Agents"
         description="Each agent looks after one kind of email. They start careful and ask before sending, and you decide how much freedom they get."

@@ -6,14 +6,16 @@ export function PageHeader({
   title,
   description,
   actions,
+  guide,
 }: {
   kicker: string;
   title: string;
   description?: string;
   actions?: ReactNode;
+  guide?: string;
 }) {
   return (
-    <header className="rise flex flex-wrap items-end justify-between gap-x-6 gap-y-4 border-b border-rule-strong pb-6" style={riseStyle(0)}>
+    <header data-guide={guide} className="rise flex flex-wrap items-end justify-between gap-x-6 gap-y-4 border-b border-rule-strong pb-6" style={riseStyle(0)}>
       <div className="min-w-0 flex-1 basis-80">
         <p className="kicker">{kicker}</p>
         <h1 className="type-display mt-2 text-[2rem] leading-[1.05] tracking-[-0.02em] break-words text-ink sm:text-[2.5rem]">{title}</h1>

@@ -55,6 +55,8 @@ describe('AppShell navigation', () => {
     expect(itemsOf(nav, 'HRMS')).toEqual(['People', 'Performance', 'Timesheets', 'Portal reconciliation', 'Escalations', 'Matching']);
     expect(itemsOf(nav, 'Teach')).toEqual(['Labels', 'Memory', 'Automations']);
     expect(itemsOf(nav, 'Settings')).toEqual(['Integrations', 'Workflows', 'Reviews']);
+    expect(itemsOf(nav, 'Help')).toEqual(['Guide']);
+    for (const link of screen.getAllByRole('link', { name: 'Open the guide' })) expect(link).toHaveAttribute('href', '/w/w1/guide');
     expect(within(nav).getByRole('link', { name: 'Inbox' })).toHaveAttribute('aria-current', 'page');
     expect(within(nav).getByRole('link', { name: 'Labels' })).toHaveAttribute('href', '/w/w1/labels');
   });

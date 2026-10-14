@@ -65,5 +65,10 @@ export function navGroups(isAdmin: boolean, hasStaffing = true): NavGroup[] {
           : []),
       ],
     },
+    {
+      id: 'help',
+      label: 'Help',
+      items: [{ to: 'guide', label: 'Guide' }],
+    },
   ];
 }

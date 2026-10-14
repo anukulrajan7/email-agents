@@ -53,7 +53,7 @@ export function AgentCard({
       </div>
 
       <div className="flex flex-col gap-1.5 text-sm">
-        <p className="flex flex-wrap items-center gap-2">
+        <p className="flex flex-wrap items-center gap-2" data-guide="autonomy-chip">
           <Badge tone={status.tone}>{status.label}</Badge>
           <Badge>{AUTONOMY[agent.autonomy.effective].chip}</Badge>
           {agent.update_available && <Badge tone="warning">Update available</Badge>}

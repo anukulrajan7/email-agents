@@ -222,7 +222,7 @@ export function MatchingPage() {
       { replace: true },
     );
 
-  const header = <PageHeader kicker="Referrals × requirements" title="Matching" description={DESCRIPTION} />;
+  const header = <PageHeader guide="matching-header" kicker="Referrals × requirements" title="Matching" description={DESCRIPTION} />;
 
   if (requirements.isLoading || candidates.isLoading) {
     return (

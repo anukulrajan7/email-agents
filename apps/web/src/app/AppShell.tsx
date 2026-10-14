@@ -8,7 +8,8 @@ import { AskMeera } from '../features/assistant/AskMeera';
 import { PerformanceWidget } from '../features/team/PerformanceWidget';
 import { Button, Dialog, EmptyState, Skeleton, SkeletonList, Spinner } from '../components/ui';
 import { cn } from '../lib/cn';
-import { FirstRunTour } from '../features/help/FirstRunTour';
+import { GuideLauncher } from '../features/help/GuideLauncher';
+import { GuideProvider } from '../features/help/GuideProvider';
 import { riseStyle } from '../lib/motion';
 import { initialOf } from '../features/inbox/emailText';
 import { navGroups, type NavBadge } from './nav';
@@ -22,6 +23,19 @@ function Wordmark({ compact = false }: { compact?: boolean }) {
         Post <span className="text-accent">Room</span>
       </span>
     </span>
+  );
+}
+
+function GuideButton({ ws }: { ws: string }) {
+  return (
+    <Link
+      to={`/w/${ws}/guide`}
+      aria-label="Open the guide"
+      title="Guide"
+      className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-rule-strong bg-raised font-mono text-sm font-semibold text-ink hover:border-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+    >
+      ?
+    </Link>
   );
 }
 
@@ -162,45 +176,51 @@ export function AppShell() {
   }
 
   return (
-    <div className="flex h-dvh flex-col overflow-hidden">
-      <div aria-hidden="true" className="airmail h-1.5 shrink-0" />
-      <header className="flex h-14 shrink-0 items-center justify-between gap-3 border-b border-rule-strong px-4 md:hidden">
-        <Wordmark compact />
-        <Button variant="secondary" size="sm" aria-expanded={menuOpen} aria-haspopup="dialog" onClick={() => setMenuOpen(true)}>
-          Menu
-        </Button>
-      </header>
-      <div className="flex min-h-0 flex-1 overflow-hidden">
-        <aside className="hidden w-60 shrink-0 flex-col overflow-y-auto border-r border-rule-strong px-3 pt-6 pb-5 md:flex">
-          <div className="rise px-3" style={riseStyle(0)}>
-            <Wordmark />
+    <GuideProvider ws={ws} user={me.data?.user.id ?? 'anon'} isAdmin={isAdmin} hasStaffing={hasStaffing}>
+      <div className="flex h-dvh flex-col overflow-hidden">
+        <div aria-hidden="true" className="airmail h-1.5 shrink-0" />
+        <header className="flex h-14 shrink-0 items-center justify-between gap-3 border-b border-rule-strong px-4 md:hidden">
+          <Wordmark compact />
+          <div className="flex items-center gap-2">
+            <GuideButton ws={ws} />
+            <Button variant="secondary" size="sm" aria-expanded={menuOpen} aria-haspopup="dialog" onClick={() => setMenuOpen(true)}>
+              Menu
+            </Button>
           </div>
-          <div className="mt-8 flex-1">
+        </header>
+        <div className="flex min-h-0 flex-1 overflow-hidden">
+          <aside className="hidden w-60 shrink-0 flex-col overflow-y-auto border-r border-rule-strong px-3 pt-6 pb-5 md:flex">
+            <div className="rise flex items-start justify-between gap-2 px-3" style={riseStyle(0)}>
+              <Wordmark />
+              <GuideButton ws={ws} />
+            </div>
+            <div className="mt-8 flex-1">
+              <SideNav ws={ws} isAdmin={isAdmin} hasStaffing={hasStaffing} />
+            </div>
+            <div className="mt-8 px-3">
+              <AccountFooter workspaceName={workspace.name} />
+            </div>
+          </aside>
+          <main className="min-h-0 min-w-0 flex-1 overflow-hidden">
+            <Suspense fallback={<RouteFallback />}>
+              <Outlet />
+            </Suspense>
+          </main>
+        </div>
+        <OnboardingPrompt ws={ws} />
+        <PerformanceWidget ws={ws} />
+        <GuideLauncher />
+        <AskMeera ws={ws} />
+        {menuOpen && (
+          <Dialog title="Menu" variant="drawer" side="left" onClose={() => setMenuOpen(false)} className="gap-6 bg-paper">
+            <Button variant="ghost" size="sm" className="self-start" onClick={() => setMenuOpen(false)}>
+              Close menu
+            </Button>
             <SideNav ws={ws} isAdmin={isAdmin} hasStaffing={hasStaffing} />
-          </div>
-          <div className="mt-8 px-3">
             <AccountFooter workspaceName={workspace.name} />
-          </div>
-        </aside>
-        <main className="min-h-0 min-w-0 flex-1 overflow-hidden">
-          <Suspense fallback={<RouteFallback />}>
-            <Outlet />
-          </Suspense>
-        </main>
+          </Dialog>
+        )}
       </div>
-      <OnboardingPrompt ws={ws} />
-      <PerformanceWidget ws={ws} />
-      <FirstRunTour />
-      <AskMeera ws={ws} />
-      {menuOpen && (
-        <Dialog title="Menu" variant="drawer" side="left" onClose={() => setMenuOpen(false)} className="gap-6 bg-paper">
-          <Button variant="ghost" size="sm" className="self-start" onClick={() => setMenuOpen(false)}>
-            Close menu
-          </Button>
-          <SideNav ws={ws} isAdmin={isAdmin} hasStaffing={hasStaffing} />
-          <AccountFooter workspaceName={workspace.name} />
-        </Dialog>
-      )}
-    </div>
+    </GuideProvider>
   );
 }
