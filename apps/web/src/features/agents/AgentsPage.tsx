@@ -3,6 +3,7 @@ import { Card, EmptyState, Page, PageHeader, SkeletonList, Tabs, type TabItem } 
 import { ErrorNote } from '../../components/ErrorNote';
 import { useWorkspace } from '../../app/useWorkspace';
 import { riseStyle } from '../../lib/motion';
+import { HelpPopover } from '../help/HelpPopover';
 import { LeadAgentCard, MyProfileCard, TeamProfiles } from './AgentSettings';
 import { ApprovalCard } from './ApprovalCard';
 import { CaseRow } from './CaseRow';
@@ -78,6 +79,7 @@ export function AgentsPage() {
       <PageHeader
         kicker="Work that follows through"
         title="Agents"
+        actions={<HelpPopover topic="approvals" label="About approvals" />}
         description="Agents take an email or a client requirement from start to finish. They always ask you before sending anything important."
       />
       <div className="rise grid grid-cols-1 items-stretch gap-4 lg:grid-cols-2" style={riseStyle(1)}>

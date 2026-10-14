@@ -54,7 +54,7 @@ export type LabelTemplateInfo = {
 export type LabelCreateBody = { name: string; description: string; color?: LabelColor };
 export type LabelPatch = Partial<{ name: string; description: string; color: LabelColor; archived: boolean; position: number }>;
 
-export type Workspace = { id: string; name: string; role: Role; created_at: string; packs?: string[] };
+export type Workspace = { id: string; name: string; role: Role; created_at: string; packs?: string[]; goal?: string | null };
 
 export type Pack = {
   key: string;
@@ -493,3 +493,5 @@ export type AgentAuditItem = {
   shadow: boolean;
   refs: { message_id: string | null; draft_id: string | null; requirement_id: string | null; candidate_ids: string[] | null };
 };
+
+export type AgentPatch = Partial<{ status: 'active' | 'paused' | 'archived'; name: string; avatar: string; color: string; autonomy_cap: Autonomy }>;

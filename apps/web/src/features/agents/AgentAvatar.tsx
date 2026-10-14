@@ -1,9 +1,13 @@
 import type { ReactNode } from 'react';
 import { labelColors } from '../../components/ui';
 import { cn } from '../../lib/cn';
+import { AgentFace } from '../agents-hub/AgentFace';
+import { parseAvatar } from '../agents-hub/avatars';
 import type { AgentBadge } from './types';
 
 export function AgentAvatar({ agent, size = 'sm', className }: { agent: Pick<AgentBadge, 'avatar' | 'color'>; size?: 'sm' | 'lg'; className?: string }) {
+  const picked = parseAvatar(agent.avatar);
+  if (picked) return <AgentFace avatar={picked} size={size === 'lg' ? 'md' : 'sm'} className={className} />;
   return (
     <span
       aria-hidden="true"

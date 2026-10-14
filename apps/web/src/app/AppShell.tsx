@@ -7,6 +7,8 @@ import { OnboardingPrompt } from '../features/agents/OnboardingPrompt';
 import { AskMeera } from '../features/assistant/AskMeera';
 import { Button, Dialog, EmptyState, Skeleton, SkeletonList, Spinner } from '../components/ui';
 import { cn } from '../lib/cn';
+import { featureEnabled } from '../lib/features';
+import { FirstRunTour } from '../features/help/FirstRunTour';
 import { riseStyle } from '../lib/motion';
 import { initialOf } from '../features/inbox/emailText';
 import { navGroups, type NavBadge } from './nav';
@@ -33,7 +35,7 @@ function SideNav({ ws, isAdmin, hasStaffing }: { ws: string; isAdmin: boolean; h
   const uid = useId();
   return (
     <nav aria-label="Main" className="flex flex-col gap-6">
-      {navGroups(isAdmin, hasStaffing).map((group) => (
+      {navGroups(isAdmin, hasStaffing, featureEnabled('metrics')).map((group) => (
         <div key={group.id} className="flex flex-col gap-1">
           <p id={`${uid}-${group.id}`} className="kicker px-3">
             {group.label}
@@ -187,6 +189,7 @@ export function AppShell() {
         </main>
       </div>
       <OnboardingPrompt ws={ws} />
+      <FirstRunTour />
       <AskMeera ws={ws} />
       {menuOpen && (
         <Dialog title="Menu" variant="drawer" side="left" onClose={() => setMenuOpen(false)} className="gap-6 bg-paper">

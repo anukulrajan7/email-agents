@@ -5,7 +5,7 @@ export type NavItem = { to: string; label: string; badge?: NavBadge };
 export type NavGroup = { id: string; label: string; items: NavItem[] };
 
 /** `hasStaffing`: Matching and the HR workflows belong to the HR & recruiting pack. */
-export function navGroups(isAdmin: boolean, hasStaffing = true): NavGroup[] {
+export function navGroups(isAdmin: boolean, hasStaffing = true, showMetrics = false): NavGroup[] {
   return [
     {
       id: 'work',
@@ -13,6 +13,8 @@ export function navGroups(isAdmin: boolean, hasStaffing = true): NavGroup[] {
       items: [
         { to: 'inbox', label: 'Inbox' },
         { to: 'agents', label: 'Agents', badge: 'agents' },
+        { to: 'agent-team', label: 'Your team' },
+        ...(showMetrics ? [{ to: 'metrics', label: 'Results' }] : []),
         ...(hasStaffing ? [{ to: 'matching', label: 'Matching' }] : []),
         { to: 'alerts', label: 'Alerts', badge: 'alerts' },
       ],

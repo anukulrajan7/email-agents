@@ -17,7 +17,7 @@ export function useMe() {
 export function useCreateWorkspace() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (body: { name: string; packs: string[] }) => api<Workspace>('/workspaces', { method: 'POST', body }),
+    mutationFn: (body: { name: string; packs: string[]; goal?: string }) => api<Workspace>('/workspaces', { method: 'POST', body }),
     onSuccess: () => qc.invalidateQueries({ queryKey: meKey }),
   });
 }
