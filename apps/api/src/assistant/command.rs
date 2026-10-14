@@ -644,3 +644,29 @@ impl Session<'_> {
         self.add_plan("snooze_alert", summary, json!({ "alert_id": id, "hours": hours })).await
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn names(features: Features) -> Vec<String> {
+        tool_specs(Role::Admin, false, features).iter().filter_map(|s| s.pointer("/function/name").and_then(Value::as_str).map(str::to_string)).collect()
+    }
+
+    #[test]
+    fn tools_of_a_pack_that_is_off_are_not_offered() {
+        let off = Features { matching: false, requirement_agent: false };
+        let on = Features { matching: true, requirement_agent: true };
+        assert!(!names(off).contains(&"list_matches".to_string()));
+        assert!(names(on).contains(&"list_matches".to_string()));
+        let kinds = |f: Features| {
+            tool_specs(Role::Operator, false, f)
+                .iter()
+                .find(|s| s.pointer("/function/name") == Some(&json!("start_agent")))
+                .and_then(|s| s.pointer("/function/parameters/properties/kind/enum").cloned())
+        };
+        assert_eq!(kinds(off), Some(json!(["inbox"])), "no requirement agent without the staffing pack");
+        assert_eq!(kinds(on), Some(json!(["requirement", "inbox"])));
+        assert!(tool_specs(Role::Operator, false, off).iter().all(|s| s.pointer("/function/parameters/properties/requirement_id").is_none()));
+    }
+}
