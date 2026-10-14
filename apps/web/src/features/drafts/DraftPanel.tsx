@@ -318,7 +318,7 @@ export function DraftPanel({
   const busy = generate.isPending || awaiting;
 
   return (
-    <section aria-labelledby="draft-heading" className="flex flex-col gap-3">
+    <section aria-labelledby="draft-heading" data-guide="draft-panel" className="flex flex-col gap-3">
       <div className="flex flex-wrap items-center justify-between gap-2 border-b-[3px] border-double border-rule-strong pb-3">
         <h3 id="draft-heading" className="type-display flex items-center gap-3 text-2xl tracking-[-0.01em]">
           Draft reply {draft && <StatusBadge status={draft.status} />}

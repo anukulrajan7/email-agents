@@ -79,6 +79,7 @@ export function AutomationsPage() {
   return (
     <Page>
       <PageHeader
+        guide="automations-header"
         kicker="When X, do Y"
         title="Automations"
         description="Rules that run on every new email once it has been read, for example drafting a reply or reminding you when an important thread goes quiet."

@@ -98,7 +98,7 @@ export function UsagePage() {
       <ErrorNote error={usage.error} />
       {usage.data && (
         <>
-          <div className="rise grid gap-4 md:grid-cols-3" style={riseStyle(1)}>
+          <div className="rise grid gap-4 md:grid-cols-3" style={riseStyle(1)} data-guide="usage-today">
             <TodayCard usage={usage.data} />
             <Stat
               label={`Last ${USAGE_DAYS} days`}

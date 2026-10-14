@@ -16,6 +16,7 @@ import { AgentsHubPage } from '../features/agents-hub/AgentsHubPage';
 import { AgentBuilderRoute } from '../features/agent-builder/AgentBuilderRoute';
 import { MetricsRoute } from '../features/metrics/MetricsRoute';
 import { WelcomePage } from '../features/onboarding/WelcomePage';
+import { GuidePage } from '../features/help/GuidePage';
 import { PacksPage } from '../features/packs/PacksPage';
 import { UsagePage } from '../features/usage/UsagePage';
 import { AppShell } from './AppShell';
@@ -52,6 +53,7 @@ export function AppRoutes() {
           <Route path="workflows" element={<WorkflowsPage />} />
           <Route path="packs" element={<PacksPage />} />
           <Route path="integrations" element={<IntegrationsPage />} />
+          <Route path="guide" element={<GuidePage />} />
           <Route path="usage" element={<UsagePage />} />
           <Route path="jobs" element={<JobsPage />} />
         </Route>

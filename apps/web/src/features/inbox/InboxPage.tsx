@@ -15,6 +15,7 @@ export function InboxPage() {
     <div className="flex h-full min-h-0">
       <section
         aria-label="Messages"
+        data-guide="inbox-list"
         className={cn(
           'h-full min-h-0 w-full shrink-0 overflow-hidden bg-surface lg:block lg:w-[clamp(320px,30vw,400px)] lg:border-r lg:border-rule-strong',
           open ? 'hidden' : 'block',
@@ -22,7 +23,7 @@ export function InboxPage() {
       >
         <MessageList ws={ws} />
       </section>
-      <section aria-label="Message detail" className={cn('h-full min-w-0 flex-1 overflow-y-auto [scrollbar-gutter:stable] lg:block', open ? 'block' : 'hidden')}>
+      <section aria-label="Message detail" data-guide="inbox-reader" className={cn('h-full min-w-0 flex-1 overflow-y-auto [scrollbar-gutter:stable] lg:block', open ? 'block' : 'hidden')}>
         {open ? (
           <>
             <div className="sticky top-0 z-10 flex h-12 items-center border-b border-rule bg-paper/95 px-4 backdrop-blur-sm lg:hidden">
