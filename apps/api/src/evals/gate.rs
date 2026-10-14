@@ -146,7 +146,7 @@ pub fn demotion_reason(level: i64, incidents_since_change: i64, decided_7d: i64,
         return None;
     }
     if incidents_since_change > 0 {
-        return Some("A person stopped an automatic send".into());
+        return Some("A person stopped an automatic send, or a safety incident was logged".into());
     }
     let threshold = match level {
         2 => 0.90,
@@ -309,6 +309,7 @@ pub async fn sweep(db: &SqlitePool) -> sqlx::Result<usize> {
     for (ws, agent_id, level, last_change) in agents {
         let since = last_change.unwrap_or(0);
         let incidents = stops.iter().filter(|s| s.workspace_id == ws && s.agent_id.as_deref() == Some(agent_id.as_str()) && s.at > since).count() as i64;
+        let incidents = incidents + crate::incidents::high_since(db, &ws, &agent_id, since).await?;
         let week = queries::counts(db, &ws, Some(&agent_id), 7).await?.remove(&agent_id).unwrap_or_default();
         let Some(reason) = demotion_reason(level, incidents, week.decided(), week.approved) else { continue };
         let evidence = json!({"incidents_since_change": incidents, "decided_7d": week.decided(), "approved_7d": week.approved});

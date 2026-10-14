@@ -296,8 +296,9 @@ pub async fn disconnect(
     )
     .await?;
     let conn: Option<(Option<String>, Option<String>)> =
-        sqlx::query_as("SELECT external_connection_id, provider_config_key FROM email_sources WHERE id = ?1")
+        sqlx::query_as("SELECT external_connection_id, provider_config_key FROM email_sources WHERE id = ?1 AND workspace_id = ?2")
             .bind(&source_id)
+            .bind(&ws)
             .fetch_optional(&mut *tx)
             .await?;
     tx.commit().await?;

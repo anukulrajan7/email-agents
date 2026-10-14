@@ -419,11 +419,58 @@ fn review_context(r: &ReplyContext, notes: &str, body: &str) -> String {
     )
 }
 
+static ADDRESS_IN_TEXT: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)[a-z0-9._%+-]+@[a-z0-9-]+(?:\.[a-z0-9-]+)+").expect("valid regex"));
+
+/// Email addresses, links and phone numbers in the reply that appear nowhere in what the sender, the
+/// thread or the team's notes gave us: possible data from another contact or another workspace. Pure.
+pub fn foreign_data(body: &str, f: &Facts) -> Vec<String> {
+    let known = f.known_text.to_lowercase();
+    let recipient = bare_address(&f.recipient);
+    let mut out: Vec<String> = ADDRESS_IN_TEXT
+        .find_iter(body)
+        .map(|m| m.as_str().trim_end_matches('.').to_lowercase())
+        .filter(|a| !known.contains(a.as_str()) && *a != recipient && !f.own_addresses.iter().any(|o| o.eq_ignore_ascii_case(a)))
+        .collect();
+    out.extend(unknown_contacts(body, &f.known_text));
+    out
+}
+
+async fn record_leak(state: &AppState, input: &CheckInput<'_>, count: usize) {
+    let agent_id: Option<String> = sqlx::query_scalar("SELECT agent_id FROM drafts WHERE id = ?1 AND workspace_id = ?2")
+        .bind(&input.reply.draft_id)
+        .bind(input.workspace_id)
+        .fetch_optional(&state.db)
+        .await
+        .ok()
+        .flatten()
+        .flatten();
+    crate::incidents::record(
+        &state.db,
+        crate::incidents::NewIncident::new(input.workspace_id, crate::incidents::Kind::LeakBlocked, serde_json::json!({"check": "send_review", "items": count}))
+            .agent(agent_id.as_deref())
+            .message(Some(&input.reply.message_id))
+            .dedupe(format!("leak:{}", input.reply.draft_id)),
+    )
+    .await;
+}
+
 /// Runs every check for one outgoing reply. Never sends anything.
 pub async fn check(state: &AppState, input: &CheckInput<'_>) -> AppResult<SafetyReport> {
     let (facts, extra_warnings, notes) = gather(state, input).await?;
     let mut report = deterministic(&facts, input.body);
     report.warnings.extend(extra_warnings);
+    if input.automated {
+        let foreign = foreign_data(input.body, &facts);
+        if !foreign.is_empty() {
+            report.blocking.push(issue(
+                "possible_leak",
+                "The reply names an email address, link or phone number that is not from this conversation or the team's notes.",
+                "A person should check where it came from.",
+            ));
+            record_leak(state, input, foreign.len()).await;
+        }
+    }
     // Skip the model when the text is unusable anyway (empty, gaps, placeholders).
     let text_broken = report.blocking.iter().any(|i| matches!(i.code, "empty_body" | "too_short" | "open_gaps" | "placeholder"));
     if !text_broken {
@@ -487,6 +534,15 @@ mod tests {
 
     fn codes(issues: &[Issue]) -> Vec<&'static str> {
         issues.iter().map(|i| i.code).collect()
+    }
+
+    #[test]
+    fn foreign_data_flags_addresses_links_and_numbers_from_nowhere() {
+        let f = Facts { recipient: "Ravi <ravi@client.com>".into(), known_text: "Write to ravi@client.com or call +91 98765 43210".into(), ..facts() };
+        assert!(foreign_data("Thanks Ravi, I will write to ravi@client.com. Call +91 98765 43210.", &f).is_empty());
+        assert_eq!(foreign_data("Please also write to cfo@elsewhere.org", &f).len(), 1);
+        assert_eq!(foreign_data("Her number is +44 20 7946 0958", &f).len(), 1);
+        assert_eq!(foreign_data("See https://other-tenant.example/secret", &f).len(), 1);
     }
 
     #[test]

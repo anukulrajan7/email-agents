@@ -61,6 +61,7 @@ export function navGroups(isAdmin: boolean, hasStaffing = true): NavGroup[] {
           ? [
               { to: 'jobs', label: 'Jobs' },
               { to: 'usage', label: 'AI usage' },
+              { to: 'ai-health', label: 'AI health' },
             ]
           : []),
       ],

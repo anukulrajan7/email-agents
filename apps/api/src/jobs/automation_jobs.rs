@@ -310,6 +310,13 @@ async fn send_reply(
         .fetch_optional(&state.db)
         .await?;
     if let Some(why) = crate::agents::injection::scan_conversation(&state.db, workspace_id, thread_id.as_deref(), Some(&ctx.id)).await? {
+        crate::incidents::record(
+            &state.db,
+            crate::incidents::NewIncident::new(workspace_id, crate::incidents::Kind::InjectionDetected, json!({"gate": "auto_reply", "why": why}))
+                .message(Some(&ctx.id))
+                .dedupe(format!("injection:auto:{}", ctx.id)),
+        )
+        .await;
         return Ok(skipped(K, format!("not sent on its own: {why}")));
     }
     let domain = sender_domain(&ctx.sender_address);

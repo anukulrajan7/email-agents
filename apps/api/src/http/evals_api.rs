@@ -51,9 +51,9 @@ async fn editable_agent(state: &AppState, ws: &str, user: &AuthUser, id: &str) -
     Err(AppError::Forbidden)
 }
 
-async fn baseline_score(state: &AppState, r: &run::EvalRun) -> sqlx::Result<Option<f64>> {
+async fn baseline_score(state: &AppState, ws: &str, r: &run::EvalRun) -> sqlx::Result<Option<f64>> {
     let Some(id) = r.baseline_run_id.as_deref() else { return Ok(None) };
-    sqlx::query_scalar("SELECT score FROM eval_runs WHERE id = ?1").bind(id).fetch_optional(&state.db).await.map(Option::flatten)
+    sqlx::query_scalar("SELECT score FROM eval_runs WHERE id = ?1 AND workspace_id = ?2").bind(id).bind(ws).fetch_optional(&state.db).await.map(Option::flatten)
 }
 
 // ---------------------------------------------------------------- runs
@@ -63,7 +63,7 @@ async fn list_runs(State(state): State<AppState>, user: AuthUser, Path((ws, id))
     let runs = run::list(&state.db, &ws, &id, 50).await?;
     let mut items = Vec::new();
     for r in &runs {
-        items.push(r.json(baseline_score(&state, r).await?));
+        items.push(r.json(baseline_score(&state, &ws, r).await?));
     }
     let versions: Vec<Value> = versions::list(&state.db, &id).await?.iter().map(|v| v.info(agent.active_version)).collect();
     Ok(Json(json!({ "items": items, "versions": versions, "live_available": live_available(&state) })))
@@ -110,7 +110,7 @@ async fn run_detail(State(state): State<AppState>, user: AuthUser, Path((ws, id)
             json!({ "case_key": c.case_key, "passed": c.passed, "score": c.score, "detail": detail })
         })
         .collect();
-    let mut out = r.json(baseline_score(&state, &r).await?);
+    let mut out = r.json(baseline_score(&state, &ws, &r).await?);
     out["results"] = json!(results);
     Ok(Json(out))
 }

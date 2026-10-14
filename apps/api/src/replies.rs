@@ -459,6 +459,30 @@ pub async fn send_draft(state: &AppState, ws: &str, draft_id: &str, actor: Actor
 
 /// Like `send_draft`, with the send held at least `hold_secs` from now. The hold is part of the same
 /// claim, so the reply is never scheduled earlier than the hold.
+async fn record_send_blocked(state: &AppState, ws: &str, ctx: &ReplyContext, report: &send_safety::SafetyReport, automated: bool) {
+    let agent_id: Option<String> = if automated {
+        sqlx::query_scalar("SELECT agent_id FROM drafts WHERE id = ?1 AND workspace_id = ?2")
+            .bind(&ctx.draft_id)
+            .bind(ws)
+            .fetch_optional(&state.db)
+            .await
+            .ok()
+            .flatten()
+            .flatten()
+    } else {
+        None
+    };
+    let codes: Vec<&str> = report.blocking.iter().map(|i| i.code).collect();
+    crate::incidents::record(
+        &state.db,
+        crate::incidents::NewIncident::new(ws, crate::incidents::Kind::SendBlocked, serde_json::json!({"codes": codes, "automated": automated}))
+            .agent(agent_id.as_deref())
+            .message(Some(&ctx.message_id))
+            .dedupe(format!("blocked:{}:{}", ctx.draft_id, codes.join(","))),
+    )
+    .await;
+}
+
 pub async fn send_draft_held(state: &AppState, ws: &str, draft_id: &str, actor: Actor<'_>, hold_secs: i64) -> AppResult<ScheduledSend> {
     let mut ctx = load(state, ws, draft_id).await?;
     if ctx.status == "sent" {
@@ -496,6 +520,7 @@ pub async fn send_draft_held(state: &AppState, ws: &str, draft_id: &str, actor: 
     let automated = matches!(actor, Actor::System);
     let report = send_safety::check(state, &CheckInput { workspace_id: ws, reply: &ctx, body: &ctx.body_text, automated }).await?;
     if report.is_blocked() {
+        record_send_blocked(state, ws, &ctx, &report, automated).await;
         return Err(report.into_error());
     }
     let now = now_ms();
