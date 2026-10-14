@@ -221,7 +221,7 @@ fn text_fields(spec: &AgentSpec) -> Vec<(String, String)> {
     out
 }
 
-fn push_capped(list: &mut Vec<String>, line: String, max: usize) {
+pub fn push_capped(list: &mut Vec<String>, line: String, max: usize) {
     let line = crate::sources::normalize::truncate_chars(&line, 280);
     if list.len() < max && !list.contains(&line) {
         list.push(line);

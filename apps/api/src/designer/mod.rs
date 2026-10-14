@@ -4,6 +4,7 @@
 //! The model only proposes. Everything it returns passes `validate` before a person sees it as ready.
 
 pub mod dry_run;
+pub mod lenient;
 pub mod prompt;
 pub mod repair;
 pub mod schema;
@@ -59,6 +60,10 @@ pub trait Designer: Send + Sync {
         true
     }
     async fn design(&self, req: &DesignRequest) -> Result<DesignReply, AiError>;
+    /// One try on the second model, asked when the first model's answers could not be read.
+    async fn design_fallback(&self, _req: &DesignRequest) -> Result<DesignReply, AiError> {
+        Err(AiError::Permanent("no fallback designer model".into()))
+    }
 }
 
 pub struct DisabledDesigner;
@@ -104,12 +109,20 @@ impl Designer for OpenRouterDesigner {
             other => other,
         }
     }
+
+    async fn design_fallback(&self, req: &DesignRequest) -> Result<DesignReply, AiError> {
+        if self.fallback.is_empty() || self.fallback == self.model {
+            return Err(AiError::Permanent("no fallback designer model".into()));
+        }
+        self.ask(&self.fallback, req).await
+    }
 }
 
 /// Replays chosen answers in order and remembers every request. Used by tests and offline runs.
 pub struct ScriptedDesigner {
     replies: Mutex<VecDeque<Result<String, AiError>>>,
     requests: Mutex<Vec<DesignRequest>>,
+    fallback_requests: Mutex<Vec<DesignRequest>>,
     cost_per_call: f64,
 }
 
@@ -121,7 +134,7 @@ impl Default for ScriptedDesigner {
 
 impl ScriptedDesigner {
     pub fn new() -> Self {
-        Self { replies: Mutex::default(), requests: Mutex::default(), cost_per_call: 0.0 }
+        Self { replies: Mutex::default(), requests: Mutex::default(), fallback_requests: Mutex::default(), cost_per_call: 0.0 }
     }
 
     pub fn with_cost(mut self, usd: f64) -> Self {
@@ -149,8 +162,17 @@ impl ScriptedDesigner {
         self.replies.lock().expect("replies lock").push_back(Ok(spec.to_string()));
     }
 
+    pub fn push_raw(&self, text: &str) {
+        self.replies.lock().expect("replies lock").push_back(Ok(text.to_string()));
+    }
+
     pub fn requests(&self) -> Vec<DesignRequest> {
         self.requests.lock().expect("requests lock").clone()
+    }
+
+    /// Requests that were sent to the fallback model (they also take the next scripted answer).
+    pub fn fallback_calls(&self) -> usize {
+        self.fallback_requests.lock().expect("fallback lock").len()
     }
 
     pub fn calls(&self) -> usize {
@@ -167,5 +189,10 @@ impl Designer for ScriptedDesigner {
             Some(Err(e)) => Err(e),
             None => Err(AiError::Permanent("the script has no more answers".into())),
         }
+    }
+
+    async fn design_fallback(&self, req: &DesignRequest) -> Result<DesignReply, AiError> {
+        self.fallback_requests.lock().expect("fallback lock").push(req.clone());
+        self.design(req).await
     }
 }

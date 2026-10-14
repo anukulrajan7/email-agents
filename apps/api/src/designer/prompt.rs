@@ -82,6 +82,12 @@ pub fn design_user(ctx: &WsCtx, turns: &[Turn], current: Option<&AgentSpec>, lat
 pub fn repair_user(previous: &str, issues: &[Issue]) -> String {
     let issues: Vec<serde_json::Value> =
         issues.iter().map(|i| serde_json::json!({"path": i.path, "code": i.code, "message": i.message})).collect();
+    if issues.iter().any(|i| i.get("code").and_then(|c| c.as_str()) == Some("bad_shape")) {
+        return format!(
+            "Your previous answer could not be read. Fix only this and return the full spec as JSON. Every trigger, step and extract field needs a \"type\"; use only the schema's keys.\n<previous_answer>\n{previous}\n</previous_answer>\n<error>\n{}\n</error>",
+            serde_json::to_string_pretty(&issues).unwrap_or_default()
+        );
+    }
     format!(
         "Your previous answer had problems. Fix only these issues and return the full corrected spec.\n<previous_spec>\n{previous}\n</previous_spec>\n<issues>\n{}\n</issues>",
         serde_json::to_string_pretty(&issues).unwrap_or_default()

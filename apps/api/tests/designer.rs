@@ -416,3 +416,65 @@ async fn reading_details_is_charged_to_the_case_and_a_retried_draft_is_not_dupli
     let origin: String = sqlx::query_scalar("SELECT origin_key FROM drafts WHERE workspace_id = ?1").bind(&env.ws).fetch_one(&env.state.db).await.unwrap();
     assert!(origin.starts_with(&format!("agent:{case_id}:{msg}:")), "{origin}");
 }
+
+const PLAIN_REQUESTS: [&str; 4] = [
+    "create a agent that observe looks for time sheet per day, capture data invoicing and send me summary",
+    "agent for refunds",
+    "reply to job seekers and send matching roles",
+    "har din timesheet check karo aur invoice banao",
+];
+
+fn without_types(mut spec: Value) -> Value {
+    for step in spec["steps"].as_array_mut().unwrap() {
+        step.as_object_mut().unwrap().remove("type");
+        for field in step.get_mut("fields").and_then(Value::as_array_mut).into_iter().flatten() {
+            field.as_object_mut().unwrap().remove("type");
+        }
+    }
+    spec
+}
+
+#[tokio::test]
+async fn short_and_foreign_requests_become_a_ready_agent() {
+    for goal in PLAIN_REQUESTS {
+        let env = env_with(ScriptedDesigner::new().reply(refund_spec())).await;
+        let s = open(&env, json!({"goal": goal})).await;
+        assert_eq!((s["status"].as_str(), s["issues"].clone()), (Some("ready"), json!([])), "{goal}: {s}");
+    }
+}
+
+#[tokio::test]
+async fn a_step_without_a_type_is_inferred_saved_and_shown_as_an_assumption() {
+    for goal in PLAIN_REQUESTS {
+        let env = env_with(ScriptedDesigner::new().reply(without_types(refund_spec()))).await;
+        let s = open(&env, json!({"goal": goal})).await;
+        assert_eq!(s["status"], "ready", "{goal}: {s}");
+        assert_eq!(s["spec"]["steps"][0]["type"], "extract");
+        assert_eq!(s["spec"]["steps"][0]["fields"][0]["type"], "string");
+        assert_eq!(s["spec"]["steps"][1]["type"], "draft_reply");
+        let notes = s["assumptions"].as_array().unwrap();
+        assert!(notes.iter().any(|n| n.as_str().unwrap().contains("had no type")), "{notes:?}");
+        assert!(s["spec"]["permissions"]["max_autonomy"].as_i64().unwrap() <= 1, "inference never widens permissions");
+    }
+}
+
+#[tokio::test]
+async fn unreadable_answers_try_the_fallback_then_fail_cleanly_and_can_be_retried() {
+    let designer = ScriptedDesigner::new();
+    for _ in 0..4 {
+        designer.push_raw("{\"name\": \"x\", \"steps\": [{\"oops\": 1}]}");
+    }
+    designer.push(refund_spec());
+    let env = env_with(designer).await;
+    let s = open(&env, json!({"goal": PLAIN_REQUESTS[0]})).await;
+    let id = s["id"].as_str().unwrap().to_string();
+    assert_eq!(s["status"], "failed", "{s}");
+    assert_eq!(s["issues"][0]["code"], "could_not_build");
+    assert!(s["issues"][0]["message"].as_str().unwrap().contains("couldn't build that agent"));
+    assert!(s["turns"][1]["text"].as_str().unwrap().contains("one or two sentences"));
+    let (st, _) = env.req("POST", &format!("/designer/sessions/{id}/save"), ADMIN, Some(json!({}))).await;
+    assert_eq!(st, StatusCode::CONFLICT);
+
+    let s = env.ok("POST", &format!("/designer/sessions/{id}/messages"), ADMIN, Some(json!({"text": PLAIN_REQUESTS[0]}))).await;
+    assert_eq!(s["status"], "ready", "{s}");
+}

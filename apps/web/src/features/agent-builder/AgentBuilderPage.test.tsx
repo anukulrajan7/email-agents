@@ -151,6 +151,27 @@ describe('AgentBuilderPage', () => {
     await waitFor(() => expect(screen.getByRole('button', { name: 'Try it on recent mail' })).toBeDisabled());
   });
 
+  it('shows a friendly failure with a Retry that asks again', async () => {
+    const user = userEvent.setup();
+    let asked = 0;
+    setup(
+      'admin',
+      (url) => {
+        if (url.endsWith('/messages')) {
+          asked += 1;
+          return json(session());
+        }
+        if (url.endsWith('/designer/sessions/s1')) return json(session({ status: 'failed', spec: null, issues: [{ code: 'could_not_build', message: 'x' }], assumptions: ['Step 1 had no type.'] }));
+        return undefined;
+      },
+      '/w/w1/agents/new?session=s1',
+    );
+    expect(await screen.findByText(/couldn.t build that agent/)).toBeInTheDocument();
+    expect(screen.getByText('Step 1 had no type.')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Retry' }));
+    await waitFor(() => expect(asked).toBe(1));
+  });
+
   it('is for admins only', async () => {
     setup('operator', () => undefined);
     expect(await screen.findByText('Only admins can create agents')).toBeInTheDocument();

@@ -2,7 +2,7 @@
 //! `{previous_spec, issues}` to be fixed, at most `MAX_REPAIRS` times. What is still wrong after that
 //! goes to the person as editable form errors.
 
-use super::{DesignRequest, Designer, MAX_REPAIRS, prompt, validate::{self, WsCtx}};
+use super::{DesignRequest, Designer, MAX_REPAIRS, lenient, prompt, validate::{self, WsCtx}};
 use crate::{
     agent_registry::spec::{AgentSpec, Issue},
     ai::AiError,
@@ -18,21 +18,44 @@ pub struct Outcome {
     /// Model calls made (first answer plus repairs).
     pub calls: usize,
     pub cost_usd: f64,
+    /// The fallback model was asked because no answer could be read.
+    pub fallback_used: bool,
 }
 
-fn parse(raw: &str) -> Result<AgentSpec, Issue> {
-    serde_json::from_str::<AgentSpec>(raw.trim()).map_err(|e| Issue {
-        path: String::new(),
-        code: "bad_shape",
-        message: format!("the answer is not a valid spec: {}", crate::agents::sentence(&e.to_string(), 240)),
-    })
+fn read_issue(e: lenient::ReadError) -> Issue {
+    let at = if e.path.is_empty() { String::new() } else { format!(" Offending part, {}: {}", e.path, e.fragment) };
+    Issue { path: e.path, code: "bad_shape", message: format!("the answer is not a valid spec: {}{at}", crate::agents::sentence(&e.error, 300)) }
+}
+
+/// Reads one answer into the outcome and returns the text a repair should start from.
+fn absorb(outcome: &mut Outcome, ctx: &WsCtx, raw: &str) -> String {
+    match lenient::parse(raw) {
+        Ok((spec, inferred)) => {
+            let mut spec = validate::normalise(spec, ctx);
+            for note in inferred.into_iter().rev() {
+                if !spec.assumptions.contains(&note) {
+                    spec.assumptions.insert(0, note);
+                }
+            }
+            spec.assumptions.truncate(10);
+            outcome.issues = validate::validate(&spec, ctx);
+            let text = serde_json::to_string_pretty(&spec).unwrap_or_default();
+            outcome.spec = Some(spec);
+            text
+        }
+        Err(e) => {
+            outcome.issues = vec![read_issue(e)];
+            raw.to_string()
+        }
+    }
 }
 
 /// Runs the design loop. `budget_usd` is what the session may still spend: no repair starts once it is used up.
 /// A failure of the first call is an error; a failure of a repair call keeps what was already read.
+/// When no answer could ever be read, the fallback model gets one fresh try before giving up.
 pub async fn run(designer: &dyn Designer, ctx: &WsCtx, first: DesignRequest, budget_usd: f64) -> Result<Outcome, AiError> {
     let mut request = first.clone();
-    let mut outcome = Outcome { spec: None, issues: vec![], repairs: 0, calls: 0, cost_usd: 0.0 };
+    let mut outcome = Outcome { spec: None, issues: vec![], repairs: 0, calls: 0, cost_usd: 0.0, fallback_used: false };
     loop {
         let reply = match designer.design(&request).await {
             Ok(r) => r,
@@ -44,25 +67,25 @@ pub async fn run(designer: &dyn Designer, ctx: &WsCtx, first: DesignRequest, bud
         };
         outcome.calls += 1;
         outcome.cost_usd += reply.cost_usd;
-        let previous = match parse(&reply.json) {
-            Ok(spec) => {
-                let spec = validate::normalise(spec, ctx);
-                outcome.issues = validate::validate(&spec, ctx);
-                let text = serde_json::to_string_pretty(&spec).unwrap_or_default();
-                outcome.spec = Some(spec);
-                text
-            }
-            Err(issue) => {
-                outcome.issues = vec![issue];
-                reply.json.clone()
-            }
-        };
+        let previous = absorb(&mut outcome, ctx, &reply.json);
         if outcome.issues.is_empty() || outcome.repairs >= MAX_REPAIRS || outcome.cost_usd >= budget_usd {
-            return Ok(outcome);
+            break;
         }
         outcome.repairs += 1;
         request = DesignRequest { system: first.system.clone(), user: prompt::repair_user(&previous, &outcome.issues), schema: first.schema.clone() };
     }
+    if outcome.spec.is_none() && outcome.cost_usd < budget_usd {
+        outcome.fallback_used = true;
+        match designer.design_fallback(&first).await {
+            Ok(reply) => {
+                outcome.calls += 1;
+                outcome.cost_usd += reply.cost_usd;
+                absorb(&mut outcome, ctx, &reply.json);
+            }
+            Err(e) => tracing::warn!(error = %e, "designer fallback failed"),
+        }
+    }
+    Ok(outcome)
 }
 
 #[cfg(test)]
@@ -136,5 +159,18 @@ mod tests {
         let o = run(&d, &ctx(), request(), 1.0).await.unwrap();
         assert!(o.spec.is_some() && !o.issues.is_empty());
         assert_eq!(o.spec.unwrap().permissions.max_autonomy, 2, "normalised before it was kept");
+    }
+
+    #[tokio::test]
+    async fn a_repair_gets_the_path_the_error_and_the_fragment_then_the_fallback_gets_one_try() {
+        let mut bad = good();
+        bad["steps"] = json!([{"oops": 1}]);
+        let d = ScriptedDesigner::new().reply(bad.clone()).reply(bad.clone()).reply(bad).reply(good());
+        let o = run(&d, &ctx(), request(), 1.0).await.unwrap();
+        let second = &d.requests()[1];
+        assert!(second.user.contains("steps[0]") && second.user.contains("oops") && second.user.contains("<error>"), "{}", second.user);
+        assert!(second.user.len() < d.requests()[0].user.len() + 4000);
+        assert_eq!((o.repairs, d.fallback_calls(), o.fallback_used), (2, 1, true));
+        assert!(o.spec.is_some() && o.issues.is_empty());
     }
 }

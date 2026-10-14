@@ -91,7 +91,7 @@ impl From<Row> for Session {
 
 impl Session {
     pub fn is_open(&self) -> bool {
-        matches!(self.status.as_str(), "drafting" | "ready")
+        matches!(self.status.as_str(), "drafting" | "ready" | "failed")
     }
 }
 
@@ -248,6 +248,20 @@ pub async fn create(state: &AppState, ws: &str, user_id: &str, goal: &str, agent
     get(&state.db, ws, &id).await?.ok_or(AppError::NotFound)
 }
 
+pub const COULD_NOT_BUILD: &str = "I couldn't build that agent. Try describing it in one or two sentences.";
+
+/// Marks a session whose last request produced nothing usable, so it never sits in `drafting` with no way forward.
+async fn mark_failed(db: &SqlitePool, ws: &str, id: &str, message: &str) {
+    let issues = json!([{"path": "", "code": "could_not_build", "message": message}]).to_string();
+    let _ = sqlx::query("UPDATE designer_sessions SET status = 'failed', issues_json = ?1, updated_at = ?2, rev = rev + 1 WHERE id = ?3 AND workspace_id = ?4 AND status IN ('drafting', 'ready', 'failed')")
+        .bind(issues)
+        .bind(now_ms())
+        .bind(id)
+        .bind(ws)
+        .execute(db)
+        .await;
+}
+
 fn designer_line(spec: Option<&AgentSpec>, issues: &[Issue], repairs: usize) -> String {
     match (spec, issues.is_empty()) {
         (Some(s), true) => {
@@ -259,7 +273,7 @@ fn designer_line(spec: Option<&AgentSpec>, issues: &[Issue], repairs: usize) -> 
             issues.len(),
             if issues.len() == 1 { "" } else { "s" }
         ),
-        (None, _) => "I could not turn that into an agent. Try describing the job again with a bit more detail.".to_string(),
+        (None, _) => COULD_NOT_BUILD.to_string(),
     }
 }
 
@@ -305,6 +319,9 @@ pub async fn design_turn(state: &AppState, ws: &str, id: &str, text: &str) -> Ap
         Err(e) => {
             tracing::warn!(error = %e, session_id = %session.id, "designer unavailable");
             settle_call(&state.db, &call_id, "failed", 0.0).await?;
+            if session.spec.is_none() {
+                mark_failed(&state.db, ws, &session.id, COULD_NOT_BUILD).await;
+            }
             return Err(AppError::AiUnavailable);
         }
     };
@@ -313,20 +330,29 @@ pub async fn design_turn(state: &AppState, ws: &str, id: &str, text: &str) -> Ap
     turns.push(Turn { role: "user".into(), text: crate::agents::sentence(text, MAX_GOAL_CHARS) });
     turns.push(Turn { role: "designer".into(), text: designer_line(outcome.spec.as_ref(), &outcome.issues, outcome.repairs) });
     let spec = outcome.spec.clone().or(session.spec.clone());
-    let issues = issues_json(&outcome.issues);
-    let ready = outcome.spec.is_some() && outcome.issues.is_empty();
+    let unreadable = outcome.spec.is_none();
+    if unreadable {
+        tracing::warn!(session_id = %session.id, issues = ?outcome.issues, fallback = outcome.fallback_used, "designer could not produce a readable spec");
+    }
+    let failed = unreadable && session.spec.is_none();
+    let issues = match (unreadable, failed) {
+        (false, _) => issues_json(&outcome.issues),
+        (true, true) => vec![json!({"path": "", "code": "could_not_build", "message": COULD_NOT_BUILD})],
+        (true, false) => session.issues.clone(),
+    };
+    let ready = if unreadable { session.spec.is_some() && session.issues.is_empty() } else { outcome.issues.is_empty() };
     let changed = spec.as_ref().map(AgentSpec::hash) != session.spec.as_ref().map(AgentSpec::hash);
     let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     sqlx::query("UPDATE designer_calls SET status = 'done', cost_usd = ?1 WHERE id = ?2").bind(outcome.cost_usd).bind(&call_id).execute(&mut *tx).await?;
     let swapped = sqlx::query(
         "UPDATE designer_sessions SET turns_json = ?1, spec_json = ?2, issues_json = ?3, status = ?4, cost_usd = cost_usd + ?5, updated_at = ?6, rev = rev + 1,
            dry_run_json = CASE WHEN ?7 THEN NULL ELSE dry_run_json END, dry_run_status = CASE WHEN ?7 THEN 'idle' ELSE dry_run_status END
-         WHERE id = ?8 AND workspace_id = ?9 AND rev = ?10 AND status IN ('drafting', 'ready')",
+         WHERE id = ?8 AND workspace_id = ?9 AND rev = ?10 AND status IN ('drafting', 'ready', 'failed')",
     )
     .bind(serde_json::to_string(&turns).unwrap_or_else(|_| "[]".into()))
     .bind(spec.as_ref().map(AgentSpec::to_json))
     .bind(json!(issues).to_string())
-    .bind(if ready { "ready" } else { "drafting" })
+    .bind(if failed { "failed" } else if ready { "ready" } else { "drafting" })
     .bind(outcome.cost_usd)
     .bind(now_ms())
     .bind(changed)
@@ -422,7 +448,7 @@ pub async fn request_dry_run(state: &AppState, ws: &str, id: &str, message_ids: 
     let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     let claimed = sqlx::query(
         "UPDATE designer_sessions SET dry_run_status = 'running', dry_run_json = NULL, dry_run_spec_hash = ?1, updated_at = ?2, rev = rev + 1
-         WHERE id = ?3 AND workspace_id = ?4 AND rev = ?5 AND status IN ('drafting', 'ready') AND (dry_run_status != 'running' OR updated_at < ?6)",
+         WHERE id = ?3 AND workspace_id = ?4 AND rev = ?5 AND status IN ('drafting', 'ready', 'failed') AND (dry_run_status != 'running' OR updated_at < ?6)",
     )
     .bind(&hash)
     .bind(now_ms())
@@ -581,7 +607,7 @@ pub async fn save(state: &AppState, ws: &str, user_id: &str, id: &str, opts: Sav
         }
     };
     let closed = sqlx::query(
-        "UPDATE designer_sessions SET status = 'saved', agent_id = ?1, updated_at = ?2, rev = rev + 1 WHERE id = ?3 AND workspace_id = ?4 AND rev = ?5 AND status IN ('drafting', 'ready')",
+        "UPDATE designer_sessions SET status = 'saved', agent_id = ?1, updated_at = ?2, rev = rev + 1 WHERE id = ?3 AND workspace_id = ?4 AND rev = ?5 AND status IN ('drafting', 'ready', 'failed')",
     )
     .bind(&agent_id)
     .bind(now_ms())
@@ -613,7 +639,7 @@ pub async fn save(state: &AppState, ws: &str, user_id: &str, id: &str, opts: Sav
 
 /// Marks a session abandoned (the person left without saving).
 pub async fn abandon(db: &SqlitePool, ws: &str, id: &str) -> sqlx::Result<()> {
-    sqlx::query("UPDATE designer_sessions SET status = 'abandoned', updated_at = ?1 WHERE id = ?2 AND workspace_id = ?3 AND status IN ('drafting', 'ready')")
+    sqlx::query("UPDATE designer_sessions SET status = 'abandoned', updated_at = ?1 WHERE id = ?2 AND workspace_id = ?3 AND status IN ('drafting', 'ready', 'failed')")
         .bind(now_ms())
         .bind(id)
         .bind(ws)

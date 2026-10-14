@@ -57,8 +57,29 @@ function List({ title, items }: { title: string; items: string[] }) {
   );
 }
 
-function Plan({ session }: { session: DesignerSession }) {
+function Failed({ ws, session }: { ws: string; session: DesignerSession }) {
+  const tell = useTellDesigner(ws, session.id);
+  const request = [...session.turns].reverse().find((t) => t.role === 'user')?.text ?? session.goal;
+  return (
+    <Card className="flex flex-col gap-3">
+      <div role="alert" className="rounded-sm border-l-[3px] border-danger bg-danger-tint px-3 py-2 text-sm text-danger">
+        <p className="font-semibold">I couldn&apos;t build that agent. Try describing it in one or two sentences.</p>
+      </div>
+      <List title="Assumptions so far" items={session.assumptions} />
+      <List title="Questions so far" items={session.questions} />
+      <ErrorNote error={tell.error} />
+      <div>
+        <Button loading={tell.isPending} onClick={() => tell.mutate(request)}>
+          Retry
+        </Button>
+      </div>
+    </Card>
+  );
+}
+
+function Plan({ ws, session }: { ws: string; session: DesignerSession }) {
   const spec = session.spec;
+  if (session.status === 'failed') return <Failed ws={ws} session={session} />;
   if (!spec) {
     return (
       <Card>
@@ -223,7 +244,7 @@ function Session({ ws, id }: { ws: string; id: string }) {
   return (
     <div className="grid grid-cols-1 gap-6 lg:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
       <div className="rise flex flex-col gap-4" style={riseStyle(1)}>
-        <Plan session={s} />
+        <Plan ws={ws} session={s} />
         <Refine ws={ws} session={s} />
       </div>
       <div className="rise" style={riseStyle(2)}>

@@ -64,7 +64,7 @@ export type DesignerSession = {
   goal: string;
   agent_id: string | null;
   base_version: number | null;
-  status: 'drafting' | 'ready' | 'saved' | 'abandoned';
+  status: 'drafting' | 'ready' | 'failed' | 'saved' | 'abandoned';
   turns: { role: 'user' | 'designer'; text: string }[];
   spec: DesignedSpec | null;
   issues: SpecIssue[];

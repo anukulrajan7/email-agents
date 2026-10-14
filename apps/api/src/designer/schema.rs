@@ -176,4 +176,30 @@ mod tests {
         v["secret"] = json!(1);
         assert!(conforms(&schema, &v, "spec").is_err());
     }
+
+    #[test]
+    fn a_spec_missing_any_type_is_rejected_by_the_schema() {
+        let schema = spec_schema();
+        let mut checked = 0;
+        for t in TEMPLATES {
+            let base = serde_json::to_value(t.spec()).unwrap();
+            for key in ["steps", "triggers"] {
+                for i in 0..base[key].as_array().unwrap().len() {
+                    let mut v = base.clone();
+                    v[key][i].as_object_mut().unwrap().remove("type");
+                    assert!(conforms(&schema, &v, "spec").is_err(), "{} {key}[{i}] without type must fail", t.key);
+                    checked += 1;
+                }
+            }
+            for (i, step) in base["steps"].as_array().unwrap().iter().enumerate() {
+                for j in 0..step["fields"].as_array().map_or(0, Vec::len) {
+                    let mut v = base.clone();
+                    v["steps"][i]["fields"][j].as_object_mut().unwrap().remove("type");
+                    assert!(conforms(&schema, &v, "spec").is_err(), "{} extract field without type must fail", t.key);
+                    checked += 1;
+                }
+            }
+        }
+        assert!(checked > 5);
+    }
 }
