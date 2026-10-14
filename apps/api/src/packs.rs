@@ -287,6 +287,7 @@ pub async fn enable(conn: &mut SqliteConnection, workspace_id: &str, keys: &[&st
             .await?;
         }
     }
+    crate::agent_registry::seed::seed_for_packs(conn, workspace_id, keys).await?;
     Ok(())
 }
 
@@ -299,6 +300,7 @@ pub async fn disable(conn: &mut SqliteConnection, workspace_id: &str, keys: &[&s
             .execute(&mut *conn)
             .await?;
     }
+    crate::agent_registry::seed::pause_for_packs_off(conn, workspace_id, keys).await?;
     Ok(())
 }
 

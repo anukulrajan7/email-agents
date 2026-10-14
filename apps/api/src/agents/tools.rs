@@ -77,6 +77,8 @@ pub struct ToolCtx<'a> {
     pub turn: i64,
     /// Who the action is done for: the system, or the person who approved it.
     pub actor: Actor<'a>,
+    /// An automatic send is held this many seconds (0 for a send a person approved).
+    pub hold_secs: i64,
 }
 
 impl ToolCtx<'_> {
@@ -148,8 +150,14 @@ impl Registry {
 
     /// OpenAI-style function specs for the planner, with `finish` last.
     pub fn specs(&self) -> Vec<Value> {
+        self.specs_for(&self.all().map(|t| t.name().to_string()).collect::<Vec<_>>())
+    }
+
+    /// The specs of only these tools (an agent's allowlist), with `finish` last.
+    pub fn specs_for(&self, allowed: &[String]) -> Vec<Value> {
         let mut specs: Vec<Value> = self
             .all()
+            .filter(|t| allowed.iter().any(|a| a == t.name()))
             .map(|t| {
                 json!({"type": "function", "function": {
                     "name": t.name(),
@@ -239,6 +247,17 @@ fn opt_str<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
     args.get(key).and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty())
 }
 
+/// Words of an email the planner sees by default; `read_email {excerpt: true}` asks for a longer one.
+const EXCERPT_WORDS: usize = 45;
+const LONG_EXCERPT_WORDS: usize = 200;
+const THREAD_EXCERPT_WORDS: usize = 40;
+
+/// Email text for the planner: cleaned, cut short, words joined by `^` and fenced, so it reads as
+/// data. The planner never sees a raw body.
+fn fenced(text: &str, words: usize) -> String {
+    format!("<<{}>>", crate::assistant::datamark(&knowledge::clean_body(text), words))
+}
+
 fn limit_arg(args: &Value, default: i64, max: i64) -> i64 {
     args.get("limit").and_then(Value::as_i64).unwrap_or(default).clamp(1, max)
 }
@@ -301,7 +320,7 @@ impl Tool for SearchMail {
         .await?;
         let items: Vec<Value> = hits
             .iter()
-            .map(|h| json!({"message_id": h.message_id, "kind": h.kind, "snippet": knowledge::snippet(knowledge::chunk_body(&h.text), query, 240)}))
+            .map(|h| json!({"message_id": h.message_id, "kind": h.kind, "snippet": fenced(&knowledge::snippet(knowledge::chunk_body(&h.text), query, 240), THREAD_EXCERPT_WORDS)}))
             .collect();
         Ok(ToolOutput {
             summary: format!("Searched mail for \"{}\" and found {} result{}", sentence(query, 60), items.len(), plural(items.len())),
@@ -323,10 +342,10 @@ impl Tool for ReadEmail {
         "read_email"
     }
     fn description(&self) -> &'static str {
-        "Read one email: cleaned text plus what it asks."
+        "Read one email: what it asks (summary, asks, deadline) and a short fenced excerpt. Pass excerpt: true for a longer one."
     }
     fn schema(&self) -> Value {
-        object(json!({"message_id": {"type": "string"}}), &["message_id"])
+        object(json!({"message_id": {"type": "string"}, "excerpt": {"type": "boolean"}}), &["message_id"])
     }
     fn risk(&self) -> Risk {
         Risk::Read
@@ -343,7 +362,7 @@ impl Tool for ReadEmail {
             value: json!({
                 "message_id": msg.id, "from": msg.sender_address, "subject": msg.subject, "received_at": iso(msg.received_at),
                 "direction": msg.direction,
-                "body": crate::sources::normalize::truncate_chars(&knowledge::clean_body(&msg.body_text), 3_000),
+                "excerpt": fenced(&msg.body_text, if args.get("excerpt").and_then(Value::as_bool) == Some(true) { LONG_EXCERPT_WORDS } else { EXCERPT_WORDS }),
                 "insight": insight,
             }),
             ..Default::default()
@@ -391,13 +410,13 @@ impl Tool for ReadThread {
                 (m.received_at, json!({
                     "message_id": m.id, "from": m.sender_address, "direction": m.direction, "subject": m.subject,
                     "received_at": iso(m.received_at),
-                    "body": crate::sources::normalize::truncate_chars(&knowledge::clean_body(&m.body_text), 1_500),
+                    "excerpt": fenced(&m.body_text, THREAD_EXCERPT_WORDS),
                 }))
             })
             .collect();
         entries.extend(sent.into_iter().map(|(id, body, at)| {
             (at, json!({"draft_id": id, "from": "us", "direction": "sent_reply", "received_at": iso(at),
-                        "body": crate::sources::normalize::truncate_chars(&body, 1_500)}))
+                        "excerpt": fenced(&body, THREAD_EXCERPT_WORDS)}))
         }));
         entries.sort_by_key(|(at, _)| *at);
         let inbound = rows.iter().filter(|m| m.direction == "inbound").count();
@@ -546,20 +565,25 @@ impl Tool for DraftEmail {
             return failed("Replies can only go to this case's conversation.");
         }
         let instructions = opt_str(args, "instructions");
-        // Without new instructions, reuse an unsent reply already suggested for this email.
+        // Without new instructions, reuse an unsent reply the system or an agent suggested for this
+        // email. A reply a person wrote or edited is never reused or claimed by an agent.
         let reused: Option<(String, String)> = match instructions {
             Some(_) => None,
+            None if ctx.case.shadow => None,
             None => sqlx::query_as(
-                "SELECT id, body_text FROM drafts WHERE message_id = ?1 AND status != 'sent' ORDER BY created_at DESC, id DESC LIMIT 1",
+                "SELECT id, body_text FROM drafts
+                 WHERE message_id = ?1 AND workspace_id = ?2 AND status = 'suggested' AND origin_key IS NOT NULL AND send_at IS NULL
+                 ORDER BY created_at DESC, id DESC LIMIT 1",
             )
             .bind(&msg.id)
+            .bind(ctx.ws())
             .fetch_optional(&ctx.state.db)
             .await?,
         };
         let (draft_id, body) = match reused.clone() {
             Some(d) => d,
             None => {
-                let agent = crate::agent_profiles::context_for_case(&ctx.state.db, &ctx.state.config, ctx.case).await?;
+                let (agent, _) = crate::agent_registry::runtime::context_for_case(&ctx.state.db, &ctx.state.config, ctx.case).await?;
                 let quality = match opt_str(args, "quality") {
                     _ if agent.agent.quality == "best" => Some(DraftQuality::Premium),
                     Some("premium") => Some(DraftQuality::Premium),
@@ -567,13 +591,35 @@ impl Tool for DraftEmail {
                     _ if ctx.case.kind == "requirement" => Some(DraftQuality::Premium),
                     _ => None,
                 };
-                let origin = format!("agent:{}:{}", ctx.case.id, ctx.turn);
                 let style = agent.draft_style(&ctx.state.config);
+                if ctx.case.shadow {
+                    let body = crate::agent_profiles::with_draft_style(style, handlers::preview_draft(ctx.state, &msg.id, quality)).await?;
+                    if body.trim().is_empty() {
+                        return failed("The writer judged that this email needs no reply.");
+                    }
+                    let gaps = replies::has_open_gaps(&body);
+                    let stand_in = format!("shadow:{}:{}", ctx.case.id, ctx.turn);
+                    return Ok(ToolOutput {
+                        summary: format!("Observe mode: wrote a reply to {} (kept here, not saved as a draft)", msg.sender_address),
+                        value: json!({"draft_id": stand_in, "body": body, "has_open_questions": gaps, "shadow": true}),
+                        state: Some(json!({"last_draft_id": stand_in})),
+                        ..Default::default()
+                    });
+                }
+                let origin = format!("agent:{}:{}", ctx.case.id, ctx.turn);
                 crate::agent_profiles::with_draft_style(style, handlers::create_agent_draft(ctx.state, &msg.id, instructions, quality, &origin))
                     .await?
                     .ok_or_else(|| ToolError::Failed("The writer judged that this email needs no reply.".into()))?
             }
         };
+        if let Some(agent_id) = &ctx.case.agent_id {
+            sqlx::query("UPDATE drafts SET agent_id = ?1 WHERE id = ?2 AND workspace_id = ?3 AND agent_id IS NULL AND status = 'suggested' AND origin_key IS NOT NULL")
+                .bind(agent_id)
+                .bind(&draft_id)
+                .bind(ctx.ws())
+                .execute(&ctx.state.db)
+                .await?;
+        }
         let gaps = replies::has_open_gaps(&body);
         let verb = if reused.is_some() { "Used the suggested reply to" } else { "Drafted a reply to" };
         Ok(ToolOutput {
@@ -706,11 +752,12 @@ impl Tool for UpdateCase {
         if outcome.is_some_and(|o| !super::OUTCOMES.contains(&o)) {
             return failed("outcome must be one of submitted, interview, rejected, placed, closed");
         }
-        sqlx::query("UPDATE cases SET status_note = ?1, outcome = COALESCE(?2, outcome), updated_at = ?3 WHERE id = ?4")
+        sqlx::query("UPDATE cases SET status_note = ?1, outcome = COALESCE(?2, outcome), updated_at = ?3 WHERE id = ?4 AND workspace_id = ?5")
             .bind(&note)
             .bind(outcome)
             .bind(now_ms())
             .bind(&ctx.case.id)
+            .bind(ctx.ws())
             .execute(&ctx.state.db)
             .await?;
         let summary = match outcome {
@@ -777,10 +824,10 @@ impl Tool for SendEmail {
     async fn run(&self, ctx: &ToolCtx<'_>, args: &Value) -> Result<ToolOutput, ToolError> {
         let preview = draft_preview(ctx, str_arg(args, "draft_id")?).await?;
         let draft_id = preview.draft_id.clone().unwrap_or_default();
-        let scheduled = replies::send_draft(ctx.state, ctx.ws(), &draft_id, ctx.actor).await?;
+        let scheduled = replies::send_draft_held(ctx.state, ctx.ws(), &draft_id, ctx.actor, ctx.hold_secs).await?;
         Ok(ToolOutput {
             summary: format!("Reply to {} is sending (can be undone for a few seconds)", preview.to.unwrap_or_default()),
-            value: json!({"scheduled": true, "draft_id": draft_id, "send_at": scheduled.send_at}),
+            value: json!({"scheduled": true, "draft_id": draft_id, "send_at": scheduled.send_at, "send_at_ms": scheduled.send_at_ms}),
             state: Some(json!({"last_sent_draft_id": draft_id})),
             ..Default::default()
         })
@@ -848,7 +895,7 @@ impl Tool for SubmitCandidate {
             return failed("Only matched candidates of this requirement can be submitted.");
         }
         let draft_id = preview.draft_id.clone().unwrap_or_default();
-        let scheduled = replies::send_draft(ctx.state, ctx.ws(), &draft_id, ctx.actor).await?;
+        let scheduled = replies::send_draft_held(ctx.state, ctx.ws(), &draft_id, ctx.actor, ctx.hold_secs).await?;
         let ids: Vec<String> = preview.candidates.iter().map(|p| p.id.clone()).collect();
         let decided_by = match ctx.actor {
             Actor::User(u) => Some(u),

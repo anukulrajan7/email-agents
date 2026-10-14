@@ -1,0 +1,305 @@
+//! Shared harness for the agent registry tests: a workspace with an admin and an operator, a shared
+//! mailbox and the operator's own mailbox (a local Gmail mock takes the sends), a scripted planner
+//! and a drafter that returns a chosen body.
+
+#![allow(dead_code)]
+
+use std::sync::{Arc, Mutex};
+
+use async_trait::async_trait;
+use axum::{
+    Json, Router,
+    body::Body,
+    extract::Path,
+    http::{Request, StatusCode},
+    routing::{get, post, put},
+};
+use email_ai_api::{
+    agents::planner::ScriptedPlanner,
+    ai::{AiError, DraftInput, DraftOutput, Drafter, judge::{FixedJudge, Verdict}},
+    build_state,
+    config::Config,
+    db,
+    domain::NormalizedEmail,
+    http::{AppState, router},
+    ingest,
+    jobs::worker,
+};
+use http_body_util::BodyExt;
+use serde_json::{Value, json};
+use tower::ServiceExt;
+
+pub const ADMIN: &str = "dev:admin@acme.test";
+pub const OPERATOR: &str = "dev:priya@acme.test";
+pub const OUTSIDER: &str = "dev:outsider@other.test";
+pub const CLIENT: &str = "ravi@client.com";
+pub const SAFE_REPLY: &str = "Hello Ravi,\n\nThanks for the update, noted.\n\nPriya";
+
+pub type Calls = Arc<Mutex<Vec<(String, Value)>>>;
+
+/// Drafts whatever body the test set, and remembers what it was asked.
+pub struct BodyDrafter {
+    pub body: Mutex<String>,
+    pub seen: Mutex<Vec<DraftInput>>,
+}
+
+impl BodyDrafter {
+    pub fn set(&self, body: &str) {
+        *self.body.lock().unwrap() = body.into();
+    }
+}
+
+#[async_trait]
+impl Drafter for BodyDrafter {
+    async fn draft(&self, input: &DraftInput) -> Result<DraftOutput, AiError> {
+        self.seen.lock().unwrap().push(input.clone());
+        Ok(DraftOutput { body_text: self.body.lock().unwrap().clone(), model_id: "test-drafter".into(), unanswered: vec![] })
+    }
+}
+
+pub async fn spawn_gmail(calls: Calls) -> String {
+    let (c1, c2, c3, c4) = (calls.clone(), calls.clone(), calls.clone(), calls);
+    let app = Router::new()
+        .route("/proxy/gmail/v1/users/me/profile", get(|| async { Json(json!({"emailAddress": "priya@acme.com"})) }))
+        .route("/proxy/gmail/v1/users/me/drafts", post(move |Json(b): Json<Value>| async move {
+            c1.lock().unwrap().push(("create_draft".into(), b));
+            Json(json!({"id": "gdraft1"}))
+        }))
+        .route("/proxy/gmail/v1/users/me/drafts/{id}", put(move |Path(id): Path<String>, Json(b): Json<Value>| async move {
+            c2.lock().unwrap().push((format!("update_draft:{id}"), b));
+            Json(json!({"id": id}))
+        }))
+        .route("/proxy/gmail/v1/users/me/drafts/send", post(move |Json(b): Json<Value>| async move {
+            c3.lock().unwrap().push(("send_draft".into(), b));
+            Json(json!({"id": "gmsg-sent"}))
+        }))
+        .route("/proxy/gmail/v1/users/me/messages/send", post(move |Json(b): Json<Value>| async move {
+            c4.lock().unwrap().push(("send_message".into(), b));
+            Json(json!({"id": "gmsg-direct"}))
+        }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    format!("http://{addr}")
+}
+
+pub async fn call(app: &Router, method: &str, path: &str, token: &str, body: Option<Value>) -> (StatusCode, Value) {
+    let req = Request::builder().method(method).uri(path).header("x-auth-token", token);
+    let req = match body {
+        Some(b) => req.header("content-type", "application/json").body(Body::from(b.to_string())).unwrap(),
+        None => req.body(Body::empty()).unwrap(),
+    };
+    let res = app.clone().oneshot(req).await.unwrap();
+    let status = res.status();
+    let bytes = res.into_body().collect().await.unwrap().to_bytes();
+    (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+}
+
+pub struct Opts {
+    pub packs: Vec<&'static str>,
+    pub planner: ScriptedPlanner,
+    pub tweak: Box<dyn FnOnce(&mut Config)>,
+}
+
+impl Opts {
+    pub fn packs(packs: &[&'static str]) -> Self {
+        Self { packs: packs.to_vec(), planner: ScriptedPlanner::new(), tweak: Box::new(|_| {}) }
+    }
+
+    pub fn planner(mut self, planner: ScriptedPlanner) -> Self {
+        self.planner = planner;
+        self
+    }
+
+    pub fn config(mut self, tweak: impl FnOnce(&mut Config) + 'static) -> Self {
+        self.tweak = Box::new(tweak);
+        self
+    }
+}
+
+pub struct Env {
+    pub state: AppState,
+    pub app: Router,
+    pub ws: String,
+    /// A mailbox nobody owns (a forwarding address).
+    pub shared_src: String,
+    /// The operator's own mailbox.
+    pub op_src: String,
+    pub admin_id: String,
+    pub op_id: String,
+    pub calls: Calls,
+    pub planner: Arc<ScriptedPlanner>,
+    pub drafter: Arc<BodyDrafter>,
+    pub judge: Arc<FixedJudge>,
+    pub dir: tempfile::TempDir,
+}
+
+impl Env {
+    pub async fn new(opts: Opts) -> Env {
+        let dir = tempfile::tempdir().unwrap();
+        let calls: Calls = Arc::default();
+        let mut config = Config::for_tests(&format!("sqlite://{}", dir.path().join("t.db").display()));
+        config.nango_api_url = spawn_gmail(calls.clone()).await;
+        config.nango_api_key = "k".into();
+        (opts.tweak)(&mut config);
+        let mut state = build_state(config).await.unwrap();
+        db::migrate(&state.db).await.unwrap();
+        let planner = Arc::new(opts.planner);
+        state.planner = planner.clone();
+        let judge = Arc::new(
+            FixedJudge::new()
+                .with("promises", Verdict::YesNo(false), "")
+                .with("professional", Verdict::YesNo(true), "")
+                .with("answers_ask", Verdict::Score(0.9), ""),
+        );
+        state.judge = judge.clone();
+        let drafter = Arc::new(BodyDrafter { body: Mutex::new(SAFE_REPLY.into()), seen: Mutex::default() });
+        state.drafter = drafter.clone();
+        let app = router(state.clone());
+        let (s, ws) = call(&app, "POST", "/api/v1/workspaces", ADMIN, Some(json!({"name": "Acme", "packs": opts.packs}))).await;
+        assert_eq!(s, StatusCode::CREATED, "{ws}");
+        let ws = ws["id"].as_str().unwrap().to_string();
+        let (_, me) = call(&app, "GET", "/api/v1/me", ADMIN, None).await;
+        let admin_id = me["user"]["id"].as_str().unwrap().to_string();
+        let (_, me) = call(&app, "GET", "/api/v1/me", OPERATOR, None).await;
+        let op_id = me["user"]["id"].as_str().unwrap().to_string();
+        let (s, _) = call(&app, "POST", &format!("/api/v1/workspaces/{ws}/members"), ADMIN, Some(json!({"email": "priya@acme.test", "role": "operator"}))).await;
+        assert_eq!(s, StatusCode::OK);
+        let settings = json!({"auto_reply": false, "reply_instructions": "", "signature": null});
+        call(&app, "PUT", &format!("/api/v1/workspaces/{ws}/reply-settings"), ADMIN, Some(settings)).await;
+        let caps = "{\"read\":true,\"sync\":true,\"provider_labels\":false,\"provider_drafts\":true,\"send\":true}";
+        for (src, mailbox, owner) in [("src_shared", "team@acme.com", None), ("src_priya", "priya@acme.com", Some(op_id.clone()))] {
+            sqlx::query(
+                "INSERT INTO email_sources (id, workspace_id, kind, status, external_connection_id, provider_config_key, capabilities_json,
+                                            created_at, mailbox_address, connected_by_user_id)
+                 VALUES (?1, ?2, 'nango_gmail', 'connected', ?3, 'google-mail', ?4, ?5, ?6, ?7)",
+            )
+            .bind(src)
+            .bind(&ws)
+            .bind(format!("conn_{src}"))
+            .bind(caps)
+            .bind(db::now_ms())
+            .bind(mailbox)
+            .bind(owner)
+            .execute(&state.db)
+            .await
+            .unwrap();
+        }
+        Env { state, app, ws, shared_src: "src_shared".into(), op_src: "src_priya".into(), admin_id, op_id, calls, planner, drafter, judge, dir }
+    }
+
+    pub fn base(&self) -> String {
+        format!("/api/v1/workspaces/{}", self.ws)
+    }
+
+    pub async fn req(&self, method: &str, path: &str, token: &str, body: Option<Value>) -> (StatusCode, Value) {
+        call(&self.app, method, &format!("{}{path}", self.base()), token, body).await
+    }
+
+    pub async fn ok(&self, method: &str, path: &str, token: &str, body: Option<Value>) -> Value {
+        let (s, v) = self.req(method, path, token, body).await;
+        assert_eq!(s, StatusCode::OK, "{method} {path}: {v}");
+        v
+    }
+
+    /// Every agent the token's user may see, flattened.
+    pub async fn agents(&self, token: &str) -> Vec<Value> {
+        let v = self.ok("GET", "/agents", token, None).await;
+        v["categories"].as_array().unwrap().iter().flat_map(|c| c["agents"].as_array().unwrap().clone()).collect()
+    }
+
+    pub async fn agent_id(&self, token: &str, template_key: &str) -> String {
+        self.agents(token).await.iter().find(|a| a["template_key"] == template_key).unwrap_or_else(|| panic!("no agent {template_key}"))["id"].as_str().unwrap().to_string()
+    }
+
+    pub async fn personal_id(&self, token: &str) -> String {
+        self.ok("GET", "/agents", token, None).await["me"]["id"].as_str().unwrap().to_string()
+    }
+
+    /// Stores an email as if it had synced into `src`, then runs the pipeline. The label and "needs a reply" are then set by hand.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn receive(&self, src: &str, gmail_id: &str, thread: &str, from: &str, subject: &str, body: &str, label: &str) -> String {
+        let email = NormalizedEmail {
+            source_message_id: gmail_id.into(),
+            rfc_message_id: Some(format!("<{gmail_id}@mail.example>")),
+            sender_address: from.into(),
+            recipients: vec!["team@acme.com".into()],
+            subject: subject.into(),
+            body_text: body.into(),
+            received_at: db::now_ms() - 3_600_000,
+            ..Default::default()
+        };
+        let mut tx = self.state.db.begin().await.unwrap();
+        let id = ingest::persist_message(&mut tx, src, &self.ws, &email, Some(thread), json!({})).await.unwrap().unwrap();
+        tx.commit().await.unwrap();
+        worker::drain(&self.state).await;
+        self.set_understanding(&id, label, true, json!([])).await;
+        id
+    }
+
+    pub async fn set_understanding(&self, message_id: &str, label: &str, needs_reply: bool, asks: Value) {
+        sqlx::query("UPDATE classifications SET category = ?1, requires_reply = ?2 WHERE message_id = ?3")
+            .bind(label)
+            .bind(needs_reply)
+            .bind(message_id)
+            .execute(&self.state.db)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT OR REPLACE INTO message_insights (message_id, summary, asks_json, deadline, needs_reply, missing_json, source, model_id, created_at)
+             VALUES (?1, 'summary', ?2, NULL, ?3, '[]', 'llm', 'test', ?4)",
+        )
+        .bind(message_id)
+        .bind(asks.to_string())
+        .bind(needs_reply)
+        .bind(db::now_ms())
+        .execute(&self.state.db)
+        .await
+        .unwrap();
+    }
+
+    pub async fn route(&self, message_id: &str) -> email_ai_api::agent_registry::routing::Routed {
+        email_ai_api::agent_registry::routing::route_message(&self.state.db, &self.state.config, &self.ws, message_id)
+            .await
+            .unwrap()
+            .expect("a route")
+    }
+
+    pub async fn count(&self, sql: &str) -> i64 {
+        sqlx::query_scalar(sql).bind(&self.ws).fetch_one(&self.state.db).await.unwrap()
+    }
+
+    pub fn sends(&self) -> Vec<Value> {
+        self.calls.lock().unwrap().iter().filter(|(k, _)| k == "send_message" || k == "send_draft").map(|(_, b)| b.clone()).collect()
+    }
+
+    /// Starts the routed agent's case the way the automatic trigger would, runs the queue and returns the case id.
+    pub async fn start(&self, message_id: &str) -> String {
+        let started = email_ai_api::agents::triggers::start_inbox_case(&self.state, &self.ws, message_id, None).await.unwrap();
+        let email_ai_api::agents::triggers::Started::Case(id, _) = started else { panic!("case not started: {started:?}") };
+        worker::drain(&self.state).await;
+        id
+    }
+
+    pub async fn case(&self, token: &str, id: &str) -> Value {
+        self.ok("GET", &format!("/cases/{id}"), token, None).await
+    }
+
+    /// Ids of every case (real and shadow) of one message, straight from the database.
+    pub async fn cases_of(&self, message_id: &str) -> Vec<(String, Option<String>, bool)> {
+        sqlx::query_as("SELECT id, agent_id, shadow FROM cases WHERE workspace_id = ?1 AND message_id = ?2 ORDER BY shadow, created_at")
+            .bind(&self.ws)
+            .bind(message_id)
+            .fetch_all(&self.state.db)
+            .await
+            .unwrap()
+    }
+
+    pub async fn set_pref(&self, sql: &str, binds: &[&str]) {
+        let mut q = sqlx::query(sql);
+        for b in binds {
+            q = q.bind(*b);
+        }
+        q.execute(&self.state.db).await.unwrap();
+    }
+}

@@ -236,6 +236,8 @@ pub struct ScheduledSend {
     pub status: &'static str,
     pub draft_id: String,
     pub send_at: String,
+    #[serde(skip)]
+    pub send_at_ms: i64,
 }
 
 // ---------------------------------------------------------------- reconciliation
@@ -451,6 +453,12 @@ fn requested_by<'a>(actor: Actor<'a>) -> Option<&'a str> {
 /// Checks the reply and schedules it `SEND_UNDO_SECONDS` ahead. Every send path (person,
 /// automation, agent approval) goes through here, so these guards cannot be bypassed.
 pub async fn send_draft(state: &AppState, ws: &str, draft_id: &str, actor: Actor<'_>) -> AppResult<ScheduledSend> {
+    send_draft_held(state, ws, draft_id, actor, 0).await
+}
+
+/// Like `send_draft`, with the send held at least `hold_secs` from now. The hold is part of the same
+/// claim, so the reply is never scheduled earlier than the hold.
+pub async fn send_draft_held(state: &AppState, ws: &str, draft_id: &str, actor: Actor<'_>, hold_secs: i64) -> AppResult<ScheduledSend> {
     let mut ctx = load(state, ws, draft_id).await?;
     if ctx.status == "sent" {
         return Err(AppError::Conflict("this reply was already sent".into()));
@@ -490,7 +498,7 @@ pub async fn send_draft(state: &AppState, ws: &str, draft_id: &str, actor: Actor
         return Err(report.into_error());
     }
     let now = now_ms();
-    let send_at = now + state.config.send_undo_seconds.max(0) * 1_000;
+    let send_at = now + state.config.send_undo_seconds.max(hold_secs).max(0) * 1_000;
     let mut tx = state.db.begin().await?;
     let claimed = sqlx::query(
         "UPDATE drafts SET send_at = ?1, send_requested_by = ?2, send_error = NULL, updated_at = ?3
@@ -533,7 +541,7 @@ pub async fn send_draft(state: &AppState, ws: &str, draft_id: &str, actor: Actor
     .await?;
     tx.commit().await?;
     state.jobs_notify.notify_one();
-    Ok(ScheduledSend { status: "scheduled", draft_id: ctx.draft_id, send_at: iso(send_at) })
+    Ok(ScheduledSend { status: "scheduled", draft_id: ctx.draft_id, send_at: iso(send_at), send_at_ms: send_at })
 }
 
 /// Checks and schedules the reply; it goes out after the undo window.
@@ -683,6 +691,19 @@ pub async fn send_scheduled(state: &AppState, payload: &Value) -> Result<(), Job
             }
             Reconciled::Unsure(why) => return Err(JobError::Retry(format!("confirming the previous send attempt: {why}"))),
         }
+    }
+    if requester.is_none()
+        && let Some(reason) = crate::agents::autonomy::automated_send_stopped(state, &ws, &ctx.draft_id).await.map_err(|e| job_err(e.into()))?
+    {
+        sqlx::query("UPDATE drafts SET send_at = NULL, updated_at = ?1 WHERE id = ?2 AND workspace_id = ?3 AND send_attempt_id IS NULL")
+            .bind(now_ms())
+            .bind(&ctx.draft_id)
+            .bind(&ws)
+            .execute(&state.db)
+            .await
+            .map_err(|e| job_err(e.into()))?;
+        tracing::info!(draft_id = %ctx.draft_id, reason, "held automatic send cancelled; it needs a person");
+        return Ok(());
     }
     let input = CheckInput { workspace_id: &ws, reply: &ctx, body: &ctx.body_text, automated: requester.is_none() };
     let report = send_safety::check(state, &input).await.map_err(job_err)?;

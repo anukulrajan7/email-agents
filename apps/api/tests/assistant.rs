@@ -569,6 +569,42 @@ async fn voice_is_off_without_a_speech_model() {
     assert_eq!(app.oneshot(req).await.unwrap().status(), StatusCode::CONFLICT);
 }
 
+#[tokio::test]
+async fn staffing_tools_are_refused_in_a_workspace_without_the_staffing_pack() {
+    let env = env().await;
+    let (s, general) = call(&env.app, "POST", "/api/v1/workspaces", ADMIN, Some(json!({"name": "Plain", "packs": ["general"]}))).await;
+    assert_eq!(s, StatusCode::CREATED);
+    let plain = general["id"].as_str().unwrap();
+    let ask = |ws: String| {
+        let app = env.app.clone();
+        async move { call(&app, "POST", &format!("/api/v1/workspaces/{ws}/assistant/command"), ADMIN, Some(json!({"text": "who matches the Java role?"}))).await }
+    };
+    let script = || {
+        vec![
+            tool("list_matches", json!({"requirement": "Java"})),
+            tool("start_agent", json!({"kind": "requirement", "requirement_id": "req_1"})),
+            answer("Done.", json!([])),
+        ]
+    };
+
+    env.planner.push(script());
+    let (status, out) = ask(plain.to_string()).await;
+    assert_eq!(status, StatusCode::OK, "{out}");
+    let prompts = env.planner.prompts();
+    let last = prompts.last().unwrap();
+    assert!(last.contains("list_matches") && last.contains("unknown tool"), "{last}");
+    assert!(last.contains("requirements are not part of this workspace"), "{last}");
+    assert_eq!(out["plan"], json!([]));
+
+    env.planner.push(script());
+    let (status, _) = ask(env.ws.clone()).await;
+    assert_eq!(status, StatusCode::OK);
+    let prompts = env.planner.prompts();
+    let last = prompts.last().unwrap();
+    assert!(last.contains("no requirement matches that"), "the staffing workspace still has the tool: {last}");
+    assert!(!last.contains("requirements are not part of this workspace"));
+}
+
 // ---------------------------------------------------------------- Ask Meera v2: page context, attachments, conversation
 
 fn timesheet_xlsx(extra_cell: &str) -> Vec<u8> {

@@ -1119,7 +1119,7 @@
     "find_candidates"
    ],
    "max_steps": 6,
-   "may_send": true,
+   "may_send": false,
    "draft_must_not_contain": [
     "ceo@evil.test"
    ]

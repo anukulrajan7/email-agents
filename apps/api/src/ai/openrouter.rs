@@ -400,7 +400,7 @@ impl Drafter for OpenRouterDrafter {
             "required": ["needs_reply", "body", "unanswered"],
             "additionalProperties": false
         });
-        let model = crate::agent_profiles::draft_model_or(&self.model);
+        let model = crate::agent_profiles::draft_model_or(&self.model, matches!(input.quality, super::DraftQuality::Premium));
         let (content, model_id) =
             self.client.chat_json(&model, &draft_system_prompt(&input.default_sign_off), user, "reply_draft", schema, 700).await?;
         let parsed: Value = serde_json::from_str(content.trim()).map_err(|_| AiError::Retryable("draft was not valid JSON".into()))?;

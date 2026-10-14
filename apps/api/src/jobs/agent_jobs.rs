@@ -2,7 +2,7 @@
 
 use serde_json::Value;
 
-use super::handlers::JobError;
+use super::{Job, handlers::JobError};
 use crate::{agents, http::AppState};
 
 fn case_and_turn(payload: &Value) -> Result<(String, i64), JobError> {
@@ -11,15 +11,20 @@ fn case_and_turn(payload: &Value) -> Result<(String, i64), JobError> {
     Ok((case_id.to_string(), turn))
 }
 
-pub async fn agent_step(state: &AppState, payload: &Value) -> Result<(), JobError> {
+/// The workspace comes from the job record, which the queue set when the step was scheduled.
+fn workspace_of(job: &Job) -> Result<&str, JobError> {
+    job.workspace_id.as_deref().ok_or_else(|| JobError::Permanent("agent step without a workspace".into()))
+}
+
+pub async fn agent_step(state: &AppState, job: &Job, payload: &Value) -> Result<(), JobError> {
     let (case_id, turn) = case_and_turn(payload)?;
-    agents::runner::run_step(state, &case_id, turn).await
+    agents::runner::run_step(state, workspace_of(job)?, &case_id, turn).await
 }
 
 /// A turn that kept failing (e.g. the AI service was down for its whole retry window) fails the case.
-pub async fn on_dead(state: &AppState, payload: &Value, _error: &str) -> Result<(), JobError> {
+pub async fn on_dead(state: &AppState, job: &Job, payload: &Value, _error: &str) -> Result<(), JobError> {
     let (case_id, _) = case_and_turn(payload)?;
-    let Some(case) = agents::case::get(&state.db, &case_id).await? else { return Ok(()) };
+    let Some(case) = agents::case::get_in(&state.db, workspace_of(job)?, &case_id).await? else { return Ok(()) };
     let mut tx = state.db.begin().await?;
     agents::case::fail(&mut tx, &case, "the AI service could not be reached for this step").await?;
     tx.commit().await?;

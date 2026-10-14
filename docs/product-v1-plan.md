@@ -46,7 +46,7 @@ Rules that do not change: people approve risky actions (the approval floor only 
   "budget": {"max_steps":15,"usd_per_case":0.10},
   "questions_for_user": [], "assumptions": [] }
 ```
-- **Workspace agents** (migration 0033, owned by WP-B):
+- **Workspace agents** (migration 0034, owned by WP-B):
 ```sql
 CREATE TABLE agents (
   id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
@@ -341,7 +341,7 @@ Assumptions: 40% of emails drafted, 25% of drafts edited, 15% of emails start ag
 - **Owns (new):**
   - `src/agent_registry/{mod,spec,templates,store,routing,seed,versions}.rs`
   - `src/http/agent_registry_api.rs`
-  - `migrations/0033_agent_registry.sql`
+  - `migrations/0034_agent_registry.sql`
   - `tests/agent_registry.rs`, `tests/routing.rs`, `tests/autonomy_levels.rs`
 - **Owns (modify):** `agents/runner.rs` (tool allowlist per spec via `registry.specs_for`, shadow mode, agent_id/version on cases and steps), `agents/autonomy.rs` (effective level, L2/L3 rules, delayed auto-send), `agents/triggers.rs` (start cases from routes and schedule triggers; job `agent_schedule_tick`), `agents/tools.rs` (shadow `draft_email`; `propose_automation` → designer after WP-C), `agents/case.rs` (`get` gains a workspace-scoped variant used by HTTP), `agent_profiles.rs` (lead reads through the registry), `packs.rs` (one line: `seed_for_packs` / pause on disable), `assistant/command.rs` (gate `list_matches` and `start_agent{kind:requirement}` by `packs::has_feature(FEATURE_MATCHING / FEATURE_REQUIREMENT_AGENT)`; these tools are hidden from the tool list when the feature is off).
 - **API:**

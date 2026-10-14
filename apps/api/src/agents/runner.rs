@@ -9,11 +9,14 @@ use super::{
     case::{self, Case, NewStep, StepRow},
     critic::{self, CriticInput, RuleContext},
     planner::{self, Decision, PlanOutput, PlanRequest, Usage},
+    workflow,
     sentence,
     tools::{self, Preview, Risk, ToolCtx, ToolError, ToolOutput},
 };
 use crate::{
     agent_profiles::{self, AgentContext},
+    agent_registry::spec::scope_of_tool,
+    agent_registry::runtime::{self, CaseAgent},
     ai::AiError,
     audit::{self, Actor, Entry},
     db::{new_id, now_ms},
@@ -48,33 +51,40 @@ fn clip(v: &str, max: usize) -> String {
     crate::sources::normalize::truncate_chars(v, max)
 }
 
-/// The planner's view of the case: goal, facts and what happened so far.
+/// The planner's view of the case, ordered for prompt caching: what never changes first (the
+/// case header), then the append-only step list, then what changes every turn (the latest
+/// detailed results, the case facts) and the turn and budget line last.
 pub fn render_prompt(case: &Case, steps: &[StepRow], turn: i64) -> String {
     let mut out = format!(
-        "Case: {}\nKind: {}\nGoal: {}\nRequirement id: {}\nCase email id: {}\nCase facts: {}\n\nSteps so far (oldest first):\n",
+        "Case: {}\nKind: {}\nGoal: {}\nRequirement id: {}\nCase email id: {}\n\nSteps so far (oldest first):\n",
         case.title,
         case.kind,
         case.goal,
         case.requirement_id.as_deref().unwrap_or("none"),
         case.message_id.as_deref().unwrap_or("none"),
-        clip(&case.state_json, 2_000),
     );
     if steps.is_empty() {
         out.push_str("(none yet)\n");
     }
-    let detailed_from = steps.len().saturating_sub(DETAILED_STEPS);
-    for (i, s) in steps.iter().enumerate() {
+    for s in steps {
         let tool = s.tool.as_deref().map(|t| format!(" {t}")).unwrap_or_default();
         out.push_str(&format!("#{} [{}{tool}] {}: {}\n", s.seq, s.kind, s.status, s.summary));
-        if i >= detailed_from {
-            if s.input_json != "null" {
-                out.push_str(&format!("   input: {}\n", clip(&s.input_json, 400)));
-            }
-            if s.output_json != "null" {
-                out.push_str(&format!("   result: {}\n", clip(&s.output_json, OUTPUT_CHARS)));
-            }
+    }
+    let detailed_from = steps.len().saturating_sub(DETAILED_STEPS);
+    let mut latest = String::new();
+    for s in &steps[detailed_from..] {
+        if s.input_json != "null" {
+            latest.push_str(&format!("#{} input: {}\n", s.seq, clip(&s.input_json, 400)));
+        }
+        if s.output_json != "null" {
+            latest.push_str(&format!("#{} result: {}\n", s.seq, clip(&s.output_json, OUTPUT_CHARS)));
         }
     }
+    if !latest.is_empty() {
+        out.push_str("\nLatest details:\n");
+        out.push_str(&latest);
+    }
+    out.push_str(&format!("\nCase facts: {}\n", clip(&case.state_json, 2_000)));
     out.push_str(&format!(
         "\nThis is turn {turn} of at most {}. Budget left: ${:.3}.\nCall the single best next tool, or finish.",
         case.max_steps,
@@ -102,10 +112,39 @@ pub async fn rule_context(state: &AppState, case: &Case) -> sqlx::Result<RuleCon
     Ok(RuleContext { case_thread_id: case.thread_id.clone(), allowed_recipients, declined_draft_ids })
 }
 
+/// Audit action written for every tool call an agent makes (reads included).
+pub const TOOL_CALL_ACTION: &str = "agent.tool_call";
+
+/// What the audit trail records about one turn's tool call: the tool, how it ended and its input.
+fn audited_call(result: &TurnResult) -> Option<(&str, &'static str, &Value)> {
+    match result {
+        TurnResult::Ran { tool, input, out, .. } => {
+            let simulated = out.value.get("simulated").and_then(Value::as_bool) == Some(true);
+            Some((tool, if simulated { "simulated" } else { "ok" }, input))
+        }
+        TurnResult::Error { tool: Some(tool), input, .. } => Some((tool, "error", input)),
+        TurnResult::Blocked { tool, input, .. } => Some((tool, "blocked", input)),
+        TurnResult::Approval { tool, input, .. } => Some((tool, "waiting_approval", input)),
+        TurnResult::Error { tool: None, .. } | TurnResult::Finish { .. } => None,
+    }
+}
+
+/// Ids a call touched (never bodies), so the trail shows what was read and acted on.
+fn call_refs(input: &Value) -> Value {
+    let pick = |k: &str| input.get(k).filter(|v| v.is_string() || v.is_array()).cloned();
+    json!({
+        "message_id": pick("message_id"), "draft_id": pick("draft_id"), "requirement_id": pick("requirement_id"),
+        "candidate_ids": pick("candidate_ids"),
+    })
+}
+
+/// How long a case waits while its agent is paused before looking again.
+const PAUSED_RECHECK_MS: i64 = 15 * 60 * 1000;
+
 /// Runs planner turn `turn` of a case. Idempotent: a turn already taken, or a case that is
-/// waiting for a person or has ended, is left alone.
-pub async fn run_step(state: &AppState, case_id: &str, turn: i64) -> Result<(), JobError> {
-    let Some(case) = case::get(&state.db, case_id).await? else { return Ok(()) };
+/// waiting for a person or has ended, is left alone. The case must belong to `ws`.
+pub async fn run_step(state: &AppState, ws: &str, case_id: &str, turn: i64) -> Result<(), JobError> {
+    let Some(case) = case::get_in(&state.db, ws, case_id).await? else { return Ok(()) };
     if case.is_terminal() || case.status == "waiting_approval" || turn != case.step_count + 1 {
         return Ok(());
     }
@@ -136,37 +175,65 @@ pub async fn run_step(state: &AppState, case_id: &str, turn: i64) -> Result<(), 
     }
     if let Some(reason) = limit_reached(case.step_count, case.max_steps, case.spent_usd, case.budget_usd) {
         let mut tx = state.db.begin().await?;
-        case::fail(&mut tx, &case, &reason).await?;
+        if case.shadow {
+            end_observation(&mut tx, &case, &reason).await?;
+        } else {
+            case::fail(&mut tx, &case, &reason).await?;
+        }
         tx.commit().await?;
         return Ok(());
     }
 
-    let steps = case::steps(&state.db, &case.id).await?;
+    let (agent, case_agent) = runtime::context_for_case(&state.db, &state.config, &case).await?;
+    if !case_agent.is_active() {
+        return park_while_inactive(state, &case, &case_agent, turn).await;
+    }
+    let steps = case::steps(&state.db, &case.workspace_id, &case.id).await?;
     let registry = tools::registry();
-    let agent = agent_profiles::context_for_case(&state.db, &state.config, &case).await?;
+    let tier = agent_profiles::effective_tier(&agent.agent.quality, case.premium());
+    let allowed = case_agent.allowed_tools(runtime::matching_enabled(&state.db, &case.workspace_id).await?);
     let req = PlanRequest {
         case_id: case.id.clone(),
-        kind: case.kind.clone(),
-        premium: case.premium(),
+        kind: if case.shadow { "shadow".into() } else { case.kind.clone() },
+        premium: tier == "best",
         requirement_id: case.requirement_id.clone(),
         message_id: case.message_id.clone(),
         facts: case.state(),
         system: planner::system_prompt(&agent.planner_block()),
-        model: Some(agent_profiles::tier_model(&state.config, &agent.agent.quality).to_string()).filter(|m| !m.is_empty()),
+        model: Some(agent_profiles::tier_model(&state.config, tier).to_string()).filter(|m| !m.is_empty()),
         prompt: render_prompt(&case, &steps, turn),
-        tools: registry.specs(),
+        tools: registry.specs_for(&allowed),
     };
-    let PlanOutput { decision, mut usage } = match state.planner.plan(&req).await {
-        Ok(p) => p,
-        Err(AiError::Retryable(m)) => return Err(JobError::Retry(m)),
-        Err(AiError::Permanent(e)) => {
-            // The same request fails the same way: stop now instead of retrying it.
-            tracing::warn!(case_id = %case.id, error = %e, "planner refused the request");
-            let mut tx = state.db.begin().await?;
-            case::fail(&mut tx, &case, &format!("The AI model couldn't take this request ({e})")).await?;
-            tx.commit().await?;
-            return Ok(());
+    let mut handover: Option<Value> = None;
+    let mut fixed: Option<Decision> = None;
+    if workflow::applies(&case_agent.spec, &case) && workflow::mode_of(&case).as_deref() != Some("planner") {
+        let first_turn = workflow::mode_of(&case).is_none();
+        let why = if first_turn {
+            workflow::escalation_reason(&state.db, &case).await?
+        } else {
+            case.state().get("declined_draft_id").is_some().then_some("a person declined the draft")
+        };
+        fixed = if why.is_none() { workflow::decide(&case_agent.spec, &case) } else { None };
+        match why.or(fixed.is_none().then_some("the next step needs a person's judgement")) {
+            Some(why) => handover = Some(json!({workflow::MODE_KEY: "planner", workflow::WHY_KEY: why})),
+            None if first_turn => handover = Some(json!({workflow::MODE_KEY: "fixed"})),
+            None => {}
         }
+    }
+    let (decision, mut usage) = match fixed.clone() {
+        Some(decision) => (decision, Usage::default()),
+        None => match state.planner.plan(&req).await {
+            Ok(PlanOutput { decision, usage }) => (decision, usage),
+            Err(AiError::Retryable(m)) => return Err(JobError::Retry(m)),
+            Err(AiError::Permanent(e)) => {
+                // The same request fails the same way: stop now instead of retrying it.
+                tracing::warn!(case_id = %case.id, error = %e, "planner refused the request");
+                let mut tx = state.db.begin().await?;
+                case::fail(&mut tx, &case, &format!("The AI model couldn't take this request ({e})")).await?;
+                tx.commit().await?;
+                return Ok(());
+            }
+        },
     };
 
     let result = match decision {
@@ -177,9 +244,25 @@ pub async fn run_step(state: &AppState, case_id: &str, turn: i64) -> Result<(), 
             summary: "The assistant made an unusable choice and will try again".into(),
             error,
         },
-        Decision::Call { tool, args } => evaluate(state, &case, &agent, turn, &tool, args, &mut usage).await?,
+        Decision::Call { tool, args } => evaluate(state, &case, &agent, &case_agent, &allowed, turn, &tool, args, fixed.is_some(), &mut usage).await?,
     };
-    commit(state, &case, turn, &usage, result).await
+    if fixed.is_some() {
+        let progress = match &result {
+            TurnResult::Ran { .. } | TurnResult::Approval { .. } => Some(json!({workflow::POS_KEY: workflow::position(&case) + 1})),
+            TurnResult::Error { .. } | TurnResult::Blocked { .. } => {
+                Some(json!({workflow::MODE_KEY: "planner", workflow::WHY_KEY: "a step failed or was stopped"}))
+            }
+            TurnResult::Finish { .. } => None,
+        };
+        handover = match (handover, progress) {
+            (Some(mut a), Some(b)) => {
+                a.as_object_mut().expect("object").extend(b.as_object().cloned().unwrap_or_default());
+                Some(a)
+            }
+            (a, b) => a.or(b),
+        };
+    }
+    commit(state, &case, turn, &usage, result, handover).await
 }
 
 /// Why the workspace's permissions stop this tool, if they do.
@@ -196,13 +279,67 @@ fn permission_block(agent: &AgentContext, tool: &str) -> Option<String> {
     }
 }
 
+/// An observing case ends quietly at its step limit: it was only ever a trial run.
+async fn end_observation(conn: &mut sqlx::SqliteConnection, case: &Case, reason: &str) -> sqlx::Result<()> {
+    if case::set_status(&mut *conn, &case.workspace_id, &case.id, "done").await? {
+        sqlx::query("UPDATE cases SET status_note = ?1, next_wake_at = NULL WHERE id = ?2 AND workspace_id = ?3")
+            .bind(sentence(&format!("Observation ended: {reason}"), 240))
+            .bind(&case.id)
+            .bind(&case.workspace_id)
+            .execute(conn)
+            .await?;
+    }
+    Ok(())
+}
+
+/// A paused agent does no work: its cases wait and pick up again when it is switched back on.
+/// An agent that was archived or never activated ends its case instead.
+async fn park_while_inactive(state: &AppState, case: &Case, agent: &CaseAgent, turn: i64) -> Result<(), JobError> {
+    let mut tx = state.db.begin().await?;
+    if agent.row.status != "paused" {
+        let reason = format!("{} is not active", agent.row.name);
+        if case.shadow {
+            end_observation(&mut tx, case, &reason).await?;
+        } else {
+            case::fail(&mut tx, case, &reason).await?;
+        }
+        tx.commit().await?;
+        return Ok(());
+    }
+    let resume_at = crate::db::now_ms() + PAUSED_RECHECK_MS;
+    sqlx::query("UPDATE cases SET status = 'waiting_event', next_wake_at = ?1, updated_at = ?2 WHERE id = ?3 AND workspace_id = ?4 AND status = 'running'")
+        .bind(resume_at)
+        .bind(crate::db::now_ms())
+        .bind(&case.id)
+        .bind(&case.workspace_id)
+        .execute(&mut *tx)
+        .await?;
+    crate::jobs::enqueue_at(
+        &mut tx,
+        crate::jobs::kind::AGENT_STEP,
+        &format!("{}:paused:{}", case::step_key(&case.id, turn), resume_at / PAUSED_RECHECK_MS),
+        Some(&case.workspace_id),
+        &serde_json::json!({ "case_id": case.id, "turn": turn, "workspace_id": case.workspace_id }),
+        crate::jobs::DEFAULT_MAX_ATTEMPTS,
+        resume_at,
+    )
+    .await?;
+    tx.commit().await?;
+    tracing::info!(case_id = %case.id, "agent paused; case waits");
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn evaluate(
     state: &AppState,
     case: &Case,
     agent: &AgentContext,
+    case_agent: &CaseAgent,
+    allowed: &[String],
     turn: i64,
     name: &str,
     args: Value,
+    workflow: bool,
     usage: &mut Usage,
 ) -> Result<TurnResult, JobError> {
     let Some(tool) = tools::registry().get(name) else {
@@ -222,10 +359,19 @@ async fn evaluate(
             error: e,
         });
     }
+    if !allowed.iter().any(|a| a == &tool_name) {
+        let reason = format!("{} does not use {tool_name}; create a task for a person instead.", agent.agent.name);
+        return Ok(TurnResult::Blocked { tool: tool_name, input: args, reason });
+    }
     if let Some(reason) = permission_block(agent, &tool_name) {
         return Ok(TurnResult::Blocked { tool: tool_name, input: args, reason });
     }
-    let ctx = ToolCtx { state, case, turn, actor: Actor::System };
+    if case.shadow && (tool.risk() == Risk::High || tool_name == "create_task") {
+        let summary = format!("Observe mode: would have used {tool_name}; nothing was done");
+        let out = ToolOutput { summary, value: json!({"simulated": true, "tool": tool_name}), ..Default::default() };
+        return Ok(TurnResult::Ran { tool: tool_name, input: args, out, auto_sent: false });
+    }
+    let mut ctx = ToolCtx { state, case, turn, actor: Actor::System, hold_secs: 0 };
     let mut preview = None;
     if tool.risk() != Risk::Read {
         if tool.risk() == Risk::High {
@@ -240,41 +386,35 @@ async fn evaluate(
                 return Ok(TurnResult::Blocked { tool: tool_name, input: args, reason });
             }
         }
-        let input = CriticInput {
-            goal: case.goal.clone(),
-            facts: case.state(),
-            tool: tool_name.clone(),
-            risk: tool.risk().as_str(),
-            args: args.clone(),
-            preview: preview.clone(),
-        };
-        match state.critic.review(&input).await {
-            Ok(v) => {
-                usage.add(&v.usage);
-                if !v.ok {
-                    let reason = if v.reason.is_empty() { "The check did not approve this action.".into() } else { v.reason };
-                    return Ok(TurnResult::Blocked { tool: tool_name, input: args, reason });
-                }
-            }
-            Err(e) => {
-                tracing::warn!(case_id = %case.id, error = %e, "critic unavailable");
-                return Ok(TurnResult::Blocked { tool: tool_name, input: args, reason: "The safety check is unavailable right now.".into() });
-            }
+        if !workflow && let Some(reason) = critic_objection(state, case, tool, &args, preview.as_ref(), usage).await {
+            return Ok(TurnResult::Blocked { tool: tool_name, input: args, reason });
         }
     }
     let mut auto_sent = false;
     if tool.risk() == Risk::High {
         let preview = preview.unwrap_or_default();
-        if tool.name() != "send_email" || !autonomy::may_send_on_its_own(state, case, agent, &preview).await? {
+        if tool.name() != "send_email" || !autonomy::may_send_on_its_own(state, case, agent, case_agent, &preview).await? {
+            return Ok(TurnResult::Approval { tool: tool_name, input: args, preview });
+        }
+        // A fixed workflow only asks the critic when a send would go out without a person.
+        if workflow && critic_objection(state, case, tool, &args, Some(&preview), usage).await.is_some() {
             return Ok(TurnResult::Approval { tool: tool_name, input: args, preview });
         }
         auto_sent = true;
+        ctx.hold_secs = state.config.agent_auto_send_delay_secs;
     }
     Ok(match tool.run(&ctx, &args).await {
         Ok(mut out) => {
             if auto_sent {
                 out.summary = format!("Sent automatically (your profile allows routine replies). {}", out.summary);
                 out.value["sent_without_approval"] = json!(true);
+                if ctx.hold_secs > 0
+                    && let (Some(draft_id), Some(at)) = (out.value.get("draft_id").and_then(Value::as_str), out.value.get("send_at_ms").and_then(Value::as_i64))
+                {
+                    autonomy::record_hold(state, &case.workspace_id, draft_id, at, ctx.hold_secs).await?;
+                    out.value["held_until"] = json!(crate::db::iso(at));
+                    out.summary = format!("{} Held until {} so you can stop it.", out.summary, crate::db::iso(at));
+                }
             }
             TurnResult::Ran { tool: tool_name, input: args, out, auto_sent }
         }
@@ -295,6 +435,28 @@ async fn evaluate(
     })
 }
 
+/// Why the critic does not approve this action, if it does not (also when it cannot be reached).
+async fn critic_objection(state: &AppState, case: &Case, tool: &dyn tools::Tool, args: &Value, preview: Option<&Preview>, usage: &mut Usage) -> Option<String> {
+    let input = CriticInput {
+        goal: case.goal.clone(),
+        facts: case.state(),
+        tool: tool.name().to_string(),
+        risk: tool.risk().as_str(),
+        args: args.clone(),
+        preview: preview.cloned(),
+    };
+    match state.critic.review(&input).await {
+        Ok(v) => {
+            usage.add(&v.usage);
+            (!v.ok).then(|| if v.reason.is_empty() { "The check did not approve this action.".into() } else { v.reason })
+        }
+        Err(e) => {
+            tracing::warn!(case_id = %case.id, error = %e, "critic unavailable");
+            Some("The safety check is unavailable right now.".into())
+        }
+    }
+}
+
 async fn preview_again(ctx: &ToolCtx<'_>, tool: &dyn tools::Tool, args: &Value) -> Result<Preview, JobError> {
     match tool.preview(ctx, args).await {
         Ok(p) => Ok(p.unwrap_or_default()),
@@ -303,7 +465,7 @@ async fn preview_again(ctx: &ToolCtx<'_>, tool: &dyn tools::Tool, args: &Value) 
     }
 }
 
-async fn commit(state: &AppState, case: &Case, turn: i64, usage: &Usage, result: TurnResult) -> Result<(), JobError> {
+async fn commit(state: &AppState, case: &Case, turn: i64, usage: &Usage, result: TurnResult, state_patch: Option<Value>) -> Result<(), JobError> {
     let now = now_ms();
     let mut tx = state.db.begin().await?;
     // Fence: only one run of this turn may record it, and never after a cancel.
@@ -338,6 +500,27 @@ async fn commit(state: &AppState, case: &Case, turn: i64, usage: &Usage, result:
         model_id: usage.model_id.clone(),
     };
     let static_name = |name: &str| tools::registry().get(name).map(|t| t.name());
+    if let Some(patch) = &state_patch {
+        case::merge_state(&mut tx, &case.workspace_id, &case.id, patch).await?;
+    }
+    if let Some((tool, status, input)) = audited_call(&result) {
+        audit::record(
+            &mut tx,
+            Entry {
+                workspace_id: &case.workspace_id,
+                actor: Actor::System,
+                action: TOOL_CALL_ACTION,
+                entity_type: "case",
+                entity_id: &case.id,
+                message_id: case.message_id.as_deref(),
+                metadata: json!({
+                    "tool": tool, "scope": scope_of_tool(tool).as_str(), "status": status, "turn": turn,
+                    "agent_id": case.agent_id, "agent_version": case.agent_version, "shadow": case.shadow, "refs": call_refs(input),
+                }),
+            },
+        )
+        .await?;
+    }
     let mut next_at = Some(now);
     let mut error_streak = 0;
     match result {
@@ -359,12 +542,13 @@ async fn commit(state: &AppState, case: &Case, turn: i64, usage: &Usage, result:
             }
             case::insert_step(&mut tx, case, step("tool", static_name(&tool), out.summary, input, out.value, "ok")).await?;
             if let Some(patch) = &out.state {
-                case::merge_state(&mut tx, &case.id, patch).await?;
+                case::merge_state(&mut tx, &case.workspace_id, &case.id, patch).await?;
             }
             if let Some(wake) = out.sleep_until {
-                sqlx::query("UPDATE cases SET status = 'waiting_event', next_wake_at = ?1 WHERE id = ?2")
+                sqlx::query("UPDATE cases SET status = 'waiting_event', next_wake_at = ?1 WHERE id = ?2 AND workspace_id = ?3")
                     .bind(wake)
                     .bind(&case.id)
+                    .bind(&case.workspace_id)
                     .execute(&mut *tx)
                     .await?;
                 next_at = Some(wake);
@@ -391,8 +575,8 @@ async fn commit(state: &AppState, case: &Case, turn: i64, usage: &Usage, result:
             let approval_id = new_id("apr");
             sqlx::query(
                 "INSERT INTO agent_approvals (id, workspace_id, case_id, step_seq, action, summary, to_address, subject, body, draft_id,
-                                              requirement_id, candidates_json, input_json, status, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, 'pending', ?14)",
+                                              requirement_id, candidates_json, input_json, status, created_at, agent_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, 'pending', ?14, ?15)",
             )
             .bind(&approval_id)
             .bind(&case.workspace_id)
@@ -408,9 +592,10 @@ async fn commit(state: &AppState, case: &Case, turn: i64, usage: &Usage, result:
             .bind(json!(preview.candidates).to_string())
             .bind(input.to_string())
             .bind(now)
+            .bind(&case.agent_id)
             .execute(&mut *tx)
             .await?;
-            sqlx::query("UPDATE cases SET status = 'waiting_approval' WHERE id = ?1").bind(&case.id).execute(&mut *tx).await?;
+            sqlx::query("UPDATE cases SET status = 'waiting_approval' WHERE id = ?1 AND workspace_id = ?2").bind(&case.id).bind(&case.workspace_id).execute(&mut *tx).await?;
             audit::record(
                 &mut tx,
                 Entry {
@@ -429,10 +614,11 @@ async fn commit(state: &AppState, case: &Case, turn: i64, usage: &Usage, result:
         TurnResult::Finish { outcome, summary } => {
             let summary = sentence(&summary, 240);
             case::insert_step(&mut tx, case, step("finish", None, summary.clone(), json!({"outcome": outcome}), Value::Null, "ok")).await?;
-            sqlx::query("UPDATE cases SET status = 'done', outcome = COALESCE(?1, outcome), status_note = ?2 WHERE id = ?3")
+            sqlx::query("UPDATE cases SET status = 'done', outcome = COALESCE(?1, outcome), status_note = ?2 WHERE id = ?3 AND workspace_id = ?4")
                 .bind(&outcome)
                 .bind(&summary)
                 .bind(&case.id)
+                .bind(&case.workspace_id)
                 .execute(&mut *tx)
                 .await?;
             audit::record(
@@ -451,7 +637,12 @@ async fn commit(state: &AppState, case: &Case, turn: i64, usage: &Usage, result:
             next_at = None;
         }
     }
-    sqlx::query("UPDATE cases SET error_streak = ?1 WHERE id = ?2").bind(error_streak).bind(&case.id).execute(&mut *tx).await?;
+    sqlx::query("UPDATE cases SET error_streak = ?1 WHERE id = ?2 AND workspace_id = ?3")
+        .bind(error_streak)
+        .bind(&case.id)
+        .bind(&case.workspace_id)
+        .execute(&mut *tx)
+        .await?;
     if error_streak >= MAX_ERROR_STREAK {
         let current = Case { step_count: turn, spent_usd: case.spent_usd + usage.cost_usd, ..case.clone() };
         case::fail(&mut tx, &current, &format!("{MAX_ERROR_STREAK} steps in a row failed")).await?;
@@ -490,6 +681,11 @@ mod tests {
             thread_id: Some("thr_1".into()),
             next_wake_at: None,
             agent_user_id: None,
+            agent_id: None,
+            agent_version: None,
+            trigger: None,
+            outcome_detail: None,
+            shadow: false,
             created_at: 0,
             updated_at: 0,
         }
@@ -503,27 +699,34 @@ mod tests {
         assert!(limit_reached(3, 15, 0.25, 0.10).is_some());
     }
 
+    fn steps_row(i: i64) -> StepRow {
+        StepRow {
+            seq: i,
+            turn: i,
+            kind: "tool".into(),
+            tool: Some("search_mail".into()),
+            summary: format!("step {i}"),
+            input_json: r#"{"query":"java"}"#.into(),
+            output_json: format!(r#"{{"marker":"out{i}"}}"#),
+            status: "ok".into(),
+            cost_usd: 0.0,
+            created_at: 0,
+        }
+    }
+
     #[test]
     fn prompt_shows_goal_facts_and_recent_detail() {
-        let steps: Vec<StepRow> = (1..=10)
-            .map(|i| StepRow {
-                seq: i,
-                turn: i,
-                kind: "tool".into(),
-                tool: Some("search_mail".into()),
-                summary: format!("step {i}"),
-                input_json: r#"{"query":"java"}"#.into(),
-                output_json: format!(r#"{{"marker":"out{i}"}}"#),
-                status: "ok".into(),
-                cost_usd: 0.0,
-                created_at: 0,
-            })
-            .collect();
+        let steps: Vec<StepRow> = (1..=10).map(steps_row).collect();
         let p = render_prompt(&case(), &steps, 11);
         assert!(p.contains("Goal: Shortlist up to 3 candidates") && p.contains("Requirement id: req_1") && p.contains("Capgemini"));
         assert!(p.contains("#1 [tool search_mail] ok: step 1"));
         assert!(!p.contains("out1\"") && !p.contains("out2\""), "old steps are summarised only");
         assert!(p.contains("out3") && p.contains("out10"));
         assert!(p.contains("turn 11 of at most 15") && p.contains("Budget left: $0.090"));
+        let (header, steps_at, facts_at, turn_at) = (p.find("Case: Java").unwrap(), p.find("Steps so far").unwrap(), p.find("Case facts").unwrap(), p.find("This is turn").unwrap());
+        assert!(header < steps_at && steps_at < facts_at && facts_at < turn_at, "stable parts first, volatile last");
+        let later = render_prompt(&case(), &(1..=11).map(|i| StepRow { seq: i, ..steps_row(i) }).collect::<Vec<_>>(), 12);
+        let prefix = &p[..p.find("\nLatest details").unwrap()];
+        assert!(later.starts_with(prefix), "the header and earlier steps do not change when a step is added");
     }
 }

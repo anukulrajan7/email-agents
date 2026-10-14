@@ -36,12 +36,21 @@ pub struct Case {
     pub next_wake_at: Option<i64>,
     /// Whose mailbox the case's email arrived in (the person the agent works for).
     pub agent_user_id: Option<String>,
+    /// The agent working the case (None for cases from before the registry: the lead).
+    pub agent_id: Option<String>,
+    pub agent_version: Option<i64>,
+    /// What started it: `email_received`, `schedule`, `manual` or `requirement`.
+    pub trigger: Option<String>,
+    pub outcome_detail: Option<String>,
+    /// An observing agent's case: runs beside the real one and changes nothing.
+    pub shadow: bool,
     pub created_at: i64,
     pub updated_at: i64,
 }
 
 pub const CASE_COLUMNS: &str = "id, workspace_id, kind, title, goal, status, outcome, status_note, failure_reason, state_json, priority,
-    step_count, max_steps, spent_usd, budget_usd, error_streak, message_id, requirement_id, thread_id, next_wake_at, agent_user_id, created_at, updated_at";
+    step_count, max_steps, spent_usd, budget_usd, error_streak, message_id, requirement_id, thread_id, next_wake_at, agent_user_id,
+    agent_id, agent_version, \"trigger\", outcome_detail, shadow, created_at, updated_at";
 
 impl Case {
     pub fn state(&self) -> Value {
@@ -71,10 +80,7 @@ pub fn can_transition(from: &str, to: &str) -> bool {
     }
 }
 
-pub async fn get(db: &SqlitePool, case_id: &str) -> sqlx::Result<Option<Case>> {
-    sqlx::query_as(&format!("SELECT {CASE_COLUMNS} FROM cases WHERE id = ?1")).bind(case_id).fetch_optional(db).await
-}
-
+/// The one case lookup: always scoped by workspace, so another tenant's case id is simply not found.
 pub async fn get_in(db: &SqlitePool, ws: &str, case_id: &str) -> sqlx::Result<Option<Case>> {
     sqlx::query_as(&format!("SELECT {CASE_COLUMNS} FROM cases WHERE id = ?1 AND workspace_id = ?2"))
         .bind(case_id)
@@ -97,12 +103,13 @@ pub struct StepRow {
     pub created_at: i64,
 }
 
-pub async fn steps(db: &SqlitePool, case_id: &str) -> sqlx::Result<Vec<StepRow>> {
+pub async fn steps(db: &SqlitePool, ws: &str, case_id: &str) -> sqlx::Result<Vec<StepRow>> {
     sqlx::query_as(
         "SELECT seq, turn, kind, tool, summary, input_json, output_json, status, cost_usd, created_at
-         FROM case_steps WHERE case_id = ?1 ORDER BY seq",
+         FROM case_steps WHERE case_id = ?1 AND workspace_id = ?2 ORDER BY seq",
     )
     .bind(case_id)
+    .bind(ws)
     .fetch_all(db)
     .await
 }
@@ -168,10 +175,11 @@ pub async fn insert_step(conn: &mut SqliteConnection, case: &Case, step: NewStep
 }
 
 /// Shallow-merges `patch` into the case's state (JSON merge patch).
-pub async fn merge_state(conn: &mut SqliteConnection, case_id: &str, patch: &Value) -> sqlx::Result<()> {
-    sqlx::query("UPDATE cases SET state_json = json_patch(state_json, ?1) WHERE id = ?2")
+pub async fn merge_state(conn: &mut SqliteConnection, ws: &str, case_id: &str, patch: &Value) -> sqlx::Result<()> {
+    sqlx::query("UPDATE cases SET state_json = json_patch(state_json, ?1) WHERE id = ?2 AND workspace_id = ?3")
         .bind(patch.to_string())
         .bind(case_id)
+        .bind(ws)
         .execute(conn)
         .await?;
     Ok(())
@@ -188,7 +196,7 @@ pub async fn enqueue_step(conn: &mut SqliteConnection, ws: &str, case_id: &str, 
         kind::AGENT_STEP,
         &step_key(case_id, turn),
         Some(ws),
-        &json!({ "case_id": case_id, "turn": turn }),
+        &json!({ "case_id": case_id, "turn": turn, "workspace_id": ws }),
         jobs::DEFAULT_MAX_ATTEMPTS,
         run_at,
     )
@@ -207,6 +215,11 @@ pub struct NewCase<'a> {
     pub state: Value,
     pub created_by: Option<&'a str>,
     pub agent_user_id: Option<&'a str>,
+    pub agent_id: Option<&'a str>,
+    pub agent_version: Option<i64>,
+    pub trigger: Option<&'a str>,
+    /// An observing agent's case: few steps, no side effects.
+    pub shadow: bool,
 }
 
 /// Creates the case and schedules its first turn, unless an equivalent case exists
@@ -216,8 +229,9 @@ pub async fn create(conn: &mut SqliteConnection, config: &Config, new: NewCase<'
     let now = now_ms();
     let created = sqlx::query(
         "INSERT OR IGNORE INTO cases (id, workspace_id, kind, title, goal, status, state_json, priority, max_steps, budget_usd,
-                                      message_id, requirement_id, thread_id, created_by, created_at, updated_at, agent_user_id)
-         VALUES (?1, ?2, ?3, ?4, ?5, 'running', ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?14, ?15)",
+                                      message_id, requirement_id, thread_id, created_by, created_at, updated_at, agent_user_id,
+                                      agent_id, agent_version, \"trigger\", shadow)
+         VALUES (?1, ?2, ?3, ?4, ?5, 'running', ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?14, ?15, ?16, ?17, ?18, ?19)",
     )
     .bind(&id)
     .bind(new.workspace_id)
@@ -226,7 +240,7 @@ pub async fn create(conn: &mut SqliteConnection, config: &Config, new: NewCase<'
     .bind(super::sentence(&new.goal, 400))
     .bind(new.state.to_string())
     .bind(&new.priority)
-    .bind(config.agent_max_steps.max(1))
+    .bind(if new.shadow { config.agent_max_steps.clamp(1, crate::agent_registry::SHADOW_MAX_STEPS) } else { config.agent_max_steps.max(1) })
     .bind(config.agent_budget_usd.max(0.0))
     .bind(new.message_id)
     .bind(new.requirement_id)
@@ -234,13 +248,17 @@ pub async fn create(conn: &mut SqliteConnection, config: &Config, new: NewCase<'
     .bind(new.created_by)
     .bind(now)
     .bind(new.agent_user_id)
+    .bind(new.agent_id)
+    .bind(new.agent_version)
+    .bind(new.trigger)
+    .bind(new.shadow)
     .execute(&mut *conn)
     .await?
     .rows_affected()
         == 1;
     if !created {
         let existing: String = sqlx::query_scalar(
-            "SELECT id FROM cases WHERE workspace_id = ?1 AND kind = ?2
+            "SELECT id FROM cases WHERE workspace_id = ?1 AND kind = ?2 AND shadow = ?5
                AND ((?3 IS NOT NULL AND requirement_id = ?3) OR (?4 IS NOT NULL AND message_id = ?4))
              ORDER BY created_at LIMIT 1",
         )
@@ -248,6 +266,7 @@ pub async fn create(conn: &mut SqliteConnection, config: &Config, new: NewCase<'
         .bind(new.kind)
         .bind(new.requirement_id)
         .bind(new.message_id)
+        .bind(new.shadow)
         .fetch_one(&mut *conn)
         .await?;
         return Ok((existing, false));
@@ -270,17 +289,19 @@ pub async fn create(conn: &mut SqliteConnection, config: &Config, new: NewCase<'
 }
 
 /// Moves a case to `to` if the transition is allowed from its current status. Returns true if changed.
-pub async fn set_status(conn: &mut SqliteConnection, case_id: &str, to: &str) -> sqlx::Result<bool> {
-    let from: Option<String> = sqlx::query_scalar("SELECT status FROM cases WHERE id = ?1").bind(case_id).fetch_optional(&mut *conn).await?;
+pub async fn set_status(conn: &mut SqliteConnection, ws: &str, case_id: &str, to: &str) -> sqlx::Result<bool> {
+    let from: Option<String> =
+        sqlx::query_scalar("SELECT status FROM cases WHERE id = ?1 AND workspace_id = ?2").bind(case_id).bind(ws).fetch_optional(&mut *conn).await?;
     let Some(from) = from else { return Ok(false) };
     if !can_transition(&from, to) {
         return Ok(false);
     }
-    let changed = sqlx::query("UPDATE cases SET status = ?1, updated_at = ?2 WHERE id = ?3 AND status = ?4")
+    let changed = sqlx::query("UPDATE cases SET status = ?1, updated_at = ?2 WHERE id = ?3 AND workspace_id = ?5 AND status = ?4")
         .bind(to)
         .bind(now_ms())
         .bind(case_id)
         .bind(&from)
+        .bind(ws)
         .execute(conn)
         .await?
         .rows_affected()
@@ -290,17 +311,19 @@ pub async fn set_status(conn: &mut SqliteConnection, case_id: &str, to: &str) ->
 
 /// Ends a case as failed with a plain reason (no-op if it already ended).
 pub async fn fail(conn: &mut SqliteConnection, case: &Case, reason: &str) -> sqlx::Result<bool> {
-    if !set_status(&mut *conn, &case.id, "failed").await? {
+    if !set_status(&mut *conn, &case.workspace_id, &case.id, "failed").await? {
         return Ok(false);
     }
-    sqlx::query("UPDATE cases SET failure_reason = ?1, next_wake_at = NULL WHERE id = ?2")
+    sqlx::query("UPDATE cases SET failure_reason = ?1, next_wake_at = NULL WHERE id = ?2 AND workspace_id = ?3")
         .bind(super::sentence(reason, 240))
         .bind(&case.id)
+        .bind(&case.workspace_id)
         .execute(&mut *conn)
         .await?;
-    sqlx::query("UPDATE agent_approvals SET status = 'declined', note = 'Case ended', decided_at = ?1 WHERE case_id = ?2 AND status = 'pending'")
+    sqlx::query("UPDATE agent_approvals SET status = 'declined', note = 'Case ended', decided_at = ?1 WHERE case_id = ?2 AND workspace_id = ?3 AND status = 'pending'")
         .bind(now_ms())
         .bind(&case.id)
+        .bind(&case.workspace_id)
         .execute(&mut *conn)
         .await?;
     insert_step(&mut *conn, case, NewStep::note(case.step_count, format!("Stopped: {reason}"), "error")).await?;

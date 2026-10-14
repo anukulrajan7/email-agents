@@ -363,6 +363,10 @@ pub async fn run_scenario(s: &Scenario, live: bool) -> Outcome {
         message_id = receive(format!("m{i}"), MAIN_THREAD.into(), mail.clone(), 1 + (n - i as i64 - 1)).await;
     }
 
+    // The scenarios exercise the planner loop, which is the lead's; workflow agents handle routine mail without it.
+    let lead: String = sqlx::query_scalar("SELECT id FROM agents WHERE workspace_id = ?1 AND kind = 'lead'").bind(&ws).fetch_one(&state.db).await.unwrap();
+    let (st, v) = call(&app, "POST", &format!("{base}/messages/{message_id}/route"), Some(json!({"agent_id": lead}))).await;
+    assert_eq!(st, StatusCode::OK, "route: {v}");
     let (st, case) = call(&app, "POST", &format!("{base}/cases"), Some(json!({"kind": "inbox", "message_id": message_id}))).await;
     assert_eq!(st, StatusCode::OK, "case: {case}");
     let case_id = case["id"].as_str().unwrap().to_string();

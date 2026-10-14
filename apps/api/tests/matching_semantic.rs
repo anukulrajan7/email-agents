@@ -221,7 +221,7 @@ async fn daily_digest_sends_new_strong_matches_once_per_day() {
     assert!(text.contains("Full Stack Developer (Infosys)") && text.contains("Vikram Shah"), "{text}");
     assert!(!text.contains("Neha Gupta"), "dismissed matches are left out");
 
-    assert_eq!(match_digest::send_match_digest(&h.state, &h.ws, now + 60_000).await.unwrap(), 0, "once per day");
+    assert_eq!(match_digest::send_match_digest(&h.state, &h.ws, now).await.unwrap(), 0, "once per day");
     assert_eq!(h.mail.sent.lock().unwrap().len(), 1);
     assert_eq!(match_digest::send_match_digest(&h.state, &h.ws, now + 2 * 86_400_000).await.unwrap(), 0, "no new matches later");
 

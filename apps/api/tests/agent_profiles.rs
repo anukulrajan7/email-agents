@@ -197,6 +197,11 @@ async fn env_with(planner: ScriptedPlanner, tweak: impl FnOnce(&mut Config)) -> 
     // Automatic drafts and cases off: tests start cases themselves.
     let settings = json!({"auto_reply": false, "reply_instructions": "", "signature": null});
     call(&app, "PUT", &format!("/api/v1/workspaces/{ws}/reply-settings"), ADMIN, Some(settings)).await;
+    sqlx::query("UPDATE agents SET status = 'paused', paused_reason = 'user' WHERE workspace_id = ?1 AND template_key IN ('general.inbox', 'personal.mailbox')")
+        .bind(&ws)
+        .execute(&state.db)
+        .await
+        .unwrap();
     let src = "src_priya".to_string();
     sqlx::query(
         "INSERT INTO email_sources (id, workspace_id, kind, status, external_connection_id, provider_config_key, capabilities_json,
@@ -378,6 +383,24 @@ async fn routine_replies_go_on_their_own_only_when_everyone_allows_it() {
     // Workspace allows routine sends, Priya lets routine replies go, Ravi is a known contact.
     let env = env(ScriptedPlanner::new().script("inbox", reply_script())).await;
     env.ok("PUT", "/agent", ADMIN, Some(json!({"permissions": {"send": "auto"}}))).await;
+    let raised: (i64, i64) = sqlx::query_as("SELECT MAX(autonomy_level), MAX(autonomy_cap) FROM agents WHERE workspace_id = ?1 AND (kind = 'lead' OR scope = 'personal')")
+        .bind(&env.ws)
+        .fetch_one(&env.state.db)
+        .await
+        .unwrap();
+    assert_eq!(raised, (1, 1), "switching the workspace to auto raises neither a level nor a cap");
+    sqlx::query("UPDATE agents SET autonomy_level = 2, autonomy_cap = 2 WHERE workspace_id = ?1 AND (kind = 'lead' OR scope = 'personal')")
+        .bind(&env.ws)
+        .execute(&env.state.db)
+        .await
+        .unwrap();
+    env.ok("PUT", "/agent", ADMIN, Some(json!({"name": "Meera", "permissions": {"send": "auto"}}))).await;
+    let kept: i64 = sqlx::query_scalar("SELECT MIN(autonomy_level) FROM agents WHERE workspace_id = ?1 AND (kind = 'lead' OR scope = 'personal')")
+        .bind(&env.ws)
+        .fetch_one(&env.state.db)
+        .await
+        .unwrap();
+    assert_eq!(kept, 2, "saving without changing send leaves earned levels alone");
     env.ok("PUT", "/me/agent-profile", OPERATOR, Some(profile("routine_ok"))).await;
     env.known_contact().await;
     let msg = env.receive("m1", "t-1", CLIENT, "Status update", "Hi Priya, the interview went well. Will update you.").await;

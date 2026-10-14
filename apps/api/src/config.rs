@@ -66,6 +66,10 @@ pub struct Config {
     pub agent_best_model_id: String,
     /// Replies the agent may send without asking, per mailbox owner per day.
     pub agent_auto_send_daily_cap: i64,
+    /// Highest autonomy level any agent may reach (0 to 3).
+    pub agent_max_autonomy: i64,
+    /// Automatic sends (level 2 and up) wait this many seconds so a person can stop them; 0 sends at once.
+    pub agent_auto_send_delay_secs: i64,
     pub email_retention_days: i64,
     pub job_worker_concurrency: usize,
     pub allow_test_emails: bool,
@@ -145,6 +149,8 @@ impl Config {
             agent_balanced_model_id: var("AGENT_BALANCED_MODEL_ID", "deepseek/deepseek-v4-flash"),
             agent_best_model_id: var("AGENT_BEST_MODEL_ID", "deepseek/deepseek-v4-pro"),
             agent_auto_send_daily_cap: var("AGENT_AUTO_SEND_DAILY_CAP", "20").parse().context("AGENT_AUTO_SEND_DAILY_CAP")?,
+            agent_max_autonomy: var("AGENT_MAX_AUTONOMY", "3").parse::<i64>().context("AGENT_MAX_AUTONOMY")?.clamp(0, 3),
+            agent_auto_send_delay_secs: var("AGENT_AUTO_SEND_DELAY_SECS", "600").parse::<i64>().context("AGENT_AUTO_SEND_DELAY_SECS")?.clamp(0, 86_400),
             email_retention_days: var("EMAIL_RETENTION_DAYS", "30").parse().context("EMAIL_RETENTION_DAYS")?,
             job_worker_concurrency: var("JOB_WORKER_CONCURRENCY", "2").parse().context("JOB_WORKER_CONCURRENCY")?,
             allow_test_emails: var("ALLOW_TEST_EMAILS", "false") == "true",
@@ -217,6 +223,8 @@ impl Config {
             agent_balanced_model_id: String::new(),
             agent_best_model_id: String::new(),
             agent_auto_send_daily_cap: 20,
+            agent_max_autonomy: 3,
+            agent_auto_send_delay_secs: 0,
             email_retention_days: 30,
             job_worker_concurrency: 2,
             allow_test_emails: true,

@@ -69,7 +69,8 @@ fn create_private(_path: &Path) -> std::io::Result<()> {
 }
 
 pub async fn migrate(pool: &SqlitePool) -> anyhow::Result<()> {
-    sqlx::migrate!("./migrations").run(pool).await.context("running migrations")
+    sqlx::migrate!("./migrations").run(pool).await.context("running migrations")?;
+    crate::agent_registry::seed::backfill_all(pool).await.context("seeding agents")
 }
 
 pub fn now_ms() -> i64 {

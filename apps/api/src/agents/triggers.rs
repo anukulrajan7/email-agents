@@ -7,11 +7,17 @@ use sqlx::SqliteConnection;
 use super::case::{self, NewCase};
 use crate::{
     agent_profiles::{self, TASK_REPLY, TASK_REQUIREMENTS},
+    agent_registry::{
+        SHADOW_MAX_PER_DAY,
+        routing::{self, RoutingAgent},
+        spec::Trigger,
+        store, templates,
+    },
     ai::Insight,
     db::now_ms,
     domain::OTHER_LABEL,
     http::AppState,
-    jobs::{Job, handlers::JobError, matching_jobs::REQUIREMENT_LABEL},
+    jobs::{self, Job, handlers::JobError, kind, matching_jobs::REQUIREMENT_LABEL},
 };
 
 /// Mail older than `AI_AUTO_HOURS` never starts a case on its own (same rule as other AI stages).
@@ -61,10 +67,14 @@ async fn agent_for(state: &AppState, ws: &str, message_id: &str, task: &str) -> 
 /// Starts (or finds) the requirement case.
 pub async fn start_requirement_case(state: &AppState, ws: &str, requirement_id: &str, created_by: Option<&str>) -> sqlx::Result<Started> {
     let Some(r) = requirement_facts(state, ws, requirement_id).await? else { return Ok(Started::NotFound) };
+    if !crate::packs::has_feature(&state.db, ws, crate::packs::FEATURE_REQUIREMENT_AGENT).await? {
+        return Ok(Started::NotAllowed("The HR & recruiting pack is not turned on for this workspace".into()));
+    }
     let owner = match agent_for(state, ws, &r.message_id, TASK_REQUIREMENTS).await? {
         Ok(owner) => owner,
         Err(why) => return Ok(Started::NotAllowed(why)),
     };
+    let desk = requirement_desk(state, ws).await?;
     let role_at = match r.client.as_deref().filter(|c| !c.trim().is_empty()) {
         Some(client) => format!("{} at {client}", r.role_title),
         None => r.role_title.clone(),
@@ -89,11 +99,25 @@ pub async fn start_requirement_case(state: &AppState, ws: &str, requirement_id: 
             }),
             created_by,
             agent_user_id: owner.as_deref(),
+            agent_id: desk.as_ref().map(|d| d.0.as_str()),
+            agent_version: desk.as_ref().map(|d| d.1),
+            trigger: Some("requirement"),
+            shadow: false,
         },
     )
     .await?;
     state.jobs_notify.notify_one();
     Ok(Started::Case(created.0, created.1))
+}
+
+/// The agent for requirement cases: the Candidates & Requirements desk when it is on, else the lead.
+async fn requirement_desk(state: &AppState, ws: &str) -> sqlx::Result<Option<(String, i64)>> {
+    let desk = store::by_template(&state.db, ws, templates::REQUIREMENTS_KEY).await?.filter(|a| a.status == "active");
+    let agent = match desk {
+        Some(d) => Some(d),
+        None => store::lead(&state.db, ws).await?.filter(|a| a.status == "active"),
+    };
+    Ok(agent.map(|a| (a.id, a.active_version.unwrap_or(0))))
 }
 
 async fn requirement_facts(state: &AppState, ws: &str, requirement_id: &str) -> sqlx::Result<Option<RequirementFacts>> {
@@ -121,10 +145,11 @@ pub async fn after_requirement_matched(state: &AppState, ws: &str, requirement_i
     }
     // A client's reply in the conversation can be read as a "new" requirement: one case per conversation.
     let thread_taken: bool = sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM cases WHERE thread_id = ?1 AND kind = 'requirement' AND requirement_id IS NOT ?2)",
+        "SELECT EXISTS (SELECT 1 FROM cases WHERE workspace_id = ?3 AND thread_id = ?1 AND kind = 'requirement' AND shadow = 0 AND requirement_id IS NOT ?2)",
     )
     .bind(&r.thread_id)
     .bind(requirement_id)
+    .bind(ws)
     .fetch_one(&state.db)
     .await?;
     if thread_taken {
@@ -157,13 +182,18 @@ async fn message_facts(state: &AppState, ws: &str, message_id: &str) -> sqlx::Re
     .await
 }
 
-/// Starts (or finds) the inbox case for one received email of this workspace.
+/// Starts (or finds) the inbox case for one received email of this workspace. The email is routed
+/// first; the routed agent works it. An observing (level 0) agent gets a shadow case beside the
+/// real one, unless a person started this case by hand.
 pub async fn start_inbox_case(state: &AppState, ws: &str, message_id: &str, created_by: Option<&str>) -> sqlx::Result<Started> {
     let Some(m) = message_facts(state, ws, message_id).await?.filter(|m| m.direction == "inbound") else { return Ok(Started::NotFound) };
     let owner = match agent_for(state, ws, message_id, TASK_REPLY).await? {
         Ok(owner) => owner,
         Err(why) => return Ok(Started::NotAllowed(why)),
     };
+    let routed = routing::route_message(&state.db, &state.config, ws, message_id).await?;
+    let handler = routed.as_ref().map(|r| (r.handler.row.id.clone(), r.handler.version));
+    let title = if m.subject.trim().is_empty() { "(no subject)".to_string() } else { m.subject.clone() };
     let mut conn = state.db.acquire().await?;
     let created = case::create(
         &mut conn,
@@ -171,7 +201,7 @@ pub async fn start_inbox_case(state: &AppState, ws: &str, message_id: &str, crea
         NewCase {
             workspace_id: ws,
             kind: "inbox",
-            title: if m.subject.trim().is_empty() { "(no subject)".into() } else { m.subject.clone() },
+            title: title.clone(),
             goal: format!("Resolve this email from {}: reply, or hand it to a person", m.sender_address),
             priority: m.priority.clone().unwrap_or_else(|| "normal".into()),
             message_id: Some(message_id),
@@ -180,30 +210,97 @@ pub async fn start_inbox_case(state: &AppState, ws: &str, message_id: &str, crea
             state: json!({"from": m.sender_address, "subject": m.subject, "label": m.category}),
             created_by,
             agent_user_id: owner.as_deref(),
+            agent_id: handler.as_ref().map(|h| h.0.as_str()),
+            agent_version: handler.as_ref().map(|h| h.1),
+            trigger: Some(if created_by.is_some() { "manual" } else { "email_received" }),
+            shadow: false,
         },
     )
     .await?;
+    if let Some(r) = routed.as_ref().filter(|r| r.route.shadow && created_by.is_none()) {
+        start_shadow_case(state, &mut conn, ws, &r.primary, &m, message_id, owner.as_deref()).await?;
+    }
+    drop(conn);
     state.jobs_notify.notify_one();
     Ok(Started::Case(created.0, created.1))
 }
 
-async fn thread_has_open_case(state: &AppState, thread_id: &str) -> sqlx::Result<bool> {
-    sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM cases WHERE thread_id = ?1 AND status NOT IN ('done', 'failed', 'cancelled'))")
-        .bind(thread_id)
+/// Observing agents run only while they stay cheap: at most `SHADOW_MAX_PER_DAY` per workspace a
+/// day, and none once half of the workspace's daily AI budget is used.
+async fn shadow_allowed(state: &AppState, ws: &str) -> sqlx::Result<bool> {
+    Ok(shadow_cases_today(state, ws).await? < SHADOW_MAX_PER_DAY
+        && crate::ai_ledger::within_budget(&state.db, state.config.ai_daily_budget_usd * 0.5, ws).await)
+}
+
+async fn shadow_cases_today(state: &AppState, ws: &str) -> sqlx::Result<i64> {
+    const DAY_MS: i64 = 86_400_000;
+    sqlx::query_scalar("SELECT COUNT(*) FROM cases WHERE workspace_id = ?1 AND shadow = 1 AND created_at >= ?2")
+        .bind(ws)
+        .bind(now_ms() / DAY_MS * DAY_MS)
         .fetch_one(&state.db)
         .await
 }
 
-/// Hook after a new email was understood: start the Inbox agent when it needs a reply, isn't
-/// `other` (requirements have their own agent), is new, and the workspace drafts replies automatically.
+async fn start_shadow_case(
+    state: &AppState,
+    conn: &mut sqlx::SqliteConnection,
+    ws: &str,
+    agent: &RoutingAgent,
+    m: &MessageFacts,
+    message_id: &str,
+    owner: Option<&str>,
+) -> sqlx::Result<()> {
+    if !shadow_allowed(state, ws).await? {
+        return Ok(());
+    }
+    case::create(
+        conn,
+        &state.config,
+        NewCase {
+            workspace_id: ws,
+            kind: "inbox",
+            title: if m.subject.trim().is_empty() { "(no subject)".into() } else { m.subject.clone() },
+            goal: format!("Observe: how {} would handle this email from {}", agent.row.name, m.sender_address),
+            priority: m.priority.clone().unwrap_or_else(|| "normal".into()),
+            message_id: Some(message_id),
+            requirement_id: None,
+            thread_id: Some(&m.thread_id),
+            state: json!({"from": m.sender_address, "subject": m.subject, "label": m.category}),
+            created_by: None,
+            agent_user_id: owner,
+            agent_id: Some(&agent.row.id),
+            agent_version: Some(agent.version),
+            trigger: Some("email_received"),
+            shadow: true,
+        },
+    )
+    .await?;
+    Ok(())
+}
+
+async fn thread_has_open_case(state: &AppState, ws: &str, thread_id: &str) -> sqlx::Result<bool> {
+    sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM cases WHERE workspace_id = ?2 AND thread_id = ?1 AND shadow = 0 AND status NOT IN ('done', 'failed', 'cancelled'))")
+        .bind(thread_id)
+        .bind(ws)
+        .fetch_one(&state.db)
+        .await
+}
+
+/// Hook after a new email was understood: route it (recorded for every inbound email), then start
+/// the routed agent when it needs a reply, isn't `other` (requirements have their own agent), is
+/// new, and the workspace drafts replies automatically.
 pub async fn after_analysis(state: &AppState, job: &Job, message_id: &str, insight: &Insight) -> Result<(), JobError> {
-    if job.dedupe_key != format!("analyze:{message_id}") || !insight.needs_reply || !state.planner.enabled() {
+    if job.dedupe_key != format!("analyze:{message_id}") {
         return Ok(());
     }
     let Some(ws) = job.workspace_id.as_deref() else { return Ok(()) };
+    routing::route_message(&state.db, &state.config, ws, message_id).await?;
+    if !insight.needs_reply || !state.planner.enabled() {
+        return Ok(());
+    }
     let Some(m) = message_facts(state, ws, message_id).await? else { return Ok(()) };
     let label_ok = m.category.as_deref().is_some_and(|c| c != OTHER_LABEL && c != REQUIREMENT_LABEL);
-    if m.direction != "inbound" || !label_ok || !is_recent(state, m.received_at) || thread_has_open_case(state, &m.thread_id).await? {
+    if m.direction != "inbound" || !label_ok || !is_recent(state, m.received_at) || thread_has_open_case(state, ws, &m.thread_id).await? {
         return Ok(());
     }
     if !crate::reply_settings::load(&state.db, &state.config, ws).await?.auto_reply {
@@ -244,4 +341,105 @@ pub async fn wake_for_thread(conn: &mut SqliteConnection, ws: &str, thread_id: &
             .await?;
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------- schedule triggers
+
+const TICK_EVERY_MS: i64 = 15 * 60 * 1000;
+
+/// Enqueues one `agent_schedule_tick` per workspace per 15-minute bucket (called from the worker's maintenance pass).
+pub async fn schedule(state: &AppState) -> sqlx::Result<()> {
+    let bucket = now_ms() / TICK_EVERY_MS;
+    let workspaces: Vec<String> = sqlx::query_scalar("SELECT id FROM workspaces").fetch_all(&state.db).await?;
+    let mut conn = state.db.acquire().await?;
+    for ws in workspaces {
+        jobs::enqueue_with_attempts(&mut conn, kind::AGENT_SCHEDULE_TICK, &format!("agent_tick:{ws}:{bucket}"), Some(&ws), &json!({ "workspace_id": ws }), 3)
+            .await?;
+    }
+    Ok(())
+}
+
+pub async fn schedule_tick_job(state: &AppState, job: &Job) -> Result<(), JobError> {
+    let ws = job.workspace_id.as_deref().ok_or_else(|| JobError::Permanent("agent tick without a workspace".into()))?;
+    run_schedule_tick(state, ws, now_ms()).await?;
+    Ok(())
+}
+
+/// Starts a case for every active agent whose schedule trigger is due. The first pass only sets the
+/// clock (an agent never fires the moment it appears). Returns how many cases were started.
+pub async fn run_schedule_tick(state: &AppState, ws: &str, now: i64) -> sqlx::Result<usize> {
+    if !state.planner.enabled() {
+        return Ok(0);
+    }
+    let mut started = 0;
+    for agent in routing::active_agents(&state.db, &state.config, ws).await? {
+        let Some(hours) = agent
+            .spec
+            .triggers
+            .iter()
+            .filter_map(|t| match t {
+                Trigger::Schedule { every_hours } => Some(i64::from(*every_hours)),
+                _ => None,
+            })
+            .min()
+        else {
+            continue;
+        };
+        if agent.row.next_run_at.is_some_and(|at| at > now) {
+            continue;
+        }
+        let next = now + hours * 3_600_000;
+        let due = agent.row.next_run_at.is_some();
+        let claimed = sqlx::query("UPDATE agents SET next_run_at = ?1 WHERE id = ?2 AND workspace_id = ?3 AND next_run_at IS ?4")
+            .bind(next)
+            .bind(&agent.row.id)
+            .bind(ws)
+            .bind(agent.row.next_run_at)
+            .execute(&state.db)
+            .await?
+            .rows_affected()
+            == 1;
+        if !claimed || !due {
+            continue;
+        }
+        let open: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM cases WHERE workspace_id = ?1 AND agent_id = ?2 AND \"trigger\" = 'schedule' AND status NOT IN ('done', 'failed', 'cancelled'))",
+        )
+        .bind(ws)
+        .bind(&agent.row.id)
+        .fetch_one(&state.db)
+        .await?;
+        let shadow = agent.level == 0;
+        if open || (shadow && !shadow_allowed(state, ws).await?) {
+            continue;
+        }
+        let mut conn = state.db.acquire().await?;
+        case::create(
+            &mut conn,
+            &state.config,
+            NewCase {
+                workspace_id: ws,
+                kind: "inbox",
+                title: format!("Scheduled: {}", agent.row.name),
+                goal: agent.spec.goal.clone(),
+                priority: "normal".into(),
+                message_id: None,
+                requirement_id: None,
+                thread_id: None,
+                state: json!({"scheduled_by": agent.row.key}),
+                created_by: None,
+                agent_user_id: agent.row.owner_user_id.as_deref(),
+                agent_id: Some(&agent.row.id),
+                agent_version: Some(agent.version),
+                trigger: Some("schedule"),
+                shadow,
+            },
+        )
+        .await?;
+        started += 1;
+    }
+    if started > 0 {
+        state.jobs_notify.notify_one();
+    }
+    Ok(started)
 }
