@@ -221,7 +221,7 @@ pub async fn update(
     }
     sqlx::query(
         "UPDATE labels SET name = COALESCE(?1, name), description = COALESCE(?2, description), color = COALESCE(?3, color),
-                archived = COALESCE(?4, archived), position = COALESCE(?5, position)
+                archived = COALESCE(?4, archived), archived_by_pack = CASE WHEN ?4 IS NULL THEN archived_by_pack ELSE 0 END, position = COALESCE(?5, position)
          WHERE id = ?6 AND workspace_id = ?7",
     )
     .bind(body.name.as_deref().map(str::trim))

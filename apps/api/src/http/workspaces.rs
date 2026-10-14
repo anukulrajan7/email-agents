@@ -1,6 +1,6 @@
 use axum::{
     Json,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
 };
 use serde::Deserialize;
@@ -105,7 +105,7 @@ pub async fn create(
         }
         (None, None) => (vec![packs::GENERAL], false),
     };
-    let seeds = if blank { vec![&OTHER_SEED] } else { packs::labels_for(&chosen) };
+    let seeds = if blank { vec![(None, &OTHER_SEED)] } else { packs::labels_with_source(&chosen) };
     let id = new_id("ws");
     let now = now_ms();
     let mut tx = state.db.begin().await?;
@@ -186,38 +186,51 @@ pub struct PutPacks {
     packs: Vec<String>,
 }
 
-/// Sets the enabled packs. Enabling seeds the pack's labels (and staffing's workflows) without
-/// touching existing or archived labels; disabling keeps all data and only gates features.
+#[derive(Deserialize)]
+pub struct PutPacksQuery {
+    dry_run: Option<String>,
+}
+
+/// Sets the enabled packs. Enabling seeds the pack's missing labels and brings back the ones an earlier
+/// removal hid; disabling hides the pack's labels (never deletes) unless another enabled pack provides them.
+/// `?dry_run=1` returns what would change and saves nothing.
 pub async fn put_packs(
     State(state): State<AppState>,
     user: AuthUser,
     Path(ws): Path<String>,
+    Query(q): Query<PutPacksQuery>,
     Json(body): Json<PutPacks>,
 ) -> AppResult<Json<Value>> {
     require_role(&state.db, &ws, &user, Role::Admin).await?;
     let chosen = parse_packs(&body.packs)?;
+    let dry_run = matches!(q.dry_run.as_deref(), Some("1" | "true"));
     // Read inside the transaction: a concurrent save makes this one fail instead of diffing a stale list.
     let mut tx = state.db.begin().await?;
     let before = packs::enabled_keys(&mut *tx, &ws).await?;
     let added: Vec<&str> = chosen.iter().copied().filter(|k| !before.contains(k)).collect();
     let removed: Vec<&str> = before.iter().copied().filter(|k| !chosen.contains(k)).collect();
-    let seeds = packs::labels_for(&added);
+    let changes = packs::plan_labels(&mut tx, &ws, &before, &chosen).await?;
+    let active: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM labels WHERE workspace_id = ?1 AND archived = 0")
+        .bind(&ws)
+        .fetch_one(&mut *tx)
+        .await?;
+    if changes.active_delta() > 0 && active + changes.active_delta() > crate::labels::MAX_ACTIVE_LABELS {
+        let names: Vec<&str> = changes.added.iter().map(|(_, l)| l.name).chain(changes.restored.iter().map(|l| l.name.as_str())).collect();
+        return Err(AppError::Conflict(format!(
+            "these packs bring back {} ({}), but a workspace can have at most {} active labels; archive some labels first",
+            names.len(),
+            names.join(", "),
+            crate::labels::MAX_ACTIVE_LABELS
+        )));
+    }
+    if dry_run {
+        let mut v = changes.to_json();
+        v["dry_run"] = json!(true);
+        return Ok(Json(v));
+    }
     // Record the implicit default first (a workspace without rows counts as general).
     packs::enable(&mut tx, &ws, &before).await?;
-    if !added.is_empty() {
-        let active: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM labels WHERE workspace_id = ?1 AND archived = 0")
-            .bind(&ws)
-            .fetch_one(&mut *tx)
-            .await?;
-        let new = packs::missing_labels(&mut tx, &ws, &seeds).await? as i64;
-        if active + new > crate::labels::MAX_ACTIVE_LABELS {
-            return Err(AppError::Conflict(format!(
-                "these packs add {new} labels, but a workspace can have at most {} active labels",
-                crate::labels::MAX_ACTIVE_LABELS
-            )));
-        }
-        packs::seed_labels(&mut tx, &ws, &seeds).await?;
-    }
+    packs::apply_labels(&mut tx, &ws, &changes).await?;
     packs::enable(&mut tx, &ws, &added).await?;
     packs::disable(&mut tx, &ws, &removed).await?;
     audit::record(
@@ -229,12 +242,19 @@ pub async fn put_packs(
             entity_type: "workspace",
             entity_id: &ws,
             message_id: None,
-            metadata: json!({ "enabled": added, "disabled": removed }),
+            metadata: json!({
+                "enabled": added, "disabled": removed,
+                "labels_added": changes.added.len(), "labels_restored": changes.restored.len(), "labels_hidden": changes.hidden.len(),
+            }),
         },
     )
     .await?;
     tx.commit().await?;
-    packs_view(&state, &ws).await
+    let Json(mut view) = packs_view(&state, &ws).await?;
+    if let (Some(out), Value::Object(extra)) = (view.as_object_mut(), changes.to_json()) {
+        out.extend(extra);
+    }
+    Ok(Json(view))
 }
 
 #[derive(Deserialize)]
