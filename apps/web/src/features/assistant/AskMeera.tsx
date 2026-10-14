@@ -1,10 +1,9 @@
 import { useEffect, useId, useRef, useState } from 'react';
 import { Button } from '../../components/ui';
 import { AssistantPanel } from './AssistantPanel';
-import { useAssistantName } from './hooks';
+import { ASSISTANT_NAME as assistantName } from './labels';
 
 export function AskMeera({ ws }: { ws: string }) {
-  const assistantName = useAssistantName(ws);
   const [open, setOpen] = useState(false);
   const [mounted, setMounted] = useState(false);
   const panelRef = useRef<HTMLElement>(null);

@@ -3,7 +3,8 @@ import { useLocation } from 'react-router';
 import { ApiError } from '../../api/client';
 import { Button, Input, Spinner, Switch, TextLink, useToast } from '../../components/ui';
 import { cn } from '../../lib/cn';
-import { useCommand, useConfirmPlan, useConversation, useTranscribe, useAssistantName } from './hooks';
+import { useCommand, useConfirmPlan, useConversation, useTranscribe } from './hooks';
+import { ASSISTANT_NAME as assistantName } from './labels';
 import { dayKey, dayLabel, linkTarget } from './labels';
 import { readPageContext } from './pageContext';
 import { PlanCardView } from './PlanCardView';
@@ -43,7 +44,6 @@ function MicIcon() {
 }
 
 export function AssistantPanel({ ws, onClose }: { ws: string; onClose: () => void }) {
-  const assistantName = useAssistantName(ws);
   const notify = useToast();
   const location = useLocation();
   const viewing = readPageContext(location.pathname, location.search);

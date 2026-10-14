@@ -1,5 +1,3 @@
-import { useAgent } from '../agents/hooks';
-import { ASSISTANT_NAME } from './labels';
 import { useInfiniteQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '../../api/client';
 import type { CommandResponse, ConfirmResponse, HistoryPage, PageContext } from './types';
@@ -45,7 +43,3 @@ export function useTranscribe(ws: string) {
 }
 
 /** The workspace agent's name (falls back to the default while loading or if not set up). */
-export function useAssistantName(ws: string): string {
-  const agent = useAgent(ws);
-  return agent.data?.agent?.name || ASSISTANT_NAME;
-}
