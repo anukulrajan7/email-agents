@@ -36,6 +36,8 @@ pub struct AgentBrief {
     pub name: String,
     pub category: String,
     pub triggers: String,
+    /// Labels its email triggers listen to.
+    pub labels: Vec<String>,
 }
 
 /// Everything about the workspace that validation and the designer prompt need.
@@ -51,6 +53,8 @@ pub struct WsCtx {
     pub max_case_budget_usd: f64,
     /// The spec being edited, when the session edits an existing agent.
     pub editing: Option<AgentSpec>,
+    /// What the person asked for, so a missing trigger can be read from it.
+    pub request: String,
 }
 
 fn category_for_pack(pack: &str) -> &str {
@@ -93,6 +97,78 @@ pub fn trigger_summary(spec: &AgentSpec) -> String {
         })
         .collect();
     parts.join("; ")
+}
+
+static MAIL_WORDS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\b(e-?mails?|mails?|inbox|incoming|inbound|received|arrives?|comes? in)\b").expect("valid regex"));
+static BY_HAND: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\b(manual(ly)?|by hand|on demand|on request)\b").expect("valid regex"));
+
+fn is_manual(t: &Trigger) -> bool {
+    matches!(t, Trigger::Manual)
+}
+
+/// The labels of this workspace that the request names, e.g. "timesheet" in "analyse timesheet emails".
+fn labels_named(request: &str, ctx: &WsCtx) -> Vec<String> {
+    let text = request.to_lowercase();
+    ctx.labels
+        .iter()
+        .filter(|l| !matches!(l.key.as_str(), "general" | "other"))
+        .filter(|l| [l.key.replace('_', " "), l.name.to_lowercase()].iter().any(|n| !n.is_empty() && text.contains(n.trim_end_matches('s'))))
+        .map(|l| l.key.clone())
+        .take(3)
+        .collect()
+}
+
+/// An email trigger read from the request when the draft has no way to start besides a person.
+fn email_trigger_for(ctx: &WsCtx) -> Option<(Trigger, String)> {
+    if !MAIL_WORDS.is_match(&ctx.request) || BY_HAND.is_match(&ctx.request) {
+        return None;
+    }
+    let labels = labels_named(&ctx.request, ctx);
+    let note = if labels.is_empty() {
+        "You described incoming email, so it starts on emails that need a reply. Narrow it with a label, sender or subject words.".to_string()
+    } else {
+        format!("You described incoming email, so it starts on emails labelled {}.", labels.join(", "))
+    };
+    let needs_reply = labels.is_empty().then_some(true);
+    Some((Trigger::EmailReceived { matcher: spec::TriggerMatch { labels, needs_reply, ..Default::default() } }, note))
+}
+
+/// Things worth a look that do not stop the agent from being saved.
+pub fn warnings(spec: &AgentSpec, ctx: &WsCtx) -> Vec<String> {
+    let mut out = Vec::new();
+    if spec.triggers.iter().all(is_manual) {
+        out.push("Nothing starts this agent except a person running it: it will never pick up incoming email. Add an email trigger to change that.".to_string());
+    }
+    let mut told: Vec<&str> = Vec::new();
+    for t in &spec.triggers {
+        let Trigger::EmailReceived { matcher } = t else { continue };
+        for agent in ctx.agents.iter().filter(|a| a.key != spec.key) {
+            if let Some(label) = matcher.labels.iter().find(|l| agent.labels.contains(l))
+                && !told.contains(&agent.key.as_str())
+            {
+                told.push(&agent.key);
+                out.push(format!("{} already handles mail labelled {label}. Update {} instead of building a second agent, or narrow this one's trigger.", agent.name, agent.name));
+            }
+        }
+    }
+    out
+}
+
+/// Which emails the agent will get, in one sentence.
+pub fn routing_preview(spec: &AgentSpec) -> String {
+    let starts: Vec<String> = spec
+        .triggers
+        .iter()
+        .filter_map(|t| match t {
+            Trigger::Manual => None,
+            _ => Some(trigger_summary(&AgentSpec { triggers: vec![t.clone()], ..spec.clone() })),
+        })
+        .collect();
+    if starts.is_empty() {
+        "It gets no email: it only runs when a person starts it.".to_string()
+    } else {
+        format!("It will get: {}.", starts.join("; or "))
+    }
 }
 
 static NEGATED: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)^\s*(never|do not|don't|dont|avoid|no|not)\b").expect("valid regex"));
@@ -165,6 +241,9 @@ pub fn validate(spec: &AgentSpec, ctx: &WsCtx) -> Vec<Issue> {
     }
     if spec.mode == spec::Mode::Workflow && spec.steps.is_empty() {
         out.push(issue("steps", "workflow_without_steps", "a workflow needs at least one step (use mode agent for open-ended work)"));
+    }
+    if spec.mode == spec::Mode::Agent && spec.steps.is_empty() && spec.tools.is_empty() {
+        out.push(issue("tools", "agent_without_tools", "an agent with no steps needs the tools it will work with"));
     }
     let mut drafted = false;
     for (i, step) in spec.steps.iter().enumerate() {
@@ -251,6 +330,20 @@ pub fn normalise(mut spec: AgentSpec, ctx: &WsCtx) -> AgentSpec {
     }
     spec.budget.max_steps = spec.budget.max_steps.min(30);
 
+    let mut triggers: Vec<Trigger> = Vec::new();
+    for t in std::mem::take(&mut spec.triggers) {
+        if !triggers.contains(&t) {
+            triggers.push(t);
+        }
+    }
+    spec.triggers = triggers;
+    if spec.triggers.iter().all(is_manual)
+        && let Some((trigger, note)) = email_trigger_for(ctx)
+    {
+        spec.triggers = vec![trigger];
+        notes.push(note);
+    }
+
     let mut seen = Vec::new();
     spec.tools.retain(|t| {
         let fresh = !seen.contains(t);
@@ -321,6 +414,7 @@ pub mod tests_support {
             ceiling: CUSTOM_CEILING,
             max_case_budget_usd: MAX_CASE_BUDGET_USD,
             editing: None,
+            request: String::new(),
         }
     }
 }
@@ -453,7 +547,60 @@ mod tests {
         assert_eq!(codes(&|s| s.steps.push(Step::Label { value: "zzz".into() }), &c), ["step_needs_tool", "unknown_label"]);
         assert_eq!(codes(&|s| s.category = "support".into(), &WsCtx { packs: vec!["general".into()], ..c.clone() }), ["category_not_enabled"]);
         assert_eq!(codes(&|s| s.goal = "Process refunds for customers".into(), &c), ["forbidden_content"]);
-        let taken = WsCtx { agents: vec![AgentBrief { key: "inbox_two".into(), name: "x".into(), category: "general".into(), triggers: String::new() }], ..c };
+        let taken = WsCtx { agents: vec![AgentBrief { key: "inbox_two".into(), name: "x".into(), category: "general".into(), triggers: String::new(), labels: vec![] }], ..c };
         assert_eq!(codes(&|_| {}, &taken), ["key_taken"]);
+    }
+
+    fn timesheet_ctx(request: &str) -> WsCtx {
+        let mut c = ctx();
+        c.labels.push(LabelBrief { key: "timesheet".into(), name: "Timesheet".into() });
+        c.agents = vec![AgentBrief { key: "timesheets_desk".into(), name: "Rohan".into(), category: "hrms".into(), triggers: "labels timesheet".into(), labels: vec!["timesheet".into()] }];
+        c.request = request.into();
+        c
+    }
+
+    fn broken_builder_spec() -> AgentSpec {
+        let manual = serde_json::json!({"type": "manual"});
+        serde_json::from_value(serde_json::json!({
+            "name": "Timesheet Analysis Agent", "key": "timesheet_analysis_agent", "category": "custom",
+            "description": "Analyses timesheets", "goal": "Analyse the timesheets that arrive by email", "persona": "",
+            "mode": "agent", "triggers": [manual, manual, manual, manual, manual, manual, manual, manual], "steps": [],
+            "tools": ["read_email", "read_thread"], "scopes": ["read_mail"],
+            "permissions": {"draft": true, "send": "never", "max_autonomy": 1, "daily_send_cap": 20}
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn eight_manual_triggers_become_one_email_trigger_when_the_request_describes_mail() {
+        let c = timesheet_ctx("an agent that analyses timesheet emails when they come in");
+        let fixed = normalise(broken_builder_spec(), &c);
+        assert_eq!(fixed.triggers.len(), 1);
+        let Trigger::EmailReceived { matcher } = &fixed.triggers[0] else { panic!("{:?}", fixed.triggers) };
+        assert_eq!(matcher.labels, ["timesheet"]);
+        assert!(fixed.assumptions.iter().any(|a| a.contains("labelled timesheet")));
+        assert!(validate(&fixed, &c).is_empty());
+    }
+
+    #[test]
+    fn manual_triggers_are_deduped_and_kept_when_the_request_is_not_about_mail() {
+        let c = timesheet_ctx("a helper I start by hand");
+        let fixed = normalise(broken_builder_spec(), &c);
+        assert_eq!(fixed.triggers, [Trigger::Manual]);
+        assert!(warnings(&fixed, &c).iter().any(|w| w.contains("Nothing starts this agent")));
+        assert_eq!(routing_preview(&fixed), "It gets no email: it only runs when a person starts it.");
+    }
+
+    #[test]
+    fn an_agent_without_steps_needs_tools_and_a_trigger_that_overlaps_an_expert_is_flagged() {
+        let c = timesheet_ctx("timesheet emails");
+        let mut s = normalise(broken_builder_spec(), &c);
+        s.tools.clear();
+        s.scopes.clear();
+        assert!(validate(&s, &c).iter().any(|i| i.code == "agent_without_tools"));
+        let s = normalise(broken_builder_spec(), &c);
+        let w = warnings(&s, &c);
+        assert!(w.iter().any(|m| m.contains("Rohan already handles mail labelled timesheet") && m.contains("Update Rohan")), "{w:?}");
+        assert_eq!(routing_preview(&s), "It will get: labels timesheet.");
     }
 }

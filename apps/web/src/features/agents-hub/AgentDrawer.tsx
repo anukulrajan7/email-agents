@@ -9,12 +9,14 @@ import { AUTONOMY, LIMITED_BY } from './autonomy';
 import { agentCopy, agentDisplayName } from './agentCopy';
 import { AgentExplainer } from './AgentExplainer';
 import { FriendlyEmpty } from './FriendlyEmpty';
+import { TriggersTab } from './TriggersTab';
 import { useActivateVersion, useAgentAudit, useAgentOutgoing, useAgentVersions, usePatchAgent, useStopSend } from './hooks';
 
-type Tab = 'tune' | 'versions' | 'outgoing' | 'audit';
+type Tab = 'tune' | 'triggers' | 'versions' | 'outgoing' | 'audit';
 
 const TABS: TabItem<Tab>[] = [
   { id: 'tune', label: 'Tune' },
+  { id: 'triggers', label: 'Triggers' },
   { id: 'versions', label: 'Versions' },
   { id: 'outgoing', label: 'Going out' },
   { id: 'audit', label: 'Activity log' },
@@ -220,6 +222,7 @@ export function AgentDrawer({ ws, agent, isAdmin, onClose }: { ws: string; agent
       <AgentExplainer agent={agent} />
       <Tabs label={`${name} settings`} tabs={TABS} value={tab} onChange={setTab}>
         {tab === 'tune' && <TuneTab key={agent.id} ws={ws} agent={agent} canEdit={canEdit} />}
+        {tab === 'triggers' && <TriggersTab ws={ws} agent={agent} canEdit={canEdit} />}
         {tab === 'versions' && <VersionsTab ws={ws} agent={agent} canEdit={canEdit} />}
         {tab === 'outgoing' && <OutgoingTab ws={ws} agent={agent} canStop />}
         {tab === 'audit' && <AuditTab ws={ws} agent={agent} />}

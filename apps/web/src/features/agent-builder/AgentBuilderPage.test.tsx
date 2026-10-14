@@ -41,6 +41,8 @@ const session = (over: Partial<DesignerSession> = {}): DesignerSession => ({
   issues: [],
   questions: [],
   assumptions: [],
+  warnings: [],
+  routing_preview: null,
   dry_run: null,
   cost_usd: 0.01,
   limits: { calls_today: 1, daily_limit: 20, session_budget_usd: 0.1 },
@@ -136,6 +138,21 @@ describe('AgentBuilderPage', () => {
     await screen.findByText('Agents list');
     const call = fetchMock.mock.calls.find(([u]) => String(u).endsWith('/save'));
     expect(JSON.parse(call?.[1]?.body as string)).toEqual({ start_level: 0, confirm_steals: true });
+  });
+
+  it('says which emails the agent will get and warns about an overlap', async () => {
+    setup(
+      'admin',
+      (url) => {
+        if (url.endsWith('/designer/sessions/s1')) {
+          return json(session({ routing_preview: 'It will get: labels timesheet.', warnings: ['Rohan already handles mail labelled timesheet. Update Rohan instead.'] }));
+        }
+        return undefined;
+      },
+      '/w/w1/agents/new?session=s1',
+    );
+    expect(await screen.findByText('It will get: labels timesheet.')).toBeInTheDocument();
+    expect(screen.getByText(/Rohan already handles mail labelled timesheet/)).toBeInTheDocument();
   });
 
   it('shows problems in words and blocks the try-out', async () => {

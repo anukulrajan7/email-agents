@@ -43,9 +43,9 @@ async fn a_staffing_workspace_adds_the_five_hrms_desks() {
     let agents = env.agents(ADMIN).await;
     assert_eq!(names(&agents, "hrms"), ["Ananya", "Rohan", "Sneha", "Arjun", "Aditya"]);
     let desk = agents.iter().find(|a| a["template_key"] == "hrms.requirements").unwrap();
-    assert_eq!(desk["autonomy"]["earned"], 1, "today's requirement agent keeps working for real");
+    assert_eq!(desk["autonomy"]["earned"], 3, "the requirement agent acts on its own like the other experts");
     let leave = agents.iter().find(|a| a["template_key"] == "hrms.leave").unwrap();
-    assert_eq!(leave["autonomy"]["cap"], 1);
+    assert_eq!((leave["autonomy"]["earned"].as_i64(), leave["autonomy"]["cap"].as_i64()), (Some(3), Some(3)));
 }
 
 #[tokio::test]

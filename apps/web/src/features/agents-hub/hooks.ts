@@ -6,6 +6,7 @@ import type {
   AgentDetail,
   AgentList,
   AgentPatch,
+  AgentSpec,
   AgentSummary,
   AgentVersionInfo,
   Items,
@@ -91,5 +92,13 @@ export function useStopSend(ws: string, agentId: string) {
   return useMutation({
     mutationFn: (draftId: string) => api<{ status: 'cancelled'; draft_id: string }>(`/workspaces/${ws}/drafts/${draftId}/undo-send`, { method: 'POST' }),
     onSettled: () => qc.invalidateQueries({ queryKey: [...registryKey(ws), 'outgoing', agentId] }),
+  });
+}
+
+export function useSaveSpec(ws: string, id: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (spec: AgentSpec) => api<AgentDetail>(`/workspaces/${ws}/agents/${id}/spec`, { method: 'PUT', body: { spec, note: 'Triggers edited' } }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: registryKey(ws) }),
   });
 }

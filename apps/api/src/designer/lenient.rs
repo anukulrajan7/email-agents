@@ -51,11 +51,27 @@ fn fix_list(list: Option<&mut Value>, label: &str, infer: fn(&Map<String, Value>
     }
 }
 
+/// A trigger whose type is missing or unknown is dropped, never read as "manual": a draft with no way
+/// to start is then caught by validation, or given an email trigger when the request describes mail.
+fn drop_untyped_triggers(list: Option<&mut Value>, notes: &mut Vec<String>) {
+    let Some(items) = list.and_then(Value::as_array_mut) else { return };
+    let mut n = 0;
+    items.retain(|item| {
+        n += 1;
+        let known = item.get("type").and_then(Value::as_str).is_some_and(|t| matches!(t, "email_received" | "schedule" | "manual"));
+        if !known {
+            notes.push(format!("Trigger {n} could not be read, so I left it out."));
+        }
+        known
+    });
+}
+
 /// Fills in what is safe to fill in and returns one note per repair.
 pub fn infer_missing(value: &mut Value) -> Vec<String> {
     let mut notes = Vec::new();
     fix_list(value.get_mut("steps"), "Step", step_type, &STEP_UNIT, &mut notes);
     fix_list(value.get_mut("triggers"), "Trigger", trigger_type, &["manual"], &mut notes);
+    drop_untyped_triggers(value.get_mut("triggers"), &mut notes);
     if let Some(steps) = value.get_mut("steps").and_then(Value::as_array_mut) {
         for (i, step) in steps.iter_mut().enumerate() {
             let Some(fields) = step.get_mut("fields").and_then(Value::as_array_mut) else { continue };
@@ -124,7 +140,7 @@ mod tests {
         assert_eq!(v["steps"][2]["fields"][0]["type"], "string");
         assert_eq!(v["steps"][3]["type"], "start_case");
         assert_eq!(v["triggers"][0]["type"], "schedule");
-        assert!(v["triggers"][1].get("type").is_none());
-        assert_eq!(notes.len(), 5);
+        assert_eq!(v["triggers"].as_array().unwrap().len(), 1, "an untyped trigger is dropped, never read as manual");
+        assert_eq!(notes.len(), 6);
     }
 }

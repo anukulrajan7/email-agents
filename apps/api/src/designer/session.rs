@@ -10,7 +10,7 @@ use super::{
 };
 use crate::{
     agent_registry::{
-        spec::{AgentSpec, Issue},
+        spec::{AgentSpec, Issue, Trigger},
         store::{self, AgentRow, NewAgent},
         versions::{self, NewVersion},
     },
@@ -205,7 +205,8 @@ pub async fn load_ctx(state: &AppState, ws: &str, editing: Option<&AgentRow>) ->
     let mut conn = state.db.acquire().await?;
     for row in store::list(&mut *conn, ws).await?.into_iter().filter(|a| !a.is_personal() && a.status != "archived") {
         let (spec, _) = versions::active_spec(&mut conn, &row).await?;
-        agents.push(AgentBrief { key: row.key, name: row.name, category: row.category, triggers: validate::trigger_summary(&spec) });
+        let labels = spec.triggers.iter().filter_map(|t| if let Trigger::EmailReceived { matcher } = t { Some(matcher.labels.clone()) } else { None }).flatten().collect();
+        agents.push(AgentBrief { key: row.key, name: row.name, category: row.category, triggers: validate::trigger_summary(&spec), labels });
     }
     let current = match editing {
         Some(row) => Some(versions::active_spec(&mut conn, row).await?.0),
@@ -219,6 +220,7 @@ pub async fn load_ctx(state: &AppState, ws: &str, editing: Option<&AgentRow>) ->
         ceiling: CUSTOM_CEILING,
         max_case_budget_usd: validate::case_budget_ceiling(state),
         editing: current,
+        request: String::new(),
     })
 }
 
@@ -303,7 +305,7 @@ pub async fn design_turn(state: &AppState, ws: &str, id: &str, text: &str) -> Ap
     let kind = if editing.as_ref().is_some_and(AgentRow::is_personal) { "personal" } else { "design" };
     let call_id = reserve_call(&mut *state.db.acquire().await?, ws, &session, kind).await?;
     let ctx = match load_ctx(state, ws, editing.as_ref()).await {
-        Ok(ctx) => ctx,
+        Ok(ctx) => WsCtx { request: format!("{} {}", session.goal, text), ..ctx },
         Err(e) => {
             settle_call(&state.db, &call_id, "failed", 0.0).await?;
             return Err(e.into());
@@ -671,7 +673,19 @@ pub async fn view(state: &AppState, ws: &str, s: &Session) -> AppResult<Value> {
             v
         }
     };
+    let (warnings, routing) = match &s.spec {
+        Some(spec) => {
+            let editing = match &s.agent_id {
+                Some(agent_id) => store::get_in(&state.db, ws, agent_id).await?,
+                None => None,
+            };
+            let ctx = load_ctx(state, ws, editing.as_ref()).await?;
+            (validate::warnings(spec, &ctx), Some(validate::routing_preview(spec)))
+        }
+        None => (vec![], None),
+    };
     Ok(json!({
+        "warnings": warnings, "routing_preview": routing,
         "id": s.id, "goal": s.goal, "agent_id": s.agent_id, "base_version": s.base_version, "status": s.status,
         "turns": s.turns, "spec": s.spec, "issues": s.issues,
         "questions": s.spec.as_ref().map(|x| x.questions_for_user.clone()).unwrap_or_default(),

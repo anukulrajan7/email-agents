@@ -15,7 +15,7 @@ validates it and the person reviews and dry-runs it before anything runs.\n\
 Context: packs {{packs}}; existing agents (name, category, triggers) {{agents}}; labels {{labels}};\n\
 tools you may use, with risk {{tool_catalogue}}; workflow steps you may use {{step_catalogue}}.\n\
 Decide mode: \"workflow\" when the steps are known in advance (label, extract, draft, review, remind); \"agent\" only for\n\
-multi-day or unpredictable work. Triggers must be as narrow as the description allows; never overlap an existing agent\n\
+multi-day or unpredictable work. When the person describes incoming mail, use an email_received trigger (a label from the list when one fits), never only manual. Triggers must be as narrow as the description allows; never overlap an existing agent\n\
 unless the person asks to take that work over. Tools: least privilege. permissions.send: \"never\" or \"ask\" unless the\n\
 person asks for automatic sending, then \"earned\" (autonomy is earned later from results, never granted here);\n\
 max_autonomy <= 2. Never include: sending to new recipients, forwarding, attachments out, links, rules that weaken\n\
@@ -104,7 +104,7 @@ mod tests {
         let mut ctx = WsCtx {
             packs: vec!["general".into()],
             labels: vec![LabelBrief { key: "refund_request".into(), name: "Refund requests".into() }],
-            agents: vec![AgentBrief { key: "inbox_assistant".into(), name: "Inbox Assistant".into(), category: "general".into(), triggers: "any email that needs a reply".into() }],
+            agents: vec![AgentBrief { key: "inbox_assistant".into(), name: "Inbox Assistant".into(), category: "general".into(), triggers: "any email that needs a reply".into(), labels: vec![] }],
             ..Default::default()
         };
         let p = system_prompt(&ctx);
