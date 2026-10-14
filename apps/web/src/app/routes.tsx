@@ -11,6 +11,7 @@ import { LabelsPage } from '../features/labels/LabelsPage';
 import { MemoryPage } from '../features/memory/MemoryPage';
 import { ContactPage } from '../features/memory/ContactPage';
 import { AlertsPage } from '../features/alerts/AlertsPage';
+import { MessagesPage } from '../features/messaging/MessagesPage';
 import { AgentsPage } from '../features/agents/AgentsPage';
 import { AgentsHubPage } from '../features/agents-hub/AgentsHubPage';
 import { WelcomePage } from '../features/onboarding/WelcomePage';
@@ -59,6 +60,7 @@ export function AppRoutes() {
           <Route path="labels" element={<LabelsPage />} />
           <Route path="reviews" element={<ReviewsPage />} />
           <Route path="alerts" element={<AlertsPage />} />
+          <Route path="messages" element={<MessagesPage />} />
           <Route path="memory" element={<MemoryPage />} />
           <Route path="memory/contacts/:email" element={<ContactPage />} />
           <Route path="automations" element={<AutomationsPage />} />

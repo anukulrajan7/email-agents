@@ -4,7 +4,7 @@ import { ApiError } from '../../api/client';
 import { Button, Input, Spinner, Switch, TextLink, useToast } from '../../components/ui';
 import { cn } from '../../lib/cn';
 import { useCommand, useConfirmPlan, useConversation, useTranscribe, useAssistantName } from './hooks';
-import { dayKey, dayLabel } from './labels';
+import { dayKey, dayLabel, linkTarget } from './labels';
 import { readPageContext } from './pageContext';
 import { PlanCardView } from './PlanCardView';
 import { canSpeak, speak, stopSpeaking } from './speech';
@@ -25,7 +25,7 @@ const failureText = (e: unknown) =>
 const fromHistory = (m: HistoryMessage): Turn =>
   m.role === 'user'
     ? { id: `h${m.id}`, role: 'user', text: m.text, at: m.created_at }
-    : { id: `h${m.id}`, role: 'assistant', text: m.text, at: m.created_at, citations: m.citations, plan: m.plan, overBudget: false };
+    : { id: `h${m.id}`, role: 'assistant', text: m.text, at: m.created_at, citations: m.citations, plan: m.plan, overBudget: false, ...(m.links ? { links: m.links } : {}) };
 
 function initialPlanState(item: PlanItem | StoredPlanItem): PlanState {
   if (!('state' in item)) return { status: 'pending' };
@@ -194,6 +194,15 @@ export function AssistantPanel({ ws, onClose }: { ws: string; onClose: () => voi
             <span className="sr-only">{assistantName} said: </span>
             {turn.text}
           </p>
+          {turn.links && turn.links.length > 0 && (
+            <ul className="flex flex-col gap-0.5 px-1 text-[13px]">
+              {turn.links.map((link) => (
+                <li key={`${link.kind}:${link.id ?? ''}`}>
+                  <TextLink to={linkTarget(ws, link).to}>{link.label ?? linkTarget(ws, link).label}</TextLink>
+                </li>
+              ))}
+            </ul>
+          )}
           {turn.citations.length > 0 && (
             <div className="flex flex-col gap-1 px-1">
               <p className="kicker">Sources</p>

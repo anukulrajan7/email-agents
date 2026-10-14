@@ -3,6 +3,7 @@ import { Link, NavLink, Outlet, useLocation, useNavigate } from 'react-router';
 import { useLogout, useMe } from '../features/auth/hooks';
 import { AlertsBadge } from '../features/alerts/AlertsBadge';
 import { AgentsBadge } from '../features/agents/AgentsBadge';
+import { MessagesBadge } from '../features/messaging/MessagesBadge';
 import { OnboardingPrompt } from '../features/agents/OnboardingPrompt';
 import { AskMeera } from '../features/assistant/AskMeera';
 import { PerformanceWidget } from '../features/team/PerformanceWidget';
@@ -42,6 +43,7 @@ function GuideButton({ ws }: { ws: string }) {
 function Badge({ kind, ws }: { kind: NavBadge | undefined; ws: string }) {
   if (kind === 'alerts') return <AlertsBadge ws={ws} />;
   if (kind === 'agents') return <AgentsBadge ws={ws} />;
+  if (kind === 'messages') return <MessagesBadge ws={ws} />;
   return null;
 }
 

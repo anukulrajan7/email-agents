@@ -64,7 +64,7 @@ pub async fn save(state: &AppState, ws: &str, actor: &str, team_id: Option<&str>
             return Err(AppError::BadRequest("the desk agent was not found".into()));
         }
     }
-    let mut tx = state.db.begin().await?;
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     let id = match team_id {
         Some(id) => {
             let updated = sqlx::query("UPDATE teams SET name = ?1, desk_agent_id = ?2 WHERE id = ?3 AND workspace_id = ?4")
@@ -121,7 +121,7 @@ fn name_clash(e: sqlx::Error) -> AppError {
 }
 
 pub async fn delete(state: &AppState, ws: &str, actor: &str, id: &str) -> AppResult<()> {
-    let mut tx = state.db.begin().await?;
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     let gone = sqlx::query("DELETE FROM teams WHERE id = ?1 AND workspace_id = ?2").bind(id).bind(ws).execute(&mut *tx).await?.rows_affected();
     if gone == 0 {
         return Err(AppError::NotFound);

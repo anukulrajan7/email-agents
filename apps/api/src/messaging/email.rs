@@ -235,7 +235,7 @@ pub async fn schedule(state: &AppState, ws: &str, id: &str, actor: Actor<'_>, ho
         Actor::User(u) => Some(u),
         Actor::System => None,
     };
-    let mut tx = state.db.begin().await?;
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     let claimed = sqlx::query(
         "UPDATE outbound_emails SET status = 'scheduled', send_at = ?1, send_requested_by = ?2, auto_sent = ?3, send_error = NULL, updated_at = ?4
          WHERE id = ?5 AND workspace_id = ?6 AND status = 'awaiting_approval'",
@@ -307,7 +307,7 @@ async fn own_addresses(state: &AppState, row: &Outbound) -> sqlx::Result<Vec<Str
 
 /// A person stops an email that has not gone out yet (the one who asked for it, or the mailbox owner).
 pub async fn stop(state: &AppState, ws: &str, id: &str, user_id: &str) -> AppResult<()> {
-    let mut tx = state.db.begin().await?;
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     let stopped = sqlx::query(
         "UPDATE outbound_emails SET status = 'cancelled', send_at = NULL, updated_at = ?1
          WHERE id = ?2 AND workspace_id = ?3 AND status IN ('scheduled','awaiting_approval') AND send_attempt_id IS NULL
@@ -535,7 +535,7 @@ pub async fn run_scheduled(state: &AppState, payload: &Value) -> Result<(), JobE
 }
 
 async fn finalize_sent(state: &AppState, row: &Outbound, provider_message_id: &str, thread_id: Option<&str>) -> AppResult<()> {
-    let mut tx = state.db.begin().await?;
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     let changed = sqlx::query(
         "UPDATE outbound_emails SET status = 'sent', provider_message_id = ?1, provider_thread_id = COALESCE(?2, provider_thread_id),
                 send_at = NULL, send_error = NULL, updated_at = ?3
@@ -609,7 +609,7 @@ impl Outbound {
 
 /// The email will not go out: say why, tell the owner and keep the email for a person to look at.
 async fn give_up(state: &AppState, row: &Outbound, reason: &str) -> Result<(), JobError> {
-    let mut tx = state.db.begin().await?;
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     sqlx::query(
         "UPDATE outbound_emails SET status = 'blocked', send_at = NULL, send_error = ?1, updated_at = ?2
          WHERE id = ?3 AND status = 'scheduled'",

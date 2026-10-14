@@ -9,6 +9,9 @@ export const ACTION_LABEL: Record<PlanAction, string> = {
   decline: 'Decline',
   create_automation: 'New automation',
   snooze_alert: 'Snooze alert',
+  send_message: 'Send a message',
+  contact_support: 'Write to support',
+  hand_to_desk: 'Hand to the team',
 };
 
 export function linkTarget(ws: string, link: ConfirmLink): { to: string; label: string } {
@@ -23,6 +26,11 @@ export function linkTarget(ws: string, link: ConfirmLink): { to: string; label: 
       return { to: `/w/${ws}/automations`, label: 'Open Automations' };
     case 'alerts':
       return { to: `/w/${ws}/alerts`, label: 'Open Alerts' };
+    case 'sent':
+      return { to: `/w/${ws}/messages`, label: 'See what I sent' };
+    case 'inbox':
+    case 'meera':
+      return { to: `/w/${ws}/messages`, label: 'Open Messages' };
   }
 }
 

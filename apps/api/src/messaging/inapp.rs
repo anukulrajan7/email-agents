@@ -180,7 +180,7 @@ pub async fn sent(db: &SqlitePool, ws: &str, user_id: &str) -> sqlx::Result<Vec<
 
 /// The sender stops a message that has not been delivered yet.
 pub async fn stop(db: &SqlitePool, ws: &str, user_id: &str, id: &str) -> AppResult<()> {
-    let mut tx = db.begin().await?;
+    let mut tx = db.begin_with("BEGIN IMMEDIATE").await?;
     let done = sqlx::query(
         "UPDATE in_app_messages SET cancelled_at = ?1
          WHERE id = ?2 AND workspace_id = ?3 AND sender_user_id = ?4 AND deliver_at > ?1 AND cancelled_at IS NULL",
@@ -237,7 +237,7 @@ pub async fn reply(state: &AppState, ws: &str, user_id: &str, id: &str, body: &s
         return Err(AppError::Conflict("this is a notice; there is nobody to reply to".into()));
     };
     let subject = if subject.to_lowercase().starts_with("re:") { subject } else { format!("Re: {subject}") };
-    let mut tx = state.db.begin().await?;
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     let (reply_id, _) = insert(
         &mut tx,
         NewMessage {
@@ -288,7 +288,7 @@ pub async fn notify_owner(
     link: Value,
     email_line: bool,
 ) -> sqlx::Result<String> {
-    let mut tx = state.db.begin().await?;
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     let (id, _) = insert(
         &mut tx,
         NewMessage {

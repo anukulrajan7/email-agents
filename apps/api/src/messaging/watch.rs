@@ -297,7 +297,7 @@ pub async fn reply_job(state: &AppState, payload: &Value) -> Result<(), JobError
         text.push_str(" That sounds resolved, so I marked it done. Tell me if it is not.");
     }
     let now = now_ms();
-    let mut tx = state.db.begin().await?;
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     let updated = sqlx::query(
         "UPDATE watches SET status = 'replied', answer_text = ?1, answer_message_id = ?2, answered_at = ?3, last_update_at = ?3
          WHERE id = ?4 AND status != 'closed'",
@@ -398,7 +398,7 @@ async fn nudge_in_app(state: &AppState, w: &Watch) -> Result<String, JobError> {
     .fetch_all(&state.db)
     .await?;
     let body = format!("A gentle reminder about this question: {}", w.question);
-    let mut tx = state.db.begin().await?;
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     for r in &recipients {
         super::inapp::insert(
             &mut tx,
@@ -428,7 +428,7 @@ async fn nudge_email(state: &AppState, w: &Watch) -> Result<String, JobError> {
     let Some(sent) = super::email::get(state, &w.workspace_id, out).await? else { return Ok("I could not find the email to follow up.".into()) };
     let person = super::recipients::classify(&state.db, &w.workspace_id, &sent.to_address).await?;
     if let (Kind::Member, Some(uid)) = (person.kind, person.user_id.as_deref()) {
-        let mut tx = state.db.begin().await?;
+        let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
         super::inapp::insert(
             &mut tx,
             super::inapp::NewMessage {
@@ -527,7 +527,7 @@ pub async fn list(state: &AppState, ws: &str, user_id: &str) -> sqlx::Result<Vec
 
 /// The person stops watching (and, for a ticket, calls it resolved).
 pub async fn close(state: &AppState, ws: &str, user_id: &str, id: &str) -> AppResult<()> {
-    let mut tx = state.db.begin().await?;
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     let closed = sqlx::query("UPDATE watches SET status = 'closed', last_update_at = ?1 WHERE id = ?2 AND workspace_id = ?3 AND user_id = ?4 AND status != 'closed'")
         .bind(now_ms())
         .bind(id)

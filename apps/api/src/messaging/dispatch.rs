@@ -115,7 +115,7 @@ async fn send_email(state: &AppState, req: &Request<'_>, person: &Person) -> App
     let mut watch_id = None;
     let mut ticket_id = None;
     if let (Some(spec), Some(owner)) = (&req.watch, req.owner) {
-        let mut tx = state.db.begin().await?;
+        let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
         let id = watch::create(
             &mut tx,
             NewWatch {
@@ -203,7 +203,7 @@ async fn send_in_app(state: &AppState, req: &Request<'_>, people: &[&Person]) ->
         Target::Team { id, .. } => Some(id.as_str()),
         Target::Person(_) => None,
     };
-    let mut tx = state.db.begin().await?;
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     let mut thread_key: Option<String> = None;
     let mut first_id = String::new();
     for (person, user) in &members {
@@ -321,7 +321,7 @@ pub async fn hand_to_desk(state: &AppState, ws: &str, user_id: &str, message_id:
     .fetch_optional(&state.db)
     .await?;
     let (agent_name, subject) = desk.unwrap_or_else(|| ("the team".into(), "this email".into()));
-    let mut tx = state.db.begin().await?;
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     let existing: Option<String> =
         sqlx::query_scalar("SELECT id FROM watches WHERE workspace_id = ?1 AND user_id = ?2 AND case_id = ?3 AND status != 'closed'").bind(ws).bind(user_id).bind(&case_id).fetch_optional(&mut *tx).await?;
     let watch_id = match existing {

@@ -1,4 +1,4 @@
-export type NavBadge = 'alerts' | 'agents';
+export type NavBadge = 'alerts' | 'agents' | 'messages';
 
 export type NavItem = { to: string; label: string; badge?: NavBadge };
 
@@ -15,6 +15,7 @@ export function navGroups(isAdmin: boolean, hasStaffing = true): NavGroup[] {
         { to: 'agents', label: 'Agents', badge: 'agents' },
         { to: 'agent-team', label: 'Your team' },
         { to: 'metrics', label: 'Results' },
+        { to: 'messages', label: 'Messages', badge: 'messages' },
         { to: 'alerts', label: 'Alerts', badge: 'alerts' },
       ],
     },
