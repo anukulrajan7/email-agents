@@ -70,6 +70,12 @@ pub struct Config {
     /// Premium drafting tier (high priority, client mail, many asks, "Write a better draft").
     pub openrouter_premium_model_id: String,
     pub openrouter_classifier_model_id: String,
+    /// Stronger model asked again only when the classifier is unsure (confidence below 0.5). Empty: no escalation.
+    pub openrouter_escalation_model_id: String,
+    /// Memory extraction from the team's replies. Empty: the classifier model.
+    pub openrouter_learn_model_id: String,
+    /// Label suggestions. Empty: the classifier model.
+    pub openrouter_suggest_model_id: String,
     /// Email understanding v2 (one structured call). Empty: the classifier model, then the drafting model.
     pub openrouter_understand_model_id: String,
     pub understand_mode: UnderstandMode,
@@ -160,6 +166,9 @@ impl Config {
             openrouter_premium_model_id: var("OPENROUTER_PREMIUM_MODEL_ID", "deepseek/deepseek-v4-pro"),
             openrouter_model_id,
             openrouter_classifier_model_id: var("OPENROUTER_CLASSIFIER_MODEL_ID", ""),
+            openrouter_escalation_model_id: var("OPENROUTER_ESCALATION_MODEL_ID", "deepseek/deepseek-v4-pro"),
+            openrouter_learn_model_id: var("OPENROUTER_LEARN_MODEL_ID", "deepseek/deepseek-v4-flash"),
+            openrouter_suggest_model_id: var("OPENROUTER_SUGGEST_MODEL_ID", "deepseek/deepseek-v4-flash"),
             openrouter_understand_model_id: var("OPENROUTER_UNDERSTAND_MODEL_ID", "deepseek/deepseek-v4-flash"),
             understand_mode: UnderstandMode::parse(&var("UNDERSTAND_V2", "off"))
                 .context("UNDERSTAND_V2 must be 'off', 'shadow' or 'on'")?,
@@ -235,6 +244,9 @@ impl Config {
             openrouter_draft_model_id: String::new(),
             openrouter_premium_model_id: String::new(),
             openrouter_classifier_model_id: String::new(),
+            openrouter_escalation_model_id: String::new(),
+            openrouter_learn_model_id: String::new(),
+            openrouter_suggest_model_id: String::new(),
             openrouter_understand_model_id: String::new(),
             understand_mode: UnderstandMode::Off,
             openrouter_embedding_model_id: "baai/bge-m3".into(),

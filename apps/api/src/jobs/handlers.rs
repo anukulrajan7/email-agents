@@ -972,8 +972,20 @@ async fn compose_draft(
         .map(|l| (l.name, l.description))
         .unwrap_or_else(|| (category.clone(), String::new()));
     let staffing = crate::packs::enabled(&state.db, &msg.workspace_id, crate::packs::STAFFING).await?;
-    let quality =
-        ai::routing::draft_quality(Priority::parse(&priority).unwrap_or(Priority::Normal), &category, Some(&insight), requested, staffing);
+    // A sender the mailbox owner marked as important gets the premium tier.
+    let vip = crate::agent_profiles::context_for_message(&state.db, &state.config, &msg.workspace_id, message_id)
+        .await?
+        .owner
+        .and_then(|o| o.profile)
+        .is_some_and(|p| ai::routing::is_vip(&p.vips, &msg.sender_address));
+    let quality = ai::routing::draft_quality(
+        Priority::parse(&priority).unwrap_or(Priority::Normal),
+        &category,
+        Some(&insight),
+        requested,
+        staffing,
+        vip,
+    );
     let settings = crate::reply_settings::load(&state.db, &state.config, &msg.workspace_id).await?;
     let reply_instructions = if settings.reply_instructions.is_empty() {
         crate::packs::reply_style(&state.db, &msg.workspace_id).await?.to_string()

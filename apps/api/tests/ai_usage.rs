@@ -267,6 +267,44 @@ async fn understanding_calls_are_verified_and_recorded_under_their_own_task_and_
 }
 
 #[tokio::test]
+async fn the_stronger_model_is_asked_only_below_half_confidence() {
+    use axum::extract::State;
+    use email_ai_api::{
+        ai::{Classifier, ClassifyInput, openrouter::OpenRouterClassifier},
+        domain::Label,
+    };
+    use std::sync::Mutex;
+
+    async fn chat(State(seen): State<Arc<(Mutex<Vec<String>>, f64)>>, Json(req): Json<Value>) -> Json<Value> {
+        seen.0.lock().unwrap().push(req["model"].as_str().unwrap_or_default().to_string());
+        let confidence = if req["model"] == "strong/model" { 0.95 } else { seen.1 };
+        let content = json!({"category": "other", "priority": "normal", "requires_reply": true, "confidence": confidence});
+        Json(json!({"model": req["model"], "choices": [{"finish_reason": "stop", "message": {"content": content.to_string()}}], "usage": {}}))
+    }
+    let input = ClassifyInput {
+        subject: "s".into(),
+        sender: "a@b.co".into(),
+        body_text: "b".into(),
+        attachment_names: vec![],
+        sender_history: None,
+        labels: vec![Label { key: "other".into(), name: "Other".into(), description: "d".into() }],
+        examples: vec![],
+    };
+    for (fast_confidence, escalated) in [(0.6, false), (0.74, false), (0.49, true), (0.1, true)] {
+        let seen = Arc::new((Mutex::new(Vec::new()), fast_confidence));
+        let app = Router::new().route("/chat/completions", post(chat)).with_state(seen.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = OpenRouterClient::new(reqwest::Client::new(), &url, "k");
+        let classifier = OpenRouterClassifier::new(client, "fast/model").with_escalation("strong/model");
+        classifier.classify(&input).await.unwrap();
+        let models = seen.0.lock().unwrap().clone();
+        assert_eq!(models.len(), if escalated { 2 } else { 1 }, "confidence {fast_confidence}: {models:?}");
+    }
+}
+
+#[tokio::test]
 async fn job_attempt_is_recorded_on_the_ledger_row() {
     let env = setup_with(|_| {}).await;
     let url = fake_detailed_openrouter(r#"{"summary":"s","asks":[],"deadline":null,"needs_reply":false,"missing_info":[]}"#).await;

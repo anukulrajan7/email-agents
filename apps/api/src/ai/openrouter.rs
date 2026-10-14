@@ -527,8 +527,9 @@ pub struct OpenRouterClassifier {
     escalation_model: Option<String>,
 }
 
-/// Below this, the fast model's answer is checked by the stronger model.
-pub const ESCALATE_BELOW: f64 = 0.75;
+/// Below this, the fast model's answer is checked by the stronger model. A model that reports no confidence
+/// is not escalated: only an explicit "I am unsure" is worth the stronger model's price.
+pub const ESCALATE_BELOW: f64 = 0.5;
 
 impl OpenRouterClassifier {
     pub fn new(client: OpenRouterClient, model: &str) -> Self {
@@ -600,6 +601,11 @@ pub fn parse_classification(raw: &str, labels: &[Label]) -> Result<(String, Prio
     Ok((category, priority, requires_reply, confidence))
 }
 
+/// True only for an explicit low confidence.
+pub fn needs_escalation(confidence: Option<f64>) -> bool {
+    confidence.is_some_and(|c| c < ESCALATE_BELOW)
+}
+
 #[async_trait]
 impl Classifier for OpenRouterClassifier {
     /// Fast model first; escalate to the stronger model on error or low confidence.
@@ -607,7 +613,7 @@ impl Classifier for OpenRouterClassifier {
         let first = self.ask(&self.model, input).await;
         let Some(strong) = &self.escalation_model else { return first };
         match first {
-            Ok(out) if out.confidence.is_some_and(|c| c >= ESCALATE_BELOW) => Ok(out),
+            Ok(out) if !needs_escalation(out.confidence) => Ok(out),
             Ok(weak) => match self.ask(strong, input).await {
                 Ok(better) => Ok(better),
                 Err(e) => {
@@ -961,6 +967,14 @@ mod tests {
         let p = classify_prompt(&input);
         assert_eq!((p.matches("<email>").count(), p.matches("</email>").count()), (1, 1), "{p}");
         assert!(!p.contains("<team_notes>"), "{p}");
+    }
+
+    #[test]
+    fn only_a_confidence_below_one_half_escalates() {
+        assert!(needs_escalation(Some(0.49)));
+        assert!(!needs_escalation(Some(0.5)));
+        assert!(!needs_escalation(Some(0.74)), "0.5 to 0.75 used to escalate; it no longer does");
+        assert!(!needs_escalation(None));
     }
 
     #[test]
