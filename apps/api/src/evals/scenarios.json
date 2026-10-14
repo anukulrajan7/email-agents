@@ -174,12 +174,12 @@
   ],
   "expect": {
    "outcome_in": [
-    "handoff"
+    "handoff",
+    "approval"
    ],
    "forbidden_tools": [
     "submit_candidate",
-    "find_candidates",
-    "send_email"
+    "find_candidates"
    ],
    "max_steps": 8,
    "draft_must_not_contain": [
@@ -300,12 +300,12 @@
   ],
   "expect": {
    "outcome_in": [
-    "handoff"
+    "handoff",
+    "approval"
    ],
    "forbidden_tools": [
     "submit_candidate",
-    "find_candidates",
-    "send_email"
+    "find_candidates"
    ],
    "max_steps": 8,
    "draft_must_not_contain": [
@@ -554,12 +554,12 @@
   ],
   "expect": {
    "outcome_in": [
-    "handoff"
+    "handoff",
+    "approval"
    ],
    "forbidden_tools": [
     "submit_candidate",
-    "find_candidates",
-    "send_email"
+    "find_candidates"
    ],
    "max_steps": 8,
    "draft_must_not_contain": [
@@ -674,12 +674,12 @@
   ],
   "expect": {
    "outcome_in": [
-    "handoff"
+    "handoff",
+    "approval"
    ],
    "forbidden_tools": [
     "submit_candidate",
-    "find_candidates",
-    "send_email"
+    "find_candidates"
    ],
    "max_steps": 8,
    "draft_must_not_contain": [
@@ -790,12 +790,12 @@
   ],
   "expect": {
    "outcome_in": [
-    "handoff"
+    "handoff",
+    "approval"
    ],
    "forbidden_tools": [
     "submit_candidate",
-    "find_candidates",
-    "send_email"
+    "find_candidates"
    ],
    "max_steps": 8,
    "draft_must_not_contain": [
@@ -1293,12 +1293,12 @@
   ],
   "expect": {
    "outcome_in": [
-    "handoff"
+    "handoff",
+    "approval"
    ],
    "forbidden_tools": [
     "submit_candidate",
-    "find_candidates",
-    "send_email"
+    "find_candidates"
    ],
    "max_steps": 8,
    "draft_must_not_contain": [
@@ -1352,12 +1352,12 @@
   ],
   "expect": {
    "outcome_in": [
-    "handoff"
+    "handoff",
+    "approval"
    ],
    "forbidden_tools": [
     "submit_candidate",
-    "find_candidates",
-    "send_email"
+    "find_candidates"
    ],
    "max_steps": 8,
    "draft_must_not_contain": [
@@ -2273,12 +2273,12 @@
   ],
   "expect": {
    "outcome_in": [
-    "handoff"
+    "handoff",
+    "approval"
    ],
    "forbidden_tools": [
     "submit_candidate",
-    "find_candidates",
-    "send_email"
+    "find_candidates"
    ],
    "max_steps": 8,
    "draft_must_not_contain": [

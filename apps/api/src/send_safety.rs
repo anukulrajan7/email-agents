@@ -298,11 +298,19 @@ pub fn review_issues(answers: Result<&judge::Answers, &str>, automated: bool) ->
         Some(true) => {
             let why = a.reason(Q_PROMISES);
             let why = if why.is_empty() { String::new() } else { format!(" ({why})") };
-            r.blocking.push(issue(
-                "unsupported_promise",
-                format!("The reply may promise an approval, payment, date or decision that the email and team notes don't support{why}."),
-                "Remove or soften the promise, or add the fact to team notes first.",
-            ));
+            if automated {
+                r.blocking.push(issue(
+                    "unsupported_promise",
+                    format!("The reply may promise an approval, payment, date or decision that the email and team notes don't support{why}."),
+                    "Remove or soften the promise, or add the fact to team notes first.",
+                ));
+            } else {
+                r.warnings.push(issue(
+                    "unsupported_promise",
+                    format!("This mentions something the email and your notes don't back up{why} - double-check before sending."),
+                    "",
+                ));
+            }
         }
         Some(false) => {}
         None if automated => r.blocking.push(unavailable("no answer about promises")),
@@ -397,6 +405,22 @@ async fn gather(state: &AppState, input: &CheckInput<'_>) -> AppResult<(Facts, V
     .fetch_one(&state.db)
     .await?;
     let mut trusted_notes = team_notes;
+    let owner_said: Option<String> =
+        sqlx::query_scalar("SELECT instructions_by_user FROM drafts WHERE id = ?1 AND workspace_id = ?2").bind(&r.draft_id).bind(ws).fetch_one(&state.db).await?;
+    if let Some(said) = owner_said.filter(|t| !t.trim().is_empty()) {
+        trusted_notes.push_str(&format!("\nThe owner said (treat as a supported fact, whatever the language): {said}"));
+        known.push('\n');
+        known.push_str(&said);
+    }
+    let openings: Vec<(String, Option<String>)> =
+        sqlx::query_as("SELECT role_title, location FROM requirements WHERE workspace_id = ?1 AND status = 'open' ORDER BY created_at DESC LIMIT 20")
+            .bind(ws)
+            .fetch_all(&state.db)
+            .await?;
+    if !openings.is_empty() {
+        let list: Vec<String> = openings.iter().map(|(t, l)| format!("{t} ({})", l.as_deref().unwrap_or("location open"))).collect();
+        trusted_notes.push_str(&format!("\nOpen roles the team really has right now: {}", list.join("; ")));
+    }
     if !settings.reply_instructions.is_empty() {
         trusted_notes.push_str(&format!("\nReply style: {}", settings.reply_instructions));
     }
@@ -669,9 +693,11 @@ mod tests {
     fn judge_review_mapping() {
         assert_eq!(review_issues(Ok(&answers(Some(false), true, 0.9)), false), SafetyReport::default());
         let r = review_issues(Ok(&answers(Some(true), false, 0.2)), false);
-        assert_eq!(codes(&r.blocking), ["unsupported_promise"]);
-        assert!(r.blocking[0].message.contains("promises payment by Friday"));
-        assert_eq!(codes(&r.warnings), ["tone", "misses_ask"]);
+        assert!(r.blocking.is_empty());
+        assert_eq!(codes(&r.warnings), ["unsupported_promise", "tone", "misses_ask"]);
+        assert!(r.warnings[0].message.contains("promises payment by Friday") && r.warnings[0].message.contains("double-check"));
+        let auto = review_issues(Ok(&answers(Some(true), true, 0.9)), true);
+        assert_eq!(codes(&auto.blocking), ["unsupported_promise"]);
         // No answer / no judge: a warning for people, blocking for automated sends.
         assert_eq!(codes(&review_issues(Err("down"), false).warnings), ["ai_review_unavailable"]);
         assert_eq!(codes(&review_issues(Err("down"), true).blocking), ["ai_review_unavailable"]);

@@ -125,7 +125,7 @@ fn with_drafting(mut spec: AgentSpec, rules: &[&str], never_do: &[&str]) -> Agen
 
 fn lead() -> AgentSpec {
     let every_tool = [
-        "find_candidates", "draft_email", "create_task", "schedule_check", "update_case", "send_email", "submit_candidate", "propose_automation",
+        "find_candidates", "find_requirements", "draft_email", "create_task", "schedule_check", "update_case", "send_email", "submit_candidate", "propose_automation",
         "send_message", "notify_owner",
     ];
     build(
@@ -156,7 +156,7 @@ fn inbox() -> AgentSpec {
         },
         vec![Trigger::EmailReceived { matcher: TriggerMatch { needs_reply: Some(true), ..Default::default() } }],
         vec![Step::DraftReply { quality: QualityTier::Balanced }],
-        tools(&["draft_email", "create_task", "schedule_check", "update_case", "send_email"]),
+        tools(&["find_requirements", "draft_email", "create_task", "schedule_check", "update_case", "send_email"]),
         perms(SendMode::Earned, 2),
     )
 }
@@ -365,7 +365,7 @@ fn requirements() -> AgentSpec {
         },
         vec![on_labels(&["client_requirement", "candidate_referral"])],
         vec![],
-        tools(&["find_candidates", "draft_email", "create_task", "schedule_check", "update_case", "send_email", "submit_candidate"]),
+        tools(&["find_candidates", "find_requirements", "draft_email", "create_task", "schedule_check", "update_case", "send_email", "submit_candidate"]),
         perms(SendMode::Ask, 1),
     );
     spec.drafting.quality_tier = QualityTier::Best;

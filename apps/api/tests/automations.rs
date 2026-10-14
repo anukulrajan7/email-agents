@@ -250,7 +250,10 @@ async fn send_reply_is_skipped_when_the_draft_has_gaps() {
     // The same server-side guard protects the manual send path.
     let (_, detail) = call(&env.app, "GET", &format!("{}/messages/{id}", env.base), ADMIN, None).await;
     let draft_id = detail["draft"]["id"].as_str().unwrap();
-    assert!(detail["draft"]["body_text"].as_str().unwrap().contains("[NEEDS:"));
+    assert!(!detail["draft"]["body_text"].as_str().unwrap().contains("[NEEDS:"), "no blanks are shown");
+    assert!(!detail["draft"]["unanswered"].as_array().unwrap().is_empty(), "kept as an internal flag");
+    let (s, _) = call(&env.app, "PATCH", &format!("{}/drafts/{draft_id}", env.base), ADMIN, Some(json!({"body_text": "Hello,\n\nYour payslip date is [NEEDS: payslip date]. Thanks for your patience.\n\nBest regards,\nHR"}))).await;
+    assert_eq!(s, StatusCode::OK);
     let (s, err) = call(&env.app, "POST", &format!("{}/drafts/{draft_id}/send", env.base), ADMIN, Some(json!({"confirm": true}))).await;
     assert_eq!((s, err["error"]["code"].as_str()), (StatusCode::CONFLICT, Some("send_blocked")));
     assert_eq!(err["error"]["blocking"][0]["code"], "open_gaps", "{err}");

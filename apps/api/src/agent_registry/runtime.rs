@@ -20,7 +20,7 @@ use crate::{
 };
 
 /// Tools that need the HR & recruiting pack's matching feature.
-pub const MATCHING_TOOLS: &[&str] = &["find_candidates", "submit_candidate"];
+pub const MATCHING_TOOLS: &[&str] = &["find_candidates", "find_requirements", "submit_candidate"];
 
 #[derive(Debug, Clone)]
 pub struct CaseAgent {

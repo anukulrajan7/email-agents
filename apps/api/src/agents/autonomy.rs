@@ -240,6 +240,19 @@ pub async fn may_send_on_its_own(state: &AppState, case: &Case, ctx: &AgentConte
         tracing::info!(case_id = %case.id, "a reply a person wrote or edited never goes out on its own");
         return Ok(false);
     }
+    let unconfirmed: String = match preview.draft_id.as_deref() {
+        Some(id) => sqlx::query_scalar("SELECT unanswered_json FROM drafts WHERE id = ?1 AND workspace_id = ?2")
+            .bind(id)
+            .bind(&case.workspace_id)
+            .fetch_optional(&state.db)
+            .await?
+            .unwrap_or_default(),
+        None => String::new(),
+    };
+    if !serde_json::from_str::<Vec<String>>(&unconfirmed).unwrap_or_default().is_empty() {
+        tracing::info!(case_id = %case.id, "the draft promises to confirm something it could not; a person decides");
+        return Ok(false);
+    }
     let Some(to) = preview.to.as_deref().map(str::to_lowercase) else { return Ok(false) };
     let original_sender: Option<String> = sqlx::query_scalar(
         "SELECT lower(sender_address) FROM email_messages

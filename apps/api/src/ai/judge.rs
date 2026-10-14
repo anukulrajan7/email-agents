@@ -398,6 +398,7 @@ pub struct FixedJudge {
     verdicts: Mutex<HashMap<String, (Verdict, String)>>,
     fail: AtomicBool,
     calls: AtomicUsize,
+    last_context: Mutex<String>,
 }
 
 impl FixedJudge {
@@ -417,12 +418,17 @@ impl FixedJudge {
     pub fn calls(&self) -> usize {
         self.calls.load(Ordering::SeqCst)
     }
+    /// The context of the latest question set (tests check what the judge was told).
+    pub fn last_context(&self) -> String {
+        self.last_context.lock().expect("judge lock").clone()
+    }
 }
 
 #[async_trait]
 impl Judge for FixedJudge {
-    async fn judge(&self, _context: &str, questions: &[Question]) -> Result<Answers, AiError> {
+    async fn judge(&self, context: &str, questions: &[Question]) -> Result<Answers, AiError> {
         validate(questions)?;
+        *self.last_context.lock().expect("judge lock") = context.to_string();
         self.calls.fetch_add(1, Ordering::SeqCst);
         if self.fail.load(Ordering::SeqCst) {
             return Err(AiError::Retryable("judge unavailable (test)".into()));

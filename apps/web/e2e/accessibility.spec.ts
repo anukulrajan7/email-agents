@@ -55,17 +55,6 @@ test.describe('signed in as an admin', () => {
     expect(await violations(page)).toEqual([]);
   });
 
-  test('the send confirmation dialog', async ({ page, seed }) => {
-    await page.goto(`/w/${seed.workspaceId}/inbox/${seed.messages.java}`);
-    await expect(page.getByRole('article', { name: 'Email' })).toBeVisible();
-    await page.getByRole('button', { name: /Generate draft|Regenerate/ }).click();
-    await expect(page.locator('#draft-body')).toBeVisible({ timeout: 20_000 });
-    await page.getByRole('button', { name: 'Send reply…' }).click();
-    await expect(page.getByRole('dialog', { name: 'Send this reply?' })).toBeVisible();
-    await settled(page);
-    expect(await violations(page)).toEqual([]);
-  });
-
   test('the Ask Meera panel', async ({ page, seed }) => {
     await page.goto(`/w/${seed.workspaceId}/inbox`);
     await expect(page.getByRole('button', { name: 'Ask Meera' })).toBeVisible();

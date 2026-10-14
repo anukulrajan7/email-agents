@@ -34,57 +34,51 @@ test('a [NEEDS: …] gap is called out and keeps Send disabled until it is fille
   await openMessage(page, seed, 'question');
   await generateDraft(page);
   const draft = page.locator('#draft-body');
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
   await draft.fill('Hello Ravi,\n\nOur enterprise plan costs [NEEDS: price per seat] per month for a team of 40.\n\nBest regards,\nAcme Desk');
   await expect(page.getByText('Fill every dashed [NEEDS: …] part to send')).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Send reply…' })).toBeDisabled();
+  await expect(page.getByRole('button', { name: 'Send', exact: true })).toBeDisabled();
   await draft.fill('Hello Ravi,\n\nOur enterprise plan costs 12 dollars per seat per month for a team of 40.\n\nBest regards,\nAcme Desk');
-  await expect(page.getByRole('button', { name: 'Send reply…' })).toBeEnabled();
+  await expect(page.getByRole('button', { name: 'Send', exact: true })).toBeEnabled();
 });
 
-test('the confirm dialog is required, shows recipient and subject, and Escape closes it without sending', async ({ page, seed }) => {
+test('Send needs no dialog: it starts the undo countdown at once', async ({ page, seed }) => {
   await openMessage(page, seed, 'reply1');
-  await page.getByRole('button', { name: 'Send reply…' }).click();
-  const dialog = page.getByRole('dialog', { name: 'Send this reply?' });
-  await expect(dialog).toContainText('dev.patel@partner.example');
-  await expect(dialog).toContainText('Re: Office visit on Friday');
-  await expect(dialog).toContainText('Checks passed.');
-  await page.keyboard.press('Escape');
-  await expect(dialog).toBeHidden();
-  await page.waitForTimeout(500);
+  await page.getByRole('button', { name: 'Send', exact: true }).click();
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await expect(page.getByRole('status').filter({ hasText: /Sending in \d+ s/ })).toBeVisible();
+  await page.getByRole('button', { name: 'Undo' }).click();
   expect(await sentTo('dev.patel@partner.example')).toHaveLength(0);
 });
 
-test('a reply that is too short is blocked in the dialog and never reaches Gmail', async ({ page, seed }) => {
+test('a reply that is too short is refused and never reaches Gmail', async ({ page, seed }) => {
   await openMessage(page, seed, 'reply1');
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
   await page.locator('#draft-body').fill('ok');
-  await page.getByRole('button', { name: 'Send reply…' }).click();
-  const dialog = page.getByRole('dialog', { name: 'Send this reply?' });
-  await expect(dialog.getByRole('region', { name: 'Fix before sending' })).toContainText(/only 2 characters/);
-  await expect(dialog.getByRole('button', { name: 'Send', exact: true })).toBeDisabled();
-  await dialog.getByRole('button', { name: 'Cancel' }).click();
+  await page.getByRole('button', { name: 'Send', exact: true }).click();
+  await expect(page.getByRole('alert')).toContainText(/only 2 characters/);
   expect(await sentTo('dev.patel@partner.example')).toHaveLength(0);
 });
 
 test('Undo inside the window stops the send: nothing is delivered after it', async ({ page, seed }) => {
   await openMessage(page, seed, 'reply2');
   await generateDraft(page);
-  await page.getByRole('button', { name: 'Send reply…' }).click();
-  await page.getByRole('dialog', { name: 'Send this reply?' }).getByRole('button', { name: 'Send', exact: true }).click();
+  await page.getByRole('button', { name: 'Send', exact: true }).click();
   const bar = page.getByRole('status').filter({ hasText: /Sending in \d+ s/ });
   await expect(bar).toBeVisible();
   await bar.getByRole('button', { name: 'Undo' }).click();
-  await expect(page.getByRole('button', { name: 'Send reply…' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Send', exact: true })).toBeVisible();
   await page.waitForTimeout((undoSeconds + 4) * 1000);
   expect(await sentTo('sana.khan@partner.example')).toHaveLength(0);
 });
 
 test('a confirmed send counts down, then goes out threaded exactly once and shows Sent', async ({ page, seed }) => {
   await openMessage(page, seed, 'reply1');
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
   await page.locator('#draft-body').fill(
     'Hello Dev,\n\nThank you for confirming your visit on Friday afternoon. We look forward to seeing you.\n\nBest regards,\nAcme Desk',
   );
-  await page.getByRole('button', { name: 'Send reply…' }).click();
-  await page.getByRole('dialog', { name: 'Send this reply?' }).getByRole('button', { name: 'Send', exact: true }).click();
+  await page.getByRole('button', { name: 'Send', exact: true }).click();
   await expect(page.getByRole('status').filter({ hasText: /Sending in \d+ s/ })).toBeVisible();
   expect(await sentTo('dev.patel@partner.example')).toHaveLength(0);
 
@@ -97,14 +91,15 @@ test('a confirmed send counts down, then goes out threaded exactly once and show
   expect(sent[0]?.inReplyTo).toContain('greply1@mail.e2e.test');
   await page.reload();
   await expect(page.getByText(/Sent ✓/)).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Send reply…' })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Send', exact: true })).toHaveCount(0);
   expect(await sentTo('dev.patel@partner.example')).toHaveLength(1);
 });
 
 test('Save to Gmail drafts puts the reply in the mailbox drafts', async ({ page, seed }) => {
   await openMessage(page, seed, 'label1');
   await generateDraft(page);
-  await page.getByRole('button', { name: 'Save to Gmail drafts' }).click();
+  await page.getByRole('button', { name: 'More' }).click();
+  await page.getByRole('menuitem', { name: 'Save to Gmail drafts' }).click();
   await expect(page.getByText('Saved in your Gmail Drafts')).toBeVisible();
   const drafts = (await nango<{ items: { to: string; subject: string }[] }>('/__e2e/drafts')).items;
   expect(drafts.some((d) => d.to.includes('neha.verma@vendor.example') && d.subject === 'Re: Invoice INV-1042 for October services')).toBe(true);

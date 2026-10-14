@@ -1,19 +1,16 @@
 import { useEffect, useRef, useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import type { Draft, MessageDetail } from '../../api/types';
-import { Button, useToast } from '../../components/ui';
+import { Button, MoreMenu, useToast } from '../../components/ui';
 import { ErrorNote } from '../../components/ErrorNote';
 import { StatusBadge } from '../../components/StatusBadges';
 import { cn } from '../../lib/cn';
 import { fullDate } from '../../lib/format';
 import { extractNeeds, hasNeeds, isStillNeeded, splitNeeds } from './needs';
-import { SendDialog } from './SendDialog';
-import { useCheckDraft, useGenerateDraft, useSaveProviderDraft, useSendDraft, useUndoSend, useUpdateDraft } from './hooks';
+import { useGenerateDraft, useSaveProviderDraft, useSendDraft, useUndoSend, useUpdateDraft } from './hooks';
 import { messageKey, messagesKey } from '../inbox/hooks';
 
 const POLL_LIMIT_MS = 60_000;
-
-const replySubject = (subject: string) => (/^\s*re:/i.test(subject) ? subject.trim() : `Re: ${subject}`);
 
 function NeedsChecklist({ items, text }: { items: string[]; text: string }) {
   if (items.length === 0) return null;
@@ -37,6 +34,15 @@ function NeedsChecklist({ items, text }: { items: string[]; text: string }) {
         })}
       </ul>
     </section>
+  );
+}
+
+function UnconfirmedNote({ items }: { items: string[] }) {
+  if (items.length === 0) return null;
+  return (
+    <p role="note" className="border-l-[3px] border-review bg-review-tint px-3 py-2 text-sm text-review-ink">
+      Couldn't confirm: {items.join(', ')}
+    </p>
   );
 }
 
@@ -155,16 +161,16 @@ function DraftEditor({
   const messageId = message.id;
   const [text, setText] = useState(draft.body_text);
   const [copied, setCopied] = useState(false);
-  const [confirming, setConfirming] = useState(false);
+  const [editing, setEditing] = useState(false);
   const update = useUpdateDraft(ws, messageId, draft.id);
   const saveProvider = useSaveProviderDraft(ws, messageId, draft.id);
   const send = useSendDraft(ws, messageId, draft.id);
   const notify = useToast();
-  const check = useCheckDraft(ws, draft.id);
   const sent = draft.status === 'sent';
   const sendAt = draft.status === 'scheduled' ? (draft.send_at ?? undefined) : send.data?.send_at;
   const scheduled = !sent && (draft.status === 'scheduled' || send.data !== undefined);
   const locked = sent || scheduled;
+  const readOnly = locked || !editing;
   const dirty = text !== draft.body_text;
   const needsInput = hasNeeds(text);
   const checklist = Array.from(new Set(draft.unanswered ?? extractNeeds(draft.body_text)));
@@ -184,8 +190,8 @@ function DraftEditor({
       <label htmlFor="draft-body" className="sr-only">
         Draft reply
       </label>
-      {!locked && <NeedsChecklist items={checklist} text={text} />}
-      <HighlightedTextarea text={text} onChange={setText} readOnly={locked} />
+      {!locked && (hasNeeds(draft.body_text) ? <NeedsChecklist items={checklist} text={text} /> : <UnconfirmedNote items={draft.unanswered ?? []} />)}
+      <HighlightedTextarea text={text} onChange={setText} readOnly={readOnly} />
       {scheduled && <UndoBar ws={ws} messageId={messageId} draftId={draft.id} sendAt={sendAt} onUndone={() => send.reset()} />}
       {!locked && draft.send_error && (
         <p role="alert" className="border-l-[3px] border-review bg-review-tint px-3 py-2 text-sm text-review-ink">
@@ -202,86 +208,71 @@ function DraftEditor({
           Sent ✓ — Sent from Gmail on {fullDate(draft.updated_at)}
         </p>
       )}
-      <div className="flex flex-wrap gap-2">
-        {!locked && (
-          <>
+      {!locked && (
+        <div className="flex flex-wrap items-center gap-2">
+          {message.source.can_send && (
+            <Button
+              disabled={needsInput}
+              aria-describedby={needsInput ? 'draft-needs-hint' : undefined}
+              loading={send.isPending}
+              onClick={() => send.mutate(dirty ? text : undefined, { onSuccess: () => setEditing(false) })}
+            >
+              Send
+            </Button>
+          )}
+          {editing && dirty ? (
             <Button
               variant="secondary"
-              loading={update.isPending && update.variables?.body_text !== undefined}
-              disabled={!dirty}
-              onClick={() => update.mutate({ body_text: text, status: 'edited' }, { onSuccess: () => notify('success', 'Draft saved.') })}
+              loading={update.isPending}
+              onClick={() =>
+                update.mutate(
+                  { body_text: text, status: 'edited' },
+                  {
+                    onSuccess: () => {
+                      setEditing(false);
+                      notify('success', 'Draft saved.');
+                    },
+                  },
+                )
+              }
             >
               Save
             </Button>
-            <Button
-              loading={update.isPending && update.variables?.body_text === undefined}
-              disabled={draft.status === 'approved' && !dirty}
-              onClick={() =>
-                update.mutate(!dirty ? { status: 'approved' } : { body_text: text, status: 'approved' }, {
-                  onSuccess: () => notify('success', 'Draft approved.'),
-                })
-              }
-            >
-              Approve
+          ) : (
+            <Button variant="secondary" onClick={() => setEditing(true)} disabled={editing}>
+              Edit
             </Button>
-            {message.source.can_create_provider_draft && (
-              <Button
-                variant="secondary"
-                loading={saveProvider.isPending}
-                onClick={() => saveProvider.mutate(dirty ? text : undefined, { onSuccess: onSavedToGmail })}
-              >
-                Save to Gmail drafts
-              </Button>
-            )}
-            {message.source.can_send && (
-              <Button
-                disabled={needsInput}
-                aria-describedby={needsInput ? 'draft-needs-hint' : undefined}
-                onClick={() => {
-                  setConfirming(true);
-                  check.mutate(text);
-                }}
-              >
-                Send reply…
-              </Button>
-            )}
-          </>
-        )}
-        <Button variant="secondary" onClick={copy}>
-          {copied ? 'Copied' : 'Copy draft'}
-        </Button>
-      </div>
+          )}
+          <MoreMenu
+            items={[
+              ...(message.source.can_create_provider_draft
+                ? [
+                    {
+                      label: 'Save to Gmail drafts',
+                      loading: saveProvider.isPending,
+                      onSelect: () => saveProvider.mutate(dirty ? text : undefined, { onSuccess: onSavedToGmail }),
+                    },
+                  ]
+                : []),
+              { label: copied ? 'Copied' : 'Copy draft', onSelect: copy },
+              {
+                label: 'Discard my edits',
+                disabled: !dirty,
+                onSelect: () => {
+                  setText(draft.body_text);
+                  setEditing(false);
+                },
+              },
+            ]}
+          />
+        </div>
+      )}
       {savedToGmail && !locked && (
         <p className="text-sm text-ink-muted" role="status">
           Saved in your Gmail Drafts — you can finish it there too.
         </p>
       )}
-      <ErrorNote error={update.error ?? saveProvider.error} />
-      {confirming && (
-        <SendDialog
-          to={message.from}
-          subject={replySubject(message.subject)}
-          body={text}
-          sending={send.isPending}
-          error={send.error}
-          report={check.data}
-          checking={check.isPending}
-          checkError={check.error}
-          onCancel={() => {
-            send.reset();
-            check.reset();
-            setConfirming(false);
-          }}
-          onConfirm={() =>
-            send.mutate(dirty ? text : undefined, {
-              onSuccess: () => {
-                setConfirming(false);
-                notify('success', `Reply sent to ${message.from}.`);
-              },
-            })
-          }
-        />
-      )}
+      <ErrorNote error={update.error ?? saveProvider.error ?? send.error} />
     </div>
   );
 }

@@ -313,14 +313,17 @@ async fn judge_promise_blocks_and_missing_review_blocks_only_automated_sends() {
     let h = harness(0).await;
     h.judge.set("promises", Verdict::YesNo(true), "promises payment by Friday");
     let d = h.draft("Hello Priya,\n\nYour payment of 50,000 will be credited by Friday.\n\nRegards, HR").await;
-    let (s, r) = h.send(&d).await;
-    assert_eq!(s, StatusCode::CONFLICT);
-    assert_eq!(codes(&r["error"]["blocking"]), ["unsupported_promise"]);
-    assert!(r["error"]["message"].as_str().unwrap().contains("promises payment by Friday"));
+    // A person's send is their decision: the finding is a warning, never a block.
+    let r = h.check(&d, None).await;
+    assert_eq!(codes(&r["warnings"]), ["unsupported_promise"], "{r}");
+    assert!(r["blocking"].as_array().unwrap().is_empty());
     assert_eq!(h.judge.calls(), 1);
-    // Same text again: the cached verdict is reused, no new model call.
-    h.send(&d).await;
-    assert_eq!(h.judge.calls(), 1);
+    // An automatic send still stops on it.
+    let err = replies::send_draft(&h.state, &h.ws, &d, Actor::System).await.unwrap_err();
+    match err {
+        AppError::SendBlocked(_, details) => assert_eq!(codes(&details["blocking"]), ["unsupported_promise"]),
+        other => panic!("{other:?}"),
+    }
 
     // Judge down: a person still gets a warning and can send; an automated send is held.
     h.judge.fail(true);
@@ -583,4 +586,25 @@ async fn a_reviewer_outage_blocking_ten_sends_demotes_nobody() {
         .await
         .unwrap();
     assert_eq!((n, high), (10, 0));
+}
+
+#[tokio::test]
+async fn the_judge_is_told_what_the_owner_said_and_which_roles_are_open() {
+    let h = harness(0).await;
+    let d = h.draft("Hello Ananth,\n\nA UK company is hiring React Native developers, and your 2 years fit well.\n\nRegards, HR").await;
+    sqlx::query("UPDATE drafts SET instructions_by_user = 'bol do UK wali company hiring kar rahi hai' WHERE id = ?1").bind(&d).execute(&h.state.db).await.unwrap();
+    sqlx::query(
+        "INSERT INTO requirements (id, workspace_id, message_id, client, role_title, location, status, source, created_at)
+         VALUES ('req_x', ?1, ?2, 'Acme UK', 'React Native Developer', 'London', 'open', 'manual', ?3)",
+    )
+    .bind(&h.ws)
+    .bind(&h.msg)
+    .bind(now_ms())
+    .execute(&h.state.db)
+    .await
+    .unwrap();
+    h.check(&d, None).await;
+    let context = h.judge.last_context();
+    assert!(context.contains("The owner said") && context.contains("UK wali company"), "{context}");
+    assert!(context.contains("React Native Developer (London)"), "{context}");
 }

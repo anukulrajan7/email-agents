@@ -382,6 +382,7 @@ async fn evaluate(
     }
     let mut ctx = ToolCtx { state, case, turn, actor: Actor::System, hold_secs: 0 };
     let mut preview = None;
+    let mut critic_down = false;
     if tool.risk() != Risk::Read {
         if tool.risk() == Risk::High {
             preview = match tool.preview(&ctx, &args).await {
@@ -395,8 +396,12 @@ async fn evaluate(
                 return Ok(TurnResult::Blocked { tool: tool_name, input: args, reason });
             }
         }
-        if !workflow && let Some(reason) = critic_objection(state, case, tool, &args, preview.as_ref(), usage).await {
-            return Ok(TurnResult::Blocked { tool: tool_name, input: args, reason });
+        if !workflow {
+            match critic_objection(state, case, tool, &args, preview.as_ref(), usage).await {
+                Critique::Fine => {}
+                Critique::Objection(reason) => return Ok(TurnResult::Blocked { tool: tool_name, input: args, reason }),
+                Critique::Unavailable => critic_down = true,
+            }
         }
     }
     let mut auto_sent = false;
@@ -407,11 +412,16 @@ async fn evaluate(
             "send_message" => crate::messaging::rules::may_send_on_its_own(state, case, agent, case_agent, &args).await?,
             _ => false,
         };
+        if critic_down {
+            let mut preview = preview;
+            preview.summary = format!("{} (the safety check couldn't run; please read it before sending)", preview.summary);
+            return Ok(TurnResult::Approval { tool: tool_name, input: args, preview });
+        }
         if !on_its_own {
             return Ok(TurnResult::Approval { tool: tool_name, input: args, preview });
         }
         // A fixed workflow only asks the critic when a send would go out without a person.
-        if workflow && critic_objection(state, case, tool, &args, Some(&preview), usage).await.is_some() {
+        if workflow && !matches!(critic_objection(state, case, tool, &args, Some(&preview), usage).await, Critique::Fine) {
             return Ok(TurnResult::Approval { tool: tool_name, input: args, preview });
         }
         auto_sent = true;
@@ -451,8 +461,15 @@ async fn evaluate(
     })
 }
 
-/// Why the critic does not approve this action, if it does not (also when it cannot be reached).
-async fn critic_objection(state: &AppState, case: &Case, tool: &dyn tools::Tool, args: &Value, preview: Option<&Preview>, usage: &mut Usage) -> Option<String> {
+/// What the critic made of a proposal.
+enum Critique {
+    Fine,
+    Objection(String),
+    /// The check could not run at all (provider down). A person decides instead; the step is not retried.
+    Unavailable,
+}
+
+async fn critic_objection(state: &AppState, case: &Case, tool: &dyn tools::Tool, args: &Value, preview: Option<&Preview>, usage: &mut Usage) -> Critique {
     let input = CriticInput {
         goal: case.goal.clone(),
         facts: case.state(),
@@ -464,11 +481,15 @@ async fn critic_objection(state: &AppState, case: &Case, tool: &dyn tools::Tool,
     match state.critic.review(&input).await {
         Ok(v) => {
             usage.add(&v.usage);
-            (!v.ok).then(|| if v.reason.is_empty() { "The check did not approve this action.".into() } else { v.reason })
+            if v.ok {
+                Critique::Fine
+            } else {
+                Critique::Objection(if v.reason.is_empty() { "The check did not approve this action.".into() } else { v.reason })
+            }
         }
         Err(e) => {
             tracing::warn!(case_id = %case.id, error = %e, "critic unavailable");
-            Some("The safety check is unavailable right now.".into())
+            Critique::Unavailable
         }
     }
 }

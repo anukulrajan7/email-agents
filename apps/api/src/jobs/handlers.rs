@@ -918,6 +918,9 @@ async fn generate_draft(state: &AppState, job: &Job, payload: &Value) -> Result<
         .rows_affected()
             == 1;
         if inserted {
+            if by_person && let Some(said) = payload.get("instructions").and_then(Value::as_str).map(str::trim).filter(|t| !t.is_empty()) {
+                sqlx::query("UPDATE drafts SET instructions_by_user = ?1 WHERE id = ?2").bind(said).bind(&draft_id).execute(&mut *tx).await?;
+            }
             audit::record(
                 &mut tx,
                 Entry {
@@ -1036,7 +1039,8 @@ async fn compose_draft(
     .await?;
     ctx.preference_ids = preferences.iter().map(|p| p.id.clone()).collect();
     let mut memory_notes = ctx.lines();
-    if let Some(extra) = extra_instructions.map(str::trim).filter(|e| !e.is_empty()) {
+    let extra_instructions = extra_instructions.map(crate::signoff::strip_sign_off_instruction);
+    if let Some(extra) = extra_instructions.as_deref().map(str::trim).filter(|e| !e.is_empty()) {
         memory_notes.push(format!("Instruction for this reply: {extra}"));
     }
     let (db, embedder) = (&state.db, state.embedder.as_ref());
@@ -1065,6 +1069,18 @@ async fn compose_draft(
         thread_digest: thread_digest(state, message_id).await?,
     };
     let mut out = state.drafter.draft(&input).await?;
+    if let Some(agent_id) = agent.agent_id.as_deref()
+        && let Some(name) = sqlx::query_scalar::<_, String>("SELECT name FROM agents WHERE id = ?1 AND workspace_id = ?2")
+            .bind(agent_id)
+            .bind(&msg.workspace_id)
+            .fetch_optional(&state.db)
+            .await?
+    {
+        let own = input.signature.as_deref().filter(|s| !s.trim().is_empty()).unwrap_or(&input.default_sign_off);
+        if crate::signoff::replace_agent_sign_off(&mut out.body_text, &name, own) {
+            tracing::info!(message_id, "an agent's own name at the end of a draft was replaced with the owner's sign-off");
+        }
+    }
     // The critic: anything the verified context pack doesn't support becomes a [NEEDS: ...] for a person.
     if !out.body_text.trim().is_empty() {
         let pack = learning::context_pack::ContextPack::from_input(&input);
@@ -1079,6 +1095,9 @@ async fn compose_draft(
             )
             .await;
         }
+    }
+    if !out.body_text.trim().is_empty() {
+        crate::gap_resolver::resolve_draft(&state.db, &msg.workspace_id, staffing, &msg.subject, &msg.body_text, &mut out).await?;
     }
     Ok((out, ctx, quality))
 }

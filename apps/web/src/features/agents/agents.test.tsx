@@ -163,9 +163,11 @@ describe('AgentsPage approvals', () => {
     renderAgents();
 
     const body = await screen.findByLabelText('Email body');
+    expect(body).toHaveAttribute('readonly');
+    await userEvent.click(screen.getByRole('button', { name: 'Edit' }));
     await userEvent.clear(body);
     await userEvent.type(body, 'Hello, two strong profiles attached.');
-    await userEvent.click(screen.getByRole('button', { name: 'Approve & send' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Send' }));
 
     await waitFor(() => expect(postsTo(fetchMock, '/approvals/ap1')).toHaveLength(1));
     expect(postsTo(fetchMock, '/approvals/ap1')[0]).toEqual({ decision: 'approve', edited_body: 'Hello, two strong profiles attached.' });
@@ -176,7 +178,7 @@ describe('AgentsPage approvals', () => {
     const fetchMock = pending();
     renderAgents();
 
-    await userEvent.click(await screen.findByRole('button', { name: 'Approve & send' }));
+    await userEvent.click(await screen.findByRole('button', { name: 'Send' }));
 
     await waitFor(() => expect(postsTo(fetchMock, '/approvals/ap1')).toHaveLength(1));
     expect(postsTo(fetchMock, '/approvals/ap1')[0]).toEqual({ decision: 'approve' });
@@ -186,9 +188,9 @@ describe('AgentsPage approvals', () => {
     const fetchMock = pending();
     renderAgents();
 
-    await userEvent.click(await screen.findByRole('button', { name: 'Decline' }));
+    await userEvent.click(await screen.findByRole('button', { name: 'Not now' }));
     await userEvent.type(screen.getByLabelText('Note for the agent (optional)'), 'Wrong client contact');
-    await userEvent.click(screen.getByRole('button', { name: 'Confirm decline' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Confirm not now' }));
 
     await waitFor(() => expect(postsTo(fetchMock, '/approvals/ap1')).toHaveLength(1));
     expect(postsTo(fetchMock, '/approvals/ap1')[0]).toEqual({ decision: 'decline', note: 'Wrong client contact' });
@@ -203,10 +205,10 @@ describe('AgentsPage approvals', () => {
     );
     renderAgents();
 
-    await userEvent.click(await screen.findByRole('button', { name: 'Approve & send' }));
+    await userEvent.click(await screen.findByRole('button', { name: 'Send' }));
 
     expect(await screen.findByRole('alert')).toHaveTextContent('Draft still has [NEEDS: salary] gaps');
-    expect(screen.getByRole('button', { name: 'Approve & send' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Send' })).toBeEnabled();
     expect(screen.getByText('Could not send. Nothing was sent.')).toBeInTheDocument();
   });
 });
@@ -287,7 +289,7 @@ describe('CaseDetailPage', () => {
     expect(screen.getByText('0.4¢')).toBeInTheDocument();
     expect(screen.getByText('1.2¢')).toBeInTheDocument();
     expect(screen.getByRole('progressbar', { name: 'Budget used' })).toHaveAttribute('aria-valuetext', '2.1¢ of 10¢ budget');
-    expect(screen.getByRole('button', { name: 'Approve & send' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Send' })).toBeInTheDocument();
     expect(screen.queryByText('Technical details')).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Cancel case' })).not.toBeInTheDocument();
   });

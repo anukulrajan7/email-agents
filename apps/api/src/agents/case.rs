@@ -346,14 +346,19 @@ pub async fn escalate_unresolved_reply(conn: &mut SqliteConnection, case: &Case,
     if already {
         return Ok(false);
     }
-    let draft: Option<(String, String)> = sqlx::query_as(
-        "SELECT id, body_text FROM drafts WHERE message_id = ?1 AND workspace_id = ?2 AND status != 'sent' ORDER BY created_at DESC, rowid DESC LIMIT 1",
+    let draft: Option<(String, String, String)> = sqlx::query_as(
+        "SELECT id, body_text, unanswered_json FROM drafts WHERE message_id = ?1 AND workspace_id = ?2 AND status != 'sent' ORDER BY created_at DESC, rowid DESC LIMIT 1",
     )
     .bind(message_id)
     .bind(&case.workspace_id)
     .fetch_optional(&mut *conn)
     .await?;
-    let needs = draft.as_ref().map(|(_, body)| open_needs(body)).unwrap_or_default();
+    let mut needs = draft.as_ref().map(|(_, body, _)| open_needs(body)).unwrap_or_default();
+    for topic in draft.as_ref().map(|(_, _, json)| serde_json::from_str::<Vec<String>>(json).unwrap_or_default()).unwrap_or_default() {
+        if !needs.contains(&topic) {
+            needs.push(topic);
+        }
+    }
     let unresolved_block: bool = sqlx::query_scalar(
         "SELECT COALESCE((SELECT MAX(seq) FROM case_steps WHERE case_id = ?1 AND workspace_id = ?2 AND tool = 'send_email' AND status = 'blocked'), 0)
               > COALESCE((SELECT MAX(seq) FROM case_steps WHERE case_id = ?1 AND workspace_id = ?2
@@ -366,7 +371,7 @@ pub async fn escalate_unresolved_reply(conn: &mut SqliteConnection, case: &Case,
     if needs.is_empty() && !unresolved_block {
         return Ok(false);
     }
-    let draft_id = draft.map(|(id, _)| id);
+    let draft_id = draft.map(|(id, _, _)| id);
     let title = if needs.is_empty() {
         "I couldn't reply safely - please check the draft and send it yourself".to_string()
     } else {
