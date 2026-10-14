@@ -147,6 +147,9 @@ async fn maintenance(state: &AppState) {
     if let Err(e) = jobs::match_digest::schedule(state).await {
         tracing::warn!(error = %e, "failed to schedule match digest");
     }
+    if let Err(e) = crate::staffing::schedule(state).await {
+        tracing::warn!(error = %e, "failed to schedule staffing scan");
+    }
     let hour_bucket = now_ms() / 3_600_000;
     let day = now_ms() / 86_400_000;
     let enqueued = async {

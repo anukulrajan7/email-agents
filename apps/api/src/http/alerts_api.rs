@@ -31,6 +31,7 @@ pub async fn list(
     Query(q): Query<ListQuery>,
 ) -> AppResult<Json<Value>> {
     require_role(&state.db, &ws, &user, Role::Operator).await?;
+    let wall = crate::team::scope::wall_for(&state.db, &ws, &user).await?;
     let filter = match q.status.as_deref().unwrap_or("open") {
         "open" => "a.status IN ('open', 'snoozed')",
         "resolved" => "a.status = 'resolved'",
@@ -39,13 +40,19 @@ pub async fn list(
     };
     let rows: Vec<AlertRow> = sqlx::query_as(&format!(
         "{ALERT_SELECT} WHERE a.workspace_id = ?1 AND {filter}
+           AND (a.message_id IS NULL OR (m.suppressed = 0 AND (?2 IS NULL OR m.source_id IN (SELECT value FROM json_each(?2)))))
          ORDER BY a.status = 'open' DESC, a.severity = 'high' DESC, a.created_at DESC LIMIT 200"
     ))
     .bind(&ws)
+    .bind(&wall)
     .fetch_all(&state.db)
     .await?;
-    let open_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM alerts WHERE workspace_id = ?1 AND status = 'open'")
+    let open_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM alerts a LEFT JOIN email_messages m ON m.id = a.message_id WHERE a.workspace_id = ?1 AND a.status = 'open'
+           AND (a.message_id IS NULL OR (m.suppressed = 0 AND (?2 IS NULL OR m.source_id IN (SELECT value FROM json_each(?2)))))",
+    )
         .bind(&ws)
+        .bind(&wall)
         .fetch_one(&state.db)
         .await?;
     let items: Vec<Value> = rows.into_iter().map(alerts::alert_json).collect();

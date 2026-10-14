@@ -31,6 +31,8 @@ pub mod memory_learning;
 pub mod sessions;
 pub mod skills;
 pub mod sources;
+pub mod staffing;
+pub mod team;
 pub mod text_clean;
 pub mod threads;
 

@@ -46,6 +46,8 @@ pub async fn persist_message(
         return Ok(None);
     }
 
+    let suppressed = crate::staffing::policy::should_suppress(conn, source_id, workspace_id, email).await?;
+
     let now = now_ms();
     let thread_id = match provider_thread_id {
         Some(ptid) => {
@@ -121,6 +123,37 @@ pub async fn persist_message(
     .execute(&mut *conn)
     .await?;
 
+    if suppressed {
+        sqlx::query("UPDATE email_messages SET suppressed = 1 WHERE id = ?1").bind(&message_id).execute(&mut *conn).await?;
+        // Metadata rows only, so a later release can read the files; nothing is extracted while suppressed.
+        for a in &email.attachments {
+            sqlx::query("INSERT INTO attachments (id, message_id, filename, media_type, size_bytes, provider_attachment_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6)")
+                .bind(new_id("att"))
+                .bind(&message_id)
+                .bind(&a.filename)
+                .bind(&a.media_type)
+                .bind(a.size_bytes)
+                .bind(&a.provider_ref)
+                .execute(&mut *conn)
+                .await?;
+        }
+        tracing::warn!(%message_id, %source_id, "billable policy: mail from a billable person outside the HR mailbox stored as suppressed");
+        audit::record(
+            &mut *conn,
+            Entry {
+                workspace_id,
+                actor: Actor::System,
+                action: "message.suppressed",
+                entity_type: "message",
+                entity_id: &message_id,
+                message_id: Some(&message_id),
+                metadata: json!({ "source_id": source_id, "reason": "billable_policy" }),
+            },
+        )
+        .await?;
+        return Ok(Some(message_id));
+    }
+
     if !outbound {
         memory::record_contact(&mut *conn, workspace_id, &email.sender_address, email.sender_name.as_deref(), email.received_at)
             .await?;
@@ -193,7 +226,7 @@ pub async fn refresh_content(
                 sender_name = COALESCE(?5, sender_name), cc_json = ?6,
                 direction = CASE WHEN ?7 THEN 'outbound' ELSE direction END,
                 processing_status = CASE WHEN ?7 THEN 'processed' ELSE processing_status END
-         WHERE source_id = ?3 AND source_message_id = ?4 AND content_complete = 0
+         WHERE source_id = ?3 AND source_message_id = ?4 AND content_complete = 0 AND suppressed = 0
          RETURNING id, workspace_id, direction",
     )
     .bind(&body_text)

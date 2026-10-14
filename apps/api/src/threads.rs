@@ -18,7 +18,7 @@ pub async fn thread_has_reply_after(
            SELECT 1 FROM email_messages m
            JOIN email_threads t ON t.id = m.thread_id
            WHERE m.workspace_id = ?1 AND (t.id = ?2 OR t.provider_thread_id = ?2)
-             AND m.direction = 'outbound' AND m.received_at > ?3
+             AND m.direction = 'outbound' AND m.suppressed = 0 AND m.received_at > ?3
          ) OR EXISTS (
            SELECT 1 FROM drafts d
            JOIN email_messages m ON m.id = d.message_id

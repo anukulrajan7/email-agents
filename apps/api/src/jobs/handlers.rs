@@ -145,6 +145,7 @@ pub async fn handle(state: &AppState, job: &Job) -> Result<(), JobError> {
         kind::AGENT_STEP => super::agent_jobs::agent_step(state, job, &payload).await,
         kind::AGENT_SCHEDULE_TICK => crate::agents::triggers::schedule_tick_job(state, job).await,
         kind::SEND_DRAFT => crate::replies::send_scheduled(state, &payload).await,
+        kind::STAFFING_SCAN => crate::staffing::scan_job(state, &payload).await,
         other => Err(JobError::Permanent(format!("unknown job kind {other}"))),
     }
 }

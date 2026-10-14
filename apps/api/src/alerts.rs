@@ -127,7 +127,7 @@ pub struct AlertSettings {
     pub digest_hour: i64,
 }
 
-fn valid_email(e: &str) -> bool {
+pub fn valid_email(e: &str) -> bool {
     let Some((local, domain)) = e.split_once('@') else { return false };
     !local.is_empty()
         && domain.contains('.')
@@ -270,7 +270,7 @@ async fn team_sent_after(db: &SqlitePool, workspace_id: &str, thread_key: &str, 
     sqlx::query_scalar(
         "SELECT EXISTS(
            SELECT 1 FROM email_messages r JOIN email_sources s ON s.id = r.source_id
-           WHERE r.workspace_id = ?1 AND r.thread_id = ?2 AND r.received_at > ?3
+           WHERE r.workspace_id = ?1 AND r.thread_id = ?2 AND r.suppressed = 0 AND r.received_at > ?3
              AND (lower(r.sender_address) IN (SELECT lower(u.email) FROM memberships mb JOIN users u ON u.id = mb.user_id
                                               WHERE mb.workspace_id = ?1)
                   OR lower(r.sender_address) = (SELECT lower(u.email) FROM users u WHERE u.id = s.connected_by_user_id))
@@ -402,6 +402,16 @@ fn rule_alert<'a>(workspace_id: &'a str, rule: &'a str, c: &'a Candidate, now: i
     }
 }
 
+/// Raises a rule alert and gives it an owner (the person linked to the mailbox) for the escalation chain.
+async fn raise_rule(pool: &SqlitePool, alert: NewAlert<'_>, message_id: &str) -> sqlx::Result<bool> {
+    let workspace_id = alert.workspace_id;
+    let (id, created) = raise(pool, alert).await?;
+    if created {
+        crate::team::escalation::tag_owner_for_message(pool, workspace_id, &id, message_id).await?;
+    }
+    Ok(created)
+}
+
 // ---------------------------------------------------------------- evaluation
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -498,24 +508,30 @@ pub async fn evaluate_workspace(state: &AppState, workspace_id: &str, now: i64) 
     let approval_ids: HashSet<&str> = approvals.iter().map(|c| c.id.as_str()).collect();
     let important = firing(pool, workspace_id, IMPORTANT_UNANSWERED, from, cutoff, None, &team).await?;
     for c in &approvals {
-        report.raised += raise(pool, rule_alert(workspace_id, APPROVAL_PENDING, c, now)).await?.1 as usize;
+        report.raised += raise_rule(pool, rule_alert(workspace_id, APPROVAL_PENDING, c, now), &c.id).await? as usize;
     }
     for c in important.iter().filter(|c| !approval_ids.contains(c.id.as_str())) {
         if !worth_alerting(state, workspace_id, c).await? {
             continue;
         }
-        report.raised += raise(pool, rule_alert(workspace_id, IMPORTANT_UNANSWERED, c, now)).await?.1 as usize;
+        report.raised += raise_rule(pool, rule_alert(workspace_id, IMPORTANT_UNANSWERED, c, now), &c.id).await? as usize;
     }
+    report.raised += crate::team::evaluate_alerts(state, workspace_id, now).await?;
 
+    // Alerts about a person wait at the owner, then at the manager, for their own configurable delays.
+    let (manager_hours, final_hours) = crate::team::escalation::delays(pool, workspace_id, settings.escalate_after_hours).await?;
     let escalated: Vec<(String, Option<String>, i64)> = sqlx::query_as(
         "UPDATE alerts SET escalation_level = escalation_level + 1, severity = 'high', level_since = ?1, updated_at = ?1
-         WHERE workspace_id = ?2 AND status = 'open' AND escalation_level < ?3 AND level_since <= ?4
+         WHERE workspace_id = ?2 AND status = 'open' AND escalation_level < ?3
+           AND level_since <= ?1 - 3600000 * CASE WHEN person_id IS NULL THEN ?4 WHEN escalation_level = 1 THEN ?5 ELSE ?6 END
          RETURNING id, message_id, escalation_level",
     )
     .bind(now)
     .bind(workspace_id)
     .bind(MAX_LEVEL)
-    .bind(now - settings.escalate_after_hours * HOUR_MS)
+    .bind(settings.escalate_after_hours)
+    .bind(manager_hours)
+    .bind(final_hours)
     .fetch_all(pool)
     .await?;
     if !escalated.is_empty() {
@@ -555,6 +571,7 @@ struct Pending {
     message_id: Option<String>,
     escalation_level: i64,
     notified_json: String,
+    person_id: Option<String>,
 }
 
 /// One alert in an email.
@@ -590,7 +607,7 @@ async fn deliver(state: &AppState, workspace_id: &str, settings: &AlertSettings)
         return Ok(0);
     };
     let pending: Vec<Pending> = sqlx::query_as(
-        "SELECT id, title, body, message_id, escalation_level, notified_json FROM alerts
+        "SELECT id, title, body, message_id, escalation_level, notified_json, person_id FROM alerts
          WHERE workspace_id = ?1 AND status = 'open' AND notified_level < escalation_level ORDER BY created_at",
     )
     .bind(workspace_id)
@@ -601,11 +618,17 @@ async fn deliver(state: &AppState, workspace_id: &str, settings: &AlertSettings)
     }
     let base = base_url(state);
     let ws_name = workspace_name(&state.db, workspace_id).await?;
-    let mut by_recipient: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
+    let mut by_recipient: BTreeMap<String, Vec<usize>> = BTreeMap::new();
     for (i, p) in pending.iter().enumerate() {
-        let targets = if p.escalation_level <= 1 || settings.escalate_to.is_empty() { &settings.recipients } else { &settings.escalate_to };
+        let targets: Vec<String> = match &p.person_id {
+            Some(person) => {
+                crate::team::escalation::recipients(&state.db, workspace_id, person, p.escalation_level, &settings.recipients).await?
+            }
+            None if p.escalation_level <= 1 || settings.escalate_to.is_empty() => settings.recipients.clone(),
+            None => settings.escalate_to.clone(),
+        };
         for t in targets {
-            by_recipient.entry(t.as_str()).or_default().push(i);
+            by_recipient.entry(t).or_default().push(i);
         }
     }
     let mut delivered: Vec<Vec<String>> = vec![vec![]; pending.len()];
@@ -621,12 +644,12 @@ async fn deliver(state: &AppState, workspace_id: &str, settings: &AlertSettings)
             })
             .collect();
         let (subject, text, html) = render_email(&ws_name, &base, workspace_id, &lines, None);
-        let email = OutgoingEmail { kind: mail_kind::ALERT, to, subject: &subject, text: &text, html: &html };
+        let email = OutgoingEmail { kind: mail_kind::ALERT, to: &to, subject: &subject, text: &text, html: &html };
         match crate::mailer::deliver(&state.db, mailer.as_ref(), email).await {
             Ok(()) => {
                 sent += 1;
                 for &i in &idxs {
-                    delivered[i].push(to.to_string());
+                    delivered[i].push(to.clone());
                 }
             }
             Err(e) => tracing::warn!(error = %e, "alert email failed; will retry next run"),

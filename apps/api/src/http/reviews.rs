@@ -34,10 +34,12 @@ pub async fn list(
     require_role(&state.db, &ws, &user, Role::Operator).await?;
     let status = q.status.filter(|s| s == "open" || s == "closed");
     let rows: Vec<ReviewRow> = sqlx::query_as(&format!(
-        "{REVIEW_SELECT} WHERE r.workspace_id = ?1 AND (?2 IS NULL OR r.status = ?2) ORDER BY r.created_at DESC LIMIT 200"
+        "{REVIEW_SELECT} WHERE r.workspace_id = ?1 AND (?2 IS NULL OR r.status = ?2) AND m.suppressed = 0
+           AND (?3 IS NULL OR m.source_id IN (SELECT value FROM json_each(?3))) ORDER BY r.created_at DESC LIMIT 200"
     ))
     .bind(&ws)
     .bind(status)
+    .bind(crate::team::scope::wall_for(&state.db, &ws, &user).await?)
     .fetch_all(&state.db)
     .await?;
     Ok(Json(Items { items: rows.into_iter().map(Into::into).collect() }))

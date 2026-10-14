@@ -217,7 +217,7 @@ fn tool_specs(role: Role, last_turn: bool, features: Features) -> Vec<Value> {
 // ---------------------------------------------------------------- mail rows
 
 const REPLIED_SQL: &str = "(EXISTS (SELECT 1 FROM drafts d WHERE d.message_id = m.id AND d.status = 'sent')
-    OR EXISTS (SELECT 1 FROM email_messages o WHERE o.thread_id = m.thread_id AND o.direction = 'outbound' AND o.received_at > m.received_at))";
+    OR EXISTS (SELECT 1 FROM email_messages o WHERE o.thread_id = m.thread_id AND o.direction = 'outbound' AND o.suppressed = 0 AND o.received_at > m.received_at))";
 
 fn mail_select() -> String {
     format!(
@@ -378,7 +378,7 @@ impl Session<'_> {
             if citations.len() >= 5 || !self.seen.iter().any(|m| m == id) || citations.iter().any(|c| c.message_id == id) {
                 continue;
             }
-            let subject: Option<String> = sqlx::query_scalar("SELECT subject FROM email_messages WHERE id = ?1 AND workspace_id = ?2")
+            let subject: Option<String> = sqlx::query_scalar("SELECT subject FROM email_messages WHERE id = ?1 AND workspace_id = ?2 AND suppressed = 0")
                 .bind(id)
                 .bind(self.ws)
                 .fetch_optional(&self.state.db)
@@ -430,7 +430,7 @@ impl Session<'_> {
     }
 
     async fn mail_by_id(&self, id: &str) -> sqlx::Result<Option<MailRow>> {
-        sqlx::query_as(&format!("{} WHERE m.id = ?1 AND m.workspace_id = ?2", mail_select()))
+        sqlx::query_as(&format!("{} WHERE m.id = ?1 AND m.workspace_id = ?2 AND m.suppressed = 0", mail_select()))
             .bind(id)
             .bind(self.ws)
             .fetch_optional(&self.state.db)
@@ -478,7 +478,7 @@ impl Session<'_> {
             _ => return Err(failed("filter must be needs_reply, important or unread")),
         };
         let rows: Vec<MailRow> = sqlx::query_as(&format!(
-            "{} WHERE m.workspace_id = ?1 AND m.direction = 'inbound' AND {filter} ORDER BY m.received_at DESC, m.id DESC LIMIT ?2",
+            "{} WHERE m.workspace_id = ?1 AND m.suppressed = 0 AND m.direction = 'inbound' AND {filter} ORDER BY m.received_at DESC, m.id DESC LIMIT ?2",
             mail_select()
         ))
         .bind(self.ws)

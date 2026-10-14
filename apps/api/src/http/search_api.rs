@@ -11,8 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{AppState, dto::Items};
 use crate::{
-    auth::{AuthUser, require_role},
-    domain::Role,
+    auth::AuthUser,
     error::AppResult,
     knowledge::{self, Scope},
     sources::normalize::truncate_chars,
@@ -43,7 +42,8 @@ pub async fn search(
     Path(ws): Path<String>,
     Query(params): Query<SearchQuery>,
 ) -> AppResult<Json<Items<SearchItem>>> {
-    require_role(&state.db, &ws, &user, Role::Operator).await?;
+    let access = crate::team::access::resolve(&state.db, &ws, &user).await?;
+    let wall = crate::team::scope::wall(&state.db, &ws, &access).await?.map(|ids| serde_json::json!(ids).to_string());
     let q = truncate_chars(params.q.unwrap_or_default().trim(), MAX_QUERY_CHARS);
     if q.is_empty() {
         return Ok(Json(Items { items: vec![] }));
@@ -64,10 +64,11 @@ pub async fn search(
     }
     let ids: Vec<&String> = best.iter().map(|(m, _)| m).collect::<HashSet<_>>().into_iter().collect();
     let sql = format!(
-        "SELECT id, subject FROM email_messages WHERE workspace_id = ? AND id IN ({})",
+        "SELECT id, subject FROM email_messages WHERE workspace_id = ? AND suppressed = 0
+           AND (? IS NULL OR source_id IN (SELECT value FROM json_each(?))) AND id IN ({})",
         vec!["?"; ids.len()].join(",")
     );
-    let mut query = sqlx::query_as::<_, (String, String)>(&sql).bind(&ws);
+    let mut query = sqlx::query_as::<_, (String, String)>(&sql).bind(&ws).bind(&wall).bind(&wall);
     for id in &ids {
         query = query.bind(*id);
     }

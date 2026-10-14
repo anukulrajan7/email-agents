@@ -351,7 +351,7 @@ async fn gather(state: &AppState, input: &CheckInput<'_>) -> AppResult<(Facts, V
         }
     }
     let thread: Vec<(String, String)> = sqlx::query_as(
-        "SELECT subject, body_text FROM email_messages WHERE thread_id = ?1 AND workspace_id = ?2 ORDER BY received_at DESC LIMIT 20",
+        "SELECT subject, body_text FROM email_messages WHERE thread_id = ?1 AND workspace_id = ?2 AND suppressed = 0 ORDER BY received_at DESC LIMIT 20",
     )
     .bind(&r.thread_id)
     .bind(ws)
@@ -457,6 +457,7 @@ pub async fn check_draft(
     body: Option<Json<CheckBody>>,
 ) -> AppResult<Json<SafetyReport>> {
     require_role(&state.db, &ws, &user, Role::Operator).await?;
+    crate::team::scope::require_draft(&state.db, &ws, &user, &id).await?;
     let reply = replies::load(&state, &ws, &id).await?;
     let text = body.and_then(|Json(b)| b.body_text).unwrap_or_else(|| reply.body_text.clone());
     if text.chars().count() > 10_000 {

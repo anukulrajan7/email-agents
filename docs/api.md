@@ -857,3 +857,117 @@ Environment: `AGENT_MAX_AUTONOMY` (0 to 3, default 3), `AGENT_AUTO_SEND_DELAY_SE
 
 Tenancy: `agents::case::get_in` is the only case lookup and always takes the workspace; job payloads carry it too.
 Another workspace's case, approval, agent, version or route id is a 404 on every route above and on the existing case and approval routes.
+
+## Team and staffing operations (WP-G)
+
+Two layers. **Generic** (every workspace): the people directory, the super admin and role-scoped views, layered
+escalation, per-person mailbox scoping and the metrics framework with the corner widget. **HR & recruiting pack only**
+(`staffing`): billable / non-billable, timesheets, submissions and outcomes, portal reconciliation, matching. HR endpoints
+answer `409 conflict` in other workspaces; HR fields are rejected (people) or ignored (settings) there.
+
+### Roles
+
+| Level | Who | Can |
+|---|---|---|
+| `super_admin` | The workspace owner (row in `workspace_owners`: the creator; existing workspaces backfilled with their first admin) | Everything: directory, targets, settings, imports, scan, every person's numbers |
+| `admin` | Other admins | Read-only, scoped like operators |
+| `operator` | Members | Read-only: themselves and everyone below them in the manager chain |
+
+The super admin is a separate table, not a new `memberships.role` value, because widening that CHECK would rebuild a
+referenced table. `GET /team/access` returns `{level, person, is_manager, report_count, staffing, primary_metric}`.
+
+### Team (any workspace; `/api/v1/workspaces/:ws/team/...`)
+
+| Method | Path | Who | Notes |
+|---|---|---|---|
+| GET | `/access` | member | Level, own directory entry (matched by email), pack flag |
+| GET / PUT | `/settings` | read: member, write: super admin | `tz_offset_minutes`, `manager_after_hours`, `final_after_hours` (null = alert escalate-after), `final_emails`, `below_target_hour`, `weekly_check_hour`; with the pack also `hr_source_id`, `client_domains`, `timesheet_grace_days`, `hours_tolerance` |
+| GET | `/people` | member (scoped) | `{items, can_edit}` |
+| POST / PATCH / DELETE | `/people`, `/people/:id` | super admin | Fields: `name, emails[], role, manager_id, joining_date (YYYY-MM-DD), daily_target, weekly_target, source_id`; pack: `employee_type (billable\|non_billable), client`. PATCH: missing = keep, `null` = clear. DELETE archives and frees the emails. 400 names the field |
+| POST | `/people/import` | super admin | `{csv, dry_run}` → `{dry_run, total_rows, created, updated, skipped, errors:[{row, field, message}]}`. Columns: `name,email` (required; several emails with `;`), `role, manager_email, joining_date, daily_target, weekly_target, mailbox`; pack: `employee_type, client`. Matched by email, so re-imports update. Bad rows are skipped and listed |
+| GET | `/metrics/me` | member | `{person, metrics}`; both null when the user is not in the directory (no widget) |
+| GET | `/metrics/people/:id` | member (scoped, else 404) | `PersonMetrics` |
+| GET | `/metrics/team?manager_id=` | super admin: everyone or one manager's team; others: the people below them | `TeamMetrics` |
+| GET | `/escalations` | member (scoped) | Delays, final contacts and each person's chain |
+
+Inbox scoping: `GET /workspaces/:ws/messages?source_id=&person_id=` narrows to one mailbox or to the mailbox linked to a
+person (`people.source_id`); both together intersect, a person with no mailbox has no mail, unknown ids are 400, a person
+outside the caller's scope is 404.
+
+### Metrics framework
+
+Exact SQL, no model. A `MetricDef { key, label, unit (count|rate|minutes), primary, ratio, sql }` is one query over
+`(workspace ?1, person ?2, from ?3, to ?4)`. Every workspace gets `replies_sent` (primary) and `avg_response_minutes`; the
+staffing pack adds `submissions` (primary, replacing the generic primary), `interviews`, `selected`, `joined`, `rejected`
+and `interview_rate` (interviews / submissions). Daily and weekly targets count the primary metric. Each metric is
+computed for today, this week (Monday start) and since the joining date, in the workspace time zone. Team totals sum counts
+and recompute ratios from the sums.
+
+### Ask Meera hook (read-only; do not edit `src/assistant/*` from here)
+
+`src/staffing/metrics.rs` is the surface the assistant will call. It does no authorisation: the caller must first apply
+`team::access::resolve` / `Access::can_see(person_id)`.
+
+```rust
+staffing::metrics::find_people(&db, ws, "priya") -> Vec<PersonRef { id, name, role }>        // resolve a name
+staffing::metrics::person_metrics(&db, ws, person_id, now_ms) -> Option<PersonMetrics>       // today / week / since joining
+staffing::metrics::team_metrics(&db, ws, Some(manager_id) | None, now_ms) -> TeamMetrics     // sums + ratios
+// e.g. "How many submissions did Priya do since joining, and what % got interviews?"
+//   metrics.find(|m| m.key == "submissions").since_joining, ...find("interview_rate").since_joining
+```
+
+### Staffing (pack; `/api/v1/workspaces/:ws/staffing/...`)
+
+| Method | Path | Who | Notes |
+|---|---|---|---|
+| POST | `/setup` | super admin | Adds the `submission_update` label (client replies about a candidate) |
+| POST | `/scan` | super admin | Runs the submission scan and outcome reader now → `{scanned, created, needs_confirm, outcomes_updated}`. Also runs every 15 min (`staffing_scan` job) |
+| GET | `/submissions?person_id=&link_status=&status=` | member (scoped) | Detected submissions with `link_status` (`auto\|needs_confirm\|confirmed\|unlinked`), options, `outcome` (`pending\|interview\|rejected\|selected\|joined`), `reached_interview` |
+| PATCH | `/submissions/:id` | the person, anyone above them, super admin | `{candidate_id?, requirement_id?, dismissed?, outcome?}`; links become `confirmed`; a manual outcome is not overwritten by the reader |
+| GET | `/timesheets?month=YYYY-MM` | member (scoped) | Billable people: `received\|pending\|missing`, due date (month end + grace days), hours read from the mail |
+| POST | `/portal/hours`, `/portal/submissions` | super admin | `{csv, dry_run}`; hours: `email,month,hours`; submissions: `email,date,candidate,client` → same report shape as the people import |
+| POST | `/portal/reconcile` | super admin | Compare now → `{months, matched, unverified, mismatches, alerts_raised}` |
+| GET | `/portal/mismatches` | member (scoped) | Open and resolved mismatches |
+
+Detection rules: an outbound message from a directory person (sender address, or their linked mailbox) to an external,
+non-free-mail, non-internal recipient domain (or a configured `client_domains` entry) with a `pdf/doc/docx/rtf/odt`
+attachment that is not named like an invoice, timesheet, offer, JD or requirement. One submission per (person, thread,
+candidate name from the file name). Links: candidate by exact name / name tokens in the file name or mail / candidate
+email; requirement by client (recipient domain vs requirement client), role words and an existing match; embeddings
+only suggest and never link on their own. Outcomes come from the client's replies in the thread, or from replies
+labelled `submission_update` that name the candidate, read by plain phrases (interview / rejected / selected / joined).
+
+Billable policy: with `hr_source_id` set, mail that a billable person SENT (sender or, for forwarded mail,
+`original_sender_address`), or that sits in a mailbox linked to a billable person, and that did not arrive through the HR
+mailbox, is stored with `email_messages.suppressed = 1` (audit `message.suppressed` + a warn log). It is never classified,
+indexed, listed, searched or alerted on. Recipients and Cc never match, so a client copying a consultant, a team list and a
+recruiter's sent CV mail copying a consultant are all kept. Attachment metadata rows are stored for suppressed mail (nothing is
+extracted). After any change of `hr_source_id`, a person's billable flag, emails or mailbox, every suppressed message is judged
+again against the policy as it now is; those that no longer qualify are released and get the steps they skipped (contact,
+agent wake-up, attachment extraction, classification). Mail that still qualifies stays suppressed. Suppressed mail never counts
+as a reply and is a 404 on every message route. Marking anyone billable needs a connected HR mailbox, and `hr_source_id` cannot be unset or point at a
+disconnected mailbox while billable people exist. A billable person cannot have their own mailbox linked.
+
+Timesheets belong to a month: a month named in the subject ("September timesheet", "Sept", `2026-09`) wins, otherwise
+`received_at` minus the grace days decides (a timesheet sent 2 Sep is August's). Portal hours for a month are only compared
+with that month's timesheet.
+
+### Ownership, redaction and the mail wall
+
+The super admin needs the owner row and the `admin` role. The members route refuses to demote them;
+`POST /team/ownership {email}` (super admin only, target must be an admin member) hands the role over. Non-owners get
+`GET /team/settings` and `/team/escalations` without any email addresses, HR mailbox or sources. With the staffing pack and
+team setting `restrict_mail_to_team`, operators read only mailboxes linked to people in their own manager-chain subtree
+(inbox list, message detail and search; filters cannot step outside it). The same wall applies to every message action
+(classification, draft, reprocess, insight), the `/drafts/{id}` routes, the review, alert and workflow-run lists and a contact's
+recent messages. Known gap: assistant and agent tools do not apply the wall yet. Off by default. Team setting
+`route_alerts_by_owner` (always on in the staffing pack) opts rule alerts into owner routing.
+
+### Alerts and escalation
+
+A resolved alert whose condition returns is reopened at level 1 when the system closed it (a person's own resolve sticks).
+`below_target` is one rolling alert per person (`alerts.period_key` = the window), resolved when the target is met or the
+window closes. New kinds: `below_target` (every workspace), `timesheet_missing` and `portal_mismatch` (pack). `alerts.person_id` is the
+owner. For an alert with an owner: level 1 goes to the person, level 2 to their manager (else the final contacts), level 3
+to the final contacts (else the alert recipients). Delays: `manager_after_hours` then `final_after_hours`. Rule alerts
+(`important_unanswered`, `approval_pending`) get the owner of the mailbox they arrived in.

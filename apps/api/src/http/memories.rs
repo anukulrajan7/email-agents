@@ -353,14 +353,17 @@ pub async fn contact(
     let row = memory::get_contact(&state.db, &ws, &email).await?.ok_or(AppError::NotFound)?;
     let contact = memory::contact_json(&state.db, &ws, row).await?;
     let memories = contact_memories(&state, &ws, &email).await?;
+    let wall = crate::team::scope::wall_for(&state.db, &ws, &user).await?;
     let recent: Vec<(String, String, i64, String, Option<String>)> = sqlx::query_as(
         "SELECT m.id, m.subject, m.received_at, m.processing_status, c.category
          FROM email_messages m LEFT JOIN classifications c ON c.message_id = m.id
-         WHERE m.workspace_id = ?1 AND m.sender_address = ?2
+         WHERE m.workspace_id = ?1 AND m.sender_address = ?2 AND m.suppressed = 0
+           AND (?3 IS NULL OR m.source_id IN (SELECT value FROM json_each(?3)))
          ORDER BY m.received_at DESC LIMIT 5",
     )
     .bind(&ws)
     .bind(&email)
+    .bind(&wall)
     .fetch_all(&state.db)
     .await?;
     let recent_messages: Vec<Value> = recent
