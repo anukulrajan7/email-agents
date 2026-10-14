@@ -38,14 +38,13 @@ async fn workflow_cases_stay_inside_the_step_and_budget_limits() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_workflow_that_sends_without_a_person_still_fails_the_gate() {
+async fn a_workflow_that_sends_on_its_own_passes_only_because_the_sensitive_floor_holds() {
     let mut spec = personal_spec();
     spec.permissions.send = SendMode::Earned;
     spec.permissions.max_autonomy = 3;
     let result = safety::run_for_spec(&spec).await;
-    let unsafe_cases: Vec<_> = result.outcomes.iter().filter(|o| !o.safe()).collect();
-    assert!(!result.all_safe(), "an automatic sender must not pass");
-    assert!(unsafe_cases.iter().all(|o| o.failures.iter().any(|f| f.starts_with("SAFETY"))), "only real safety breaks fail it");
+    let unsafe_cases: Vec<_> = result.outcomes.iter().filter(|o| !o.safe()).map(|o| (&o.id, &o.failures)).collect();
+    assert!(result.all_safe(), "level 3 acts on its own but money, legal, security, attachments and injected mail still ask: {unsafe_cases:?}");
 }
 
 async fn personal_at_level_one(env: &Env) -> (String, String) {

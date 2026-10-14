@@ -12,7 +12,6 @@ import { AUTONOMY_PLAIN, agentCopy, agentDisplayName } from './agentCopy';
 import { AgentsHubPage } from './AgentsHubPage';
 
 const DESKS: [string, string, AgentSummary['category']][] = [
-  ['general.lead', 'Aarav', 'general'],
   ['personal.mailbox', 'Meera', 'personal'],
   ['hrms.leave', 'Ananya', 'hrms'],
   ['hrms.timesheets', 'Rohan', 'hrms'],
@@ -20,9 +19,7 @@ const DESKS: [string, string, AgentSummary['category']][] = [
   ['hrms.requirements', 'Arjun', 'hrms'],
   ['hrms.payroll', 'Aditya', 'hrms'],
   ['support.resolver', 'Ishaan', 'support'],
-  ['support.escalation', 'Diya', 'support'],
   ['sales.qualifier', 'Kabir', 'sales'],
-  ['sales.followups', 'Tara', 'sales'],
   ['finance.invoices', 'Vikram', 'finance'],
   ['personal.scheduling', 'Nisha', 'personal'],
 ];
@@ -35,19 +32,25 @@ const card = (a: AgentSummary) =>
 describe('agent explanation on every card', () => {
   afterEach(() => vi.unstubAllGlobals());
 
-  it.each(DESKS)('%s: says what it does, when it acts, what it does alone vs asks, and an example', (template, name, category) => {
+  it.each(DESKS)('%s: says what it does, when it acts, what it does alone vs asks, and an example', async (template, name, category) => {
+    const user = userEvent.setup();
     const level: Autonomy = 1;
     const a = agent({
       id: template,
       name,
       category,
       template_key: template,
-      kind: template === 'general.lead' ? 'lead' : 'system',
+      kind: 'system',
       scope: template === 'personal.mailbox' ? 'personal' : 'workspace',
       autonomy: { earned: level, cap: 3, effective: level, limited_by: 'earned' },
     });
     card(a);
     const copy = agentCopy(a);
+    expect(screen.queryByText('What it does')).not.toBeInTheDocument();
+    const how = screen.getByRole('button', { name: 'How I work' });
+    expect(how).toHaveAttribute('aria-expanded', 'false');
+    await user.click(how);
+    expect(how).toHaveAttribute('aria-expanded', 'true');
     const article = screen.getByRole('article', { name: agentDisplayName(a) });
     for (const label of ['What it does', 'When it acts', 'On its own', 'Asks you', 'For example']) expect(within(article).getByText(label)).toBeInTheDocument();
     expect(within(article).getByText(copy.does)).toBeInTheDocument();
@@ -58,15 +61,18 @@ describe('agent explanation on every card', () => {
     expect(article.textContent).not.toMatch(/\b[a-z]+\.[a-z]+\b.*template|My assistant|\(personal\)|gpt|claude|gemini|openai|anthropic/i);
   });
 
-  it.each([0, 1, 2, 3] as Autonomy[])('level %s has its own plain-English line', (level) => {
+  it.each([0, 1, 2, 3] as Autonomy[])('level %s has its own plain-English line', async (level) => {
+    const user = userEvent.setup();
     card(agent({ id: 'x', name: 'Kabir', category: 'sales', template_key: 'sales.qualifier', autonomy: { earned: level, cap: 3, effective: level, limited_by: 'earned' } }));
     expect(screen.getByText(AUTONOMY_PLAIN[level].headline)).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'How I work' }));
     expect(screen.getByText(AUTONOMY_PLAIN[level].alone)).toBeInTheDocument();
     expect(screen.getByText(AUTONOMY_PLAIN[level].asks)).toBeInTheDocument();
   });
 
-  it('falls back to the description for a custom agent', () => {
+  it('falls back to the description for a custom agent', async () => {
     card(agent({ id: 'c1', name: 'Zed', category: 'custom', description: 'Sorts supplier quotes.' }));
+    await userEvent.setup().click(screen.getByRole('button', { name: 'How I work' }));
     const article = screen.getByRole('article', { name: 'Zed' });
     expect(within(article).getByText('Sorts supplier quotes.')).toBeInTheDocument();
     expect(within(article).getByText('Custom helper')).toBeInTheDocument();
@@ -89,7 +95,7 @@ describe('hub intro and avatar changes', () => {
   });
 
   function serve() {
-    const lead = agent({ id: 'a-lead', name: 'Aarav', category: 'general', kind: 'lead', template_key: 'general.lead' });
+    const lead = agent({ id: 'a-lead', name: 'Routing', category: 'general', kind: 'lead', template_key: 'general.lead', hidden: true });
     const kabir = agent({ id: 'a-kabir', name: 'Kabir', category: 'sales', template_key: 'sales.qualifier', avatar: '🎯' });
     const mine = agent({ id: 'a-me', name: 'Meera', category: 'personal', scope: 'personal', template_key: 'personal.mailbox', owner_user_id: 'u1', avatar: '🙋' });
     const server = { mine };
@@ -131,18 +137,19 @@ describe('hub intro and avatar changes', () => {
     mount();
     const intro = await screen.findByRole('complementary', { name: 'About your team' });
     expect(intro).toHaveTextContent('Meera is your own assistant');
-    expect(intro).toHaveTextContent('Aarav leads the team');
-    expect(intro).toHaveTextContent('New helpers start by only watching');
+    expect(intro).toHaveTextContent('one expert');
+    expect(intro).toHaveTextContent('ask only for sensitive things');
+    expect(intro).not.toHaveTextContent('Aarav');
   });
 
   it('shows name and role together, and the personal agent as "Your Meera"', async () => {
     serve();
     mount();
     const kabir = await screen.findByRole('article', { name: 'Kabir' });
-    expect(within(kabir).getByText('Lead qualifier')).toBeInTheDocument();
-    expect(within(kabir).getByText(/tell you which leads are worth a call/)).toBeInTheDocument();
+    expect(within(kabir).getByText('Sales expert')).toBeInTheDocument();
     expect(screen.getByRole('article', { name: 'Your Meera' })).toBeInTheDocument();
     expect(screen.queryByText(/My assistant/)).not.toBeInTheDocument();
+    expect(screen.queryByRole('article', { name: /Routing|Aarav/ })).not.toBeInTheDocument();
   });
 
   it('shows a new avatar straight away and keeps it after a fresh load', async () => {

@@ -3,7 +3,7 @@ import { riseStyle } from '../../lib/motion';
 import type { AgentSummary } from '../../api/types';
 import { AgentFace } from './AgentFace';
 import { resolveAvatar } from './avatars';
-import { AUTONOMY, PAUSE_REASON, STATUS_COPY } from './autonomy';
+import { PAUSE_REASON, STATUS_COPY } from './autonomy';
 import { AUTONOMY_PLAIN, agentCopy, agentDisplayName } from './agentCopy';
 import { AgentExplainer } from './AgentExplainer';
 
@@ -18,7 +18,6 @@ export function AgentCard({
   index,
   isAdmin,
   busy,
-  featured = false,
   onToggle,
   onOpen,
 }: {
@@ -26,7 +25,6 @@ export function AgentCard({
   index: number;
   isAdmin: boolean;
   busy?: boolean;
-  featured?: boolean;
   onToggle: (agent: AgentSummary, on: boolean) => void;
   onOpen: (agent: AgentSummary) => void;
 }) {
@@ -38,32 +36,21 @@ export function AgentCard({
   const why = agent.status === 'paused' && agent.paused_reason ? PAUSE_REASON[agent.paused_reason] : undefined;
 
   return (
-    <article
-      aria-label={name}
-      className="group rise letter flex h-full flex-col gap-4 rounded-xs p-5"
-      style={riseStyle(index + 2)}
-      data-agent-id={agent.id}
-    >
-      <div className="flex items-start gap-4">
-        <AgentFace avatar={resolveAvatar(agent)} size={featured ? 'xl' : 'lg'} index={index} />
-        <div className="min-w-0 flex-1">
-          <div className="flex flex-wrap items-center gap-2">
-            <h3 className="type-display text-xl leading-tight tracking-[-0.01em] break-words">{name}</h3>
-            {agent.kind === 'lead' && <Badge tone="info">Lead</Badge>}
-          </div>
-          <p className="mt-1 text-sm leading-snug text-ink-muted">{agentCopy(agent).role}</p>
+    <article aria-label={name} className="group rise letter flex h-full flex-col gap-2 rounded-xs p-4" style={riseStyle(index + 2)} data-agent-id={agent.id}>
+      <div className="flex items-center gap-3">
+        <AgentFace avatar={resolveAvatar(agent)} size="card" index={index} />
+        <div className="flex min-w-0 flex-1 flex-wrap items-baseline gap-x-2">
+          <h3 className="type-display text-lg leading-tight tracking-[-0.01em] break-words">{name}</h3>
+          <p className="text-sm leading-snug text-ink-muted">{agentCopy(agent).role}</p>
         </div>
       </div>
 
-      <div className="flex flex-col gap-1.5 text-sm">
-        <p className="flex flex-wrap items-center gap-2">
-          <Badge tone={status.tone}>{status.label}</Badge>
-          <Badge>{AUTONOMY[agent.autonomy.effective].chip}</Badge>
-          {agent.update_available && <Badge tone="warning">Update available</Badge>}
-        </p>
-        <p className="font-semibold text-ink">{AUTONOMY_PLAIN[agent.autonomy.effective].headline}</p>
-        {why && <p className="text-ink-muted">{why}</p>}
-      </div>
+      <p className="flex flex-wrap items-center gap-2 text-sm">
+        <Badge tone={status.tone}>{status.label}</Badge>
+        <span className="font-semibold text-ink">{AUTONOMY_PLAIN[agent.autonomy.effective].headline}</span>
+        {agent.update_available && <Badge tone="warning">Update available</Badge>}
+      </p>
+      {why && <p className="text-sm text-ink-muted">{why}</p>}
 
       <AgentExplainer agent={agent} />
 
@@ -72,7 +59,7 @@ export function AgentCard({
         {waiting > 0 && <span className="text-accent"> · {waiting} waiting on you</span>}
       </p>
 
-      <div className="mt-auto flex items-center justify-between gap-3 border-t border-rule pt-3">
+      <div className="mt-auto flex items-center justify-between gap-3 border-t border-rule pt-2">
         <span className="flex items-center gap-2 text-[13px] font-semibold text-ink-muted">
           <Switch
             checked={active}

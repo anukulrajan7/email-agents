@@ -22,7 +22,7 @@ use crate::{
 /// Money, banks and security: never sent without a person, whoever it goes to.
 static MONEY_SECURITY: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-        r"(?i)(₹|\$|€|£|\b(inr|usd|eur|rs\.?|lakhs?|crores?|salary|salaries|payroll|pay|paid|payments?|amount|invoices?|refunds?|wire|transfers?|neft|rtgs|imps|upi|ifsc|swift|iban|bank|banking|account (number|no\.?)|a/c|card (number|no\.?|ending)|credit card|debit card|cvv|otp|one[- ]time (password|code)|pin|password|passcode|passwords|credentials?|api[- ]keys?|secrets?|tokens?|2fa|two[- ]factor|login|sign[- ]in)\b)",
+        r"(?i)(₹|\$|€|£|\b(inr|usd|eur|rs\.?|lakhs?|crores?|salary|salaries|payroll|pay|paid|payments?|amount|invoices?|refunds?|prices?|pricing|quote[ds]?|discount|fees?|costs?|owe[sd]?|rupees?|dollars?|nda|confidential|visa|gdpr|harassment|legal|contracts?|wire|transfers?|neft|rtgs|imps|upi|ifsc|swift|iban|bank|banking|account (number|no\.?)|a/c|card (number|no\.?|ending)|credit card|debit card|cvv|otp|one[- ]time (password|code)|pin|password|passcode|passwords|credentials?|api[- ]keys?|secrets?|tokens?|2fa|two[- ]factor|login|sign[- ]in)\b)",
     )
     .expect("valid regex")
 });
@@ -83,7 +83,7 @@ pub fn injection_signal(texts: &[&str]) -> Option<&'static str> {
 pub async fn personal_level(state: &AppState, ws: &str, user_id: &str) -> sqlx::Result<i64> {
     let Some(row) = crate::agent_registry::store::personal_of(&state.db, ws, user_id).await? else { return Ok(0) };
     let (spec, _) = crate::agent_registry::versions::active_spec_in(&state.db, &row).await?;
-    let routine_ok = crate::agent_profiles::user_profile(&state.db, ws, user_id).await?.is_some_and(|p| p.routine_ok());
+    let routine_ok = crate::agent_profiles::user_profile(&state.db, ws, user_id).await?.is_none_or(|p| p.routine_ok());
     Ok(autonomy::effective_level(LevelInputs {
         earned: row.autonomy_level,
         cap: row.autonomy_cap,

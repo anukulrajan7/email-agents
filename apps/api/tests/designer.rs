@@ -53,6 +53,7 @@ async fn writes(env: &Env) -> Vec<i64> {
 #[tokio::test]
 async fn the_refund_example_is_designed_dry_run_without_writes_and_saved_at_level_zero() {
     let env = env_with(ScriptedDesigner::new().reply(refund_spec())).await;
+    env.install_inbox().await;
     env.receive(&env.shared_src, "g1", "t1", CLIENT, "Refund for my order", "Please refund order #4411, it arrived broken.", "billing").await;
     env.receive(&env.shared_src, "g2", "t2", CLIENT, "Meeting", "Lunch on friday?", "scheduling").await;
 

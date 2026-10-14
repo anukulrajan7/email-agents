@@ -364,6 +364,8 @@ pub async fn run_scenario_with(s: &Scenario, options: &RunOptions) -> Outcome {
     }
     if let Some(send) = &s.setup.permission_send {
         permissions["send"] = json!(send);
+    } else if !s.setup.auto_send {
+        permissions["send"] = json!("ask");
     }
     if s.setup.auto_send {
         permissions["send"] = json!("auto");

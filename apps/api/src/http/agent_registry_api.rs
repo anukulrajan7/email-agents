@@ -168,7 +168,7 @@ fn summary(state: &AppState, a: &AgentRow, spec: &AgentSpec, today: Option<&Toda
     json!({
         "id": a.id, "key": a.key, "kind": a.kind, "scope": a.scope, "owner_user_id": a.owner_user_id, "category": a.category,
         "name": a.name, "avatar": a.avatar, "color": a.color, "description": a.description,
-        "status": a.status, "paused_reason": a.paused_reason, "template_key": a.template_key, "tuned": a.tuned,
+        "status": a.status, "paused_reason": a.paused_reason, "template_key": a.template_key, "tuned": a.tuned, "hidden": a.kind == "lead",
         "update_available": update_available, "active_version": a.active_version,
         "autonomy": { "earned": a.autonomy_level, "cap": a.autonomy_cap, "effective": level.level, "limited_by": level.limited_by },
         "today": { "routed": today.routed, "cases": today.cases, "approvals_pending": today.approvals_pending, "cost_usd": today.cost_usd },
@@ -177,7 +177,7 @@ fn summary(state: &AppState, a: &AgentRow, spec: &AgentSpec, today: Option<&Toda
 
 async fn profile_asks_first(state: &AppState, ws: &str, a: &AgentRow) -> sqlx::Result<bool> {
     let Some(owner) = a.owner_user_id.as_deref() else { return Ok(false) };
-    Ok(!agent_profiles::user_profile(&state.db, ws, owner).await?.is_some_and(|p| p.routine_ok()))
+    Ok(!agent_profiles::user_profile(&state.db, ws, owner).await?.is_none_or(|p| p.routine_ok()))
 }
 
 pub(super) async fn detail_json(state: &AppState, ws: &str, a: &AgentRow) -> AppResult<Value> {
@@ -327,6 +327,9 @@ async fn update(
             return Err(AppError::BadRequest(format!("autonomy_cap must be 0 to {ceiling}")));
         }
         store::set_autonomy_cap(&mut tx, &ws, &id, cap).await?;
+        if cap != agent.autonomy_cap {
+            crate::evals::gate::record_limit_change(&mut tx, &ws, &id, agent.autonomy_cap, cap, &user.id).await?;
+        }
     }
     if body.status.as_deref().is_some_and(|s| s != "active") || body.autonomy_cap.is_some_and(|c| c < 2) {
         store::release_held_sends(&mut tx, &ws, Some(&id), None).await?;

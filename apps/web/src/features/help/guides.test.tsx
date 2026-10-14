@@ -77,10 +77,16 @@ describe('pack and role filtering', () => {
 });
 
 describe('page explanation card', () => {
-  it('says what the page does, how to use it and why it is safe', () => {
+  it('is one line until "How to use" is opened, which shows the steps and why it is safe', async () => {
+    const user = userEvent.setup();
     renderAt('/w/w1/labels');
     const card = screen.getByRole('region', { name: /About this page: Labels/ });
     expect(within(card).getByText('What this page does')).toBeInTheDocument();
+    expect(within(card).queryByText('How to use it')).not.toBeInTheDocument();
+    const toggle = within(card).getByRole('button', { name: 'How to use' });
+    expect(toggle).toHaveAttribute('aria-expanded', 'false');
+    await user.click(toggle);
+    expect(toggle).toHaveAttribute('aria-expanded', 'true');
     expect(within(card).getByText('How to use it')).toBeInTheDocument();
     expect(within(card).getByText('Why it is safe')).toBeInTheDocument();
     expect(within(card).getAllByRole('listitem').length).toBeGreaterThanOrEqual(2);

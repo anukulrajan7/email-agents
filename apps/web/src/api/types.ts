@@ -450,6 +450,7 @@ export type AgentSummary = {
   template_key: string | null;
   tuned: boolean;
   update_available: boolean;
+  hidden?: boolean;
   active_version: number | null;
   autonomy: { earned: Autonomy; cap: Autonomy; effective: Autonomy; limited_by: 'earned' | 'admin_cap' | 'spec' | 'workspace' | 'profile' | 'paused' };
   today: { routed: number; cases: number; approvals_pending: number; cost_usd: number };

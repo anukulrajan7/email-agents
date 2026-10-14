@@ -33,6 +33,7 @@ static PATTERNS: LazyLock<Vec<Pattern>> = LazyLock::new(|| {
         pattern("it tells the agent to keep something from the team", r"\bdo not (tell|inform|notify|alert|mention)\b|\bdon'?t (tell|inform|notify|alert)\b"),
         pattern("it asks the agent to forward mail on", r"\bforward (this|the|all|it|them|(your )?(mail|email|thread))\b[^.\n]{0,40}\bto\b"),
         pattern("it asks the agent to forward mail on", r"\bforward (everything|these|a copy)\b[^.\n]{0,40}\bto\b"),
+        pattern("it tries to set a standing rule for the agent", r"\bstanding rule\b|\bfrom now on\b[^.\n]{0,60}\b(always|cc|copy|forward|send)\b|\balways cc\b|\bcc\b[^.\n]{0,30}\b(every|all) (reply|replies|email|emails|message|messages)\b"),
         pattern("it contains tool-call markup", r#"\{\s*"(tool|tool_name|function|name)"\s*:|<\|"#),
     ]
 });

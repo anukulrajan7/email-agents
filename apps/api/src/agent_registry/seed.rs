@@ -69,19 +69,22 @@ pub async fn ensure_lead(conn: &mut SqliteConnection, ws: &str) -> sqlx::Result<
     Ok(())
 }
 
-/// The member's own agent. It starts at the lead's level, so a workspace that already lets routine
-/// replies go keeps that behaviour for every mailbox. Its name is Meera for everyone.
+/// The member's own agent. It starts acting on its own (level 3, behind the hold and the fixed
+/// sensitive-case floor). Its name is Meera for everyone.
 pub async fn ensure_personal(conn: &mut SqliteConnection, ws: &str, user_id: &str) -> sqlx::Result<()> {
     ensure_lead(conn, ws).await?;
-    let lead = store::lead(&mut *conn, ws).await?;
-    let level = lead.as_ref().map_or(1, |l| l.autonomy_level.clamp(1, 2));
-    ensure_template_agent(conn, ws, templates::personal_template(), &personal_key(user_id), Some(user_id), level, templates::PERSONAL_NAME).await?;
+    let t = templates::personal_template();
+    ensure_template_agent(conn, ws, t, &personal_key(user_id), Some(user_id), t.initial_level, templates::PERSONAL_NAME).await?;
     Ok(())
 }
 
 /// The lead's first personality line, before the lead was called Aarav.
 const OLD_LEAD_PERSONALITY: &str = "I'm Meera, the team's email assistant. I'm warm, upbeat and a little playful, \
 but always professional: friendly greetings, clear next steps, no jargon, and never more words than needed.";
+
+/// The lead's personality line while it was called Aarav.
+const AARAV_PERSONALITY: &str = "I'm Aarav, the team's email assistant. I'm calm and organised, \
+and always professional: friendly greetings, clear next steps, no jargon, and never more words than needed.";
 
 /// Gives agents that still carry an old default name (and were never tuned) their new one. A name an
 /// admin chose, or an agent that was tuned, is left alone.
@@ -98,10 +101,11 @@ async fn rename_old_defaults(conn: &mut SqliteConnection, ws: &str) -> sqlx::Res
                 .await?
                 .rows_affected();
             if renamed > 0 && t.key == templates::LEAD_KEY {
-                sqlx::query("UPDATE workspace_agents SET name = ?1, persona = REPLACE(persona, ?2, ?3) WHERE workspace_id = ?4 AND name = ?5")
-                    .bind(t.name)
+                sqlx::query("UPDATE workspace_agents SET name = ?1, persona = REPLACE(REPLACE(persona, ?2, ?3), ?4, ?3) WHERE workspace_id = ?5 AND name = ?6")
+                    .bind(crate::agent_profiles::DEFAULT_NAME)
                     .bind(OLD_LEAD_PERSONALITY)
                     .bind(crate::agent_profiles::DEFAULT_PERSONALITY)
+                    .bind(AARAV_PERSONALITY)
                     .bind(ws)
                     .bind(old)
                     .execute(&mut *conn)
@@ -210,6 +214,93 @@ pub async fn upgrade_templates(conn: &mut SqliteConnection, ws: &str, catalogue:
     Ok(upgraded)
 }
 
+/// The jobs of the agents that were merged into an expert belong to that expert now. An untuned merged
+/// agent is archived and its open cases, pending approvals, unsent drafts and routes move to the expert
+/// (the lead for the inbox assistant); one an admin tuned stays active as a custom agent. Idempotent.
+pub async fn consolidate_roster(conn: &mut SqliteConnection, ws: &str) -> sqlx::Result<()> {
+    for retired in templates::RETIRED {
+        let Some(target_key) = templates::merged_into(retired.key) else { continue };
+        let agents = sqlx::query_as::<_, AgentRow>(&format!(
+            "SELECT {} FROM agents WHERE workspace_id = ?1 AND template_key = ?2 AND kind = 'system' AND status != 'archived'",
+            store::AGENT_COLUMNS
+        ))
+        .bind(ws)
+        .bind(retired.key)
+        .fetch_all(&mut *conn)
+        .await?;
+        for agent in agents {
+            if agent.tuned {
+                sqlx::query("UPDATE agents SET kind = 'custom', template_key = NULL, template_version = NULL, updated_at = ?1 WHERE id = ?2")
+                    .bind(crate::db::now_ms())
+                    .bind(&agent.id)
+                    .execute(&mut *conn)
+                    .await?;
+                continue;
+            }
+            let target = match store::by_template(&mut *conn, ws, target_key).await? {
+                Some(t) => Some(t),
+                None => store::lead(&mut *conn, ws).await?,
+            };
+            let Some(target) = target else {
+                tracing::warn!(workspace = ws, agent = %agent.id, "no agent to take over from a merged desk; leaving it active");
+                continue;
+            };
+            repoint_work(conn, ws, &agent.id, &target).await?;
+            store::set_status(conn, ws, &agent.id, "archived", None).await?;
+        }
+    }
+    Ok(())
+}
+
+async fn repoint_work(conn: &mut SqliteConnection, ws: &str, from: &str, to: &AgentRow) -> sqlx::Result<()> {
+    let version = to.active_version.unwrap_or(1);
+    for sql in [
+        "UPDATE cases SET agent_id = ?1, agent_version = ?2 WHERE workspace_id = ?3 AND agent_id = ?4 AND shadow = 0 AND status NOT IN ('done', 'failed', 'cancelled')",
+        "UPDATE agent_approvals SET agent_id = ?1 WHERE workspace_id = ?3 AND agent_id = ?4 AND status = 'pending' AND ?2 IS NOT NULL",
+        "UPDATE drafts SET agent_id = ?1 WHERE workspace_id = ?3 AND agent_id = ?4 AND status != 'sent' AND ?2 IS NOT NULL",
+        "UPDATE message_routes SET agent_id = ?1, agent_version = ?2 WHERE workspace_id = ?3 AND agent_id = ?4",
+    ] {
+        sqlx::query(sql).bind(&to.id).bind(version).bind(ws).bind(from).execute(&mut *conn).await?;
+    }
+    Ok(())
+}
+
+/// Meera and the field experts act on their own by default. A workspace whose admin never saved the
+/// agent's settings moves to "send automatically" and its untuned helpers to level 3 (behind the hold and
+/// the sensitive-case floor); a workspace whose admin chose is left alone, and so is any helper an
+/// incident demoted. Idempotent: it only acts while the send setting is still the untouched "ask".
+pub async fn adopt_automatic_defaults(conn: &mut SqliteConnection, ws: &str) -> sqlx::Result<()> {
+    let flipped = sqlx::query(
+        "UPDATE workspace_agents SET permissions_json = json_set(permissions_json, '$.send', 'auto')
+         WHERE workspace_id = ?1 AND updated_by IS NULL AND json_valid(permissions_json) AND json_extract(permissions_json, '$.send') = 'ask'",
+    )
+    .bind(ws)
+    .execute(&mut *conn)
+    .await?
+    .rows_affected();
+    if flipped == 0 {
+        return Ok(());
+    }
+    let keys: Vec<&str> = templates::TEMPLATES.iter().filter(|t| t.initial_level >= 3).map(|t| t.key).collect();
+    let candidates: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT a.id, a.autonomy_level FROM agents a
+         WHERE a.workspace_id = ?1 AND a.status = 'active' AND a.tuned = 0 AND a.autonomy_level < 3 AND a.autonomy_cap BETWEEN 1 AND 2
+           AND (a.kind = 'lead' OR a.scope = 'personal' OR a.template_key IN (SELECT value FROM json_each(?2)))
+           AND NOT EXISTS (SELECT 1 FROM autonomy_changes c WHERE c.agent_id = a.id AND (c.actor LIKE 'user:%' OR (c.to_level < c.from_level AND c.actor = 'system')))",
+    )
+    .bind(ws)
+    .bind(serde_json::json!(keys).to_string())
+    .fetch_all(&mut *conn)
+    .await?;
+    for (id, level) in candidates {
+        store::set_autonomy_cap(conn, ws, &id, 3).await?;
+        if store::set_autonomy_level(conn, ws, &id, 3).await? {
+            crate::evals::gate::record_change(conn, ws, &id, level, 3, "Helpers act on their own by default", serde_json::json!({}), "system").await?;
+        }
+    }
+    Ok(())
+}
+
 /// Brings one workspace's registry up to date: lead, pack desks, a personal agent for every
 /// member, first versions and template upgrades.
 pub async fn seed_workspace(conn: &mut SqliteConnection, ws: &str) -> sqlx::Result<()> {
@@ -222,7 +313,9 @@ pub async fn seed_workspace(conn: &mut SqliteConnection, ws: &str) -> sqlx::Resu
     }
     ensure_versions(conn, ws).await?;
     upgrade_templates(conn, ws, templates::TEMPLATES).await?;
+    consolidate_roster(conn, ws).await?;
     rename_old_defaults(conn, ws).await?;
+    adopt_automatic_defaults(conn, ws).await?;
     Ok(())
 }
 
@@ -238,6 +331,19 @@ async fn incomplete(conn: &mut SqliteConnection, ws: &str) -> sqlx::Result<bool>
     .fetch_one(&mut *conn)
     .await?;
     if gaps > 0 {
+        return Ok(true);
+    }
+    let retired: Vec<&str> = templates::RETIRED.iter().map(|t| t.key).collect();
+    let pending: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM agents WHERE workspace_id = ?1 AND status != 'archived' AND kind = 'system' AND template_key IN (SELECT value FROM json_each(?2)))
+             OR EXISTS (SELECT 1 FROM workspace_agents WHERE workspace_id = ?1 AND updated_by IS NULL AND json_valid(permissions_json)
+                        AND json_extract(permissions_json, '$.send') = 'ask')",
+    )
+    .bind(ws)
+    .bind(serde_json::json!(retired).to_string())
+    .fetch_one(&mut *conn)
+    .await?;
+    if pending {
         return Ok(true);
     }
     let have: Vec<(String, Option<i64>, bool)> =

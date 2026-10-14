@@ -213,7 +213,7 @@ export function AppShell() {
           </main>
         </div>
         <OnboardingPrompt ws={ws} />
-        <PerformanceWidget ws={ws} />
+        {hasStaffing && <PerformanceWidget ws={ws} />}
         <AskMeera ws={ws} />
         {menuOpen && (
           <Dialog title="Menu" variant="drawer" side="left" onClose={() => setMenuOpen(false)} className="gap-6 bg-paper">

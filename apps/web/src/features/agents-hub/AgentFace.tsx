@@ -3,7 +3,7 @@ import { cn } from '../../lib/cn';
 import { useReducedMotion } from '../../lib/useReducedMotion';
 import { avatarSrc } from './avatars';
 
-const SIZES = { sm: 'h-8 w-8', md: 'h-14 w-14', lg: 'h-20 w-20', xl: 'h-28 w-28' } as const;
+const SIZES = { sm: 'h-8 w-8', card: 'h-10 w-10', md: 'h-14 w-14', lg: 'h-20 w-20', xl: 'h-28 w-28' } as const;
 
 /** Decorative 3D avatar: the agent's name always sits next to it, so the image has no alt text. */
 export function AgentFace({

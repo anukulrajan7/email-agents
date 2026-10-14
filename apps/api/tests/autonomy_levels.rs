@@ -70,12 +70,13 @@ async fn the_effective_level_is_the_lowest_limit_and_names_it() {
     let env = Env::new(Opts::packs(&["general"])).await;
     let mine = env.personal_id(OPERATOR).await;
     let level = |v: &Value| (v["autonomy"]["earned"].as_i64().unwrap(), v["autonomy"]["cap"].as_i64().unwrap(), v["autonomy"]["effective"].as_i64().unwrap(), v["autonomy"]["limited_by"].as_str().unwrap().to_string());
-    assert_eq!(level(&env.ok("GET", &format!("/agents/{mine}"), OPERATOR, None).await), (1, 1, 1, "earned".to_string()));
-    // The workspace lets routine replies go: nothing is raised by that switch alone ...
+    assert_eq!(level(&env.ok("GET", &format!("/agents/{mine}"), OPERATOR, None).await), (3, 3, 3, "earned".to_string()), "a new Meera acts on her own");
     env.ok("PUT", "/agent", ADMIN, Some(json!({"permissions": {"send": "auto"}}))).await;
-    assert_eq!(level(&env.ok("GET", &format!("/agents/{mine}"), OPERATOR, None).await), (1, 1, 1, "earned".to_string()));
+    assert_eq!(level(&env.ok("GET", &format!("/agents/{mine}"), OPERATOR, None).await), (3, 3, 3, "earned".to_string()));
     earn_level_two(&env).await;
-    // ... but Priya's own profile still asks first.
+    assert_eq!(level(&env.ok("GET", &format!("/agents/{mine}"), OPERATOR, None).await), (2, 2, 2, "earned".to_string()));
+    // Priya's own profile can still say "ask first", and that wins.
+    env.ok("PUT", "/me/agent-profile", OPERATOR, Some(json!({"display_name": "Priya", "approvals": {"send_email": "always_ask"}}))).await;
     assert_eq!(level(&env.ok("GET", &format!("/agents/{mine}"), OPERATOR, None).await), (2, 2, 1, "profile".to_string()));
     env.ok("PUT", "/me/agent-profile", OPERATOR, Some(json!({"display_name": "Priya", "approvals": {"send_email": "routine_ok"}}))).await;
     assert_eq!(level(&env.ok("GET", &format!("/agents/{mine}"), OPERATOR, None).await), (2, 2, 2, "earned".to_string()));
@@ -323,7 +324,7 @@ async fn the_planner_reads_datamarked_excerpts_never_raw_bodies() {
 async fn routine_mail_runs_as_a_fixed_workflow_without_the_planner() {
     let env = Env::new(Opts::packs(&["general"]).planner(ScriptedPlanner::new().script("inbox", vec![finish(None, "Handled by a person.")]))).await;
     let msg = env.receive(&env.shared_src, "m1", "t1", CLIENT, "Status update", "Hi team, the interview went well. Will update you.", "general").await;
-    let inbox = env.agent_id(ADMIN, "general.inbox").await;
+    let inbox = env.install_inbox().await;
     let mut spec = env.ok("GET", &format!("/agents/{inbox}"), ADMIN, None).await["spec"].clone();
     assert!(spec["steps"].as_array().unwrap().iter().all(|s| s["type"] != "remind_if_no_reply"), "the 48-hour reminder is off by default");
     spec["steps"].as_array_mut().unwrap().push(json!({"type": "remind_if_no_reply", "hours": 48}));
@@ -359,6 +360,7 @@ async fn routine_mail_runs_as_a_fixed_workflow_without_the_planner() {
 #[tokio::test]
 async fn mail_that_is_not_routine_goes_to_the_planner() {
     let env = Env::new(Opts::packs(&["general", "support"]).planner(ScriptedPlanner::new().script("inbox", vec![finish(None, "Needs a person.")]))).await;
+    env.install_inbox().await;
     let mut cases: Vec<(&str, String)> = Vec::new();
     // a complaint
     let m = env.receive(&env.shared_src, "m1", "t1", CLIENT, "Terrible service", "I am very unhappy.", "complaint").await;
@@ -384,14 +386,14 @@ async fn mail_that_is_not_routine_goes_to_the_planner() {
         let id = env.start(&msg).await;
         let case = env.case(ADMIN, &id).await;
         if why == "it is a complaint" {
-            assert_eq!(case["agent"]["name"], "Aarav", "a label desk that only observes leaves the mail to the lead: {case}");
+            assert_eq!(case["agent"]["name"], "Ishaan", "the support expert takes a complaint: {case}");
         } else {
             assert_eq!(case["state"]["wf"], "planner", "{why}: {case}");
             assert!(case["state"]["wf_why"].is_string(), "{why}");
         }
         assert_eq!(case["status"], "done", "{why}");
     }
-    assert_eq!(env.planner.prompts().len(), 6, "one planner call for each of the five, plus the observing Escalations desk on the complaint");
+    assert_eq!(env.planner.prompts().len(), 5, "one planner call for each of the five");
 }
 
 #[tokio::test]
@@ -413,7 +415,7 @@ async fn a_paused_agents_case_waits_and_resumes() {
 #[tokio::test]
 async fn schedule_triggers_start_a_case_when_due() {
     let env = Env::new(Opts::packs(&["general", "sales"]).planner(ScriptedPlanner::new().script("inbox", vec![finish(None, "Nothing to follow up.")]))).await;
-    let followups = env.agent_id(ADMIN, "sales.followups").await;
+    let followups = env.agent_id(ADMIN, "sales.qualifier").await;
     sqlx::query("UPDATE agents SET autonomy_level = 1 WHERE id = ?1").bind(&followups).execute(&env.state.db).await.unwrap();
     let now = db::now_ms();
     let hour = 3_600_000;
@@ -424,7 +426,7 @@ async fn schedule_triggers_start_a_case_when_due() {
     let list = env.ok("GET", &format!("/cases?agent_id={followups}"), ADMIN, None).await;
     let items = list["items"].as_array().unwrap();
     assert_eq!(items.len(), 1);
-    assert_eq!((items[0]["trigger"].as_str(), items[0]["status"].as_str(), items[0]["agent"]["name"].as_str()), (Some("schedule"), Some("done"), Some("Tara")));
+    assert_eq!((items[0]["trigger"].as_str(), items[0]["status"].as_str(), items[0]["agent"]["name"].as_str()), (Some("schedule"), Some("done"), Some("Kabir")));
     assert_eq!(triggers::run_schedule_tick(&env.state, &env.ws, now + 26 * hour).await.unwrap(), 0, "the clock moved on");
     assert_eq!(triggers::run_schedule_tick(&env.state, &env.ws, now + 50 * hour).await.unwrap(), 1, "due again a day later");
 }
@@ -532,10 +534,11 @@ async fn cancelling_the_case_and_switching_a_pack_off_release_held_sends() {
     assert_eq!(send_at(&env, &draft).await, None, "cancelled case");
 
     let (env, _, draft) = held_env().await;
-    let inbox = env.agent_id(ADMIN, "general.inbox").await;
-    sqlx::query("UPDATE drafts SET agent_id = ?1 WHERE id = ?2").bind(&inbox).bind(&draft).execute(&env.state.db).await.unwrap();
+    env.ok("PUT", "/packs", ADMIN, Some(json!({"packs": ["general", "support"]}))).await;
+    let expert = env.agent_id(ADMIN, "support.resolver").await;
+    sqlx::query("UPDATE drafts SET agent_id = ?1 WHERE id = ?2").bind(&expert).bind(&draft).execute(&env.state.db).await.unwrap();
     let mut conn = env.state.db.acquire().await.unwrap();
-    email_ai_api::agent_registry::seed::pause_for_packs_off(&mut conn, &env.ws, &["general"]).await.unwrap();
+    email_ai_api::agent_registry::seed::pause_for_packs_off(&mut conn, &env.ws, &["support"]).await.unwrap();
     drop(conn);
     assert_eq!(send_at(&env, &draft).await, None, "pack switched off");
 }
@@ -564,7 +567,7 @@ async fn a_due_send_stops_when_meera_is_switched_off_or_the_spec_no_longer_earns
     for how in ["control", "meera_off", "spec_ask", "spec_never"] {
         let (env, _, draft) = held_env().await;
         if how.starts_with("spec") || how == "control" {
-            let inbox = env.agent_id(ADMIN, "general.inbox").await;
+            let inbox = env.install_inbox().await;
             sqlx::query("UPDATE agents SET autonomy_level = 2, autonomy_cap = 2 WHERE id = ?1").bind(&inbox).execute(&env.state.db).await.unwrap();
             sqlx::query("UPDATE drafts SET agent_id = ?1 WHERE id = ?2").bind(&inbox).bind(&draft).execute(&env.state.db).await.unwrap();
             let mode = match how {
@@ -719,7 +722,7 @@ async fn another_members_personal_work_stays_out_of_the_timeline_and_case_creati
 #[tokio::test]
 async fn an_outdated_untuned_template_agent_is_brought_up_to_date() {
     let env = Env::new(Opts::packs(&["general"])).await;
-    let inbox = env.agent_id(ADMIN, "general.inbox").await;
+    let inbox = env.personal_id(OPERATOR).await;
     sqlx::query("UPDATE agents SET template_version = 0, tuned = 0 WHERE id = ?1").bind(&inbox).execute(&env.state.db).await.unwrap();
     email_ai_api::agent_registry::seed::ensure_workspace(&env.state.db, &env.ws).await.unwrap();
     let version: Option<i64> = sqlx::query_scalar("SELECT template_version FROM agents WHERE id = ?1").bind(&inbox).fetch_one(&env.state.db).await.unwrap();
