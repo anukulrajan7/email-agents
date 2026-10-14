@@ -11,6 +11,28 @@ pub enum AuthMode {
     Oidc,
 }
 
+/// `UNDERSTAND_V2`: whether one structured call (`ai::understand`) replaces classify + analyze + judges.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnderstandMode {
+    /// Today's separate calls.
+    Off,
+    /// Today's calls decide; v2 also runs and its label agreement is recorded (`understanding_shadow`).
+    Shadow,
+    /// v2 decides; today's calls are the fallback when it fails.
+    On,
+}
+
+impl UnderstandMode {
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "" | "off" | "false" | "0" => Some(Self::Off),
+            "shadow" => Some(Self::Shadow),
+            "on" | "true" | "1" => Some(Self::On),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub database_url: String,
@@ -48,6 +70,9 @@ pub struct Config {
     /// Premium drafting tier (high priority, client mail, many asks, "Write a better draft").
     pub openrouter_premium_model_id: String,
     pub openrouter_classifier_model_id: String,
+    /// Email understanding v2 (one structured call). Empty: the classifier model, then the drafting model.
+    pub openrouter_understand_model_id: String,
+    pub understand_mode: UnderstandMode,
     pub openrouter_embedding_model_id: String,
     /// Reads images (OCR, description, fields). Empty disables image reading.
     pub openrouter_vision_model_id: String,
@@ -135,6 +160,9 @@ impl Config {
             openrouter_premium_model_id: var("OPENROUTER_PREMIUM_MODEL_ID", "deepseek/deepseek-v4-pro"),
             openrouter_model_id,
             openrouter_classifier_model_id: var("OPENROUTER_CLASSIFIER_MODEL_ID", ""),
+            openrouter_understand_model_id: var("OPENROUTER_UNDERSTAND_MODEL_ID", "deepseek/deepseek-v4-flash"),
+            understand_mode: UnderstandMode::parse(&var("UNDERSTAND_V2", "off"))
+                .context("UNDERSTAND_V2 must be 'off', 'shadow' or 'on'")?,
             openrouter_embedding_model_id: var("OPENROUTER_EMBEDDING_MODEL_ID", "baai/bge-m3"),
             openrouter_vision_model_id: var("OPENROUTER_VISION_MODEL_ID", "qwen/qwen3-vl-30b-a3b-instruct"),
             openrouter_audio_model_id: var("OPENROUTER_AUDIO_MODEL_ID", "qwen/qwen3-asr-1.7b"),
@@ -207,6 +235,8 @@ impl Config {
             openrouter_draft_model_id: String::new(),
             openrouter_premium_model_id: String::new(),
             openrouter_classifier_model_id: String::new(),
+            openrouter_understand_model_id: String::new(),
+            understand_mode: UnderstandMode::Off,
             openrouter_embedding_model_id: "baai/bge-m3".into(),
             openrouter_vision_model_id: "qwen/qwen3-vl-30b-a3b-instruct".into(),
             openrouter_audio_model_id: String::new(),
@@ -278,6 +308,14 @@ mod tests {
         assert!(check_dev_auth(true, "https://mail.example.com", "127.0.0.1:8080").is_err());
         assert!(check_dev_auth(true, "HTTPS://mail.example.com", "127.0.0.1:8080").is_err());
         assert!(check_dev_auth(true, "http://localhost:5173", "0.0.0.0:8080").is_err());
+    }
+
+    #[test]
+    fn understand_mode_parses_flags() {
+        assert_eq!(UnderstandMode::parse(""), Some(UnderstandMode::Off));
+        assert_eq!(UnderstandMode::parse("Shadow"), Some(UnderstandMode::Shadow));
+        assert_eq!(UnderstandMode::parse("true"), Some(UnderstandMode::On));
+        assert_eq!(UnderstandMode::parse("maybe"), None);
     }
 
     #[test]

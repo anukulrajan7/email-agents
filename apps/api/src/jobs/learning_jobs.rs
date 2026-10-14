@@ -6,6 +6,7 @@ use serde_json::{Value, json};
 use super::{handlers::JobError, kind};
 use crate::{
     ai::memory_extractor::{LearnDirection, MemoryExtractInput},
+    config::UnderstandMode,
     http::AppState,
     memory_learning::{self, AUTO_MEMORY_CAP},
 };
@@ -116,7 +117,15 @@ pub async fn learn_from_message(state: &AppState, payload: &Value) -> Result<(),
             context: None,
         }
     };
-    let facts = state.memory_extractor.extract(&input).await?;
+    // With understanding v2 the facts came out of the one reading already: no second call on the same email.
+    let v2_facts = match (input.direction, state.config.understand_mode) {
+        (LearnDirection::Incoming, UnderstandMode::On) => crate::ai::understand::stored(&state.db, &message_id).await?.map(|u| u.facts),
+        _ => None,
+    };
+    let facts = match v2_facts {
+        Some(facts) => facts,
+        None => state.memory_extractor.extract(&input).await?,
+    };
     let learned = memory_learning::sanitize(input.direction, input.counterpart.as_deref(), facts);
     let report =
         memory_learning::store(&state.db, &m.workspace_id, &message_id, &message_id, input.direction, learned, AUTO_MEMORY_CAP)

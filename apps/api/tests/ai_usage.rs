@@ -237,6 +237,36 @@ async fn unparseable_answers_are_logged_as_failures_not_successes() {
 }
 
 #[tokio::test]
+async fn understanding_calls_are_verified_and_recorded_under_their_own_task_and_prompt_version() {
+    use email_ai_api::{
+        ai::understand::{OpenRouterUnderstander, UnderstandInput, Understander},
+        domain::Label,
+    };
+    let env = setup_with(|_| {}).await;
+    let url = fake_detailed_openrouter(
+        r#"{"label":"leave","label_confidence":0.9,"priority":"normal","needs_reply":true,"intent":"request","sentiment":"calm","summary":"s","asks":[{"text":"Approve","kind":"request","quote":"approve my leave"},{"text":"Fake","kind":"request","quote":"never written"}],"commitments":[],"deadlines":[],"entities":[],"missing_info":[],"facts_to_remember":[],"alert_signals":[],"injection_signals":[],"language":"en"}"#,
+    )
+    .await;
+    let client = OpenRouterClient::new(reqwest::Client::new(), &url, "k").with_ledger(env.state.db.clone());
+    let input = UnderstandInput {
+        subject: "Leave".into(),
+        sender: "a@b.co".into(),
+        received_at_ms: now_ms(),
+        new_part: "Please approve my leave.".into(),
+        attachments_block: String::new(),
+        attachment_names: vec![],
+        labels: vec![Label { key: "leave".into(), name: "Leave".into(), description: "d".into() }],
+        examples: vec![],
+        sender_history: None,
+        thread_digest: None,
+    };
+    let (u, _) = OpenRouterUnderstander::new(client, "deepseek/deepseek-v4-flash").understand(&input).await.unwrap();
+    assert_eq!((u.asks.len(), u.dropped_unverified), (1, 1));
+    let (task, version): (String, Option<String>) = sqlx::query_as("SELECT task, prompt_version FROM ai_calls").fetch_one(&env.state.db).await.unwrap();
+    assert_eq!((task.as_str(), version.as_deref()), ("understand", Some("understand-v1")));
+}
+
+#[tokio::test]
 async fn job_attempt_is_recorded_on_the_ledger_row() {
     let env = setup_with(|_| {}).await;
     let url = fake_detailed_openrouter(r#"{"summary":"s","asks":[],"deadline":null,"needs_reply":false,"missing_info":[]}"#).await;

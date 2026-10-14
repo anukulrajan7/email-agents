@@ -8,7 +8,11 @@ use sha2::{Digest, Sha256};
 use super::{Job, kind};
 use crate::{
     ai_ledger,
-    ai::{self, AiError, ClassifyInput, ClassifyOutput, DraftInput, policy},
+    ai::{
+        self, AiError, ClassifyInput, ClassifyOutput, DraftInput, policy,
+        understand::{UnderstandInput, Understanding},
+    },
+    config::UnderstandMode,
     audit::{self, Actor, Entry},
     db::{new_id, now_ms},
     ingest, memory,
@@ -358,15 +362,101 @@ async fn classify_email(state: &AppState, job: &Job, payload: &Value) -> Result<
         sender_history,
         labels: labels::active(&state.db, &msg.workspace_id).await?,
     };
+    let mode = state.config.understand_mode;
+    let mut understood: Option<StoredUnderstanding> = None;
     let out = if over_global_cap {
         tracing::warn!("global daily AI budget reached: labelling with rules");
         ai::Classifier::classify(&ai::fallback::RulesClassifier, &input).await?
     } else {
-        state.classifier.classify(&input).await?
+        // v2: one call labels and reads the email. Any failure falls back to today's calls.
+        let v2 = if mode == UnderstandMode::On { understand_for_classify(state, &message_id, &input).await } else { None };
+        match v2 {
+            Some((out, stored)) => {
+                understood = Some(stored);
+                out
+            }
+            None => {
+                let out = state.classifier.classify(&input).await?;
+                if mode == UnderstandMode::Shadow {
+                    shadow_compare(state, &msg.workspace_id, &message_id, &input, &out).await;
+                }
+                out
+            }
+        }
     };
-    persist_classification(state, &message_id, &out, Actor::System, Some(&job.id), WriteMode::Upsert).await?;
+    persist_classification_with(state, &message_id, &out, Actor::System, Some(&job.id), WriteMode::Upsert, understood.as_ref(), false).await?;
     state.jobs_notify.notify_one();
     Ok(())
+}
+
+/// A v2 reading stored together with the classification it produced.
+pub struct StoredUnderstanding {
+    understanding: Understanding,
+    model_id: String,
+    attachments_hash: Option<String>,
+}
+
+/// The v2 input for one email: its new part, attachments, thread digest and the workspace taxonomy.
+async fn understand_input(
+    state: &AppState,
+    message_id: &str,
+    input: &ClassifyInput,
+) -> Result<(UnderstandInput, Option<String>), JobError> {
+    let received_at_ms: i64 = sqlx::query_scalar("SELECT received_at FROM email_messages WHERE id = ?1")
+        .bind(message_id)
+        .fetch_one(&state.db)
+        .await?;
+    let items = crate::attachments::load_prompt_items(&state.db, message_id).await?;
+    let attachments_block = crate::attachments::prompt_block(&items);
+    let attachments_hash = (!attachments_block.is_empty()).then(|| format!("{:x}", Sha256::digest(attachments_block.as_bytes())));
+    Ok((
+        UnderstandInput {
+            subject: input.subject.clone(),
+            sender: input.sender.clone(),
+            received_at_ms,
+            new_part: input.body_text.clone(),
+            attachments_block,
+            attachment_names: input.attachment_names.clone(),
+            labels: input.labels.clone(),
+            examples: input.examples.clone(),
+            sender_history: input.sender_history.clone(),
+            thread_digest: thread_digest(state, message_id).await?,
+        },
+        attachments_hash,
+    ))
+}
+
+async fn understand_for_classify(state: &AppState, message_id: &str, input: &ClassifyInput) -> Option<(ClassifyOutput, StoredUnderstanding)> {
+    if !state.understander.available() {
+        return None;
+    }
+    let result = async {
+        let (ui, attachments_hash) = understand_input(state, message_id, input).await.map_err(|e| e.to_string())?;
+        let (u, model_id) = state.understander.understand(&ui).await.map_err(|e| e.to_string())?;
+        Ok::<_, String>((u, model_id, attachments_hash))
+    }
+    .await;
+    match result {
+        Ok((u, model_id, attachments_hash)) => Some((u.classify_output(&model_id), StoredUnderstanding { understanding: u, model_id, attachments_hash })),
+        Err(e) => {
+            tracing::warn!(error = %e, %message_id, "understanding v2 failed: falling back to separate classify and analyze calls");
+            None
+        }
+    }
+}
+
+/// Shadow mode: run v2 beside the production label and record whether they agree. Never affects the email.
+async fn shadow_compare(state: &AppState, workspace_id: &str, message_id: &str, input: &ClassifyInput, v1: &ClassifyOutput) {
+    if !state.understander.available() {
+        return;
+    }
+    let v2 = match understand_input(state, message_id, input).await {
+        Ok((ui, _)) => state.understander.understand(&ui).await,
+        Err(e) => Err(AiError::Retryable(e.to_string())),
+    };
+    if let Err(e) = ai::understand::record_shadow(&state.db, workspace_id, message_id, v1, &v2).await {
+        tracing::warn!(error = %e, "could not record the understanding shadow comparison");
+    }
 }
 
 /// Files bulk mail with the rules label and an empty, no-reply insight. Nothing else runs on it except
@@ -383,7 +473,7 @@ async fn file_as_bulk(state: &AppState, job: &Job, msg: &MessageForAi, message_i
         model_id: Some(crate::bulk::MODEL_ID.into()),
         model_version: None,
     };
-    let written = persist_classification_with(state, message_id, &out, Actor::System, Some(&job.id), WriteMode::Upsert, true).await?;
+    let written = persist_classification_with(state, message_id, &out, Actor::System, Some(&job.id), WriteMode::Upsert, None, true).await?;
     if written.is_some() {
         tracing::info!(%message_id, ?signals, "filed as bulk mail by rules: no model call");
     }
@@ -410,10 +500,12 @@ pub async fn persist_classification(
     trigger: Option<&str>,
     mode: WriteMode,
 ) -> Result<Option<bool>, JobError> {
-    persist_classification_with(state, message_id, out, actor, trigger, mode, false).await
+    persist_classification_with(state, message_id, out, actor, trigger, mode, None, false).await
 }
 
 /// `bulk`: filed by rules. The insight is written here (nothing needs a model) and only indexing is queued.
+/// `understanding`: a v2 reading made by the same call as the label; its insight is stored in the same transaction.
+#[allow(clippy::too_many_arguments)]
 async fn persist_classification_with(
     state: &AppState,
     message_id: &str,
@@ -421,6 +513,7 @@ async fn persist_classification_with(
     actor: Actor<'_>,
     trigger: Option<&str>,
     mode: WriteMode,
+    understanding: Option<&StoredUnderstanding>,
     bulk: bool,
 ) -> Result<Option<bool>, JobError> {
     let needs_review = policy::needs_review(out);
@@ -530,6 +623,10 @@ async fn persist_classification_with(
         .bind(message_id)
         .fetch_one(&mut *tx)
         .await?;
+    if let Some(u) = understanding {
+        // The same call that labelled the email also read it: store the insight with the label, in one transaction.
+        store_insight(&mut tx, message_id, &u.understanding.insight(), &u.model_id, u.attachments_hash.as_deref(), Some(&u.understanding), true).await?;
+    }
     if analyzed {
         // Re-labelled mail already has its insight: the downstream stages can follow right away.
         enqueue_after_analysis(&mut tx, &workspace_id, message_id, &trigger).await?;
@@ -1144,54 +1241,103 @@ pub async fn analyze_message(state: &AppState, payload: &Value) -> Result<ai::In
         .fetch_optional(&state.db)
         .await?;
     let new_part = ai::body::model_body(&msg.subject, &msg.body_text);
-    let analyst_body = if attachments_block.is_empty() {
-        new_part
-    } else {
-        format!("{}{attachments_block}", crate::sources::normalize::truncate_chars(&new_part, ai::MAX_MODEL_INPUT_CHARS))
-    };
     let digest = thread_digest(state, &message_id).await?;
-    let (mut insight, model_id) =
-        state.analyst.analyze_in_thread(&msg.subject, &msg.sender_address, &analyst_body, digest.as_deref()).await?;
-    // Two independent signals must agree before we skip a reply; a cheap judge breaks real ties.
-    let has_asks = !insight.asks.is_empty();
-    let judge_says = if ai::judge::needs_reply_disputed(insight.needs_reply, requires_reply, has_asks) {
-        let context = ai::judge::email_context(&msg.sender_address, &msg.subject, Some(&insight.summary), &msg.body_text);
-        match state.judge.judge(&context, &[ai::judge::needs_reply_question()]).await {
-            Ok(a) => a.yes_no(ai::judge::NEEDS_REPLY),
-            Err(e) => {
-                tracing::debug!(error = %e, "needs-reply tie-break unavailable; keeping the rule");
-                None
-            }
+
+    // v2: the same single call that labels also reads; here only the reading is kept (the label is not touched).
+    let mut understood: Option<(Understanding, String)> = None;
+    if state.config.understand_mode == UnderstandMode::On && state.understander.available() {
+        let labels = labels::active(&state.db, &msg.workspace_id).await?;
+        let received_at_ms: i64 = sqlx::query_scalar("SELECT received_at FROM email_messages WHERE id = ?1").bind(&message_id).fetch_one(&state.db).await?;
+        let ui = UnderstandInput {
+            subject: msg.subject.clone(),
+            sender: msg.sender_address.clone(),
+            received_at_ms,
+            new_part: new_part.clone(),
+            attachments_block: attachments_block.clone(),
+            attachment_names: items.iter().map(|(name, _, _)| name.clone()).collect(),
+            labels,
+            examples: vec![],
+            sender_history: None,
+            thread_digest: digest.clone(),
+        };
+        match state.understander.understand(&ui).await {
+            Ok(r) => understood = Some(r),
+            Err(e) => tracing::warn!(error = %e, %message_id, "understanding v2 failed: falling back to the analyst"),
         }
-    } else {
-        None
+    }
+    let (insight, model_id, understanding) = match understood {
+        // One call decided needs_reply, so no tie-break judge.
+        Some((u, model_id)) => (u.insight(), model_id, Some(u)),
+        None => {
+            let analyst_body = if attachments_block.is_empty() {
+                new_part
+            } else {
+                format!("{}{attachments_block}", crate::sources::normalize::truncate_chars(&new_part, ai::MAX_MODEL_INPUT_CHARS))
+            };
+            let (mut insight, model_id) =
+                state.analyst.analyze_in_thread(&msg.subject, &msg.sender_address, &analyst_body, digest.as_deref()).await?;
+            // Two independent signals must agree before we skip a reply; a cheap judge breaks real ties.
+            let has_asks = !insight.asks.is_empty();
+            let judge_says = if ai::judge::needs_reply_disputed(insight.needs_reply, requires_reply, has_asks) {
+                let context = ai::judge::email_context(&msg.sender_address, &msg.subject, Some(&insight.summary), &msg.body_text);
+                match state.judge.judge(&context, &[ai::judge::needs_reply_question()]).await {
+                    Ok(a) => a.yes_no(ai::judge::NEEDS_REPLY),
+                    Err(e) => {
+                        tracing::debug!(error = %e, "needs-reply tie-break unavailable; keeping the rule");
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+            insight.needs_reply = ai::judge::settle_needs_reply(insight.needs_reply, requires_reply, has_asks, judge_says);
+            (insight, model_id, None)
+        }
     };
-    insight.needs_reply = ai::judge::settle_needs_reply(insight.needs_reply, requires_reply, has_asks, judge_says);
+    let mut conn = state.db.acquire().await?;
+    store_insight(&mut conn, &message_id, &insight, &model_id, attachments_hash.as_deref(), understanding.as_ref(), refresh).await?;
+    Ok(insight)
+}
+
+/// Writes a message's insight. `overwrite` replaces an existing one (a refresh after attachment text, or a v2 reading
+/// stored with its label); otherwise the first writer wins.
+async fn store_insight(
+    conn: &mut sqlx::SqliteConnection,
+    message_id: &str,
+    insight: &ai::Insight,
+    model_id: &str,
+    attachments_hash: Option<&str>,
+    understanding: Option<&Understanding>,
+    overwrite: bool,
+) -> sqlx::Result<()> {
     let source = if model_id == "rules-v1" { "rules" } else { "llm" };
     sqlx::query(
         "INSERT INTO message_insights (message_id, summary, asks_json, deadline, needs_reply, missing_json, source, model_id, created_at,
-                                      attachments_hash)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                                      attachments_hash, understanding_json, understanding_version)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?12, ?13)
          ON CONFLICT(message_id) DO UPDATE SET summary = excluded.summary, asks_json = excluded.asks_json,
            deadline = excluded.deadline, needs_reply = excluded.needs_reply, missing_json = excluded.missing_json,
            source = excluded.source, model_id = excluded.model_id, created_at = excluded.created_at,
-           attachments_hash = excluded.attachments_hash
+           attachments_hash = excluded.attachments_hash, understanding_json = excluded.understanding_json,
+           understanding_version = excluded.understanding_version
          WHERE ?11",
     )
-    .bind(&message_id)
+    .bind(message_id)
     .bind(&insight.summary)
     .bind(json!(insight.asks).to_string())
     .bind(&insight.deadline)
     .bind(insight.needs_reply)
     .bind(json!(insight.missing_info).to_string())
     .bind(source)
-    .bind(&model_id)
+    .bind(model_id)
     .bind(now_ms())
-    .bind(&attachments_hash)
-    .bind(refresh)
-    .execute(&state.db)
+    .bind(attachments_hash)
+    .bind(overwrite)
+    .bind(understanding.map(|u| serde_json::to_string(u).unwrap_or_default()))
+    .bind(understanding.map(|_| ai::understand::PROMPT_VERSION))
+    .execute(conn)
     .await?;
-    Ok(insight)
+    Ok(())
 }
 
 async fn finish_without_draft(

@@ -140,6 +140,17 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
         _ => Arc::new(ai::RulesAnalyst),
     };
 
+    // Email understanding v2: used only when UNDERSTAND_V2 is shadow or on; without a model it is the rules reader.
+    let understand_model = [&config.openrouter_understand_model_id, &config.openrouter_classifier_model_id, &config.openrouter_model_id]
+        .into_iter()
+        .find(|m| !m.is_empty())
+        .cloned()
+        .unwrap_or_default();
+    let understander: Arc<dyn ai::understand::Understander> = match &openrouter {
+        Some(client) if !understand_model.is_empty() => Arc::new(ai::understand::OpenRouterUnderstander::new(client.clone(), &understand_model)),
+        _ => Arc::new(ai::understand::RulesUnderstander),
+    };
+
     let embedder: Arc<dyn ai::embeddings::Embedder> =
         if openrouter.is_some() && !config.openrouter_embedding_model_id.is_empty() {
             Arc::new(
@@ -262,6 +273,7 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
         memory_extractor,
         alert_mailer: mailer.clone(),
         analyst,
+        understander,
         embedder,
         label_suggester,
         extractor,
