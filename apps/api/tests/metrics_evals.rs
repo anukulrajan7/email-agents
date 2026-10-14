@@ -35,6 +35,7 @@ async fn a_level_is_refused_until_the_checklist_is_met_and_the_reasons_are_liste
     let env = Env::new(Opts::packs(&["general"])).await;
     let lead = env.agent_id(ADMIN, "general.lead").await;
 
+    sqlx::query("UPDATE agents SET autonomy_level = 1 WHERE id = ?1").bind(&lead).execute(&env.state.db).await.unwrap();
     let state = env.ok("GET", &format!("/agents/{lead}/autonomy"), ADMIN, None).await;
     assert!(state["next"]["requirements"].as_array().unwrap().iter().any(|r| r["met"] == false));
     assert!(!state["why"].as_array().unwrap().is_empty());

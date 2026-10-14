@@ -8,7 +8,7 @@ import { ToastProvider } from '../../components/ui';
 import { agent, json, meBody, registry } from '../../test/fixtures';
 import { AgentsHubPage, groupAgents } from './AgentsHubPage';
 
-const lead = agent({ id: 'a-lead', name: 'Aarav', category: 'general', kind: 'lead', template_key: 'general.lead', autonomy: { earned: 1, cap: 3, effective: 1, limited_by: 'earned' } });
+const lead = agent({ id: 'a-lead', name: 'Routing', category: 'general', kind: 'lead', hidden: true, template_key: 'general.lead', autonomy: { earned: 1, cap: 3, effective: 1, limited_by: 'earned' } });
 const desk = agent({ id: 'a-pay', name: 'Aditya', category: 'hrms', template_key: 'hrms.payroll', autonomy: { earned: 2, cap: 3, effective: 2, limited_by: 'earned' }, today: { routed: 3, cases: 3, approvals_pending: 2, cost_usd: 0 } });
 const leave = agent({ id: 'a-leave', name: 'Ananya', category: 'hrms', template_key: 'hrms.leave' });
 const support = agent({ id: 'a-sup', name: 'Ishaan', category: 'support', template_key: 'support.resolver', status: 'paused', paused_reason: 'pack_off' });
@@ -43,10 +43,10 @@ function setup(role: 'admin' | 'operator' = 'admin') {
 }
 
 describe('groupAgents', () => {
-  it('orders categories, lifts the personal agent out, puts the lead first and drops empty groups', () => {
+  it('orders categories, lifts the personal agent out, hides the routing lead and drops empty groups', () => {
     const groups = groupAgents(registry([desk, lead, leave, support], mine).categories, mine.id);
-    expect(groups.map((g) => g.title)).toEqual(['Lead', 'Support', 'HRMS']);
-    expect(groups[2]?.agents.map((a) => a.name)).toEqual(['Aditya', 'Ananya']);
+    expect(groups.map((g) => g.title)).toEqual(['Support', 'HRMS']);
+    expect(groups[1]?.agents.map((a) => a.name)).toEqual(['Aditya', 'Ananya']);
   });
 });
 
@@ -61,22 +61,21 @@ describe('AgentsHubPage', () => {
     setup();
     expect(await screen.findByRole('heading', { name: 'Your personal agent' })).toBeInTheDocument();
     const headings = screen.getAllByRole('heading', { level: 2 }).map((h) => h.textContent);
-    expect(headings).toEqual(['Your personal agent', 'Lead1', 'Support1', 'HRMS2']);
+    expect(headings).toEqual(['Your personal agent', 'Support1', 'HRMS2']);
     const payroll = screen.getByRole('article', { name: 'Aditya' });
     expect(within(payroll).getByText('Sends routine replies after a 10-minute hold')).toBeInTheDocument();
     expect(within(payroll).getByText(/2 waiting on you/)).toBeInTheDocument();
-    expect(within(screen.getByRole('article', { name: 'Aarav' })).getByText('Drafts replies, you approve')).toBeInTheDocument();
+    expect(screen.queryByRole('article', { name: /Routing|Aarav/ })).not.toBeInTheDocument();
     expect(document.body.textContent).not.toMatch(/gpt|claude|gemini|anthropic|openai|haiku|sonnet|opus/i);
   });
 
-  it('turns an agent off with a PATCH and keeps the lead and pack-off agents locked', async () => {
+  it('turns an agent off with a PATCH and keeps pack-off agents locked', async () => {
     const calls = setup();
     const user = userEvent.setup();
     await user.click(await screen.findByRole('switch', { name: 'Pause Aditya' }));
     await waitFor(() =>
       expect(calls).toContainEqual(expect.objectContaining({ url: '/api/v1/workspaces/w1/agents/a-pay', method: 'PATCH', body: JSON.stringify({ status: 'paused' }) })),
     );
-    expect(screen.getByRole('switch', { name: 'Pause Aarav' })).toBeDisabled();
     expect(screen.getByRole('switch', { name: 'Turn on Ishaan' })).toBeDisabled();
     expect(screen.getByText('Its pack is turned off')).toBeInTheDocument();
   });

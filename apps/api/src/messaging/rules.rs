@@ -83,7 +83,7 @@ pub fn injection_signal(texts: &[&str]) -> Option<&'static str> {
 pub async fn personal_level(state: &AppState, ws: &str, user_id: &str) -> sqlx::Result<i64> {
     let Some(row) = crate::agent_registry::store::personal_of(&state.db, ws, user_id).await? else { return Ok(0) };
     let (spec, _) = crate::agent_registry::versions::active_spec_in(&state.db, &row).await?;
-    let routine_ok = crate::agent_profiles::user_profile(&state.db, ws, user_id).await?.is_some_and(|p| p.routine_ok());
+    let routine_ok = crate::agent_profiles::user_profile(&state.db, ws, user_id).await?.is_none_or(|p| p.routine_ok());
     Ok(autonomy::effective_level(LevelInputs {
         earned: row.autonomy_level,
         cap: row.autonomy_cap,

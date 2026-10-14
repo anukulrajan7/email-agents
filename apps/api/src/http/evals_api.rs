@@ -119,7 +119,7 @@ async fn run_detail(State(state): State<AppState>, user: AuthUser, Path((ws, id)
 
 async fn profile_asks_first(state: &AppState, ws: &str, a: &AgentRow) -> sqlx::Result<bool> {
     let Some(owner) = a.owner_user_id.as_deref() else { return Ok(false) };
-    Ok(!agent_profiles::user_profile(&state.db, ws, owner).await?.is_some_and(|p| p.routine_ok()))
+    Ok(!agent_profiles::user_profile(&state.db, ws, owner).await?.is_none_or(|p| p.routine_ok()))
 }
 
 const LEVEL_NAMES: [&str; 4] = ["Observe only", "Draft for approval", "Send routine replies", "Send most replies"];

@@ -223,7 +223,7 @@ pub async fn stats(db: &SqlitePool, config: &Config, ws: &str, agent: &AgentRow)
 // ---------------------------------------------------------------- changing the level
 
 #[allow(clippy::too_many_arguments)]
-async fn record_change(conn: &mut SqliteConnection, ws: &str, agent_id: &str, from: i64, to: i64, reason: &str, evidence: Value, actor: &str) -> sqlx::Result<()> {
+pub async fn record_change(conn: &mut SqliteConnection, ws: &str, agent_id: &str, from: i64, to: i64, reason: &str, evidence: Value, actor: &str) -> sqlx::Result<()> {
     sqlx::query(
         "INSERT INTO autonomy_changes (id, workspace_id, agent_id, from_level, to_level, reason, evidence_json, actor, created_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",

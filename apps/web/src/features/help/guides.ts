@@ -66,7 +66,7 @@ export const GUIDES: Guide[] = [
   {
     id: 'team',
     title: 'Your team of agents',
-    what: 'Each agent looks after one kind of email. Aarav leads the team, and Meera is your own assistant.',
+    what: 'Meera is your own assistant, and each field has one expert. They act on their own and ask you only for sensitive things.',
     page: 'agent-team',
     avatar: 'panda',
     steps: [

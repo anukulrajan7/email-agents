@@ -250,12 +250,12 @@ async fn the_workspace_agent_is_seeded_and_only_admins_change_it() {
 
     let v = env.ok("GET", "/agent", OPERATOR, None).await;
     let agent = &v["agent"];
-    assert_eq!((agent["name"].as_str(), agent["avatar"].as_str(), agent["quality"].as_str()), (Some("Aarav"), Some("🌼"), Some("balanced")));
+    assert_eq!((agent["name"].as_str(), agent["avatar"].as_str(), agent["quality"].as_str()), (Some("Meera"), Some("🌼"), Some("balanced")));
     let persona = agent["persona"].as_str().unwrap();
-    assert!(persona.starts_with("I'm Aarav") && persona.contains(DEFAULT_REPLY_STYLE) && persona.ends_with("Always mention our 1-day turnaround."));
+    assert!(persona.starts_with("I'm Meera") && persona.contains(DEFAULT_REPLY_STYLE) && persona.ends_with("Always mention our 1-day turnaround."));
     assert_eq!(agent["signature"], "Acme HR");
     assert_eq!(agent["tasks"], json!(["reply", "requirements"]));
-    assert_eq!(agent["permissions"], json!({"draft": true, "send": "ask", "submit_candidate": "ask"}));
+    assert_eq!(agent["permissions"], json!({"draft": true, "send": "auto", "submit_candidate": "ask"}), "new workspaces act on their own by default");
     assert_eq!(v["can_edit"], false);
     assert!(v["standard_guidance"].as_str().unwrap().contains(DEFAULT_REPLY_STYLE));
     assert_eq!(env.ok("GET", "/agent", ADMIN, None).await["can_edit"], true);
@@ -291,8 +291,8 @@ async fn people_fill_in_their_own_profile_and_admins_can_read_all() {
     let mine = env.ok("GET", "/me/agent-profile", OPERATOR, None).await;
     assert_eq!(mine["needs_onboarding"], true, "Priya connected a mailbox and hasn't told the agent about herself");
     assert_eq!(mine["mailboxes"], json!(["priya@acme.com"]));
-    assert_eq!(mine["agent"]["name"], "Aarav");
-    assert_eq!(mine["profile"]["approvals"]["send_email"], "always_ask");
+    assert_eq!(mine["agent"]["name"], "Meera");
+    assert_eq!(mine["profile"]["approvals"]["send_email"], "routine_ok", "nobody is asked to opt in");
     let admin = env.ok("GET", "/me/agent-profile", ADMIN, None).await;
     assert_eq!(admin["needs_onboarding"], false, "no mailbox, no prompt");
 
@@ -332,18 +332,18 @@ async fn the_agent_works_for_the_mailbox_owner() {
     let msg = env.receive("m1", "t-1", CLIENT, "Status update", "Hi Priya, the interview went well. Will update you.").await;
     let detail = env.start_inbox(&msg).await;
 
-    assert_eq!((detail["agent"]["name"].as_str(), detail["agent"]["avatar"].as_str(), detail["agent"]["color"].as_str(), detail["agent"]["kind"].as_str()), (Some("Aarav"), Some("🌼"), Some("ochre"), Some("lead")));
+    assert_eq!((detail["agent"]["name"].as_str(), detail["agent"]["avatar"].as_str(), detail["agent"]["color"].as_str(), detail["agent"]["kind"].as_str()), (Some("Meera"), Some("🌼"), Some("ochre"), Some("lead")));
     assert_eq!(detail["working_for"]["email"], "priya@acme.test");
     assert_eq!(detail["working_for"]["name"], "Priya");
     let system = env.planner.systems().first().cloned().unwrap();
     assert!(system.starts_with(SYSTEM_PROMPT), "the safety rules come first");
     assert!(system.contains("the rules win"));
-    assert!(system.contains("You are Aarav, the team's email agent for the mailbox priya@acme.com."));
+    assert!(system.contains("You are Meera, the team's email agent for the mailbox priya@acme.com."));
     assert!(system.contains("You are working for Priya (priya@acme.test), Senior Recruiter."));
     assert!(system.contains("Never share salary bands") && system.contains("client.com") && system.contains("Payroll questions"));
 
     let seen = env.recorder.seen.lock().unwrap().last().cloned().expect("the drafter ran");
-    assert!(seen.reply_instructions.starts_with("I'm Aarav"), "{}", seen.reply_instructions);
+    assert!(seen.reply_instructions.starts_with("I'm Meera"), "{}", seen.reply_instructions);
     assert!(seen.reply_instructions.contains("Senior Recruiter") && seen.reply_instructions.contains("friendly, short"));
     assert_eq!(seen.signature.as_deref(), Some("Priya S."), "her sign-off");
 
@@ -351,10 +351,10 @@ async fn the_agent_works_for_the_mailbox_owner() {
     assert_eq!(detail["status"], "waiting_approval");
     assert!(env.sends().is_empty());
     let approvals = env.ok("GET", "/approvals?status=pending", OPERATOR, None).await;
-    assert_eq!(approvals["items"][0]["agent"]["name"], "Aarav");
+    assert_eq!(approvals["items"][0]["agent"]["name"], "Meera");
     assert_eq!(approvals["items"][0]["working_for"]["name"], "Priya");
     let cases = env.ok("GET", "/cases", OPERATOR, None).await;
-    assert_eq!(cases["items"][0]["agent"]["name"], "Aarav");
+    assert_eq!(cases["items"][0]["agent"]["name"], "Meera");
 }
 
 #[tokio::test]
@@ -366,7 +366,7 @@ async fn jobs_and_permissions_limit_what_the_agent_does() {
     env.ok("PUT", "/agent", ADMIN, Some(json!({"tasks": ["requirements"]}))).await;
     let (s, v) = env.req("POST", "/cases", OPERATOR, Some(json!({"kind": "inbox", "message_id": msg}))).await;
     assert_eq!(s, StatusCode::CONFLICT);
-    assert!(v.to_string().contains("Aarav is not set up to reply to emails"), "{v}");
+    assert!(v.to_string().contains("Meera is not set up to reply to emails"), "{v}");
     env.ok("PUT", "/agent", ADMIN, Some(json!({"tasks": ["reply"], "enabled": false}))).await;
     assert_eq!(env.req("POST", "/cases", OPERATOR, Some(json!({"kind": "inbox", "message_id": msg}))).await.0, StatusCode::CONFLICT);
 
@@ -374,7 +374,7 @@ async fn jobs_and_permissions_limit_what_the_agent_does() {
     env.ok("PUT", "/agent", ADMIN, Some(json!({"enabled": true, "permissions": {"draft": false}}))).await;
     let detail = env.start_inbox(&msg).await;
     let blocked = detail["steps"].as_array().unwrap().iter().find(|s| s["status"] == "blocked").expect("blocked");
-    assert!(blocked["summary"].as_str().unwrap().contains("Writing drafts is switched off for Aarav"));
+    assert!(blocked["summary"].as_str().unwrap().contains("Writing drafts is switched off for Meera"));
     assert!(env.recorder.seen.lock().unwrap().is_empty());
 }
 
@@ -388,7 +388,7 @@ async fn routine_replies_go_on_their_own_only_when_everyone_allows_it() {
         .fetch_one(&env.state.db)
         .await
         .unwrap();
-    assert_eq!(raised, (1, 1), "switching the workspace to auto raises neither a level nor a cap");
+    assert_eq!(raised, (3, 3), "a new workspace starts with Meera acting on her own");
     sqlx::query("UPDATE agents SET autonomy_level = 2, autonomy_cap = 2 WHERE workspace_id = ?1 AND (kind = 'lead' OR scope = 'personal')")
         .bind(&env.ws)
         .execute(&env.state.db)
@@ -426,7 +426,6 @@ async fn sends_ask_a_person_otherwise() {
     let cases = [
         Case { what: "workspace asks first", workspace_send: "ask", owner: "routine_ok", known: true, cap: 20 },
         Case { what: "owner always asks", workspace_send: "auto", owner: "always_ask", known: true, cap: 20 },
-        Case { what: "first email to this address", workspace_send: "auto", owner: "routine_ok", known: false, cap: 20 },
         Case { what: "daily cap reached", workspace_send: "auto", owner: "routine_ok", known: true, cap: 0 },
     ];
     for c in cases {
@@ -516,7 +515,7 @@ async fn test_on_an_email_previews_without_saving() {
     let seen = env.recorder.seen.lock().unwrap().last().cloned().unwrap();
     assert!(seen.reply_instructions.starts_with("Be extremely brief."));
     assert_eq!(seen.signature.as_deref(), Some("P."));
-    assert!(env.ok("GET", "/agent", ADMIN, None).await["agent"]["persona"].as_str().unwrap().starts_with("I'm Aarav"), "not saved");
+    assert!(env.ok("GET", "/agent", ADMIN, None).await["agent"]["persona"].as_str().unwrap().starts_with("I'm Meera"), "not saved");
 
     assert_eq!(env.req("POST", "/agent/preview", OPERATOR, Some(body)).await.0, StatusCode::FORBIDDEN, "only admins try agent changes");
     assert_eq!(env.req("POST", "/agent/preview", OPERATOR, Some(json!({"message_id": "msg_nope"}))).await.0, StatusCode::NOT_FOUND);

@@ -16,7 +16,7 @@ export const SEND_OPTIONS: { value: SendMode; label: string }[] = [
 
 export const SEND_SUMMARY: Record<SendMode, string> = {
   ask: 'Asks before sending',
-  auto: 'Sends routine replies on its own when the person allows it',
+  auto: 'Acts on its own and asks only for sensitive things (money, legal, security, attachments)',
   never: 'Never sends; hands replies to a person',
 };
 

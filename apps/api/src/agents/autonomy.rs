@@ -57,10 +57,10 @@ pub fn effective_level(i: LevelInputs) -> Effective {
     Effective { level: level.clamp(0, 3), limited_by }
 }
 
-/// Money, rates or rejections: never sent without a person.
+/// Money, rates, rejections, legal, security and attachments: never sent without a person.
 static SENSITIVE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-        r"(?i)(₹|\$|€|£|\b(inr|usd|eur|rs\.?|lakhs?|lpa|ctc|salary|salaries|rates?|payment|invoice|budget|offer letter|unfortunately|regret|reject(ed|ion)?|not (been )?(selected|shortlisted)|decline[ds]?)\b)",
+        r"(?i)(₹|\$|€|£|\b(inr|usd|eur|rs\.?|lakhs?|lpa|ctc|salary|salaries|rates?|payments?|amounts?|bank(ing)?|wire|iban|ifsc|invoice|budget|legal|lawyers?|attorneys?|lawsuit|sue|contracts?|agreements?|terminat\w*|security|password|passcode|otp|credentials?|attach(ed|ments?)|offer letter|unfortunately|regret|reject(ed|ion)?|not (been )?(selected|shortlisted)|decline[ds]?)\b)",
     )
     .expect("valid regex")
 });
@@ -364,7 +364,7 @@ pub async fn automated_send_stopped(state: &AppState, ws: &str, draft_id: &str) 
     .await?
     .flatten();
     let routine_ok = match mailbox_owner {
-        Some(owner) => crate::agent_profiles::user_profile(&state.db, ws, &owner).await?.is_some_and(|p| p.routine_ok()),
+        Some(owner) => crate::agent_profiles::user_profile(&state.db, ws, &owner).await?.is_none_or(|p| p.routine_ok()),
         None => false,
     };
     let level = effective_level(LevelInputs {

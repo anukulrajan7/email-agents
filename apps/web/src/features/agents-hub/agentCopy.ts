@@ -4,56 +4,32 @@ export type AgentCopy = { role: string; does: string; when: string; example: str
 
 /** Plain-English copy for each system agent, in its own voice. Keyed by template. */
 const BY_TEMPLATE: Record<string, AgentCopy> = {
-  'general.lead': {
-    role: 'Team lead',
-    does: 'I read every email that comes in and hand it to the helper whose job it is. I answer what nobody else owns.',
-    when: 'When an email arrives and no other helper has claimed it.',
-    example: 'A vendor asks about opening hours. No helper owns that, so I draft the answer for you.',
-  },
-  'general.inbox': {
-    role: 'Inbox assistant',
-    does: 'I draft replies to mail that is waiting for an answer.',
-    when: 'When an email needs a reply.',
-    example: 'A client asks when the report is ready. I draft a short reply for you to check.',
-  },
   'personal.mailbox': {
     role: 'Your assistant',
-    does: 'I work only in your own mailbox, write as you and follow your profile. Nobody else can see me.',
-    when: 'When you ask me to handle an email, or mail arrives that matches your profile.',
-    example: 'Priya asks you for a quick call. I draft your reply in your tone and keep it for your OK.',
+    does: 'I work only in your own mailbox, write as you and follow your profile. I handle everyday mail and anything no expert owns. Nobody else can see me.',
+    when: 'When mail arrives in your mailbox, or you ask me to handle an email.',
+    example: 'Priya asks you for a quick call. I reply in your tone after a 10-minute hold, and ask you first only if it touches money, legal, security or attachments.',
   },
   'support.resolver': {
-    role: 'Ticket resolver',
-    does: 'I answer customer questions from what the team already knows, step by step.',
-    when: 'When an email is labelled Question, Bug report, Refund request or Customer support.',
-    example: 'A customer cannot log in. I find the known fix, draft the steps, and tell you if I am unsure.',
-  },
-  'support.escalation': {
-    role: 'Escalations',
-    does: 'I catch complaints and angry customers, ask a person to step in and prepare a calm reply.',
-    when: 'When an email is labelled Complaint, or says "escalate", "unacceptable" or "legal action".',
-    example: 'A customer threatens to cancel. I flag it to you at once and draft a calm, honest reply. I never send it.',
+    role: 'Support expert',
+    does: 'I answer customer questions from what the team already knows. For complaints and angry customers I stay calm and ask a person to step in.',
+    when: 'When an email is labelled Question, Bug report, Refund request, Customer support or Complaint, or says escalate or unacceptable.',
+    example: 'A customer cannot log in. I find the known fix and reply with the steps. If they threaten to cancel, I flag it to you first.',
   },
   'sales.qualifier': {
-    role: 'Lead qualifier',
-    does: 'I check every new enquiry and tell you which leads are worth a call, with their budget, timeline and need.',
-    when: 'When an email is labelled Sales lead.',
-    example: 'Acme asks for a quote for 40 seats by March. I note budget, timeline and need, and draft a reply for you.',
-  },
-  'sales.followups': {
-    role: 'Follow-ups',
-    does: 'I keep deals moving by nudging proposals and quotes that went quiet, once, politely.',
-    when: 'When an email is labelled Follow up, and once a day for conversations that went quiet.',
-    example: 'You sent a quote five days ago and heard nothing. I draft a short, friendly nudge.',
+    role: 'Sales expert',
+    does: 'I qualify every new enquiry (budget, timeline, need) and follow up on proposals and quotes that went quiet, once, politely.',
+    when: 'When an email is labelled Sales lead or Follow up, and once a day for conversations that went quiet.',
+    example: 'Acme asks for a quote for 40 seats by March. I note budget, timeline and need, and reply. Five days after a quote I send a short nudge.',
   },
   'finance.invoices': {
-    role: 'Invoices and payments',
+    role: 'Finance expert',
     does: 'I read invoices and payment mail, note the vendor, number, amount and due date, and flag anything odd.',
     when: 'When an email is labelled Invoice, Payment, Expense or Billing.',
     example: 'A vendor sends invoice 1042 for Rs 48,000. I note the details, acknowledge it and ask you to approve.',
   },
   'personal.scheduling': {
-    role: 'Scheduling',
+    role: 'Scheduling expert',
     does: 'I answer meeting requests using the free slots I was given, and mark anything I do not know.',
     when: 'When an email is labelled Scheduling, or mentions a meeting, rescheduling or availability.',
     example: 'Priya asks to meet next week. I offer your free slots, or mark the gap if I do not know them.',
@@ -128,9 +104,9 @@ export const AUTONOMY_PLAIN: Record<Autonomy, { headline: string; alone: string;
     asks: 'Anything that is not routine, new or sensitive.',
   },
   3: {
-    headline: 'Replies on its own after a 10-minute hold',
-    alone: 'Replies by itself after a 10-minute hold, and you can press Stop in that time.',
-    asks: 'Only what its job description says a person must decide.',
+    headline: 'Acts on its own, 10-minute hold',
+    alone: 'Replies to routine mail by itself after a 10-minute hold, and you can press Stop in that time.',
+    asks: 'Only for money, legal, security and attachments.',
   },
 };
 

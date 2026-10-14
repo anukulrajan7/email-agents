@@ -450,7 +450,7 @@ mod tests {
         assert_eq!(pick(&f, &thread, &agents), ("inbox".into(), Source::Thread), "thread beats rules and labels");
         let mut keyworded = facts("question");
         keyworded.subject = "This is unacceptable".into();
-        assert_eq!(pick(&keyworded, &none, &agents), ("escalation".into(), Source::Rule), "a keyword rule beats a label trigger");
+        assert_eq!(pick(&keyworded, &none, &agents), ("resolver".into(), Source::Rule), "a keyword rule beats a label trigger");
         let plain = facts("general");
         assert_eq!(pick(&plain, &none, &agents), ("inbox".into(), Source::Generic), "no owner: the generic trigger");
         let mut owned = facts("general");

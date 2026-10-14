@@ -61,11 +61,12 @@ describe('AppShell navigation', () => {
     expect(within(nav).getByRole('link', { name: 'Labels' })).toHaveAttribute('href', '/w/w1/labels');
   });
 
-  it('shows a generic Team group, with no HR modules, when the HR & recruiting pack is off', async () => {
+  it('hides the whole team menu (People, Performance, Escalations) when the HR & recruiting pack is off', async () => {
     renderShell('member', ['general']);
     const nav = await screen.findByRole('navigation', { name: 'Main' });
-    expect(itemsOf(nav, 'Team')).toEqual(['People', 'Performance', 'Escalations']);
+    expect(within(nav).queryByRole('list', { name: 'Team' })).toBeNull();
     expect(within(nav).queryByRole('list', { name: 'HRMS' })).toBeNull();
+    for (const name of ['People', 'Performance', 'Escalations'] as const) expect(within(nav).queryByRole('link', { name })).toBeNull();
     expect(within(nav).queryByRole('link', { name: 'Matching' })).toBeNull();
     expect(within(nav).queryByRole('link', { name: 'Timesheets' })).toBeNull();
   });

@@ -4,7 +4,7 @@ export type NavItem = { to: string; label: string; badge?: NavBadge };
 
 export type NavGroup = { id: string; label: string; items: NavItem[] };
 
-/** `hasStaffing`: the HRMS group (timesheets, portal reconciliation, matching) and the HR workflows belong to the HR & recruiting pack. */
+/** `hasStaffing`: the HRMS group (people, performance, escalations, timesheets, portal reconciliation, matching) and the HR workflows belong to the HR & recruiting pack; other workspaces see no team group. */
 export function navGroups(isAdmin: boolean, hasStaffing = true): NavGroup[] {
   return [
     {
@@ -19,28 +19,22 @@ export function navGroups(isAdmin: boolean, hasStaffing = true): NavGroup[] {
         { to: 'alerts', label: 'Alerts', badge: 'alerts' },
       ],
     },
-    hasStaffing
-      ? {
-          id: 'hrms',
-          label: 'HRMS',
-          items: [
-            { to: 'people', label: 'People' },
-            { to: 'performance', label: 'Performance' },
-            { to: 'timesheets', label: 'Timesheets' },
-            { to: 'portal', label: 'Portal reconciliation' },
-            { to: 'escalations', label: 'Escalations' },
-            { to: 'matching', label: 'Matching' },
-          ],
-        }
-      : {
-          id: 'team',
-          label: 'Team',
-          items: [
-            { to: 'people', label: 'People' },
-            { to: 'performance', label: 'Performance' },
-            { to: 'escalations', label: 'Escalations' },
-          ],
-        },
+    ...(hasStaffing
+      ? [
+          {
+            id: 'hrms',
+            label: 'HRMS',
+            items: [
+              { to: 'people', label: 'People' },
+              { to: 'performance', label: 'Performance' },
+              { to: 'timesheets', label: 'Timesheets' },
+              { to: 'portal', label: 'Portal reconciliation' },
+              { to: 'escalations', label: 'Escalations' },
+              { to: 'matching', label: 'Matching' },
+            ],
+          },
+        ]
+      : []),
     {
       id: 'teach',
       label: 'Teach',

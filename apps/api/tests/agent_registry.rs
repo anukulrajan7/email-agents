@@ -23,13 +23,14 @@ fn names(agents: &[Value], category: &str) -> Vec<String> {
 async fn a_support_workspace_shows_general_and_support_agents() {
     let env = Env::new(Opts::packs(&["general", "support"])).await;
     let agents = env.agents(ADMIN).await;
-    assert_eq!(names(&agents, "general"), ["Aarav", "Inbox Assistant"]);
-    assert_eq!(names(&agents, "support"), ["Ishaan", "Diya"]);
+    assert_eq!(names(&agents, "general"), ["Routing"], "the routing lead is internal and is the only general agent");
+    assert_eq!(names(&agents, "support"), ["Ishaan"], "one expert per field");
+    assert_eq!(agents[0]["hidden"], true, "the hub never shows the lead");
     assert!(names(&agents, "hrms").is_empty() && names(&agents, "sales").is_empty());
     let lead = &agents[0];
-    assert_eq!((lead["kind"].as_str(), lead["status"].as_str(), lead["autonomy"]["earned"].as_i64()), (Some("lead"), Some("active"), Some(1)));
+    assert_eq!((lead["kind"].as_str(), lead["status"].as_str(), lead["autonomy"]["earned"].as_i64()), (Some("lead"), Some("active"), Some(3)));
     let resolver = agents.iter().find(|a| a["template_key"] == "support.resolver").unwrap();
-    assert_eq!((resolver["status"].as_str(), resolver["autonomy"]["earned"].as_i64(), resolver["autonomy"]["effective"].as_i64()), (Some("active"), Some(0), Some(0)), "desks start observing");
+    assert_eq!((resolver["status"].as_str(), resolver["autonomy"]["earned"].as_i64(), resolver["autonomy"]["effective"].as_i64()), (Some("active"), Some(3), Some(3)), "experts act on their own from the start");
     assert_eq!(resolver["active_version"], 1);
     let v = env.ok("GET", "/agents", ADMIN, None).await;
     let order: Vec<&str> = v["categories"].as_array().unwrap().iter().map(|c| c["key"].as_str().unwrap()).collect();
@@ -66,7 +67,7 @@ async fn seeding_is_idempotent_and_packs_pause_their_agents_without_deleting_the
     let paused = env.ok("GET", &format!("/agents/{resolver}"), ADMIN, None).await;
     assert_eq!((paused["status"].as_str(), paused["paused_reason"].as_str()), (Some("paused"), Some("pack_off")));
     assert_eq!(env.req("PATCH", &format!("/agents/{resolver}"), ADMIN, Some(json!({"status": "active"}))).await.0, StatusCode::CONFLICT, "its pack is off");
-    assert_eq!(env.agents(ADMIN).await.iter().filter(|a| a["category"] == "support").count(), 2, "still listed, nothing deleted");
+    assert_eq!(env.agents(ADMIN).await.iter().filter(|a| a["category"] == "support").count(), 1, "still listed, nothing deleted");
 
     env.ok("PUT", "/packs", ADMIN, Some(json!({"packs": ["general", "support"]}))).await;
     let back = env.ok("GET", &format!("/agents/{resolver}"), ADMIN, None).await;
@@ -81,11 +82,13 @@ async fn the_migration_backfills_lead_personal_agents_and_the_hrms_roster() {
     let mut before = sqlx::migrate!("./migrations");
     before.migrations = before.migrations.iter().filter(|m| m.version < 34).cloned().collect::<Vec<_>>().into();
     before.run(&pool).await.unwrap();
-    for (ws, send) in [("ws_auto", "auto"), ("ws_ask", "ask")] {
+    for (ws, send, admin_chose) in [("ws_auto", "auto", false), ("ws_ask", "ask", true), ("ws_default", "ask", false)] {
         sqlx::query("INSERT INTO workspaces (id, name, created_at) VALUES (?1, 'Old', 1)").bind(ws).execute(&pool).await.unwrap();
-        sqlx::query("INSERT INTO workspace_agents (workspace_id, name, avatar, color, permissions_json, created_at, updated_at) VALUES (?1, 'Asha', 'AS', 'plum', ?2, 1, 1)")
+        sqlx::query("INSERT OR IGNORE INTO users (id, external_auth_subject, email, created_at) VALUES ('u1', 'u1', 'u1@x.test', 1)").execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO workspace_agents (workspace_id, name, avatar, color, permissions_json, updated_by, created_at, updated_at) VALUES (?1, 'Asha', 'AS', 'plum', ?2, ?3, 1, 1)")
             .bind(ws)
             .bind(json!({"draft": true, "send": send}).to_string())
+            .bind(admin_chose.then_some("u1"))
             .execute(&pool)
             .await
             .unwrap();
@@ -111,9 +114,9 @@ async fn the_migration_backfills_lead_personal_agents_and_the_hrms_roster() {
     }
     db::migrate(&pool).await.unwrap();
 
-    for (ws, level) in [("ws_auto", 2), ("ws_ask", 1)] {
+    for (ws, level) in [("ws_auto", 2), ("ws_ask", 1), ("ws_default", 3)] {
         let lead = store::lead(&pool, ws).await.unwrap().expect("a lead");
-        assert_eq!((lead.name.as_str(), lead.avatar.as_str(), lead.autonomy_level, lead.autonomy_cap), ("Asha", "AS", level, level), "{ws}: keeps its settings");
+        assert_eq!((lead.name.as_str(), lead.avatar.as_str(), lead.autonomy_level, lead.autonomy_cap), ("Asha", "AS", level, level), "{ws}: an admin's choice is kept, an untouched default moves to acting on its own");
         assert_eq!(lead.active_version, Some(2), "the template upgrade follows the migration");
         let personal: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agents WHERE workspace_id = ?1 AND scope = 'personal'").bind(ws).fetch_one(&pool).await.unwrap();
         assert_eq!(personal, 2, "one per member");
@@ -130,7 +133,9 @@ async fn the_migration_backfills_lead_personal_agents_and_the_hrms_roster() {
     }
     db::migrate(&pool).await.unwrap();
     let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agents").fetch_one(&pool).await.unwrap();
-    assert_eq!(total, 2 * (1 + 2 + 1 + 5), "a second run adds nothing (lead, 2 personal, inbox assistant, 5 HRMS per workspace)");
+    assert_eq!(total, 3 * (1 + 2 + 5), "a second run adds nothing (lead, 2 personal, 5 HRMS per workspace)");
+    let sends: Vec<(String, String)> = sqlx::query_as("SELECT workspace_id, json_extract(permissions_json, '$.send') FROM workspace_agents ORDER BY workspace_id").fetch_all(&pool).await.unwrap();
+    assert_eq!(sends, [("ws_ask".to_string(), "ask".to_string()), ("ws_auto".into(), "auto".into()), ("ws_default".into(), "auto".into())], "only the untouched 'ask' moved to auto");
 }
 
 #[tokio::test]
@@ -235,7 +240,7 @@ async fn every_member_has_one_personal_agent_nobody_else_can_see() {
     // The owner manages it; the cap stays within what the agent can ever do.
     let paused = env.ok("PATCH", &format!("/agents/{mine_op}"), OPERATOR, Some(json!({"status": "paused", "name": "Priya's helper"}))).await;
     assert_eq!((paused["status"].as_str(), paused["name"].as_str()), (Some("paused"), Some("Priya's helper")));
-    assert_eq!(env.req("PATCH", &format!("/agents/{mine_op}"), OPERATOR, Some(json!({"autonomy_cap": 3}))).await.0, StatusCode::BAD_REQUEST);
+    assert_eq!(env.req("PATCH", &format!("/agents/{mine_op}"), OPERATOR, Some(json!({"autonomy_cap": 4}))).await.0, StatusCode::BAD_REQUEST);
     env.ok("PATCH", &format!("/agents/{mine_op}"), OPERATOR, Some(json!({"autonomy_cap": 2, "status": "active"}))).await;
     let mut tuned = spec;
     tuned["drafting"]["rules"] = json!(["Keep it short"]);
@@ -352,16 +357,16 @@ async fn changing_how_an_agent_behaves_caps_it_at_level_one_until_it_passes_the_
 
 #[tokio::test]
 async fn template_upgrades_follow_untuned_agents_and_offer_tuned_ones_an_update() {
-    let env = Env::new(Opts::packs(&["general", "support"])).await;
+    let env = Env::new(Opts::packs(&["general", "support", "sales"])).await;
     let resolver = env.agent_id(ADMIN, "support.resolver").await;
-    let escalation = env.agent_id(ADMIN, "support.escalation").await;
+    let escalation = env.agent_id(ADMIN, "sales.qualifier").await;
     let spec = env.ok("GET", &format!("/agents/{escalation}"), ADMIN, None).await["spec"].clone();
     env.ok("PUT", &format!("/agents/{escalation}/spec"), ADMIN, Some(json!({"spec": spec}))).await;
 
     let newer: Vec<AgentTemplate> = templates::TEMPLATES
         .iter()
         .map(|t| AgentTemplate {
-            key: t.key, category: t.category, pack: t.pack, version: 3, kind: t.kind, scope: t.scope, initial_level: t.initial_level,
+            key: t.key, category: t.category, pack: t.pack, version: 9, kind: t.kind, scope: t.scope, initial_level: t.initial_level,
             name: t.name, avatar: t.avatar, color: t.color, spec: t.spec,
         })
         .collect();
@@ -385,14 +390,14 @@ async fn pause_all_stops_everyone_and_restores_only_what_it_paused() {
     env.ok("PATCH", &format!("/agents/{resolver}"), ADMIN, Some(json!({"status": "paused"}))).await;
     assert_eq!(env.req("POST", "/agents/pause-all", OPERATOR, Some(json!({"paused": true}))).await.0, StatusCode::FORBIDDEN);
     let out = env.ok("POST", "/agents/pause-all", ADMIN, Some(json!({"paused": true}))).await;
-    assert!(out["affected"].as_i64().unwrap() >= 4);
+    assert!(out["affected"].as_i64().unwrap() >= 3);
     let listed = env.ok("GET", "/agents", ADMIN, None).await;
     assert_eq!(listed["paused_all"], true);
     assert!(env.agents(ADMIN).await.iter().all(|a| a["status"] == "paused"));
     env.ok("POST", "/agents/pause-all", ADMIN, Some(json!({"paused": false}))).await;
     let agents = env.agents(ADMIN).await;
     let by = |k: &str| agents.iter().find(|a| a["template_key"] == k).unwrap()["status"].as_str().unwrap().to_string();
-    assert_eq!((by("general.lead").as_str(), by("support.escalation").as_str(), by("support.resolver").as_str()), ("active", "active", "paused"), "the one a person paused stays paused");
+    assert_eq!((by("general.lead").as_str(), by("personal.mailbox").as_str(), by("support.resolver").as_str()), ("active", "active", "paused"), "the one a person paused stays paused");
     assert_eq!(env.ok("GET", "/agents", ADMIN, None).await["paused_all"], false);
 }
 
@@ -405,7 +410,8 @@ async fn the_template_catalogue_says_what_is_installed() {
     assert_eq!((find("support.resolver")["installed"].as_bool(), find("support.resolver")["pack_enabled"].as_bool()), (Some(true), Some(true)));
     assert_eq!((find("hrms.leave")["installed"].as_bool(), find("hrms.leave")["pack_enabled"].as_bool()), (Some(false), Some(false)));
     assert_eq!(find("personal.mailbox")["installed"], true, "your own personal agent");
-    assert_eq!(find("support.escalation")["spec"]["permissions"]["max_autonomy"], 1);
+    assert_eq!(find("support.resolver")["spec"]["permissions"]["max_autonomy"], 3);
+    assert!(items.iter().all(|t| t["key"] != "support.escalation" && t["key"] != "general.inbox"), "merged agents are not offered any more");
 }
 
 #[tokio::test]
@@ -445,13 +451,11 @@ async fn old_default_names_move_to_the_new_team_but_edited_or_tuned_agents_keep_
         }
     };
     set("support.resolver", "Ticket Resolver", false).await;
-    set("support.escalation", "Escalations", true).await;
     set("sales.qualifier", "Zoya", false).await;
-    set("sales.followups", "Follow-ups", false).await;
     set("personal.mailbox", "Meera (personal)", false).await;
-    set("general.lead", "Meera", false).await;
+    set("general.lead", "Aarav", false).await;
     env.ok("GET", "/agent", ADMIN, None).await;
-    sqlx::query("UPDATE workspace_agents SET name = 'Meera' WHERE workspace_id = ?1").bind(&ws).execute(&env.state.db).await.unwrap();
+    sqlx::query("UPDATE workspace_agents SET name = 'Aarav' WHERE workspace_id = ?1").bind(&ws).execute(&env.state.db).await.unwrap();
 
     let mut conn = env.state.db.acquire().await.unwrap();
     seed::seed_workspace(&mut conn, &ws).await.unwrap();
@@ -465,13 +469,11 @@ async fn old_default_names_move_to_the_new_team_but_edited_or_tuned_agents_keep_
         }
     };
     assert_eq!(name("support.resolver").await, "Ishaan", "an untuned default is renamed");
-    assert_eq!(name("support.escalation").await, "Escalations", "a tuned agent is left alone");
     assert_eq!(name("sales.qualifier").await, "Zoya", "a name an admin chose is never overridden");
-    assert_eq!(name("sales.followups").await, "Tara");
     assert_eq!(name("personal.mailbox").await, "Meera");
-    assert_eq!(name("general.lead").await, "Aarav");
+    assert_eq!(name("general.lead").await, "Routing", "the lead is internal routing now");
     let profile: String = sqlx::query_scalar("SELECT name FROM workspace_agents WHERE workspace_id = ?1").bind(&ws).fetch_one(&env.state.db).await.unwrap();
-    assert_eq!(profile, "Aarav", "the lead's profile follows");
+    assert_eq!(profile, "Meera", "the workspace agent that answers is Meera");
 }
 
 #[tokio::test]
@@ -485,10 +487,10 @@ async fn a_picture_avatar_is_saved_for_the_personal_agent_and_the_lead_and_shows
     let (s, _) = env.req("PATCH", &format!("/agents/{mine}"), OPERATOR, Some(json!({"avatar": "fluent:nope"}))).await;
     assert_eq!(s, StatusCode::BAD_REQUEST, "only pictures the app ships are accepted");
 
-    let saved = env.ok("PATCH", &format!("/agents/{lead}"), ADMIN, Some(json!({"avatar": "fluent:fox", "name": "Aarav K"}))).await;
-    assert_eq!((saved["avatar"].as_str(), saved["name"].as_str()), (Some("fluent:fox"), Some("Aarav K")));
+    let saved = env.ok("PATCH", &format!("/agents/{lead}"), ADMIN, Some(json!({"avatar": "fluent:fox", "name": "Asha K"}))).await;
+    assert_eq!((saved["avatar"].as_str(), saved["name"].as_str()), (Some("fluent:fox"), Some("Asha K")));
     let profile = env.ok("GET", "/agent", ADMIN, None).await;
-    assert_eq!((profile["agent"]["avatar"].as_str(), profile["agent"]["name"].as_str()), (Some("fluent:fox"), Some("Aarav K")), "the lead is the workspace agent");
+    assert_eq!((profile["agent"]["avatar"].as_str(), profile["agent"]["name"].as_str()), (Some("fluent:fox"), Some("Asha K")), "the lead is the workspace agent");
 
     let list = env.ok("GET", "/agents", OPERATOR, None).await;
     assert_eq!(list["me"]["avatar"], "fluent:owl", "a fresh read returns what was saved");

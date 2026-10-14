@@ -38,10 +38,7 @@ async fn every_inbound_email_gets_a_recorded_route() {
 async fn precedence_is_manual_thread_rule_label_personal_generic_fallback() {
     let env = Env::new(Opts::packs(&["general", "support"])).await;
     set_level(&env, "support.resolver", 1).await;
-    set_level(&env, "support.escalation", 1).await;
     let resolver = env.agent_id(ADMIN, "support.resolver").await;
-    let escalation = env.agent_id(ADMIN, "support.escalation").await;
-    let inbox = env.agent_id(ADMIN, "general.inbox").await;
     let lead = env.agent_id(ADMIN, "general.lead").await;
     let mine = env.personal_id(OPERATOR).await;
 
@@ -50,10 +47,10 @@ async fn precedence_is_manual_thread_rule_label_personal_generic_fallback() {
     assert_eq!((r.route.agent_id.as_str(), r.route.source, r.route.shadow), (resolver.as_str(), Source::Label, false));
 
     let rule = env.receive(&env.shared_src, "m2", "t2", CLIENT, "This is unacceptable", "Hello", "question").await;
-    assert_eq!((env.route(&rule).await.route.agent_id, env.route(&rule).await.route.source), (escalation.clone(), Source::Rule), "a keyword rule beats a label trigger");
+    assert_eq!((env.route(&rule).await.route.agent_id, env.route(&rule).await.route.source), (resolver.clone(), Source::Rule), "a keyword rule beats a label trigger");
 
     let generic = env.receive(&env.shared_src, "m3", "t3", CLIENT, "Hello there", "Hello", "general").await;
-    assert_eq!((env.route(&generic).await.route.agent_id, env.route(&generic).await.route.source), (inbox.clone(), Source::Generic));
+    assert_eq!((env.route(&generic).await.route.agent_id, env.route(&generic).await.route.source), (lead.clone(), Source::Fallback), "Meera answers what no expert owns");
 
     let owned = env.receive(&env.op_src, "m4", "t4", CLIENT, "Hello there", "Hello", "general").await;
     assert_eq!((env.route(&owned).await.route.agent_id, env.route(&owned).await.route.source), (mine.clone(), Source::Personal), "mail in a member's own mailbox goes to their personal agent");
@@ -94,6 +91,7 @@ async fn an_observing_agent_runs_a_shadow_case_beside_the_real_one_and_writes_no
         finish(None, "Done."),
     ];
     let env = Env::new(Opts::packs(&["general", "support"]).planner(ScriptedPlanner::new().script("shadow", script).script("inbox", vec![tool("draft_email", json!({"message_id": "$message_id"})), finish(None, "Drafted.")]))).await;
+    set_level(&env, "support.resolver", 0).await;
     let resolver = env.agent_id(ADMIN, "support.resolver").await;
     let inbox = env.agent_id(ADMIN, "general.lead").await;
     let msg = env.receive(&env.shared_src, "m1", "t1", CLIENT, "Where is my parcel?", "Hello, where is my parcel?", "question").await;
@@ -109,9 +107,9 @@ async fn an_observing_agent_runs_a_shadow_case_beside_the_real_one_and_writes_no
     assert_eq!((shadow_agent.as_deref(), shadow_flag), (Some(resolver.as_str()), true));
     assert_eq!(cases[0].1.as_deref(), Some(inbox.as_str()));
 
-    // The real case is Aarav's, the lead's: he drafts while the desk only observes.
+    // The real case is Meera's, the lead's: she drafts while the expert only observes.
     let real = env.case(ADMIN, &real_case).await;
-    assert_eq!((real["status"].as_str(), real["shadow"].as_bool(), real["agent"]["name"].as_str()), (Some("done"), Some(false), Some("Aarav")), "{real}");
+    assert_eq!((real["status"].as_str(), real["shadow"].as_bool(), real["agent"]["name"].as_str()), (Some("done"), Some(false), Some("Meera")), "{real}");
     // The observing case ran the planner, but nothing it did left a mark.
     let shadow = env.case(ADMIN, &shadow_id).await;
     assert_eq!(shadow["shadow"], true);
@@ -124,7 +122,7 @@ async fn an_observing_agent_runs_a_shadow_case_beside_the_real_one_and_writes_no
     assert!(shadow["steps"].as_array().unwrap().iter().filter(|s| s["tool"] == "send_email" || s["tool"] == "create_task").all(|s| s["output"]["simulated"] == true));
     assert_eq!(env.count(&format!("SELECT COUNT(*) FROM drafts WHERE workspace_id = ?1 AND agent_id = '{resolver}'")).await, 0, "shadow cases write no drafts");
     let prompts = env.planner.systems().join("\n");
-    assert!(prompts.contains("You are Ishaan, a patient problem-solver"), "the desk's persona reaches the planner prompt: {prompts}");
+    assert!(prompts.contains("You are Ishaan, the support expert: a patient problem-solver"), "the desk's persona reaches the planner prompt: {prompts}");
     assert!(prompts.contains("Never sign them with your own name"), "mail goes out in the owner's voice: {prompts}");
     assert_eq!(env.count("SELECT COUNT(*) FROM drafts WHERE workspace_id = ?1").await, 1, "only the real case drafted");
     assert_eq!(env.count(&format!("SELECT COUNT(*) FROM agent_approvals WHERE workspace_id = ?1 AND agent_id = '{resolver}'")).await, 0);

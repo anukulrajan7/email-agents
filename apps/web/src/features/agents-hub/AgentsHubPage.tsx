@@ -19,13 +19,13 @@ export type HubGroup = { key: AgentCategory; title: string; agents: AgentSummary
 export function groupAgents(categories: { key: AgentCategory; agents: AgentSummary[] }[], mineId: string | undefined): HubGroup[] {
   const byKey = new Map<AgentCategory, AgentSummary[]>();
   for (const c of categories) {
-    const rest = c.agents.filter((a) => a.id !== mineId && a.status !== 'archived');
+    const rest = c.agents.filter((a) => a.id !== mineId && a.status !== 'archived' && a.kind !== 'lead' && !a.hidden);
     byKey.set(c.key, [...(byKey.get(c.key) ?? []), ...rest]);
   }
   return CATEGORY_ORDER.filter((key) => (byKey.get(key)?.length ?? 0) > 0).map((key) => ({
     key,
     title: CATEGORY_TITLE[key],
-    agents: [...(byKey.get(key) ?? [])].sort((a, b) => Number(b.kind === 'lead') - Number(a.kind === 'lead') || a.name.localeCompare(b.name)),
+    agents: [...(byKey.get(key) ?? [])].sort((a, b) => a.name.localeCompare(b.name)),
   }));
 }
 
@@ -40,7 +40,6 @@ export function AgentsHubPage() {
   const data = registry.data;
   const groups = data ? groupAgents(data.categories, data.me?.id) : [];
   const all = data ? [...(data.me ? [data.me] : []), ...data.categories.flatMap((c) => c.agents)] : [];
-  const lead = all.find((a) => a.kind === 'lead');
   const open = all.find((a) => a.id === openId);
   const empty = data !== undefined && !data.me && groups.length === 0;
   let index = 0;
@@ -56,7 +55,7 @@ export function AgentsHubPage() {
       <PageHeader
         kicker="Your team"
         title="Agents"
-        description="Each agent looks after one kind of email. They start careful and ask before sending, and you decide how much freedom they get."
+        description="Meera and one expert for each field. They act on their own and ask you only for sensitive things."
         actions={
           <>
             <HelpPopover topic="agents" />
@@ -83,11 +82,11 @@ export function AgentsHubPage() {
         }
       />
       {data && (
-        <aside aria-label="About your team" className="rise letter flex flex-col gap-1 rounded-xs p-4 text-sm leading-snug" style={riseStyle(1)}>
+        <aside aria-label="About your team" className="rise letter flex flex-col gap-1 rounded-xs px-4 py-3 text-sm leading-snug" style={riseStyle(1)}>
           <p className="type-display text-lg tracking-[-0.01em]">Your team</p>
           <p className="text-ink">
-            Meera is your own assistant. {lead?.name ?? 'Aarav'} leads the team and hands each email to the right helper. Each helper handles one kind of email.
-            New helpers start by only watching.
+            Meera is your own assistant and handles everyday mail. Each field has one expert. Your helpers act on their own and ask only for sensitive
+            things. Change this in Settings → Sending.
           </p>
         </aside>
       )}
@@ -119,8 +118,8 @@ export function AgentsHubPage() {
             </h2>
             <p className="text-sm text-ink-muted">Works only on your own mailbox. Nobody else can see it, admins included.</p>
           </div>
-          <div className="grid max-w-xl grid-cols-1">
-            <AgentCard agent={data.me} index={index++} featured isAdmin={isAdmin} busy={patch.isPending} onToggle={toggle} onOpen={(a) => setOpenId(a.id)} />
+          <div className="grid max-w-md grid-cols-1">
+            <AgentCard agent={data.me} index={index++} isAdmin={isAdmin} busy={patch.isPending} onToggle={toggle} onOpen={(a) => setOpenId(a.id)} />
           </div>
         </section>
       )}
@@ -130,7 +129,7 @@ export function AgentsHubPage() {
             {g.title}
             <span className="font-mono text-xs text-ink-muted">{g.agents.length}</span>
           </h2>
-          <ul className="grid auto-rows-fr grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+          <ul className="grid auto-rows-fr grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
             {g.agents.map((a) => (
               <li key={a.id}>
                 <AgentCard agent={a} index={index++} isAdmin={isAdmin} busy={patch.isPending} onToggle={toggle} onOpen={(x) => setOpenId(x.id)} />

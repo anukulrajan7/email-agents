@@ -6,7 +6,7 @@ export const AUTONOMY: Record<Autonomy, AutonomyCopy> = {
   0: { chip: 'Watching', sentence: 'Watches and learns. Does not touch your mail yet' },
   1: { chip: 'Asks first', sentence: 'Asks before sending' },
   2: { chip: 'Routine replies', sentence: 'Sends routine replies, 10-minute hold' },
-  3: { chip: 'Trusted', sentence: 'Replies on its own, 10-minute hold' },
+  3: { chip: 'On its own', sentence: 'Replies on its own, 10-minute hold' },
 };
 
 export const autonomyLabel = (level: Autonomy) => AUTONOMY[level].sentence;
@@ -31,7 +31,7 @@ export const CATEGORY_ORDER: AgentCategory[] = ['personal', 'general', 'support'
 
 export const CATEGORY_TITLE: Record<AgentCategory, string> = {
   personal: 'Personal',
-  general: 'Lead',
+  general: 'General',
   support: 'Support',
   sales: 'Sales',
   finance: 'Finance',

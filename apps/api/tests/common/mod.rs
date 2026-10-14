@@ -223,6 +223,47 @@ impl Env {
         self.agents(token).await.iter().find(|a| a["template_key"] == template_key).unwrap_or_else(|| panic!("no agent {template_key}"))["id"].as_str().unwrap().to_string()
     }
 
+    /// The retired Inbox Assistant, installed as a custom agent: the fixed-workflow agent a few tests exercise.
+    pub async fn install_inbox(&self) -> String {
+        use email_ai_api::agent_registry::{
+            store::{self, NewAgent},
+            templates,
+            versions::{self, NewVersion},
+        };
+        let t = templates::template(templates::INBOX_KEY).unwrap();
+        let spec = t.spec();
+        let mut conn = self.state.db.acquire().await.unwrap();
+        let id = store::insert(
+            &mut conn,
+            NewAgent {
+                workspace_id: &self.ws,
+                key: "inbox_assistant",
+                kind: "custom",
+                scope: "workspace",
+                owner_user_id: None,
+                category: "general",
+                template_key: None,
+                template_version: None,
+                cloned_from: None,
+                name: "Inbox Assistant",
+                avatar: t.avatar,
+                color: t.color,
+                description: &spec.description,
+                status: "active",
+                autonomy_level: 1,
+                autonomy_cap: 1,
+                created_by: None,
+            },
+        )
+        .await
+        .unwrap()
+        .expect("installed once");
+        versions::create(&mut conn, &self.ws, &id, &spec, NewVersion { source: "backfill", note: None, created_by: None, designer_session_id: None, activate: true })
+            .await
+            .unwrap();
+        id
+    }
+
     pub async fn personal_id(&self, token: &str) -> String {
         self.ok("GET", "/agents", token, None).await["me"]["id"].as_str().unwrap().to_string()
     }
