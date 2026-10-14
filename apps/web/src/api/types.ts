@@ -377,6 +377,7 @@ export type Autonomy = 0 | 1 | 2 | 3;
 export type AgentKind = 'lead' | 'system' | 'custom';
 export type AgentScope = 'workspace' | 'personal';
 export type AgentStatus = 'draft' | 'active' | 'paused' | 'archived';
+export type AgentScopeName = 'read_mail' | 'draft' | 'send' | 'label' | 'schedule';
 export type AgentCategory = 'general' | 'support' | 'sales' | 'finance' | 'personal' | 'hrms' | 'custom';
 
 export type SpecMatch = {
@@ -411,6 +412,7 @@ export type AgentSpec = {
   triggers: SpecTrigger[];
   steps: SpecStep[];
   tools: string[];
+  scopes: AgentScopeName[];
   permissions: { draft: boolean; send: 'never' | 'ask' | 'earned'; max_autonomy: Autonomy; daily_send_cap: number };
   memory: { scope: 'own+shared' | 'own' | 'shared'; learn_from: ('edits' | 'approvals' | 'labels' | 'routes')[] };
   drafting: { rules: string[]; never_do: string[]; quality_tier: 'fast' | 'balanced' | 'best' };
@@ -480,3 +482,14 @@ export type MessageRoute = {
   created_at: string;
 };
 export type OutgoingItem = { draft_id: string; message_id: string; subject: string; to: string; send_at: string; body_preview: string };
+export type AgentAuditItem = {
+  at: string;
+  case_id: string;
+  message_id: string | null;
+  tool: string;
+  scope: AgentScopeName;
+  status: 'ok' | 'error' | 'blocked' | 'waiting_approval' | 'simulated';
+  turn: number;
+  shadow: boolean;
+  refs: { message_id: string | null; draft_id: string | null; requirement_id: string | null; candidate_ids: string[] | null };
+};

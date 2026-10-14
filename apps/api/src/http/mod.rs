@@ -1,4 +1,5 @@
 mod agent_profiles_api;
+mod agent_registry_api;
 mod ai_usage_api;
 mod agents_api;
 mod alerts_api;
@@ -156,6 +157,7 @@ pub fn router(state: AppState) -> Router {
         .merge(automations_api::routes())
         .merge(agents_api::routes())
         .merge(agent_profiles_api::routes())
+        .merge(agent_registry_api::routes())
         .merge(assistant_api::routes())
         .fallback(|| async { AppError::NotFound })
         .layer(middleware::from_fn(crate::ai_ledger::attach_context))

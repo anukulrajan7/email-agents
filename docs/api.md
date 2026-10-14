@@ -815,7 +815,7 @@ All routes below need membership of the workspace; reading is `operator`, writin
 | GET | `/api/v1/workspaces/:ws/agents/:id` | `AgentDetail` (summary + `spec` + `versions`). 404 for another workspace's agent or someone else's personal agent |
 | PATCH | `/api/v1/workspaces/:ws/agents/:id` | `{status?: "active"\|"paused"\|"archived", name?, avatar?, color?, autonomy_cap?: 0..3}`. A personal agent's owner may edit it (cap at most the template ceiling); admins cannot. The lead cannot be paused or archived here; 409 for `active` while the agent's pack is off |
 | DELETE | `/api/v1/workspaces/:ws/agents/:id` | `{deleted: true}` for custom agents only; **409** for `lead` and `system` agents (pause or tune them instead) |
-| POST | `/api/v1/workspaces/:ws/agents` | `{spec: AgentSpec, avatar?, color?}` creates a `custom` agent as `draft` at level 0 (version 1, source `manual`). 422 `{issues}` when the spec is invalid; 409 if the key is taken |
+| POST | `/api/v1/workspaces/:ws/agents` | `{spec: AgentSpec, avatar?, color?}` creates a `custom` agent as `draft` at level 0 (version 1, source `manual`). 400 listing every issue (path and message) when the spec is invalid; 409 if the key is taken |
 | POST | `/api/v1/workspaces/:ws/agents/:id/clone` | `{name?}` copies the spec into a new `custom` agent (`cloned_from` set) |
 | PUT | `/api/v1/workspaces/:ws/agents/:id/spec` | `{spec, note?}` adds a version (source `tuned` for template agents, else `manual`), activates it and sets `tuned`. A change to tools, permissions, steps or drafting caps the agent at level 1 until it passes the gate |
 | GET | `/api/v1/workspaces/:ws/agents/:id/versions` | `{ items: [{version, source, gate_status, note, spec_hash, active, created_at}] }` |
@@ -825,7 +825,8 @@ All routes below need membership of the workspace; reading is `operator`, writin
 | GET | `/api/v1/workspaces/:ws/messages/:id/route` | `{message_id, route: {agent_id, agent_name, agent_version, source, shadow, created_at} \| null}` |
 | POST | `/api/v1/workspaces/:ws/messages/:id/route` | operator. `{agent_id}` reassigns the message (source `manual`); audited as `message.route_corrected` |
 | GET | `/api/v1/workspaces/:ws/agents/:id/outgoing` | `{ items: [{draft_id, message_id, subject, to, send_at, body_preview}] }`: automatic sends held for the delay |
-| GET | `/api/v1/workspaces/:ws/cases?agent_id=` | the existing case list, filtered by agent. Cases have `agent_id`, `agent` (badge) and `shadow` |
+| GET | `/api/v1/workspaces/:ws/agents/:id/audit` | `{ items: [{at, case_id, message_id, tool, scope, status, turn, shadow, refs}] }`: one entry per tool call the agent made, reads included (`status` is `ok`, `error`, `blocked`, `waiting_approval` or `simulated`; `refs` holds ids only, never mail text) |
+| GET | `/api/v1/workspaces/:ws/cases?agent_id=&include_shadow=` | the existing case list, filtered by agent; observing agents' trial cases are left out unless `include_shadow=true`. Cases have `agent_id`, `agent` (badge), `shadow` and `trigger` |
 
 ```ts
 interface AgentSummary { id; key; kind: 'lead'|'system'|'custom'; scope: 'workspace'|'personal'; owner_user_id: string|null; category;
@@ -834,6 +835,25 @@ interface AgentSummary { id; key; kind: 'lead'|'system'|'custom'; scope: 'worksp
   autonomy: { earned: Autonomy; cap: Autonomy; effective: Autonomy; limited_by: 'earned'|'admin_cap'|'spec'|'workspace'|'profile'|'paused' };
   today: { routed: number; cases: number; approvals_pending: number; cost_usd: number } }
 ```
+
+**Scopes.** A spec lists the scopes the agent holds: `read_mail` (read mail, threads, memory, search), `draft`, `send`
+(send, submit), `label` (tasks, case notes) and `schedule` (wake later, propose automations). Every tool belongs to one
+scope; a tool outside the agent's scopes is rejected when the spec is saved and is never offered to or run for the
+agent, so a `read_mail`-only agent cannot draft or send whatever an email says. Each tool call is audited
+(`agent.tool_call`), approvals store a hash of what the person approved, and the leak check (an address that is not in the
+conversation, or a long number) and the recipient rules are code, not a model's opinion.
+
+**Workflows.** A `mode: "workflow"` agent (the Inbox Assistant and every personal agent) runs a routine email as fixed
+steps with no planner call: draft, check, ask or send, then wait for a reply and nudge. The planner takes over only for
+a complaint, legal wording, several parties, three or more asks, a reopened conversation, a declined draft, a reply
+that wakes the case, or a step that failed or was stopped (`state.wf = "planner"`, `state.wf_why`).
+
+**Planner context and models.** The planner sees understanding fields and short fenced excerpts with words joined by `^`
+(never raw bodies; `read_email {excerpt: true}` asks for a longer one), only its agent's tools, and a prompt ordered for
+caching (case header, steps, latest details, facts, then the turn and budget line). `max_tokens` is 300. One tier rule:
+the agent's quality tier is the floor and a premium case or draft can only raise it to `best`.
+
+Environment: `AGENT_MAX_AUTONOMY` (0 to 3, default 3), `AGENT_AUTO_SEND_DELAY_SECS` (default 600), `AGENT_AUTO_SEND_DAILY_CAP`.
 
 Tenancy: `agents::case::get_in` is the only case lookup and always takes the workspace; job payloads carry it too.
 Another workspace's case, approval, agent, version or route id is a 404 on every route above and on the existing case and approval routes.

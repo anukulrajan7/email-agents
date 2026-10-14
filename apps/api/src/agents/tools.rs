@@ -592,9 +592,11 @@ impl Tool for DraftEmail {
                         return failed("The writer judged that this email needs no reply.");
                     }
                     let gaps = replies::has_open_gaps(&body);
+                    let stand_in = format!("shadow:{}:{}", ctx.case.id, ctx.turn);
                     return Ok(ToolOutput {
                         summary: format!("Observe mode: wrote a reply to {} (kept here, not saved as a draft)", msg.sender_address),
-                        value: json!({"draft_id": Value::Null, "body": body, "has_open_questions": gaps, "shadow": true}),
+                        value: json!({"draft_id": stand_in, "body": body, "has_open_questions": gaps, "shadow": true}),
+                        state: Some(json!({"last_draft_id": stand_in})),
                         ..Default::default()
                     });
                 }

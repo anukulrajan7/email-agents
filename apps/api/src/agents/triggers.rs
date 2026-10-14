@@ -376,11 +376,11 @@ pub async fn run_schedule_tick(state: &AppState, ws: &str, now: i64) -> sqlx::Re
         else {
             continue;
         };
+        if agent.row.next_run_at.is_some_and(|at| at > now) {
+            continue;
+        }
         let next = now + hours * 3_600_000;
-        let due = match agent.row.next_run_at {
-            None => false,
-            Some(at) => at <= now,
-        };
+        let due = agent.row.next_run_at.is_some();
         let claimed = sqlx::query("UPDATE agents SET next_run_at = ?1 WHERE id = ?2 AND workspace_id = ?3 AND next_run_at IS ?4")
             .bind(next)
             .bind(&agent.row.id)
