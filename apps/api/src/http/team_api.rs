@@ -38,6 +38,14 @@ pub fn routes() -> Router<AppState> {
         .route("/workspaces/{ws}/team/ownership", post(transfer_ownership))
 }
 
+/// Re-judges suppressed mail after a change that the billable policy depends on.
+async fn policy_changed(state: &AppState, ws: &str) -> AppResult<()> {
+    if packs::enabled(&state.db, ws, packs::STAFFING).await? {
+        crate::staffing::policy::release_suppressed(&state.db, ws).await?;
+    }
+    Ok(())
+}
+
 fn bad(e: people::FieldError) -> AppError {
     AppError::BadRequest(format!("{}: {}", e.field, e.message))
 }
@@ -140,7 +148,7 @@ pub async fn put_settings(State(state): State<AppState>, user: AuthUser, Path(ws
         }
     }
     settings::save(&state.db, &ws, &next).await?;
-    if staffing && next.hr_source_id != current.hr_source_id {
+    if staffing {
         crate::staffing::policy::release_suppressed(&state.db, &ws).await?;
     }
     let mut conn = state.db.acquire().await?;
@@ -186,6 +194,7 @@ pub async fn create_person(State(state): State<AppState>, user: AuthUser, Path(w
     let id = people::insert(&mut tx, &ws, &draft).await?;
     audit::record(&mut tx, Entry { workspace_id: &ws, actor: Actor::User(&user.id), action: "person.created", entity_type: "person", entity_id: &id, message_id: None, metadata: json!({}) }).await?;
     tx.commit().await?;
+    policy_changed(&state, &ws).await?;
     let p = people::get(&state.db, &ws, &id).await?.ok_or(AppError::NotFound)?;
     Ok((StatusCode::CREATED, Json(shape(p, ctx.staffing))))
 }
@@ -200,6 +209,7 @@ pub async fn update_person(State(state): State<AppState>, user: AuthUser, Path((
     people::update(&mut tx, &ws, &id, &draft).await?;
     audit::record(&mut tx, Entry { workspace_id: &ws, actor: Actor::User(&user.id), action: "person.updated", entity_type: "person", entity_id: &id, message_id: None, metadata: json!({}) }).await?;
     tx.commit().await?;
+    policy_changed(&state, &ws).await?;
     let p = people::get(&state.db, &ws, &id).await?.ok_or(AppError::NotFound)?;
     Ok(Json(shape(p, ctx.staffing)))
 }
@@ -217,6 +227,7 @@ pub async fn archive_person(State(state): State<AppState>, user: AuthUser, Path(
     audit::record(&mut tx, Entry { workspace_id: &ws, actor: Actor::User(&user.id), action: "person.archived", entity_type: "person", entity_id: &id, message_id: None, metadata: json!({}) }).await?;
     tx.commit().await?;
     let _ = ctx;
+    policy_changed(&state, &ws).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -232,6 +243,7 @@ pub async fn import_people(State(state): State<AppState>, user: AuthUser, Path(w
     let ctx = context(&state, &ws).await?;
     let report = people::import_csv(&state.db, &ws, &body.csv, body.dry_run, &ctx).await.map_err(AppError::BadRequest)?;
     if !body.dry_run {
+        policy_changed(&state, &ws).await?;
         let mut conn = state.db.acquire().await?;
         audit::record(&mut conn, Entry { workspace_id: &ws, actor: Actor::User(&user.id), action: "people.imported", entity_type: "workspace", entity_id: &ws, message_id: None, metadata: json!({ "created": report.created, "updated": report.updated, "skipped": report.skipped }) }).await?;
     }
@@ -312,15 +324,17 @@ pub struct Transfer {
 /// The super admin hands the role to another admin of the workspace. They stay an admin.
 pub async fn transfer_ownership(State(state): State<AppState>, user: AuthUser, Path(ws): Path<String>, Json(body): Json<Transfer>) -> AppResult<Json<Value>> {
     access::resolve(&state.db, &ws, &user).await?.require_owner()?;
+    let mut tx = state.db.begin().await?;
+    // The first statement is a write, so the checks below run under the write lock.
+    sqlx::query("UPDATE workspaces SET name = name WHERE id = ?1").bind(&ws).execute(&mut *tx).await?;
     let target: Option<String> = sqlx::query_scalar(
         "SELECT u.id FROM memberships m JOIN users u ON u.id = m.user_id WHERE m.workspace_id = ?1 AND m.role = 'admin' AND lower(u.email) = lower(?2)",
     )
     .bind(&ws)
     .bind(body.email.trim())
-    .fetch_optional(&state.db)
+    .fetch_optional(&mut *tx)
     .await?;
     let target = target.ok_or_else(|| AppError::BadRequest("the new super admin must be an admin member of this workspace".into()))?;
-    let mut tx = state.db.begin().await?;
     sqlx::query("INSERT INTO workspace_owners (workspace_id, user_id, created_at) VALUES (?1, ?2, ?3) ON CONFLICT(workspace_id) DO UPDATE SET user_id = excluded.user_id")
         .bind(&ws)
         .bind(&target)

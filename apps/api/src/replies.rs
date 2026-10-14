@@ -215,6 +215,7 @@ pub async fn save_to_provider(
     Path((ws, id)): Path<(String, String)>,
 ) -> AppResult<Json<Value>> {
     require_role(&state.db, &ws, &user, Role::Operator).await?;
+    crate::team::scope::require_draft(&state.db, &ws, &user, &id).await?;
     let provider_draft_id = save_draft(&state, &ws, &id, Actor::User(&user.id)).await?;
     Ok(Json(json!({ "status": "saved", "provider_draft_id": provider_draft_id })))
 }
@@ -544,6 +545,7 @@ pub async fn send(
     Json(body): Json<SendBody>,
 ) -> AppResult<Json<ScheduledSend>> {
     require_role(&state.db, &ws, &user, Role::Operator).await?;
+    crate::team::scope::require_draft(&state.db, &ws, &user, &id).await?;
     if !body.confirm {
         return Err(AppError::BadRequest("sending needs explicit confirmation".into()));
     }
@@ -557,6 +559,7 @@ pub async fn undo_send(
     Path((ws, id)): Path<(String, String)>,
 ) -> AppResult<Json<Value>> {
     require_role(&state.db, &ws, &user, Role::Operator).await?;
+    crate::team::scope::require_draft(&state.db, &ws, &user, &id).await?;
     let mut tx = state.db.begin().await?;
     let undone = sqlx::query(
         "UPDATE drafts SET send_at = NULL, send_requested_by = NULL, updated_at = ?1

@@ -261,7 +261,7 @@ struct MessageRow {
 async fn message_in_ws(ctx: &ToolCtx<'_>, message_id: &str) -> Result<MessageRow, ToolError> {
     sqlx::query_as(
         "SELECT id, subject, sender_address, body_text, received_at, direction, thread_id
-         FROM email_messages WHERE id = ?1 AND workspace_id = ?2",
+         FROM email_messages WHERE id = ?1 AND workspace_id = ?2 AND suppressed = 0",
     )
     .bind(message_id)
     .bind(ctx.ws())
@@ -371,7 +371,7 @@ impl Tool for ReadThread {
         let msg = message_in_ws(ctx, str_arg(args, "message_id")?).await?;
         let rows: Vec<MessageRow> = sqlx::query_as(
             "SELECT id, subject, sender_address, body_text, received_at, direction, thread_id
-             FROM email_messages WHERE thread_id = ?1 AND workspace_id = ?2 ORDER BY received_at, id LIMIT 30",
+             FROM email_messages WHERE thread_id = ?1 AND workspace_id = ?2 AND suppressed = 0 ORDER BY received_at, id LIMIT 30",
         )
         .bind(&msg.thread_id)
         .bind(ctx.ws())

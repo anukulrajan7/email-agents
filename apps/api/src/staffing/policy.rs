@@ -40,6 +40,15 @@ pub fn address_of(raw: &str) -> String {
 /// come through the HR mailbox. Recipients and Cc never count, so a client copying a consultant, a team list, or a
 /// recruiter's sent CV mail copying a consultant are all kept. The mail is stored but marked `suppressed`.
 pub async fn should_suppress(conn: &mut SqliteConnection, source_id: &str, workspace_id: &str, email: &NormalizedEmail) -> sqlx::Result<bool> {
+    let senders: Vec<String> = std::iter::once(&email.sender_address)
+        .chain(email.original_sender_address.as_ref())
+        .map(|a| address_of(a))
+        .filter(|a| !a.is_empty())
+        .collect();
+    qualifies(conn, source_id, workspace_id, &senders).await
+}
+
+async fn qualifies(conn: &mut SqliteConnection, source_id: &str, workspace_id: &str, senders: &[String]) -> sqlx::Result<bool> {
     let hr: Option<String> = sqlx::query_scalar("SELECT hr_source_id FROM team_settings WHERE workspace_id = ?1")
         .bind(workspace_id)
         .fetch_optional(&mut *conn)
@@ -49,11 +58,6 @@ pub async fn should_suppress(conn: &mut SqliteConnection, source_id: &str, works
     if hr == source_id || !packs::enabled(&mut *conn, workspace_id, packs::STAFFING).await? {
         return Ok(false);
     }
-    let senders: Vec<String> = std::iter::once(&email.sender_address)
-        .chain(email.original_sender_address.as_ref())
-        .map(|a| address_of(a))
-        .filter(|a| !a.is_empty())
-        .collect();
     sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM people p
                        WHERE p.workspace_id = ?1 AND p.active = 1 AND p.employee_type = 'billable'
@@ -67,27 +71,61 @@ pub async fn should_suppress(conn: &mut SqliteConnection, source_id: &str, works
     .await
 }
 
-/// Policy changed (HR mailbox changed or cleared): suppressed mail is released and goes through the normal pipeline.
+#[derive(sqlx::FromRow)]
+struct Held {
+    id: String,
+    source_id: String,
+    thread_id: String,
+    direction: String,
+    sender_address: String,
+    original_sender_address: Option<String>,
+    sender_name: Option<String>,
+    received_at: i64,
+}
+
+/// Run after anything the policy depends on changes (HR mailbox, a person's billable flag, emails or mailbox).
+/// Each suppressed message is judged again against the policy as it is now; only those that no longer qualify are
+/// released, and they get the steps they skipped: contact, agent wake-up, attachment reading and labelling.
 pub async fn release_suppressed(db: &SqlitePool, workspace_id: &str) -> sqlx::Result<usize> {
-    let ids: Vec<(String, String)> = sqlx::query_as("SELECT id, direction FROM email_messages WHERE workspace_id = ?1 AND suppressed = 1")
-        .bind(workspace_id)
-        .fetch_all(db)
-        .await?;
+    let held: Vec<Held> = sqlx::query_as(
+        "SELECT id, source_id, thread_id, direction, sender_address, original_sender_address, sender_name, received_at
+         FROM email_messages WHERE workspace_id = ?1 AND suppressed = 1",
+    )
+    .bind(workspace_id)
+    .fetch_all(db)
+    .await?;
     let mut conn = db.acquire().await?;
-    for (id, direction) in &ids {
-        sqlx::query("UPDATE email_messages SET suppressed = 0 WHERE id = ?1").bind(id).execute(&mut *conn).await?;
-        if direction == "inbound" {
-            crate::jobs::enqueue(
-                &mut conn,
-                crate::jobs::kind::CLASSIFY_EMAIL,
-                &format!("classify:{id}:{}:released", crate::domain::TAXONOMY_VERSION),
-                Some(workspace_id),
-                &json!({ "message_id": id }),
-            )
-            .await?;
+    let mut released = 0;
+    for m in held {
+        let senders: Vec<String> = std::iter::once(&m.sender_address)
+            .chain(m.original_sender_address.as_ref())
+            .map(|a| address_of(a))
+            .filter(|a| !a.is_empty())
+            .collect();
+        if qualifies(&mut conn, &m.source_id, workspace_id, &senders).await? {
+            continue;
         }
+        sqlx::query("UPDATE email_messages SET suppressed = 0 WHERE id = ?1").bind(&m.id).execute(&mut *conn).await?;
+        released += 1;
+        if m.direction != "inbound" {
+            continue;
+        }
+        crate::memory::record_contact(&mut conn, workspace_id, &m.sender_address, m.sender_name.as_deref(), m.received_at).await?;
+        crate::agents::triggers::wake_for_thread(&mut conn, workspace_id, &m.thread_id, &m.id).await?;
+        let files: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM attachments WHERE message_id = ?1").bind(&m.id).fetch_one(&mut *conn).await?;
+        if files > 0 {
+            crate::jobs::attachment_jobs::enqueue_extract(&mut conn, workspace_id, &m.id, false).await?;
+        }
+        crate::jobs::enqueue(
+            &mut conn,
+            crate::jobs::kind::CLASSIFY_EMAIL,
+            &format!("classify:{}:{}:released", m.id, crate::domain::TAXONOMY_VERSION),
+            Some(workspace_id),
+            &json!({ "message_id": m.id }),
+        )
+        .await?;
     }
-    Ok(ids.len())
+    Ok(released)
 }
 
 static HOURS_TOTAL: OnceLock<Regex> = OnceLock::new();

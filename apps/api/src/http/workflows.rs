@@ -146,10 +146,11 @@ pub async fn runs(State(state): State<AppState>, user: AuthUser, Path(ws): Path<
          FROM workflow_runs r
          JOIN workflows w ON w.id = r.workflow_id
          JOIN email_messages m ON m.id = r.message_id
-         WHERE r.workspace_id = ?1
+         WHERE r.workspace_id = ?1 AND m.suppressed = 0 AND (?2 IS NULL OR m.source_id IN (SELECT value FROM json_each(?2)))
          ORDER BY r.created_at DESC LIMIT 100",
     )
     .bind(&ws)
+    .bind(crate::team::scope::wall_for(&state.db, &ws, &user).await?)
     .fetch_all(&state.db)
     .await?;
     let items: Vec<Value> = rows

@@ -832,8 +832,11 @@ Billable policy: with `hr_source_id` set, mail that a billable person SENT (send
 `original_sender_address`), or that sits in a mailbox linked to a billable person, and that did not arrive through the HR
 mailbox, is stored with `email_messages.suppressed = 1` (audit `message.suppressed` + a warn log). It is never classified,
 indexed, listed, searched or alerted on. Recipients and Cc never match, so a client copying a consultant, a team list and a
-recruiter's sent CV mail copying a consultant are all kept. Changing `hr_source_id` releases suppressed mail into the normal
-pipeline. Marking anyone billable needs a connected HR mailbox, and `hr_source_id` cannot be unset or point at a
+recruiter's sent CV mail copying a consultant are all kept. Attachment metadata rows are stored for suppressed mail (nothing is
+extracted). After any change of `hr_source_id`, a person's billable flag, emails or mailbox, every suppressed message is judged
+again against the policy as it now is; those that no longer qualify are released and get the steps they skipped (contact,
+agent wake-up, attachment extraction, classification). Mail that still qualifies stays suppressed. Suppressed mail never counts
+as a reply and is a 404 on every message route. Marking anyone billable needs a connected HR mailbox, and `hr_source_id` cannot be unset or point at a
 disconnected mailbox while billable people exist. A billable person cannot have their own mailbox linked.
 
 Timesheets belong to a month: a month named in the subject ("September timesheet", "Sept", `2026-09`) wins, otherwise
@@ -846,7 +849,9 @@ The super admin needs the owner row and the `admin` role. The members route refu
 `POST /team/ownership {email}` (super admin only, target must be an admin member) hands the role over. Non-owners get
 `GET /team/settings` and `/team/escalations` without any email addresses, HR mailbox or sources. With the staffing pack and
 team setting `restrict_mail_to_team`, operators read only mailboxes linked to people in their own manager-chain subtree
-(inbox list, message detail and search; filters cannot step outside it). Off by default. Team setting
+(inbox list, message detail and search; filters cannot step outside it). The same wall applies to every message action
+(classification, draft, reprocess, insight), the `/drafts/{id}` routes, the review, alert and workflow-run lists and a contact's
+recent messages. Known gap: assistant and agent tools do not apply the wall yet. Off by default. Team setting
 `route_alerts_by_owner` (always on in the staffing pack) opts rule alerts into owner routing.
 
 ### Alerts and escalation

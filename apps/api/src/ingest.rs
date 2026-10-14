@@ -125,6 +125,18 @@ pub async fn persist_message(
 
     if suppressed {
         sqlx::query("UPDATE email_messages SET suppressed = 1 WHERE id = ?1").bind(&message_id).execute(&mut *conn).await?;
+        // Metadata rows only, so a later release can read the files; nothing is extracted while suppressed.
+        for a in &email.attachments {
+            sqlx::query("INSERT INTO attachments (id, message_id, filename, media_type, size_bytes, provider_attachment_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6)")
+                .bind(new_id("att"))
+                .bind(&message_id)
+                .bind(&a.filename)
+                .bind(&a.media_type)
+                .bind(a.size_bytes)
+                .bind(&a.provider_ref)
+                .execute(&mut *conn)
+                .await?;
+        }
         tracing::warn!(%message_id, %source_id, "billable policy: mail from a billable person outside the HR mailbox stored as suppressed");
         audit::record(
             &mut *conn,

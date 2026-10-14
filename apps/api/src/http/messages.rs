@@ -87,7 +87,7 @@ macro_rules! replied_sql {
     () => {
         "(EXISTS (SELECT 1 FROM drafts d WHERE d.message_id = m.id AND d.status = 'sent')
           OR EXISTS (SELECT 1 FROM email_messages o WHERE o.thread_id = m.thread_id AND o.direction = 'outbound'
-                     AND o.received_at > m.received_at))"
+                     AND o.suppressed = 0 AND o.received_at > m.received_at))"
     };
 }
 
@@ -482,13 +482,8 @@ pub async fn detail(
     })))
 }
 
-async fn ensure_message(state: &AppState, ws: &str, id: &str) -> AppResult<()> {
-    let found: Option<String> = sqlx::query_scalar("SELECT id FROM email_messages WHERE id = ?1 AND workspace_id = ?2")
-        .bind(id)
-        .bind(ws)
-        .fetch_optional(&state.db)
-        .await?;
-    found.map(|_| ()).ok_or(AppError::NotFound)
+async fn ensure_message(state: &AppState, ws: &str, user: &AuthUser, id: &str) -> AppResult<()> {
+    crate::team::scope::require_message(&state.db, ws, user, id).await
 }
 
 // ---------------------------------------------------------------- classification override
@@ -507,7 +502,7 @@ pub async fn override_classification(
     Json(body): Json<OverrideBody>,
 ) -> AppResult<Json<Classification>> {
     require_role(&state.db, &ws, &user, Role::Operator).await?;
-    ensure_message(&state, &ws, &id).await?;
+    ensure_message(&state, &ws, &user, &id).await?;
     if !labels::is_active(&state.db, &ws, &body.category).await? {
         return Err(AppError::BadRequest("unknown label".into()));
     }
@@ -552,7 +547,7 @@ pub async fn approve_classification(
     Path((ws, id)): Path<(String, String)>,
 ) -> AppResult<Json<Classification>> {
     require_role(&state.db, &ws, &user, Role::Operator).await?;
-    ensure_message(&state, &ws, &id).await?;
+    ensure_message(&state, &ws, &user, &id).await?;
     let mut tx = state.db.begin().await?;
     let row: ClassificationRow = sqlx::query_as(
         "UPDATE classifications SET needs_review = 0, updated_at = ?1 WHERE message_id = ?2
@@ -625,7 +620,7 @@ pub async fn request_draft(
     body: Bytes,
 ) -> AppResult<(StatusCode, Json<Value>)> {
     require_role(&state.db, &ws, &user, Role::Operator).await?;
-    ensure_message(&state, &ws, &id).await?;
+    ensure_message(&state, &ws, &user, &id).await?;
     let request: DraftRequest = if body.iter().all(u8::is_ascii_whitespace) {
         DraftRequest::default()
     } else {
@@ -662,7 +657,7 @@ pub async fn understand_now(
     Path((ws, id)): Path<(String, String)>,
 ) -> AppResult<Json<Value>> {
     require_role(&state.db, &ws, &user, Role::Operator).await?;
-    ensure_message(&state, &ws, &id).await?;
+    ensure_message(&state, &ws, &user, &id).await?;
     let insight = handlers::analyze_message(&state, &json!({ "message_id": id })).await.map_err(|e| {
         tracing::warn!(message_id = %id, error = %e, "on-demand analysis failed");
         AppError::AiUnavailable
@@ -700,7 +695,7 @@ pub async fn reprocess(
     Path((ws, id)): Path<(String, String)>,
 ) -> AppResult<(StatusCode, Json<Value>)> {
     require_role(&state.db, &ws, &user, Role::Admin).await?;
-    ensure_message(&state, &ws, &id).await?;
+    ensure_message(&state, &ws, &user, &id).await?;
     let key = format!("classify:{id}:{TAXONOMY_VERSION}:reprocess:{}", new_id("req"));
     enqueue_for_message(&state, &ws, &id, &user, kind::CLASSIFY_EMAIL, key, "message.reprocess_requested").await
 }
@@ -718,6 +713,7 @@ pub async fn update_draft(
     Json(body): Json<DraftPatch>,
 ) -> AppResult<Json<Draft>> {
     require_role(&state.db, &ws, &user, Role::Operator).await?;
+    crate::team::scope::require_draft(&state.db, &ws, &user, &id).await?;
     // Clients can only edit or approve. "sent" is reserved for a future, audited send action.
     let status = match body.status.as_deref() {
         Some(s @ ("edited" | "approved")) => Some(s),

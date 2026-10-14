@@ -270,7 +270,7 @@ async fn team_sent_after(db: &SqlitePool, workspace_id: &str, thread_key: &str, 
     sqlx::query_scalar(
         "SELECT EXISTS(
            SELECT 1 FROM email_messages r JOIN email_sources s ON s.id = r.source_id
-           WHERE r.workspace_id = ?1 AND r.thread_id = ?2 AND r.received_at > ?3
+           WHERE r.workspace_id = ?1 AND r.thread_id = ?2 AND r.suppressed = 0 AND r.received_at > ?3
              AND (lower(r.sender_address) IN (SELECT lower(u.email) FROM memberships mb JOIN users u ON u.id = mb.user_id
                                               WHERE mb.workspace_id = ?1)
                   OR lower(r.sender_address) = (SELECT lower(u.email) FROM users u WHERE u.id = s.connected_by_user_id))

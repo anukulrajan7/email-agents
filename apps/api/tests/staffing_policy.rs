@@ -34,7 +34,7 @@ async fn the_billable_gate_only_hides_mail_a_billable_person_sent_and_never_dele
     let priya_box = h.mailbox(&ws, "priya@acme.test").await;
     h.call("PUT", &format!("{}/team/settings", api(&ws)), OWNER, Some(settings(json!({"hr_source_id": hr})))).await;
     h.person(&ws, json!({"name": "Priya Sharma", "emails": ["priya@acme.test"], "employee_type": "non_billable", "source_id": priya_box})).await;
-    h.person(&ws, json!({"name": "Ravi Kumar", "emails": ["ravi@client.test"], "employee_type": "billable", "client": "TCS"})).await;
+    let ravi = h.person(&ws, json!({"name": "Ravi Kumar", "emails": ["ravi@client.test"], "employee_type": "billable", "client": "TCS"})).await;
     let list = || async { h.get(OWNER, &format!("{}/messages?direction=all", api(&ws))).await.1["items"].as_array().unwrap().iter().map(|m| m["subject"].as_str().unwrap().to_string()).collect::<Vec<_>>() };
 
     // Kept: a client copying the consultant, a team list the consultant is on, and the recruiter's sent CV mail copying him.
@@ -65,9 +65,12 @@ async fn the_billable_gate_only_hides_mail_a_billable_person_sent_and_never_dele
     // Through the HR mailbox Ravi's mail is read normally.
     assert!(!suppressed(&h, &ws, &h.ingest(&ws, &hr, email("ravi@client.test", &["hr@acme.test"], "September timesheet", "Total hours: 168", OCT5 + 6), "b1").await.unwrap()).await);
 
-    // Policy change: with no billable person left and the HR mailbox moved, the hidden mail is released.
+    // Moving the HR mailbox does not release mail that still qualifies; Ravi no longer being billable does.
     let other = h.mailbox(&ws, "hr2@acme.test").await;
     assert_eq!(h.call("PUT", &format!("{}/team/settings", api(&ws)), OWNER, Some(settings(json!({"hr_source_id": other})))).await.0, StatusCode::OK);
+    assert!(suppressed(&h, &ws, &own).await);
+    let (st, body) = h.call("PATCH", &format!("{}/team/people/{}", api(&ws), ravi["id"].as_str().unwrap()), OWNER, Some(json!({"employee_type": "non_billable"}))).await;
+    assert_eq!(st, StatusCode::OK, "{body}");
     assert!(!suppressed(&h, &ws, &own).await);
     assert!(list().await.contains(&"Hidden direct".to_string()));
 }

@@ -82,3 +82,35 @@ pub async fn wall(db: &SqlitePool, workspace_id: &str, access: &Access) -> AppRe
         .await?,
     ))
 }
+
+/// The wall as the JSON a query binds (`NULL` = no wall) for the signed-in user.
+pub async fn wall_for(db: &SqlitePool, workspace_id: &str, user: &crate::auth::AuthUser) -> AppResult<Option<String>> {
+    let access = super::access::resolve(db, workspace_id, user).await?;
+    Ok(wall(db, workspace_id, &access).await?.map(|ids| serde_json::json!(ids).to_string()))
+}
+
+/// 404 unless the message exists here, is not suppressed and is inside the user's wall. Every content route
+/// that acts on one message goes through this (or `require_draft`).
+pub async fn require_message(db: &SqlitePool, workspace_id: &str, user: &crate::auth::AuthUser, message_id: &str) -> AppResult<()> {
+    let wall = wall_for(db, workspace_id, user).await?;
+    let found: Option<i64> = sqlx::query_scalar(
+        "SELECT 1 FROM email_messages WHERE id = ?1 AND workspace_id = ?2 AND suppressed = 0
+           AND (?3 IS NULL OR source_id IN (SELECT value FROM json_each(?3)))",
+    )
+    .bind(message_id)
+    .bind(workspace_id)
+    .bind(wall)
+    .fetch_optional(db)
+    .await?;
+    found.map(|_| ()).ok_or(AppError::NotFound)
+}
+
+/// Same for a draft, through the message it answers.
+pub async fn require_draft(db: &SqlitePool, workspace_id: &str, user: &crate::auth::AuthUser, draft_id: &str) -> AppResult<()> {
+    let message: Option<String> = sqlx::query_scalar("SELECT message_id FROM drafts WHERE id = ?1 AND workspace_id = ?2")
+        .bind(draft_id)
+        .bind(workspace_id)
+        .fetch_optional(db)
+        .await?;
+    require_message(db, workspace_id, user, &message.ok_or(AppError::NotFound)?).await
+}

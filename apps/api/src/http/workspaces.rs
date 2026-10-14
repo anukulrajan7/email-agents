@@ -297,10 +297,16 @@ pub async fn add_member(
         tx.commit().await?;
         return Ok((StatusCode::ACCEPTED, Json(json!({ "invited": true, "email": email, "role": role.as_str() }))));
     };
-    if role != Role::Admin && crate::team::access::owner_user_id(&state.db, &ws).await?.as_deref() == Some(member_id.as_str()) {
+    let mut tx = state.db.begin().await?;
+    // Write first, so the owner check below and the role change are one atomic step.
+    sqlx::query("UPDATE workspaces SET name = name WHERE id = ?1").bind(&ws).execute(&mut *tx).await?;
+    let owner: Option<String> = match sqlx::query_scalar("SELECT user_id FROM workspace_owners WHERE workspace_id = ?1").bind(&ws).fetch_optional(&mut *tx).await? {
+        Some(o) => Some(o),
+        None => sqlx::query_scalar("SELECT user_id FROM memberships WHERE workspace_id = ?1 AND role = 'admin' ORDER BY rowid LIMIT 1").bind(&ws).fetch_optional(&mut *tx).await?,
+    };
+    if role != Role::Admin && owner.as_deref() == Some(member_id.as_str()) {
         return Err(AppError::Conflict("this person is the workspace's super admin; transfer ownership before changing their role".into()));
     }
-    let mut tx = state.db.begin().await?;
     sqlx::query(
         "INSERT INTO memberships (workspace_id, user_id, role) VALUES (?1, ?2, ?3)
          ON CONFLICT(workspace_id, user_id) DO UPDATE SET role = excluded.role",
