@@ -5,11 +5,11 @@ use serde::Serialize;
 use serde_json::{Value, json};
 
 use super::{
-    ANSWER_TOOL, ASSISTANT_NAME, CommandRequest, MAX_ANSWER_WORDS, MAX_PLAN_ITEMS, MAX_TURNS, PLAN_TTL_MS, context::Viewing, datamark,
-    plain_answer,
+    ANSWER_TOOL, ASSISTANT_NAME, CommandRequest, FALLBACK_ANSWER, MAX_ANSWER_WORDS, MAX_PLAN_ITEMS, MAX_TURNS, PLAN_TTL_MS, context::Viewing, datamark,
+    leaks_reasoning, plain_answer, REPAIR_NOTE,
 };
 use crate::{
-    agents::{approvals, case, planner::Decision, sentence},
+    agents::{approvals, case, planner::{Decision, strip_reasoning}, sentence},
     messaging,
     auth::AuthUser,
     automations::{self, Action, AutomationInput},
@@ -348,6 +348,7 @@ pub async fn run(state: &AppState, ws: &str, user: &AuthUser, role: Role, text: 
     let today = iso(crate::db::now_ms());
     let today = today.get(..10).unwrap_or(&today).to_string();
     let mut transcript: Vec<String> = vec![];
+    let mut repaired = false;
 
     for turn in 1..=MAX_TURNS {
         let last = turn == MAX_TURNS;
@@ -357,7 +358,20 @@ pub async fn run(state: &AppState, ws: &str, user: &AuthUser, role: Role, text: 
             AppError::AiUnavailable
         })?;
         match out.decision {
-            Decision::Call { tool, args } if tool == ANSWER_TOOL => return session.finish(&args).await,
+            Decision::Call { tool, args } if tool == ANSWER_TOOL => {
+                let text = strip_reasoning(args.get("text").and_then(Value::as_str).unwrap_or_default());
+                if leaks_reasoning(&text) {
+                    if repaired {
+                        return session.finish(&json!({ "text": FALLBACK_ANSWER })).await;
+                    }
+                    repaired = true;
+                    transcript.push(format!("[{turn}] error: {REPAIR_NOTE}"));
+                    continue;
+                }
+                let mut args = args;
+                args["text"] = json!(text);
+                return session.finish(&args).await;
+            }
             Decision::Finish { summary, .. } => return session.finish(&json!({ "text": summary })).await,
             Decision::Call { tool, .. } if last => transcript.push(format!("[{turn}] {tool} was not run: answer now")),
             Decision::Call { tool, args } => {
@@ -374,7 +388,13 @@ pub async fn run(state: &AppState, ws: &str, user: &AuthUser, role: Role, text: 
                 }
                 transcript.push(line);
             }
-            Decision::Invalid { error } => transcript.push(format!("[{turn}] error: {error}")),
+            Decision::Invalid { error } => {
+                if repaired {
+                    return session.finish(&json!({ "text": FALLBACK_ANSWER })).await;
+                }
+                repaired = true;
+                transcript.push(format!("[{turn}] error: {error}"));
+            }
         }
     }
     session.finish(&json!({})).await
@@ -410,7 +430,7 @@ impl Session<'_> {
         }
         if answer.is_empty() {
             answer = if self.plan.is_empty() {
-                "I could not work that out. Try asking in a simpler way.".into()
+                FALLBACK_ANSWER.into()
             } else {
                 "I prepared this for you. Confirm it below to go ahead.".into()
             };
@@ -803,7 +823,24 @@ impl Session<'_> {
                 "source": people.first().map(|p| messaging::recipients::source_words(to, p)),
             },
         });
-        self.add_plan("send_message", summary, params).await
+        let sent_to = address.clone();
+        let added = self.add_plan("send_message", summary, params).await?;
+        if let Some(address) = sent_to {
+            let now = now_ms();
+            sqlx::query(
+                "UPDATE assistant_plans SET expires_at = ?1 WHERE workspace_id = ?2 AND user_id = ?3 AND action = 'draft_reply'
+                   AND used_at IS NULL AND expires_at > ?1
+                   AND json_extract(params_json, '$.message_id') IN
+                       (SELECT id FROM email_messages WHERE workspace_id = ?2 AND lower(sender_address) = lower(?4))",
+            )
+            .bind(now)
+            .bind(self.ws)
+            .bind(&self.user.id)
+            .bind(address)
+            .execute(&self.state.db)
+            .await?;
+        }
+        Ok(added)
     }
 
     async fn contact_support(&mut self, args: &Value) -> ToolResult {

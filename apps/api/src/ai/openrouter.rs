@@ -373,7 +373,12 @@ impl OpenRouterClient {
         }
         let body: Value = res.json().await.map_err(|e| AiError::Retryable(format!("OpenRouter decode: {e}")))?;
         self.log_call(model, started, Some(&body), None).await;
-        let message = body.pointer("/choices/0/message").cloned().unwrap_or(Value::Null);
+        let mut message = body.pointer("/choices/0/message").cloned().unwrap_or(Value::Null);
+        if let Some(m) = message.as_object_mut() {
+            for key in ["reasoning", "reasoning_content", "reasoning_details"] {
+                m.remove(key);
+            }
+        }
         let usage = ChatUsage {
             tokens_in: body.pointer("/usage/prompt_tokens").and_then(Value::as_i64).unwrap_or(0),
             tokens_out: body.pointer("/usage/completion_tokens").and_then(Value::as_i64).unwrap_or(0),

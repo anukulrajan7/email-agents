@@ -211,8 +211,77 @@ async fn the_loop_is_bounded_to_six_turns() {
     let (status, out) = env.command(OPERATOR, "keep going").await;
     assert_eq!(status, StatusCode::OK, "{out}");
     assert_eq!(env.planner.prompts().len(), 6);
-    assert_eq!(out["answer"], "I could not work that out. Try asking in a simpler way.");
+    assert_eq!(out["answer"], email_ai_api::assistant::FALLBACK_ANSWER);
     assert!(env.planner.prompts()[5].contains("last turn"));
+}
+
+const LEAK: &str = "The person is looking at Ananth's email and just asked me to draft a reply. Let me ask for clarification.";
+
+#[tokio::test]
+async fn leaked_reasoning_is_never_shown_and_gets_one_repair_turn() {
+    let env = env().await;
+    env.planner.push(vec![
+        tool("answer", json!({ "text": LEAK })),
+        answer("I prepared nothing yet. Tell me who to write to.", json!([])),
+    ]);
+    let (status, out) = env.command(OPERATOR, "can you send also").await;
+    assert_eq!(status, StatusCode::OK, "{out}");
+    assert_eq!(out["answer"], "I prepared nothing yet. Tell me who to write to.");
+    assert!(env.planner.prompts()[1].contains(email_ai_api::assistant::REPAIR_NOTE));
+
+    env.planner.push(vec![email_ai_api::agents::planner::Decision::Invalid { error: "x".into() }, tool("answer", json!({ "text": LEAK }))]);
+    let (_, out) = env.command(OPERATOR, "hello").await;
+    assert_eq!(out["answer"], email_ai_api::assistant::FALLBACK_ANSWER);
+    assert!(!out.to_string().contains("Ananth"));
+}
+
+#[tokio::test]
+async fn short_follow_ups_see_the_one_pending_card_and_send_replaces_the_draft() {
+    let env = env().await;
+    let id = env.receive("m1", "ananth@partner.test", "Candidate referral", "Do you have a candidate for us?").await;
+    env.planner.push(vec![
+        tool("draft_reply", json!({"message_id": id, "instructions": "ask for a candidate referral"})),
+        answer("I prepared a draft reply to Ananth.", json!([])),
+    ]);
+    let (_, first) = env.command(OPERATOR, "draft a reply to Ananth asking for a referral").await;
+    let draft_card = first["plan"][0]["id"].as_str().unwrap().to_string();
+
+    sqlx::query("UPDATE email_sources SET connected_by_user_id = (SELECT id FROM users WHERE email = 'op@acme.test') WHERE id = ?1")
+        .bind(&env.src)
+        .execute(&env.state.db)
+        .await
+        .unwrap();
+    env.planner.push(vec![
+        tool("send_message", json!({"channel": "email", "to": "ananth@partner.test", "subject": "Re: Candidate referral", "body": "Hi Ananth, do you have a candidate you can refer to us?"})),
+        answer("Ready to send to Ananth. Confirm below.", json!([])),
+    ]);
+    let (status, out) = env.command(OPERATOR, "can you send also").await;
+    assert_eq!(status, StatusCode::OK, "{out}");
+    let prompt = &env.planner.prompts()[2];
+    assert!(prompt.contains("<pending_cards>") && prompt.contains(&draft_card) && prompt.contains("sender ananth@partner.test"), "{prompt}");
+    assert!(prompt.contains("Exactly one card is pending"));
+    assert_eq!(out["plan"][0]["action"], "send_message", "{out} {}", env.planner.prompts().pop().unwrap());
+    assert_eq!(out["plan"][0]["params"]["preview"]["address"], "ananth@partner.test");
+    let (status, _) = env.confirm(OPERATOR, &draft_card).await;
+    assert_eq!(status, StatusCode::CONFLICT, "the draft card was replaced by the send card");
+}
+
+#[tokio::test]
+async fn two_pending_cards_tell_the_planner_to_ask_which() {
+    let env = env().await;
+    let a = env.receive("m1", "ananth@partner.test", "Candidate referral", "Any candidates?").await;
+    let b = env.receive("m2", "priya@candidate.test", "Offer letter", "When is it ready?").await;
+    env.planner.push(vec![
+        tool("draft_reply", json!({"message_id": a})),
+        tool("draft_reply", json!({"message_id": b})),
+        answer("I prepared two drafts.", json!([])),
+    ]);
+    env.command(OPERATOR, "draft replies to both").await;
+    env.planner.push(vec![answer("Which one do you want me to send, Ananth or Priya?", json!([]))]);
+    let (_, out) = env.command(OPERATOR, "send it").await;
+    let prompt = env.planner.prompts().pop().unwrap();
+    assert!(prompt.contains("Several cards are pending") && prompt.contains("ask which"), "{prompt}");
+    assert!(out["plan"].as_array().unwrap().is_empty());
 }
 
 #[tokio::test]

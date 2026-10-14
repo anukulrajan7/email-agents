@@ -132,6 +132,13 @@ pub fn system_prompt(persona_block: &str) -> String {
     }
 }
 
+/// Removes `<think>...</think>` blocks (and an unclosed trailing one): model reasoning is never shown.
+pub fn strip_reasoning(text: &str) -> String {
+    static THINK: std::sync::LazyLock<regex::Regex> =
+        std::sync::LazyLock::new(|| regex::Regex::new(r"(?is)<think(ing)?>.*?(</think(ing)?>|$)").expect("valid regex"));
+    THINK.replace_all(text, "").trim().to_string()
+}
+
 /// Reads the assistant message of a tool-calling response into a decision. Never trusts it blindly.
 pub fn parse_tool_message(message: &Value) -> Decision {
     let Some(call) = message.pointer("/tool_calls/0/function") else {
@@ -153,7 +160,8 @@ pub fn parse_tool_message(message: &Value) -> Decision {
         return Decision::Invalid { error: format!("the arguments for {name} were not an object") };
     }
     if name == FINISH {
-        let summary = args.get("summary").and_then(Value::as_str).map(str::trim).unwrap_or_default();
+        let summary = strip_reasoning(args.get("summary").and_then(Value::as_str).unwrap_or_default());
+        let summary = summary.as_str();
         if summary.is_empty() {
             return Decision::Invalid { error: "finish needs a summary".into() };
         }
@@ -323,6 +331,14 @@ mod tests {
         assert!(matches!(parse_tool_message(&bad), Decision::Invalid { .. }));
         let no_summary = json!({"tool_calls": [{"function": {"name": "finish", "arguments": "{}"}}]});
         assert!(matches!(parse_tool_message(&no_summary), Decision::Invalid { .. }));
+    }
+
+    #[test]
+    fn reasoning_blocks_are_stripped() {
+        assert_eq!(strip_reasoning("<think>hmm the user</think>Done."), "Done.");
+        assert_eq!(strip_reasoning("Done. <think>oops"), "Done.");
+        let fin = json!({"tool_calls": [{"function": {"name": "finish", "arguments": "{\"summary\":\"<think>x</think>Sent.\"}"}}]});
+        assert_eq!(parse_tool_message(&fin), Decision::Finish { outcome: None, summary: "Sent.".into() });
     }
 
     #[test]
