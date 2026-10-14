@@ -102,7 +102,14 @@ export type Source = {
   last_synced_at: string | null;
   last_error: string | null;
   created_at: string;
+  /** Set once the mailbox was disconnected with its mail deleted; `done` when nothing is left to delete. */
+  purge?: { status: 'running' | 'done'; total: number; done: number } | null;
 };
+
+/** What disconnecting a mailbox will permanently delete from Post Room. */
+export type PurgePreview = { emails: number; attachments: number; drafts: number; summaries: number };
+
+export type DeleteResult = { deleted: number };
 
 export type NangoProvider = 'gmail' | 'microsoft';
 

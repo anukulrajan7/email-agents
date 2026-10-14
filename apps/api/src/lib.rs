@@ -14,6 +14,7 @@ pub mod backup;
 pub mod bulk;
 pub mod config;
 pub mod db;
+pub mod deletion;
 pub mod designer;
 pub mod domain;
 pub mod error;

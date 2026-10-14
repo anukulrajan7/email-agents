@@ -153,6 +153,7 @@ pub async fn handle(state: &AppState, job: &Job) -> Result<(), JobError> {
         kind::WATCH_REPLY => crate::messaging::watch::reply_job(state, &payload).await,
         kind::WATCH_NUDGE => crate::messaging::watch::nudge_job(state, &payload).await,
         kind::INAPP_DUE => crate::messaging::inapp::due_job(state, &payload).await,
+        kind::PURGE_SOURCE => crate::deletion::purge_source_job(state, &payload).await,
         kind::STAFFING_SCAN => crate::staffing::scan_job(state, &payload).await,
         kind::RUN_EVAL => super::eval_jobs::run_eval(state, &payload).await,
         kind::ROLLUP_AGENT_METRICS => super::eval_jobs::rollup_agent_metrics(state).await,

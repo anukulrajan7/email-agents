@@ -29,8 +29,26 @@ memory, 12 Results, evals and earned freedom, 13 Team, 14 HRMS modules, 15 Autom
 |---|---|
 | **What it does** | Connect a Gmail mailbox (each person connects their own, through a secure Google sign-in) or forward mail to a Post Room address. Mail is stored once, grouped into threads, labelled, and shown in a reader that looks and behaves like Gmail: sender, thread, formatted message, links and pictures (cleaned for safety), attachment chips with their reading status. Search covers words and meaning. Filters: by label, by mailbox, by person, needs a reply, with an insight line under each message (what is asked, deadline, why it matters). Mail the team sent is kept but never labelled or drafted for. |
 | **Who** | Operators and admins see the shared inbox. Members see mail they are allowed to see (mailbox and privacy wall). A member's personal mail is visible only to them. |
-| **Where** | Inbox; Settings, Integrations (connect, disconnect, forwarding address). |
+| **Where** | Inbox; Settings, Integrations (connect, disconnect, forwarding address). Delete and Disconnect are described right below. |
 | **Safety** | Newsletters, receipts and automated mail are recognised by rules and filed without any AI call. Mail hidden by a policy (see Timesheets policy) is marked suppressed and skipped everywhere: lists, search, alerts, matching. Only an admin connects a mailbox; members connecting their own Gmail is on the after-v1 list. |
+
+### Delete (from Post Room only)
+
+| | |
+|---|---|
+| **What it does** | Deletes an email from Post Room; the Gmail copy always stays. Delete one email from the reader (with an option to take the whole conversation too), or press Select in the inbox, tick several and Delete. A confirm asks "Delete from Post Room? Your Gmail copy stays." and a toast says it is done. Everything made from the email goes with it: attachments and what was read from them, summary, label, draft replies (sent or not), review items, alerts, routing, search entries (words and meaning), and the sender's contact card when no other mail from them is left. Facts and preferences the agents learned only from that email are removed; ones also confirmed by other mail or typed by a person stay, minus this source. A case on the email is cancelled (a held automatic send is released first) and keeps its row for the record without the email. Ask Meera answers that cited it keep their sentence and show "Deleted email". |
+| **Who** | The mailbox owner and admins. Operators can delete mail in shared mailboxes inside their access wall, and in their own mailbox; someone else's personal mailbox answers "not found". |
+| **Where** | Inbox reader (Delete); Inbox, Select. |
+| **Safety** | It never comes back: Post Room remembers the provider's message id (a tombstone), so the next Gmail sync skips it. The audit log gets a `message.deleted` row with ids only. A reply that is being sent at that moment blocks the delete (try again in a moment). |
+
+### Disconnect a mailbox (and delete what came from it)
+
+| | |
+|---|---|
+| **What it does** | Disconnect asks first, with exact numbers from the server: "1,368 emails, 120 attachments, 45 drafts and their summaries will be permanently deleted from Post Room. Labels, settings and other mailboxes stay. This can't be undone." On confirm the mailbox stops syncing and its Gmail access is revoked, then a background job deletes everything from that mailbox in small batches (the same per-email deletion as above). Progress shows on the Integrations card ("Deleting… 400/1,368") and survives restarts: it carries on from what is left. Afterwards sync cursors and the connection reference are cleared, people linked to the mailbox are unlinked (not deleted), and contacts and learned facts that came only from it are gone. Labels, packs, agents, automations and other mailboxes are untouched. |
+| **Who** | Admins, and the person who owns a personal mailbox. Another member's personal mailbox answers "not found". |
+| **Where** | Settings, Integrations, Disconnect. |
+| **Safety** | Nothing is deleted before the confirm. New mail cannot be added to a mailbox while it is being purged. The audit log gets `source.disconnected` and, when finished, `source.purged` with the counts. |
 
 ## 3. Packs, including labels that follow the packs
 

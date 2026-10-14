@@ -8,6 +8,7 @@ mod assistant_api;
 mod auth_api;
 mod automations_api;
 mod designer_api;
+mod delete_api;
 mod dto;
 mod evals_api;
 mod jobs_api;
@@ -36,7 +37,7 @@ use axum::{
     extract::{DefaultBodyLimit, State},
     http::{HeaderName, HeaderValue, Method, header},
     middleware,
-    routing::{get, patch, post},
+    routing::{delete, get, patch, post},
 };
 use serde_json::{Value, json};
 use sqlx::SqlitePool;
@@ -129,10 +130,13 @@ pub fn router(state: AppState) -> Router {
         .route("/workspaces/{ws}/sources/nango-session", post(sources::nango_session))
         .route("/workspaces/{ws}/sources/nango-connections", post(sources::nango_connection))
         .route("/workspaces/{ws}/sources/{id}/disconnect", post(sources::disconnect))
+        .route("/workspaces/{ws}/sources/{id}/purge-preview", get(sources::purge_preview))
         .route("/workspaces/{ws}/sources/{id}/sync", post(sources::sync))
         .route("/workspaces/{ws}/sources/{id}/test-email", post(sources::test_email))
         .route("/workspaces/{ws}/messages", get(messages::list))
-        .route("/workspaces/{ws}/messages/{id}", get(messages::detail))
+        .route("/workspaces/{ws}/messages/{id}", get(messages::detail).delete(delete_api::delete_one))
+        .route("/workspaces/{ws}/messages/delete", post(delete_api::delete_many))
+        .route("/workspaces/{ws}/messages/{id}/thread", delete(delete_api::delete_thread))
         .route("/workspaces/{ws}/messages/{id}/classification", patch(messages::override_classification))
         .route("/workspaces/{ws}/messages/{id}/classification/approve", post(messages::approve_classification))
         .route("/workspaces/{ws}/messages/{id}/draft", post(messages::request_draft))

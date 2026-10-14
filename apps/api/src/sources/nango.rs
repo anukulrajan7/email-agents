@@ -711,7 +711,8 @@ pub async fn sync_source(state: &AppState, payload: &Value) -> Result<(), JobErr
     // Skip messages we already have, then fetch full content for the new ones only.
     let ids: Vec<&str> = candidates.iter().map(|r| r.email.source_message_id.as_str()).collect();
     let existing: Vec<String> = sqlx::query_scalar(
-        "SELECT source_message_id FROM email_messages WHERE source_id = ?1 AND source_message_id IN (SELECT value FROM json_each(?2))",
+        "SELECT source_message_id FROM email_messages WHERE source_id = ?1 AND source_message_id IN (SELECT value FROM json_each(?2))
+         UNION SELECT provider_message_id FROM deleted_messages WHERE source_id = ?1 AND provider_message_id IN (SELECT value FROM json_each(?2))",
     )
     .bind(&source_id)
     .bind(json!(ids).to_string())
@@ -827,7 +828,8 @@ async fn pull_from_gmail(
     // Skip what we already have with a full body (incremental runs re-list an hour of overlap).
     let known: Vec<String> = sqlx::query_scalar(
         "SELECT source_message_id FROM email_messages WHERE source_id = ?1 AND content_complete = 1
-           AND source_message_id IN (SELECT value FROM json_each(?2))",
+           AND source_message_id IN (SELECT value FROM json_each(?2))
+         UNION SELECT provider_message_id FROM deleted_messages WHERE source_id = ?1 AND provider_message_id IN (SELECT value FROM json_each(?2))",
     )
     .bind(source_id)
     .bind(json!(ids).to_string())

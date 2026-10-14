@@ -8,6 +8,7 @@ import { StatusBadge } from '../../components/StatusBadges';
 import { useWorkspace } from '../../app/useWorkspace';
 import { cn } from '../../lib/cn';
 import { fullDate } from '../../lib/format';
+import type { PurgePreview } from '../../api/types';
 import Nango from '@nangohq/frontend';
 import {
   useCreateForwardingSource,
@@ -17,8 +18,17 @@ import {
   useSendTestEmail,
   useSendTestEmailEnsuringSource,
   useSources,
+  usePurgePreview,
   useSyncSource,
 } from './hooks';
+
+const count = new Intl.NumberFormat('en');
+const plural = (n: number, one: string, many = `${one}s`) => `${count.format(n)} ${n === 1 ? one : many}`;
+
+/** The exact counts the confirm dialog promises will be deleted. */
+export function purgeSentence(c: PurgePreview): string {
+  return `${plural(c.emails, 'email')}, ${plural(c.attachments, 'attachment')}, ${plural(c.drafts, 'draft')} and their summaries will be permanently deleted from Post Room. Labels, settings and other mailboxes stay. This can't be undone.`;
+}
 
 const TEST_QUEUED = 'Test email queued — it appears in the Inbox in a few seconds';
 
@@ -179,6 +189,7 @@ function ForwardingDetails({ ws, source, isAdmin }: { ws: string; source: Source
 function GmailCard({ ws, source, isAdmin, style }: { ws: string; source: Source | undefined; isAdmin: boolean; style?: CSSProperties }) {
   const { hasStaffing } = useWorkspace();
   const connected = source && source.status !== 'disconnected';
+  const purging = source?.purge?.status === 'running' ? source.purge : undefined;
   return (
     <Ticket
       number="02"
@@ -196,13 +207,22 @@ function GmailCard({ ws, source, isAdmin, style }: { ws: string; source: Source 
         )
       }
       footer={
-        connected ? undefined : isAdmin ? (
+        connected || purging ? undefined : isAdmin ? (
           <ConnectGmailButton ws={ws} />
         ) : (
           <p className="text-sm text-ink-muted">Ask a workspace admin to connect Gmail.</p>
         )
       }
     >
+      {purging && (
+        <div role="status" className="flex flex-col gap-2 text-sm">
+          <p className="font-semibold">
+            Deleting… {count.format(purging.done)}/{count.format(purging.total)}
+          </p>
+          <progress aria-label="Deleting mail from Post Room" max={Math.max(purging.total, 1)} value={purging.done} className="h-2 w-full accent-accent" />
+          <p className="text-ink-muted">Everything from this mailbox is being removed from Post Room. You can leave this page.</p>
+        </div>
+      )}
       {connected && <GmailDetails ws={ws} source={source} isAdmin={isAdmin} />}
     </Ticket>
   );
@@ -266,6 +286,7 @@ function GmailDetails({ ws, source, isAdmin }: { ws: string; source: Source; isA
   const disconnect = useDisconnectSource(ws);
   const notify = useToast();
   const [confirming, setConfirming] = useState(false);
+  const preview = usePurgePreview(ws, source.id, confirming);
   return (
     <div className="flex flex-1 flex-col gap-3">
       <Mono>
@@ -296,9 +317,10 @@ function GmailDetails({ ws, source, isAdmin }: { ws: string; source: Source; isA
       {confirming && (
         <ConfirmDialog
           title="Disconnect Gmail?"
-          confirmLabel="Disconnect"
+          confirmLabel="Disconnect and delete"
           busy={disconnect.isPending}
-          error={disconnect.error}
+          confirmDisabled={!preview.data}
+          error={disconnect.error ?? preview.error}
           onCancel={() => {
             disconnect.reset();
             setConfirming(false);
@@ -307,12 +329,13 @@ function GmailDetails({ ws, source, isAdmin }: { ws: string; source: Source; isA
             disconnect.mutate(source.id, {
               onSuccess: () => {
                 setConfirming(false);
-                notify('success', 'Gmail disconnected.');
+                notify('success', 'Gmail disconnected. Its mail is being deleted from Post Room.');
               },
             })
           }
         >
-          New mail from this inbox stops arriving. Emails already here stay in Post Room.
+          <p>New mail from this inbox stops arriving.</p>
+          <p className="mt-2 font-semibold text-ink">{preview.data ? purgeSentence(preview.data) : 'Counting what will be deleted…'}</p>
         </ConfirmDialog>
       )}
     </div>

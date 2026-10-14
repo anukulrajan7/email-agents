@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { NavLink } from 'react-router';
-import { Badge, Button, EmptyState, Input, RelativeTime, SegmentedControl, Select, Skeleton } from '../../components/ui';
+import { Badge, Button, ConfirmDialog, EmptyState, Input, RelativeTime, SegmentedControl, Select, Skeleton, useToast } from '../../components/ui';
 import { ErrorNote } from '../../components/ErrorNote';
 import { cn } from '../../lib/cn';
 import { useDebounced } from '../../lib/useDebounced';
@@ -8,7 +8,8 @@ import { LabelStamp } from '../labels/LabelStamp';
 import { useLabels } from '../labels/hooks';
 import type { MessageSummary } from '../../api/types';
 import { parseAddress } from './emailText';
-import { useMessages, type MessageSort, type ReplyFilter } from './hooks';
+import { DELETE_NOTE, useDeleteMessages, useMessages, type MessageSort, type ReplyFilter } from './hooks';
+import { deletedToast } from './DeleteEmail';
 
 const SORT_KEY = 'inbox.sort';
 
@@ -33,22 +34,13 @@ const SORT_OPTIONS: { value: MessageSort; label: string }[] = [
   { value: 'recent', label: 'Newest' },
 ];
 
-function Row({ ws, m }: { ws: string; m: MessageSummary }) {
+function RowBody({ ws, m, showUnreadDot }: { ws: string; m: MessageSummary; showUnreadDot: boolean }) {
   const sender = parseAddress(m.from).name;
   const unread = m.unread === true;
   const summary = m.summary?.trim();
   return (
-    <NavLink
-      to={`/w/${ws}/inbox/${m.id}`}
-      className={({ isActive }) =>
-        cn(
-          'group relative block py-3 pr-4 pl-6 motion-safe:transition-colors focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent',
-          'before:absolute before:inset-y-0 before:left-0 before:w-[3px]',
-          isActive ? 'bg-raised shadow-[inset_0_-1px_0_var(--color-rule),inset_0_1px_0_var(--color-rule)] before:bg-accent' : 'before:bg-transparent hover:bg-ink/[0.035]',
-        )
-      }
-    >
-      {unread && (
+    <>
+      {unread && showUnreadDot && (
         <span className="absolute top-[1.15rem] left-2.5 h-2 w-2 rounded-full bg-info">
           <span className="sr-only">Unread</span>
         </span>
@@ -76,7 +68,41 @@ function Row({ ws, m }: { ws: string; m: MessageSummary }) {
           </Badge>
         )}
       </div>
+    </>
+  );
+}
+
+function Row({ ws, m }: { ws: string; m: MessageSummary }) {
+  return (
+    <NavLink
+      to={`/w/${ws}/inbox/${m.id}`}
+      className={({ isActive }) =>
+        cn(
+          'group relative block py-3 pr-4 pl-6 motion-safe:transition-colors focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent',
+          'before:absolute before:inset-y-0 before:left-0 before:w-[3px]',
+          isActive ? 'bg-raised shadow-[inset_0_-1px_0_var(--color-rule),inset_0_1px_0_var(--color-rule)] before:bg-accent' : 'before:bg-transparent hover:bg-ink/[0.035]',
+        )
+      }
+    >
+      <RowBody ws={ws} m={m} showUnreadDot />
     </NavLink>
+  );
+}
+
+function SelectableRow({ ws, m, checked, onToggle }: { ws: string; m: MessageSummary; checked: boolean; onToggle: () => void }) {
+  return (
+    <label className={cn('flex cursor-pointer items-start gap-3 py-3 pr-4 pl-4 motion-safe:transition-colors', checked ? 'bg-raised' : 'hover:bg-ink/[0.035]')}>
+      <input
+        type="checkbox"
+        checked={checked}
+        onChange={onToggle}
+        aria-label={`Select ${m.subject || '(no subject)'}`}
+        className="mt-1 h-4 w-4 shrink-0 accent-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+      />
+      <div className="relative min-w-0 flex-1">
+        <RowBody ws={ws} m={m} showUnreadDot={false} />
+      </div>
+    </label>
   );
 }
 
@@ -107,12 +133,36 @@ export function MessageList({ ws }: { ws: string }) {
   const reply = category.startsWith('reply:') ? (category.slice(6) as ReplyFilter) : undefined;
   const messages = useMessages(ws, { category: reply ? undefined : category || undefined, q: q || undefined, sort, reply });
   const items = messages.data?.pages.flatMap((p) => p.items) ?? [];
+  const [selecting, setSelecting] = useState(false);
+  const [selected, setSelected] = useState<ReadonlySet<string>>(new Set());
+  const [confirming, setConfirming] = useState(false);
+  const del = useDeleteMessages(ws);
+  const notify = useToast();
+  const toggle = (id: string) =>
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (!next.delete(id)) next.add(id);
+      return next;
+    });
+  const stopSelecting = () => {
+    setSelecting(false);
+    setSelected(new Set());
+  };
+  const closeConfirm = () => {
+    del.reset();
+    setConfirming(false);
+  };
 
   return (
     <div className="flex h-full flex-col">
       <div className="flex flex-col gap-3 border-b border-rule-strong px-4 pt-5 pb-4">
         <div>
-          <p className="kicker">Incoming</p>
+          <div className="flex items-center justify-between gap-2">
+            <p className="kicker">Incoming</p>
+            <Button variant="ghost" size="sm" aria-pressed={selecting} onClick={() => (selecting ? stopSelecting() : setSelecting(true))}>
+              {selecting ? 'Done' : 'Select'}
+            </Button>
+          </div>
           <h1 className="type-display mt-1 text-[2rem] leading-none tracking-[-0.02em]">Inbox</h1>
           <p className="mt-2 text-sm text-ink-muted">Every email that reaches this workspace, read and labelled for you.</p>
         </div>
@@ -138,6 +188,19 @@ export function MessageList({ ws }: { ws: string }) {
             ))}
           </optgroup>
         </Select>
+        {selecting && (
+          <div role="group" aria-label="Selected emails" className="flex flex-wrap items-center gap-2 border border-rule-strong bg-raised px-3 py-2 text-sm">
+            <span className="mr-auto" aria-live="polite">
+              {selected.size} selected
+            </span>
+            <Button variant="ghost" size="sm" onClick={() => setSelected(new Set(items.map((m) => m.id)))} disabled={items.length === 0}>
+              Select all loaded
+            </Button>
+            <Button variant="danger" size="sm" disabled={selected.size === 0} onClick={() => setConfirming(true)}>
+              Delete
+            </Button>
+          </div>
+        )}
         <SegmentedControl
           label="Sort messages"
           options={SORT_OPTIONS}
@@ -167,7 +230,7 @@ export function MessageList({ ws }: { ws: string }) {
         <ul aria-label="Messages in this view">
           {items.map((m) => (
             <li key={m.id} className="border-b border-rule">
-              <Row ws={ws} m={m} />
+              {selecting ? <SelectableRow ws={ws} m={m} checked={selected.has(m.id)} onToggle={() => toggle(m.id)} /> : <Row ws={ws} m={m} />}
             </li>
           ))}
         </ul>
@@ -179,6 +242,29 @@ export function MessageList({ ws }: { ws: string }) {
           </div>
         )}
       </div>
+      {confirming && (
+        <ConfirmDialog
+          title="Delete from Post Room?"
+          confirmLabel={selected.size === 1 ? 'Delete 1 email' : `Delete ${selected.size} emails`}
+          busy={del.isPending}
+          error={del.error}
+          onCancel={closeConfirm}
+          onConfirm={() =>
+            del.mutate(
+              { ids: [...selected] },
+              {
+                onSuccess: (res) => {
+                  notify('success', deletedToast(res.deleted));
+                  closeConfirm();
+                  stopSelecting();
+                },
+              },
+            )
+          }
+        >
+          {DELETE_NOTE} The {selected.size === 1 ? 'email, its' : `${selected.size} emails, their`} attachments, summaries and drafts are removed from Post Room, and they will not come back when Gmail syncs. This can&apos;t be undone.
+        </ConfirmDialog>
+      )}
     </div>
   );
 }

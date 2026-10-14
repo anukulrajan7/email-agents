@@ -1,6 +1,6 @@
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '../../api/client';
-import type { Category, Classification, ClassificationPatch, MessageDetail, MessageSummary, Paged } from '../../api/types';
+import type { Category, Classification, ClassificationPatch, DeleteResult, MessageDetail, MessageSummary, Paged } from '../../api/types';
 
 const PAGE_SIZE = 25;
 export const messagesKey = (ws: string) => ['ws', ws, 'messages'] as const;
@@ -71,3 +71,24 @@ export function useReprocess(ws: string) {
     },
   });
 }
+
+/** Deletes emails from Post Room only (the Gmail copy stays): the given ones, or the whole conversation of one. */
+export function useDeleteMessages(ws: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (target: { ids: string[]; wholeThread?: boolean }) => {
+      const [first] = target.ids;
+      if (target.wholeThread && first !== undefined) {
+        return api<DeleteResult>(`/workspaces/${ws}/messages/${first}/thread`, { method: 'DELETE' });
+      }
+      return api<DeleteResult>(`/workspaces/${ws}/messages/delete`, { method: 'POST', body: { ids: target.ids } });
+    },
+    onSuccess: (_d, target) => {
+      for (const id of target.ids) qc.removeQueries({ queryKey: messageKey(ws, id) });
+      void qc.invalidateQueries({ queryKey: messagesKey(ws) });
+      void qc.invalidateQueries({ queryKey: ['ws', ws, 'contacts'] });
+    },
+  });
+}
+
+export const DELETE_NOTE = 'Your Gmail copy stays.';

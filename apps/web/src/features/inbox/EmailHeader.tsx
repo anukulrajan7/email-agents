@@ -7,6 +7,7 @@ import { LabelStamp } from '../labels/LabelStamp';
 import { SeeMatchesLink } from '../matching/SeeMatchesLink';
 import { avatarColor, gmailDate, initialOf, parseAddress } from './emailText';
 import { cn } from '../../lib/cn';
+import { DeleteEmailButton } from './DeleteEmail';
 
 function Avatar({ name, seed }: { name: string; seed: string }) {
   return (
@@ -100,7 +101,10 @@ export function EmailHeader({ ws, message }: { ws: string; message: MessageDetai
   return (
     <header className="flex flex-col gap-4">
       <div className="flex flex-col gap-2">
-        <h2 className="text-[22px] leading-tight font-normal break-words text-ink sm:text-[26px]">{message.subject || '(no subject)'}</h2>
+        <div className="flex items-start justify-between gap-3">
+          <h2 className="text-[22px] leading-tight font-normal break-words text-ink sm:text-[26px]">{message.subject || '(no subject)'}</h2>
+          <DeleteEmailButton ws={ws} messageId={message.id} />
+        </div>
         <div className="flex flex-wrap items-center gap-2">
           {category && <LabelStamp ws={ws} category={category} />}
           {message.classification?.priority === 'high' && <Badge tone="danger">High priority</Badge>}

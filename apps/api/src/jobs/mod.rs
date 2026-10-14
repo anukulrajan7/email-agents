@@ -58,6 +58,7 @@ pub mod kind {
     pub const WATCH_REPLY: &str = "watch_reply";
     pub const WATCH_NUDGE: &str = "watch_nudge";
     pub const INAPP_DUE: &str = "inapp_due";
+    pub const PURGE_SOURCE: &str = "purge_source";
 }
 
 #[derive(Debug, Clone, FromRow)]
@@ -173,7 +174,7 @@ pub fn priority_of(kind: &str, dedupe_key: &str) -> i64 {
         kind::CLASSIFY_EMAIL if dedupe_key.contains(":recheck:") => -5,
         kind::CLASSIFY_EMAIL => 5,
         kind::AGENT_STEP => 3,
-        kind::BACKFILL_KNOWLEDGE | kind::CLEAN_STORED_TEXT | kind::REFETCH_GMAIL_HTML => -5,
+        kind::BACKFILL_KNOWLEDGE | kind::CLEAN_STORED_TEXT | kind::REFETCH_GMAIL_HTML | kind::PURGE_SOURCE => -5,
         _ => 0,
     }
 }
