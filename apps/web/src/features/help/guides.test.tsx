@@ -25,6 +25,11 @@ const PAGE_DIRS: Record<string, string[]> = {
   alerts: ['alerts'],
   packs: ['packs'],
   matching: ['matching'],
+  people: ['team'],
+  performance: ['team'],
+  escalations: ['team'],
+  timesheets: ['hrms'],
+  portal: ['hrms'],
   workflows: ['workflows'],
   usage: ['usage'],
 };

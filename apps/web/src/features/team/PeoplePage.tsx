@@ -26,6 +26,7 @@ export function PeoplePage() {
   return (
     <Page className="gap-6">
       <PageHeader
+        guide="people-header"
         kicker={staffing ? 'HRMS · People' : 'Team · People'}
         title="People"
         description="Everyone on your team with their emails, manager, joining date and targets. Performance numbers and alert escalation both follow this list."

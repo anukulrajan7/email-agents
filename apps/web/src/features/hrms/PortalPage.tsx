@@ -38,6 +38,7 @@ export function PortalPage() {
   return (
     <Page className="gap-6">
       <PageHeader
+        guide="portal-header"
         kicker="HRMS · Portal reconciliation"
         title="Portal reconciliation"
         description="Import hours and submissions exported from the client portal. They are compared exactly with the timesheet mails and the CVs you actually sent, and differences become alerts."
