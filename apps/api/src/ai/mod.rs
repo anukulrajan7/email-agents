@@ -19,7 +19,7 @@ use async_trait::async_trait;
 use crate::domain::{ClassificationSource, Label, Priority};
 
 pub const PROMPT_VERSION: &str = "classify-v2";
-pub const DRAFT_PROMPT_VERSION: &str = "ack-draft-v2";
+pub const DRAFT_PROMPT_VERSION: &str = "ack-draft-v3";
 /// Upper bound on email text sent to any model.
 pub const MAX_MODEL_INPUT_CHARS: usize = 6_000;
 
@@ -94,6 +94,8 @@ pub struct DraftInput {
     pub body_text: String,
     /// Staff-written or staff-accepted memories, already rendered one per line.
     pub memory_notes: Vec<String>,
+    /// Learned style preferences (style only, code-checked, person-visible), already rendered one per line.
+    pub writer_preferences: Vec<String>,
     pub sender_history: Option<String>,
     /// What the sender asks, from the analysis step. The draft must address each one.
     pub insight: Option<Insight>,
@@ -199,17 +201,43 @@ impl Extractor for RulesExtractor {
     }
 }
 
-/// A reusable lesson proposed from how an operator changed a draft.
+/// One lesson about how a reply is written.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LearnedLesson {
-    pub kind: String,  // "preference" | "style"
-    pub scope: String, // "workspace" | "contact"
+pub struct StyleLesson {
+    /// greeting | sign_off | length | tone | structure | phrasing | process (code validates).
+    pub category: String,
     pub content: String,
+}
+
+#[derive(Debug, Clone)]
+pub enum LearnTask {
+    /// A person finalised a reply: learn from the difference (or from the reply itself when nothing changed).
+    ApprovedReply { suggested: String, approved: String },
+    /// A person declined an action and said why.
+    DeclineNote { proposed: String, note: String },
+}
+
+#[derive(Debug, Clone)]
+pub struct LearnInput {
+    pub task: LearnTask,
+    pub subject: String,
+    /// The outside party the reply went to.
+    pub counterpart: Option<String>,
+    pub label: Option<String>,
+    /// The email being answered (untrusted data).
+    pub email: String,
+}
+
+/// Everything learned from one finalised reply: style lessons and durable facts, from a single model call.
+#[derive(Debug, Clone, Default)]
+pub struct LearnOutput {
+    pub style: Vec<StyleLesson>,
+    pub facts: Vec<memory_extractor::ExtractedFact>,
 }
 
 #[async_trait]
 pub trait Learner: Send + Sync {
-    async fn learn(&self, suggested: &str, approved: &str) -> Result<Vec<LearnedLesson>, AiError>;
+    async fn learn(&self, input: &LearnInput) -> Result<LearnOutput, AiError>;
 }
 
 /// Minimal context for models: bounded, with obvious secrets masked.

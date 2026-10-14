@@ -264,6 +264,7 @@ async fn cancel_case(State(state): State<AppState>, user: AuthUser, Path((ws, id
         },
     )
     .await?;
+    crate::learning::hooks::case_cancelled(&mut tx, &ws, &user.id, &c.id, c.message_id.as_deref(), c.agent_id.as_deref()).await?;
     tx.commit().await?;
     let c = case::get_in(&state.db, &ws, &id).await?.ok_or(AppError::NotFound)?;
     Ok(Json(Who::load(&state, &ws).await?.case(&c)))

@@ -15,7 +15,7 @@ use crate::{
     domain::{self, ClassificationSource, OTHER_LABEL, Priority, TAXONOMY_VERSION},
     labels,
     http::AppState,
-    jobs,
+    jobs, learning,
     sources::resend::{FetchError, ReceivedEmail},
 };
 
@@ -124,7 +124,7 @@ pub async fn handle(state: &AppState, job: &Job) -> Result<(), JobError> {
         kind::PURGE_EXPIRED_EVENTS => purge_expired_events(state).await,
         kind::BACKUP_DATABASE => backup_database(state).await,
         kind::SYNC_NANGO_SOURCE => crate::sources::nango::sync_source(state, &payload).await,
-        kind::LEARN_FROM_DRAFT => learn_from_draft(state, &payload).await,
+        kind::LEARN_FROM_DRAFT | kind::LEARN_FROM_REPLY | kind::LEARN_FROM_SIGNAL => super::learning_jobs::learn_from_signal(state, &payload).await,
         kind::ANALYZE_MESSAGE => {
             let insight = analyze_message(state, &payload).await?;
             crate::agents::triggers::after_analysis(state, job, &str_field(&payload, "message_id")?, &insight).await
@@ -139,7 +139,6 @@ pub async fn handle(state: &AppState, job: &Job) -> Result<(), JobError> {
         kind::REGISTER_NANGO_CONNECTION => crate::sources::nango::register_from_webhook(state, &payload).await,
         kind::INDEX_MESSAGE | kind::INDEX_REPLY | kind::BACKFILL_KNOWLEDGE => super::knowledge_jobs::handle(state, job, &payload).await,
         kind::LEARN_FROM_MESSAGE => super::learning_jobs::learn_from_message(state, &payload).await,
-        kind::LEARN_FROM_REPLY => super::learning_jobs::learn_from_reply(state, &payload).await,
         kind::EVALUATE_ALERTS => crate::alerts::evaluate_job(state, &payload).await,
         kind::SEND_MATCH_DIGEST => super::match_digest::digest_job(state, &payload).await,
         kind::AGENT_STEP => super::agent_jobs::agent_step(state, job, &payload).await,
@@ -459,6 +458,14 @@ pub async fn persist_classification(
         },
     )
     .await?;
+    if let Actor::User(user_id) = actor
+        && matches!(out.source, ClassificationSource::Manual)
+    {
+        // A person set the label: it confirms the model's pick or corrects it.
+        let model_pick: Option<String> =
+            sqlx::query_scalar("SELECT ai_category FROM classifications WHERE message_id = ?1").bind(message_id).fetch_one(&mut *tx).await?;
+        learning::hooks::label_decision(&mut tx, &workspace_id, user_id, message_id, model_pick.as_deref(), &out.category).await?;
+    }
     let trigger = trigger.map(str::to_string).unwrap_or_else(|| format!("{}:{}", out.category, now));
     enqueue_workflow(&mut tx, &workspace_id, message_id, &trigger).await?;
     // Understand what the email asks (shown to people, used by the drafter).
@@ -666,7 +673,7 @@ async fn generate_draft(state: &AppState, job: &Job, payload: &Value) -> Result<
     let by_person = job.dedupe_key.contains(":manual:");
     let generated = match automation_draft {
         Some(_) => None,
-        None => Some(compose_draft(state, &message_id, &msg, insight, payload.get("instructions").and_then(Value::as_str), requested, !by_person).await?),
+        None => Some(compose_draft(state, &message_id, &msg, insight, payload.get("instructions").and_then(Value::as_str), requested, !by_person, None).await?),
     };
     if let Some((out, _, _)) = &generated
         && out.body_text.trim().is_empty()
@@ -711,6 +718,7 @@ async fn generate_draft(state: &AppState, job: &Job, payload: &Value) -> Result<
             )
             .await?;
             crate::memory_learning::record_use(&mut tx, &ctx.ids(), now).await?;
+            learning::preferences::record_use(&mut tx, &ctx.preference_ids).await?;
         }
     }
     if let Some(run_id) = &run_id {
@@ -748,6 +756,7 @@ async fn generate_draft(state: &AppState, job: &Job, payload: &Value) -> Result<
 /// `extra_instructions` (from an automation) is passed to the drafter as one more memory note.
 /// `automated` (nobody asked for this draft): past replies only from the sender's own domain and
 /// no auto-learned workspace-wide notes, so outside mail can't pull other clients' data into it.
+#[allow(clippy::too_many_arguments)]
 async fn compose_draft(
     state: &AppState,
     message_id: &str,
@@ -756,6 +765,7 @@ async fn compose_draft(
     extra_instructions: Option<&str>,
     requested: Option<ai::DraftQuality>,
     automated: bool,
+    agent_id: Option<&str>,
 ) -> Result<(ai::DraftOutput, memory::MemoryContext, ai::DraftQuality), JobError> {
     let classification: Option<(String, String)> =
         sqlx::query_as("SELECT category, priority FROM classifications WHERE message_id = ?1")
@@ -782,12 +792,23 @@ async fn compose_draft(
     let (reply_instructions, signature) =
         crate::agent_profiles::draft_voice(&state.db, &state.config, &msg.workspace_id, message_id, reply_instructions, settings.signature).await?;
 
-    // Trusted memory (staff notes + learned sender profile), retrieved by sender and topic.
-    let ctx = if automated {
-        memory::context_for_automation(&state.db, &msg.workspace_id, &msg.sender_address, &msg.subject).await?
-    } else {
-        memory::context_for(&state.db, &msg.workspace_id, &msg.sender_address, &msg.subject).await?
+    // Trusted memory (staff notes + learned sender profile), retrieved by sender and topic, within the agent's memory scope.
+    let agent = {
+        let mut conn = state.db.acquire().await?;
+        learning::scope::resolve(&mut conn, &msg.workspace_id, agent_id, Some(message_id)).await?
     };
+    let view = agent.agent_id.clone().map(|id| memory::AgentMemory { agent_id: id, scope: agent.memory });
+    let mut ctx = memory::context_for_agent(&state.db, &msg.workspace_id, &msg.sender_address, &msg.subject, automated, view.as_ref()).await?;
+    let preferences = learning::retrieve::for_draft(
+        &state.db,
+        state.embedder.as_ref(),
+        &msg.workspace_id,
+        agent.agent_id.as_deref(),
+        agent.owner_user_id.as_deref(),
+        &format!("{}\n{}", msg.subject, msg.body_text),
+    )
+    .await?;
+    ctx.preference_ids = preferences.iter().map(|p| p.id.clone()).collect();
     let mut memory_notes = ctx.lines();
     if let Some(extra) = extra_instructions.map(str::trim).filter(|e| !e.is_empty()) {
         memory_notes.push(format!("Instruction for this reply: {extra}"));
@@ -799,25 +820,32 @@ async fn compose_draft(
     } else {
         crate::knowledge::reply_examples(db, embedder, &msg.workspace_id, message_id, &msg.subject, &msg.body_text).await
     };
-    let out = state
-        .drafter
-        .draft(&DraftInput {
-            examples,
-            category,
-            category_name,
-            category_description,
-            subject: msg.subject.clone(),
-            sender: msg.sender_address.clone(),
-            body_text: msg.body_text.clone(),
-            memory_notes,
-            sender_history: ctx.sender_history.clone(),
-            insight: Some(insight),
-            quality,
-            reply_instructions,
-            signature,
-            default_sign_off,
-        })
-        .await?;
+    let input = DraftInput {
+        examples,
+        category,
+        category_name,
+        category_description,
+        subject: msg.subject.clone(),
+        sender: msg.sender_address.clone(),
+        body_text: msg.body_text.clone(),
+        memory_notes,
+        writer_preferences: learning::retrieve::lines(&preferences),
+        sender_history: ctx.sender_history.clone(),
+        insight: Some(insight),
+        quality,
+        reply_instructions,
+        signature,
+        default_sign_off,
+    };
+    let mut out = state.drafter.draft(&input).await?;
+    // The critic: anything the verified context pack doesn't support becomes a [NEEDS: ...] for a person.
+    if !out.body_text.trim().is_empty() {
+        let pack = learning::context_pack::ContextPack::from_input(&input);
+        let unsupported = learning::context_pack::check_draft(&pack, &mut out);
+        if !unsupported.is_empty() {
+            tracing::info!(message_id, claims = unsupported.len(), "draft claims not in the context pack were turned into [NEEDS]");
+        }
+    }
     Ok((out, ctx, quality))
 }
 
@@ -841,7 +869,7 @@ pub async fn create_draft_for_message(
     if !insight.needs_reply {
         return Ok(None);
     }
-    let (out, ctx, quality) = compose_draft(state, message_id, &msg, insight, extra_instructions, None, true).await?;
+    let (out, ctx, quality) = compose_draft(state, message_id, &msg, insight, extra_instructions, None, true, None).await?;
     if out.body_text.trim().is_empty() {
         return Ok(None);
     }
@@ -898,6 +926,7 @@ pub async fn create_agent_draft(
     instructions: Option<&str>,
     requested: Option<ai::DraftQuality>,
     origin_key: &str,
+    agent_id: Option<&str>,
 ) -> Result<Option<(String, String)>, JobError> {
     let existing: Option<(String, String)> = sqlx::query_as("SELECT id, body_text FROM drafts WHERE origin_key = ?1")
         .bind(origin_key)
@@ -908,7 +937,7 @@ pub async fn create_agent_draft(
     }
     let msg = load_message(state, message_id).await?;
     let insight = analyze_message(state, &json!({ "message_id": message_id })).await?;
-    let (out, ctx, quality) = compose_draft(state, message_id, &msg, insight, instructions, requested, true).await?;
+    let (out, ctx, quality) = compose_draft(state, message_id, &msg, insight, instructions, requested, true, agent_id).await?;
     if out.body_text.trim().is_empty() {
         return Ok(None);
     }
@@ -956,7 +985,7 @@ pub async fn create_agent_draft(
 pub async fn preview_draft(state: &AppState, message_id: &str, requested: Option<ai::DraftQuality>) -> Result<String, JobError> {
     let msg = load_message(state, message_id).await?;
     let insight = analyze_message(state, &json!({ "message_id": message_id })).await?;
-    let (out, _, _) = compose_draft(state, message_id, &msg, insight, None, requested, false).await?;
+    let (out, _, _) = compose_draft(state, message_id, &msg, insight, None, requested, false, None).await?;
     Ok(out.body_text)
 }
 
@@ -1076,38 +1105,6 @@ async fn finish_without_draft(
 }
 
 // ---------------------------------------------------------------- learning
-
-/// Compares the suggested draft with what an operator approved and stores up to three
-/// reusable lessons as *suggestions*. Nothing is used until a person accepts it.
-async fn learn_from_draft(state: &AppState, payload: &Value) -> Result<(), JobError> {
-    // An approved reply also teaches durable facts (once per draft).
-    super::learning_jobs::enqueue_reply_learning(&state.db, &str_field(payload, "draft_id")?).await?;
-    let Some(learner) = state.learner.clone() else {
-        return Ok(());
-    };
-    let draft_id = str_field(payload, "draft_id")?;
-    let row: Option<(String, String, Option<String>, String, String)> = sqlx::query_as(
-        "SELECT d.workspace_id, d.message_id, d.original_body_text, d.body_text, m.sender_address
-         FROM drafts d JOIN email_messages m ON m.id = d.message_id WHERE d.id = ?1",
-    )
-    .bind(&draft_id)
-    .fetch_optional(&state.db)
-    .await?;
-    let Some((workspace_id, message_id, Some(original), approved, sender)) = row else {
-        return Ok(());
-    };
-    if memory::dedupe_key(&original) == memory::dedupe_key(&approved) {
-        return Ok(());
-    }
-    let lessons = learner.learn(&original, &approved).await?;
-    let suggestions = lessons
-        .into_iter()
-        .map(|l| memory::Suggestion { kind: l.kind, scope: l.scope, content: l.content })
-        .collect();
-    let stored = memory::store_suggestions(&state.db, &workspace_id, &sender, &message_id, suggestions).await?;
-    tracing::info!(%draft_id, stored, "learned from draft edit");
-    Ok(())
-}
 
 // ---------------------------------------------------------------- retention
 

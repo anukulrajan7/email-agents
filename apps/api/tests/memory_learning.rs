@@ -209,10 +209,10 @@ async fn approved_replies_teach_standing_answers_and_corroborate() {
     worker::drain(&h.state).await;
 
     let auto = h.auto(&ws).await;
-    assert_eq!(auto.len(), 3, "{auto:?}");
+    assert_eq!(auto.len(), 2, "style lessons are preferences now, never facts: {auto:?}");
     let answer = by_content(&auto, "Timesheets are due by the 3rd");
     assert!((conf(answer) - 0.9).abs() < 1e-9 && answer["kind"] == "fact" && answer["scope"] == "workspace", "{answer}");
-    assert_eq!(by_content(&auto, "Sign replies as")["kind"], "style");
+    assert!(auto.iter().all(|m| m["kind"] != "style"));
     let client = by_content(&auto, "Acme Corp needs");
     assert!((conf(client) - 0.95).abs() < 1e-9, "a team reply lifts the outside cap: {client}");
     assert!(h.auto_with(&ws, "suggested").await.is_empty(), "the team's reply made the suggestion usable");

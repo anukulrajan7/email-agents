@@ -18,6 +18,7 @@ pub mod http;
 pub mod ingest;
 pub mod jobs;
 pub mod knowledge;
+pub mod learning;
 pub mod labels;
 pub mod mailer;
 pub mod matching;

@@ -231,6 +231,11 @@ async fn requirement_case_runs_to_an_interview() {
     assert_eq!(s, StatusCode::OK, "{decided}");
     assert_eq!((decided["status"].as_str(), decided["decided_by"].as_str(), decided["body"].as_str()), (Some("approved"), Some("op@acme.test"), Some(edited)));
     assert!(decided["decided_at"].is_string());
+    let edited_signals: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM feedback_events WHERE kind = 'approval_edited' AND edit_distance > 0")
+        .fetch_one(&env.state.db)
+        .await
+        .unwrap();
+    assert_eq!(edited_signals, 1, "an approval with edits is one learning signal");
     // Sends are scheduled (undo window; 0 s in tests) and go out when the worker runs.
     worker::drain(&env.state).await;
     let sends = env.sends();
@@ -297,6 +302,8 @@ async fn declined_submission_is_never_retried() {
 
     let (s, declined) = env.post(&format!("/approvals/{id}"), ADMIN, json!({"decision": "decline", "note": "Client wants rates first"})).await;
     assert_eq!((s, declined["status"].as_str()), (StatusCode::OK, Some("declined")));
+    let note: Option<String> = sqlx::query_scalar("SELECT note FROM feedback_events WHERE kind = 'approval_declined'").fetch_one(&env.state.db).await.unwrap();
+    assert_eq!(note.as_deref(), Some("Client wants rates first"));
     worker::drain(&env.state).await;
 
     let case = &env.cases("requirement").await[0];

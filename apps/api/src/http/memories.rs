@@ -20,7 +20,7 @@ use crate::{
 
 pub const MEMORY_COLUMNS: &str =
     "id, scope, contact_email, kind, content, status, source, created_by, evidence_message_id, created_at, updated_at,
-     origin, confidence, pinned, use_count, last_used_at";
+     origin, confidence, pinned, use_count, last_used_at, agent_id";
 
 #[derive(FromRow)]
 pub struct MemoryRow {
@@ -40,6 +40,7 @@ pub struct MemoryRow {
     pinned: bool,
     use_count: i64,
     last_used_at: Option<i64>,
+    agent_id: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -62,6 +63,8 @@ pub struct Memory {
     pinned: bool,
     use_count: i64,
     last_used_at: Option<String>,
+    /// The agent this memory belongs to; `None` = shared team memory. A personal agent's memories are visible to its owner only.
+    agent_id: Option<String>,
 }
 
 impl From<MemoryRow> for Memory {
@@ -84,18 +87,21 @@ impl From<MemoryRow> for Memory {
             pinned: r.pinned,
             use_count: r.use_count,
             last_used_at: r.last_used_at.map(iso),
+            agent_id: r.agent_id,
         }
     }
 }
 
-pub async fn contact_memories(state: &AppState, ws: &str, email: &str) -> sqlx::Result<Vec<Memory>> {
+pub async fn contact_memories(state: &AppState, ws: &str, viewer: &str, email: &str) -> sqlx::Result<Vec<Memory>> {
     let rows: Vec<MemoryRow> = sqlx::query_as(&format!(
         "SELECT {MEMORY_COLUMNS} FROM memories
-         WHERE workspace_id = ?1 AND scope = 'contact' AND contact_email = ?2 AND status = 'active'
-         ORDER BY updated_at DESC"
+         WHERE workspace_id = ?1 AND scope = 'contact' AND contact_email = ?2 AND status = 'active' AND {}
+         ORDER BY updated_at DESC",
+        crate::agent_registry::store::hide_foreign_personal("memories", "?3")
     ))
     .bind(ws)
     .bind(email)
+    .bind(viewer)
     .fetch_all(&state.db)
     .await?;
     Ok(rows.into_iter().map(Into::into).collect())
@@ -158,7 +164,9 @@ pub async fn list(
            AND (?4 IS NULL OR contact_email = ?4)
            AND (?5 IS NULL OR id IN (SELECT value FROM json_each(?5)))
            AND (?6 IS NULL OR origin = ?6)
-         ORDER BY updated_at DESC LIMIT 200"
+           AND {}
+         ORDER BY updated_at DESC LIMIT 200",
+        crate::agent_registry::store::hide_foreign_personal("memories", "?7")
     ))
     .bind(&ws)
     .bind(&status)
@@ -166,6 +174,7 @@ pub async fn list(
     .bind(contact)
     .bind(ids.map(|i| json!(i).to_string()))
     .bind(origin)
+    .bind(&user.id)
     .fetch_all(&state.db)
     .await?;
     let items: Vec<Memory> = rows.into_iter().map(Into::into).collect();
@@ -271,8 +280,9 @@ pub async fn update(
                 confidence = CASE WHEN ?7 OR ?1 IS NOT NULL OR (?3 = 'active' AND status = 'suggested') THEN 1.0 ELSE confidence END,
                 status = COALESCE(?3, CASE WHEN ?7 AND status = 'suggested' THEN 'active' ELSE status END),
                 pinned = COALESCE(?8, pinned), updated_at = ?4
-         WHERE id = ?5 AND workspace_id = ?6
-         RETURNING {MEMORY_COLUMNS}"
+         WHERE id = ?5 AND workspace_id = ?6 AND {}
+         RETURNING {MEMORY_COLUMNS}",
+        crate::agent_registry::store::hide_foreign_personal("memories", "?9")
     ))
     .bind(&content)
     .bind(&body.kind)
@@ -282,6 +292,7 @@ pub async fn update(
     .bind(&ws)
     .bind(confirmed)
     .bind(body.pinned)
+    .bind(&user.id)
     .fetch_optional(&mut *tx)
     .await?
     .ok_or(AppError::NotFound)?;
@@ -306,6 +317,14 @@ pub async fn update(
         },
     )
     .await?;
+    let judged = match (body.status.as_deref(), confirmed) {
+        (Some("archived"), _) if row.origin == "auto" => Some(crate::learning::signals::Kind::MemoryArchived),
+        (_, true) | (Some("active"), _) if row.origin == "auto" => Some(crate::learning::signals::Kind::MemoryConfirmed),
+        _ => None,
+    };
+    if let Some(kind) = judged {
+        crate::learning::hooks::judged(&mut tx, &ws, &user.id, kind, row.agent_id.as_deref(), json!({"memory_id": id})).await?;
+    }
     tx.commit().await?;
     Ok(Json(row.into()))
 }
@@ -352,7 +371,7 @@ pub async fn contact(
     let email = normalize::address(&email);
     let row = memory::get_contact(&state.db, &ws, &email).await?.ok_or(AppError::NotFound)?;
     let contact = memory::contact_json(&state.db, &ws, row).await?;
-    let memories = contact_memories(&state, &ws, &email).await?;
+    let memories = contact_memories(&state, &ws, &user.id, &email).await?;
     let recent: Vec<(String, String, i64, String, Option<String>)> = sqlx::query_as(
         "SELECT m.id, m.subject, m.received_at, m.processing_status, c.category
          FROM email_messages m LEFT JOIN classifications c ON c.message_id = m.id

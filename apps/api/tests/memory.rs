@@ -13,7 +13,7 @@ use axum::{
     http::{Request, StatusCode},
 };
 use email_ai_api::{
-    ai::{AiError, LearnedLesson, Learner},
+    ai::{AiError, LearnInput, LearnOutput, Learner, StyleLesson},
     build_state,
     config::Config,
     db,
@@ -28,9 +28,9 @@ struct FakeLearner(Arc<AtomicUsize>);
 
 #[async_trait]
 impl Learner for FakeLearner {
-    async fn learn(&self, _suggested: &str, _approved: &str) -> Result<Vec<LearnedLesson>, AiError> {
+    async fn learn(&self, _input: &LearnInput) -> Result<LearnOutput, AiError> {
         self.0.fetch_add(1, Ordering::SeqCst);
-        Ok(vec![LearnedLesson { kind: "style".into(), scope: "workspace".into(), content: "Sign off as 'HR Team, Acme'.".into() }])
+        Ok(LearnOutput { style: vec![StyleLesson { category: "sign_off".into(), content: "Sign off as HR Team, Acme.".into() }], facts: vec![] })
     }
 }
 
@@ -142,16 +142,21 @@ async fn memory_learns_profiles_retrieves_notes_and_learns_from_edits() {
         .await;
     worker::drain(&h.state).await;
     assert_eq!(calls.load(Ordering::SeqCst), 2);
-    let (_, suggested) = h.call("GET", &format!("{base}/memories?status=suggested"), ADMIN, None).await;
+    let (_, suggested) = h.call("GET", &format!("{base}/preferences?status=suggested"), ADMIN, None).await;
     let suggested = suggested["items"].as_array().unwrap().clone();
     assert_eq!(suggested.len(), 1, "same lesson twice is stored once");
-    assert_eq!((suggested[0]["source"].as_str(), suggested[0]["evidence_message_id"].is_string()), (Some("learned"), true));
+    assert_eq!((suggested[0]["source"].as_str(), suggested[0]["category"].as_str()), (Some("edit"), Some("sign_off")));
     let (_, active_before) = h.call("GET", &format!("{base}/memories"), ADMIN, None).await;
-    assert_eq!(active_before["items"].as_array().unwrap().len(), 2, "suggestion not used until accepted");
+    assert_eq!(active_before["items"].as_array().unwrap().len(), 2, "learning never adds an active fact on its own");
 
-    let sid = suggested[0]["id"].as_str().unwrap();
-    let (s, accepted) = h.call("PATCH", &format!("{base}/memories/{sid}"), ADMIN, Some(json!({"status":"active"}))).await;
+    let sid = suggested[0]["id"].as_str().unwrap().to_string();
+    let (s, accepted) = h.call("PATCH", &format!("{base}/preferences/{sid}"), ADMIN, Some(json!({"status":"active"}))).await;
     assert_eq!((s, accepted["status"].as_str()), (StatusCode::OK, Some("active")));
+
+    let (s, team_pref) = h
+        .call("POST", &format!("{base}/preferences"), ADMIN, Some(json!({"category":"tone","content":"Keep replies short and warm."})))
+        .await;
+    assert_eq!((s, team_pref["status"].as_str()), (StatusCode::CREATED, Some("active")));
 
     // 5. The next draft for Priya is given her note, the matching team fact and the accepted lesson.
     h.email(&ws, &src, json!({"from":"Priya Sharma <priya.sharma@example.com>","subject":"Payroll date question",
@@ -168,7 +173,9 @@ async fn memory_learns_profiles_retrieves_notes_and_learns_from_edits() {
         detail["draft"]["memories_used"].as_array().unwrap().iter().map(|m| m["content"].as_str().unwrap().to_string()).collect();
     assert!(used.contains(&"Greet Priya by first name.".to_string()), "{used:?}");
     assert!(used.iter().any(|u| u.starts_with("Payroll runs on the 28th")), "{used:?}");
-    assert!(used.contains(&"Sign off as 'HR Team, Acme'.".to_string()), "{used:?}");
+    let (_, prefs) = h.call("GET", &format!("{base}/preferences?status=active"), ADMIN, None).await;
+    let team_use = prefs["items"].as_array().unwrap().iter().find(|p| p["id"] == team_pref["id"]).unwrap()["use_count"].as_i64().unwrap();
+    assert!(team_use >= 1, "an active team-wide preference reaches the draft prompt");
     assert_eq!(used[0], "Greet Priya by first name.", "contact notes come first");
 
     // 6. Archived memories are no longer used.

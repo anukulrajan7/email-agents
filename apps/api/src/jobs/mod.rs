@@ -41,6 +41,7 @@ pub mod kind {
     pub const REFETCH_GMAIL_HTML: &str = "refetch_gmail_html";
     pub const LEARN_FROM_MESSAGE: &str = "learn_from_message";
     pub const LEARN_FROM_REPLY: &str = "learn_from_reply";
+    pub const LEARN_FROM_SIGNAL: &str = "learn_from_signal";
     pub const EVALUATE_ALERTS: &str = "evaluate_alerts";
     pub const SEND_MATCH_DIGEST: &str = "send_match_digest";
     pub const AGENT_STEP: &str = "agent_step";

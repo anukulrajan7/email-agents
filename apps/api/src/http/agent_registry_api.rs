@@ -696,6 +696,7 @@ async fn set_route(
         },
     )
     .await?;
+    crate::learning::hooks::route_corrected(&mut tx, &ws, &user.id, &id, before.as_deref(), &agent.id).await?;
     tx.commit().await?;
     Ok(Json(route_json(&state, &ws, &id).await?))
 }

@@ -167,11 +167,28 @@ pub fn merged_confidence(old: f64, new: f64, team_seen: bool) -> f64 {
     (old.max(new) + BOOST).min(cap).max(old)
 }
 
-/// Stores learned facts from one source, then enforces the cap. Idempotent per `source_ref`
-/// (a message id, or a draft id for replies); `source_message_id` is the email shown as evidence.
+/// Stores shared (team) facts. See `store_for`.
 pub async fn store(
     pool: &SqlitePool,
     workspace_id: &str,
+    source_message_id: &str,
+    source_ref: &str,
+    via: LearnDirection,
+    facts: Vec<LearnedFact>,
+    cap: i64,
+) -> sqlx::Result<LearnReport> {
+    store_for(pool, workspace_id, None, source_message_id, source_ref, via, facts, cap).await
+}
+
+/// Stores learned facts from one source, then enforces the cap. Idempotent per `source_ref`
+/// (a message id, or a draft id for replies); `source_message_id` is the email shown as evidence.
+/// With `agent_id` the facts belong to that agent alone (a personal agent's are private to its owner):
+/// they never merge into, or corroborate, a shared fact, and shared facts never merge into them.
+#[allow(clippy::too_many_arguments)]
+pub async fn store_for(
+    pool: &SqlitePool,
+    workspace_id: &str,
+    agent_id: Option<&str>,
     source_message_id: &str,
     source_ref: &str,
     via: LearnDirection,
@@ -187,15 +204,19 @@ pub async fn store(
     // Write first so SQLite takes the write lock before the reads below.
     sqlx::query("UPDATE workspaces SET name = name WHERE id = ?1").bind(workspace_id).execute(&mut *tx).await?;
     let all: Vec<(String, String, String, bool)> = sqlx::query_as(
-        "SELECT id, content, origin, pinned FROM memories WHERE workspace_id = ?1 AND status != 'archived'",
+        "SELECT id, content, origin, pinned FROM memories WHERE workspace_id = ?1 AND status != 'archived' AND agent_id IS ?2",
     )
     .bind(workspace_id)
+    .bind(agent_id)
     .fetch_all(&mut *tx)
     .await?;
     let source = json!({ "id": source_ref, "via": via.as_str() });
 
     for fact in facts {
-        let key = fact.dedupe_key();
+        let key = match agent_id {
+            Some(a) => format!("{a}|{}", fact.dedupe_key()),
+            None => fact.dedupe_key(),
+        };
         let content_key = dedupe_key(&fact.content);
         let mut existing: Option<Existing> = sqlx::query_as(
             "SELECT id, content, confidence, pinned, status, sources_json FROM memories WHERE workspace_id = ?1 AND dedupe_key = ?2",
@@ -227,8 +248,8 @@ pub async fn store(
                 let id = new_id("mem");
                 sqlx::query(
                     "INSERT INTO memories (id, workspace_id, scope, contact_email, kind, content, status, source, origin,
-                                           confidence, subject, dedupe_key, sources_json, evidence_message_id, created_at, updated_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?13, 'learned', 'auto', ?7, ?8, ?9, ?10, ?11, ?12, ?12)",
+                                           confidence, subject, dedupe_key, sources_json, evidence_message_id, created_at, updated_at, agent_id)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?13, 'learned', 'auto', ?7, ?8, ?9, ?10, ?11, ?12, ?12, ?14)",
                 )
                 .bind(&id)
                 .bind(workspace_id)
@@ -243,6 +264,7 @@ pub async fn store(
                 .bind(source_message_id)
                 .bind(now)
                 .bind(if via == LearnDirection::Incoming { "suggested" } else { "active" })
+                .bind(agent_id)
                 .execute(&mut *tx)
                 .await?;
                 report.created += 1;

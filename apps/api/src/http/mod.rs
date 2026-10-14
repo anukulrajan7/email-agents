@@ -9,6 +9,7 @@ mod automations_api;
 mod dto;
 mod jobs_api;
 mod label_health;
+mod learning_api;
 mod labels_api;
 mod matching_api;
 mod memories;
@@ -158,6 +159,7 @@ pub fn router(state: AppState) -> Router {
         .merge(agents_api::routes())
         .merge(agent_profiles_api::routes())
         .merge(agent_registry_api::routes())
+        .merge(learning_api::routes())
         .merge(assistant_api::routes())
         .fallback(|| async { AppError::NotFound })
         .layer(middleware::from_fn(crate::ai_ledger::attach_context))
