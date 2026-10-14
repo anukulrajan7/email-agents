@@ -1343,6 +1343,9 @@ pub async fn analyze_message(state: &AppState, payload: &Value) -> Result<ai::In
         }
     };
     insight.summary = crate::attachments::strip_attachment_markup(&insight.summary).to_string();
+    let received_at_ms: i64 = sqlx::query_scalar("SELECT received_at FROM email_messages WHERE id = ?1").bind(&message_id).fetch_one(&state.db).await?;
+    let seen = format!("{}\n{}\n{attachments_block}", msg.subject, msg.body_text);
+    insight.summary = crate::format::summary::polish(&insight.summary, &seen, received_at_ms);
     let mut conn = state.db.acquire().await?;
     store_insight(&mut conn, &message_id, &insight, &model_id, attachments_hash.as_deref(), understanding.as_ref(), refresh).await?;
     Ok(insight)

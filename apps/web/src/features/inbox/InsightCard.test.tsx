@@ -31,6 +31,12 @@ describe('InsightCard', () => {
     expect(screen.getByText('PO number')).toBeInTheDocument();
   });
 
+  it('shows a chat-style summary with rupee amounts as written', () => {
+    const summary = 'You spent ₹8,138.76 on your card ending 4755 at Amazon on 12 Oct.';
+    render(<InsightCard ws="w1" messageId="m1" insight={{ ...insight, summary, asks: [], missing_info: [], deadline: null }} status="processed" />);
+    expect(screen.getByText(summary)).toBeInTheDocument();
+  });
+
   it('shows Replied instead of Needs reply once we answered', () => {
     render(<InsightCard ws="w1" messageId="m1" insight={insight} status="processed" replied />);
     expect(screen.getByText('Replied')).toBeInTheDocument();

@@ -147,7 +147,7 @@ impl Env {
     }
 
     async fn start_inbox(&self, message_id: &str) -> Value {
-        let (s, c) = self.req("POST", "/cases", ADMIN, Some(json!({"kind": "inbox", "message_id": message_id}))).await;
+        let (s, c) = self.req("POST", "/cases", OPERATOR, Some(json!({"kind": "inbox", "message_id": message_id}))).await;
         assert_eq!(s, StatusCode::OK, "{c}");
         worker::drain(&self.state).await;
         self.ok("GET", &format!("/cases/{}", c["id"].as_str().unwrap()), ADMIN, None).await
@@ -364,11 +364,11 @@ async fn jobs_and_permissions_limit_what_the_agent_does() {
     let msg = env.receive("m1", "t-1", CLIENT, "Status update", "Hi, the interview went well.").await;
 
     env.ok("PUT", "/agent", ADMIN, Some(json!({"tasks": ["requirements"]}))).await;
-    let (s, v) = env.req("POST", "/cases", ADMIN, Some(json!({"kind": "inbox", "message_id": msg}))).await;
+    let (s, v) = env.req("POST", "/cases", OPERATOR, Some(json!({"kind": "inbox", "message_id": msg}))).await;
     assert_eq!(s, StatusCode::CONFLICT);
     assert!(v.to_string().contains("Meera is not set up to reply to emails"), "{v}");
     env.ok("PUT", "/agent", ADMIN, Some(json!({"tasks": ["reply"], "enabled": false}))).await;
-    assert_eq!(env.req("POST", "/cases", ADMIN, Some(json!({"kind": "inbox", "message_id": msg}))).await.0, StatusCode::CONFLICT);
+    assert_eq!(env.req("POST", "/cases", OPERATOR, Some(json!({"kind": "inbox", "message_id": msg}))).await.0, StatusCode::CONFLICT);
 
     // On, but not allowed to write drafts: the step is stopped and nothing is drafted.
     env.ok("PUT", "/agent", ADMIN, Some(json!({"enabled": true, "permissions": {"draft": false}}))).await;
@@ -520,4 +520,24 @@ async fn test_on_an_email_previews_without_saving() {
 
     assert_eq!(env.req("POST", "/agent/preview", OPERATOR, Some(body)).await.0, StatusCode::FORBIDDEN, "only admins try agent changes");
     assert_eq!(env.req("POST", "/agent/preview", OPERATOR, Some(json!({"message_id": "msg_nope"}))).await.0, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn an_admin_cannot_start_a_case_on_a_members_personal_mail() {
+    let env = env(ScriptedPlanner::new().script("inbox", reply_script())).await;
+    env.ok("PUT", "/me/agent-profile", OPERATOR, Some(profile("always_ask"))).await;
+    let msg = env.receive("m1", "t-1", CLIENT, "Status update", "Hi Priya, the interview went well.").await;
+    let count = || async {
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM cases WHERE workspace_id = ?1").bind(&env.ws).fetch_one(&env.state.db).await.unwrap()
+    };
+    assert_eq!(count().await, 0);
+
+    let (s, v) = env.req("POST", "/cases", ADMIN, Some(json!({"kind": "inbox", "message_id": msg}))).await;
+    assert_eq!(s, StatusCode::CONFLICT, "{v}");
+    assert_eq!(v["error"]["message"].as_str().or(v["message"].as_str()).unwrap_or_default(), "This is in Priya's personal mailbox \u{2014} their own Meera handles it.", "{v}");
+    assert_eq!(count().await, 0, "no case row is created");
+
+    let (s, _) = env.req("POST", "/cases", OPERATOR, Some(json!({"kind": "inbox", "message_id": msg}))).await;
+    assert_eq!(s, StatusCode::OK, "the owner can still start it");
+    assert_eq!(count().await, 1);
 }

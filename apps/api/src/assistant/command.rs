@@ -365,6 +365,9 @@ impl Session<'_> {
 
     async fn finish(&self, args: &Value) -> AppResult<Outcome> {
         let mut answer = plain_answer(args.get("text").and_then(Value::as_str).unwrap_or(""), MAX_ANSWER_WORDS);
+        if !answer.is_empty() {
+            answer = crate::format::summary::tidy(&answer, crate::db::now_ms());
+        }
         if answer.is_empty() {
             answer = if self.plan.is_empty() {
                 "I could not work that out. Try asking in a simpler way.".into()
@@ -670,6 +673,9 @@ impl Session<'_> {
             Some("inbox") => {
                 let id = text_arg(args, "message_id").ok_or_else(|| failed("message_id is required"))?;
                 let row = self.mail_by_id(id).await?.filter(|m| m.direction == "inbound").ok_or_else(|| failed("no inbound email with that id"))?;
+                if let Some(why) = crate::agents::triggers::personal_refusal(self.state, self.ws, &row.id, &self.user.id).await? {
+                    return Err(failed(why));
+                }
                 let summary = format!("Start an agent on “{}”", sentence(&row.subject, 80));
                 self.add_plan("start_agent", summary, json!({ "kind": "inbox", "message_id": row.id })).await
             }

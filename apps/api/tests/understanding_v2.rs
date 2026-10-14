@@ -187,7 +187,7 @@ async fn on_one_call_labels_reads_and_remembers_without_the_other_calls() {
     .unwrap();
     assert_eq!((summary.as_str(), needs_reply), ("Priya asks to approve leave.", true));
     assert_eq!(asks, r#"["Approve leave 20-24 Oct"]"#, "the invented ask was dropped by the quote check");
-    assert_eq!(version.as_deref(), Some("understand-v1"));
+    assert_eq!(version.as_deref(), Some("understand-v2"));
     assert!(json_blob.unwrap().contains("\"dropped_unverified\":1"));
 
     // The pipeline after the reading is unchanged: automations and memory learning ran from the stored result.
@@ -210,7 +210,7 @@ async fn on_falls_back_to_the_separate_calls_when_v2_fails() {
     let model: String = sqlx::query_scalar("SELECT model_id FROM classifications WHERE message_id = ?1").bind(&id).fetch_one(&env.state.db).await.unwrap();
     assert_eq!(model, "v1-model");
     let summary: String = sqlx::query_scalar("SELECT summary FROM message_insights WHERE message_id = ?1").bind(&id).fetch_one(&env.state.db).await.unwrap();
-    assert_eq!(summary, "v1 about Leave request");
+    assert_eq!(summary, "V1 about Leave request.");
 }
 
 #[tokio::test]
