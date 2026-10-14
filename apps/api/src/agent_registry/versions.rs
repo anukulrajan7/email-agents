@@ -6,7 +6,7 @@ use serde_json::{Map, Value, json};
 use sqlx::{SqliteConnection, SqliteExecutor};
 
 use super::{
-    spec::AgentSpec,
+    spec::{AgentSpec, Step},
     store::{self, AgentRow},
     templates,
 };
@@ -140,6 +140,11 @@ pub async fn active_spec_in(db: &sqlx::SqlitePool, agent: &AgentRow) -> sqlx::Re
     active_spec(&mut conn, agent).await
 }
 
+/// The steps with their wording removed: a review task's title is copy, not behaviour.
+fn copy_free_steps(steps: &[Step]) -> Vec<Step> {
+    steps.iter().map(|s| if let Step::CreateReview { .. } = s { Step::CreateReview { title: String::new() } } else { s.clone() }).collect()
+}
+
 /// A change that widens what an agent may do or how it behaves: tools, scopes, triggers, permissions, steps or
 /// drafting. Such a version is capped at level 1 until it passes the regression gate.
 pub fn behaviour_changed(old: &AgentSpec, new: &AgentSpec) -> bool {
@@ -155,7 +160,7 @@ pub fn behaviour_changed(old: &AgentSpec, new: &AgentSpec) -> bool {
         || old_scopes != new_scopes
         || old.triggers != new.triggers
         || old.permissions != new.permissions
-        || old.steps != new.steps
+        || copy_free_steps(&old.steps) != copy_free_steps(&new.steps)
         || old.drafting != new.drafting
 }
 
@@ -275,6 +280,24 @@ mod tests {
         let mut reordered = a.clone();
         reordered.scopes.reverse();
         assert!(!behaviour_changed(&a, &reordered), "order alone changes nothing");
+    }
+
+    #[test]
+    fn names_persona_and_review_titles_are_copy_not_behaviour() {
+        let a = template(INBOX_KEY).unwrap().spec();
+        let mut b = a.clone();
+        b.name = "Another".into();
+        b.persona = "New persona".into();
+        b.description = "New description".into();
+        b.goal = "New goal".into();
+        b.steps = vec![Step::CreateReview { title: "Check: Leave request".into() }];
+        let mut c = a.clone();
+        c.steps = vec![Step::CreateReview { title: "Check: Leave".into() }];
+        assert!(!behaviour_changed(&c, &b), "only the title differs");
+        assert!(!behaviour_changed(&a, &{ let mut d = a.clone(); d.name = "X".into(); d.persona = "Y".into(); d }));
+        let mut e = c.clone();
+        e.steps.push(Step::StartCase);
+        assert!(behaviour_changed(&c, &e));
     }
 
     #[test]
