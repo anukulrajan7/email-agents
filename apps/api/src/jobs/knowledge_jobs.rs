@@ -108,7 +108,7 @@ async fn index_message(state: &AppState, payload: &Value) -> Result<(), JobError
 
     let mut docs = vec![knowledge::email_document(&message_id, &subject, &body)];
     docs.extend(attachments.iter().map(|(id, name, text)| knowledge::attachment_document(id, name, text)));
-    let mut tx = state.db.begin().await?;
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     let mut changed = 0;
     for doc in &docs {
         changed += knowledge::upsert_document(&mut tx, &workspace_id, &message_id, doc).await? as usize;
@@ -131,7 +131,7 @@ async fn index_reply(state: &AppState, payload: &Value) -> Result<(), JobError> 
     let Some((workspace_id, message_id, status, reply, subject, email_body)) = row else {
         return Ok(());
     };
-    let mut tx = state.db.begin().await?;
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     if matches!(status.as_str(), "approved" | "sent") {
         let doc = knowledge::reply_document(&draft_id, &subject, &email_body, &reply);
         knowledge::upsert_document(&mut tx, &workspace_id, &message_id, &doc).await?;
@@ -180,7 +180,7 @@ async fn backfill(state: &AppState, payload: &Value) -> Result<(), JobError> {
         }
         other => return Err(JobError::Permanent(format!("unknown backfill phase {other}"))),
     };
-    let mut tx = state.db.begin().await?;
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     for (id, workspace_id) in &rows {
         if phase == "messages" {
             enqueue_index_message(&mut tx, workspace_id, id).await?;

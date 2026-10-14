@@ -42,7 +42,7 @@ pub async fn list(State(state): State<AppState>, user: AuthUser, Path(ws): Path<
 pub async fn create_forwarding(State(state): State<AppState>, user: AuthUser, Path(ws): Path<String>) -> AppResult<Json<Source>> {
     require_role(&state.db, &ws, &user, Role::Admin).await?;
     let id = new_id("src");
-    let mut tx = state.db.begin().await?;
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     let created = sqlx::query(
         "INSERT OR IGNORE INTO email_sources (id, workspace_id, kind, status, inbound_alias, capabilities_json, created_at)
          VALUES (?1, ?2, 'forwarding', 'pending', ?3, ?4, ?5)",
@@ -138,7 +138,7 @@ pub async fn test_email(
         ..Default::default()
     };
     let event_id = new_id("evt");
-    let mut tx = state.db.begin().await?;
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     sqlx::query(
         "INSERT INTO inbound_events (id, provider, provider_event_id, payload_json, created_at) VALUES (?1, 'test', ?2, ?3, ?4)",
     )
@@ -239,7 +239,7 @@ pub async fn sync(
     if status == "disconnected" {
         return Err(AppError::Conflict("source is disconnected; reconnect it first".into()));
     }
-    let mut tx = state.db.begin().await?;
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     // Unique per click: a second "Sync now" must never be silently swallowed.
     nango::enqueue_sync(&mut tx, &ws, &source_id, &format!("manual:{}", new_id("req"))).await?;
     audit::record(
@@ -267,7 +267,7 @@ pub async fn disconnect(
     Path((ws, source_id)): Path<(String, String)>,
 ) -> AppResult<Json<Source>> {
     require_role(&state.db, &ws, &user, Role::Admin).await?;
-    let mut tx = state.db.begin().await?;
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     let row: SourceRow = sqlx::query_as(&format!(
         "UPDATE email_sources SET status = 'disconnected' WHERE id = ?1 AND workspace_id = ?2 RETURNING {SOURCE_COLUMNS}"
     ))

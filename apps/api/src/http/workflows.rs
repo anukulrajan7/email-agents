@@ -98,7 +98,7 @@ pub async fn update(
     if body.enabled && !template(&key).is_some_and(|t| t.available && active.contains(t.label_key)) {
         return Err(AppError::Conflict("add and activate this workflow's label before enabling it".into()));
     }
-    let mut tx = state.db.begin().await?;
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     sqlx::query("UPDATE workflows SET enabled = ?1 WHERE id = ?2 AND workspace_id = ?3")
         .bind(body.enabled)
         .bind(&id)
@@ -185,7 +185,7 @@ pub async fn setup(
         .flat_map(|tpl| tpl.labels.iter())
         .find(|l| l.key == t.label_key)
         .ok_or_else(|| AppError::Internal(anyhow::anyhow!("no seed for label {}", t.label_key)))?;
-    let mut tx = state.db.begin().await?;
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     sqlx::query(
         "INSERT INTO labels (id, workspace_id, key, name, description, color, position, created_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, (SELECT COALESCE(MAX(position), 0) + 1 FROM labels WHERE workspace_id = ?2), ?7)

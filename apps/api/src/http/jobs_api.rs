@@ -43,7 +43,7 @@ pub async fn retry(
     Path((ws, id)): Path<(String, String)>,
 ) -> AppResult<Json<JobDto>> {
     require_role(&state.db, &ws, &user, Role::Admin).await?;
-    let mut tx = state.db.begin().await?;
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     let job = jobs::retry_dead(&mut tx, &ws, &id).await?.ok_or(AppError::NotFound)?;
     audit::record(
         &mut tx,

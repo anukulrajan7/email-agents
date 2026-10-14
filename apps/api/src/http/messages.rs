@@ -560,7 +560,7 @@ pub async fn approve_classification(
 ) -> AppResult<Json<Classification>> {
     require_role(&state.db, &ws, &user, Role::Operator).await?;
     ensure_message(&state, &ws, &user, &id).await?;
-    let mut tx = state.db.begin().await?;
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     let row: ClassificationRow = sqlx::query_as(
         "UPDATE classifications SET needs_review = 0, updated_at = ?1 WHERE message_id = ?2
          RETURNING category, priority, requires_reply, confidence, needs_review, source, model_id, updated_at",
@@ -599,7 +599,7 @@ async fn enqueue_for_message(
     dedupe_key: String,
     action: &str,
 ) -> AppResult<(StatusCode, Json<Value>)> {
-    let mut tx = state.db.begin().await?;
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     jobs::enqueue(&mut tx, job_kind, &dedupe_key, Some(ws), &json!({ "message_id": message_id })).await?;
     audit::record(
         &mut tx,
@@ -642,7 +642,7 @@ pub async fn request_draft(
     let premium = request.quality == Some(DraftQuality::Premium);
     let key = format!("draft:{id}:manual:{}", new_id("req"));
     let payload = if premium { json!({ "message_id": id, "quality": "premium" }) } else { json!({ "message_id": id }) };
-    let mut tx = state.db.begin().await?;
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     jobs::enqueue(&mut tx, kind::GENERATE_DRAFT, &key, Some(&ws), &payload).await?;
     audit::record(
         &mut tx,
@@ -693,7 +693,7 @@ pub async fn understand_now(
         .await?;
     let matching = crate::packs::has_feature(&state.db, &ws, crate::packs::FEATURE_MATCHING).await?;
     let category = category.filter(|_| matching);
-    let mut tx = state.db.begin().await?;
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     if has_attachments {
         jobs::attachment_jobs::enqueue_extract(&mut tx, &ws, &id, true).await?;
     }
@@ -755,7 +755,7 @@ pub async fn update_draft(
     if in_flight == Some(true) {
         return Err(AppError::Conflict("this reply is scheduled to send; undo the send before editing".into()));
     }
-    let mut tx = state.db.begin().await?;
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     let row: DraftRow = sqlx::query_as(
         "UPDATE drafts SET body_text = COALESCE(?1, body_text), status = COALESCE(?2, status), updated_at = ?3
          WHERE id = ?4 AND workspace_id = ?5 AND status != 'sent' AND send_at IS NULL AND send_attempt_id IS NULL

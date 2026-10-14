@@ -33,7 +33,7 @@ pub async fn connect(database_url: &str) -> anyhow::Result<SqlitePool> {
         .journal_mode(SqliteJournalMode::Wal)
         .synchronous(SqliteSynchronous::Normal)
         .foreign_keys(true)
-        .busy_timeout(Duration::from_secs(5));
+        .busy_timeout(Duration::from_secs(15));
 
     if let Some(parent) = Path::new(options.get_filename()).parent()
         && !parent.as_os_str().is_empty()

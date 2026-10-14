@@ -96,7 +96,7 @@ pub async fn update(
         (_, Some(_)) => return Err(AppError::BadRequest("snooze_hours must be 1-168 (with status open or omitted)".into())),
         _ => return Err(AppError::BadRequest("status must be resolved or open".into())),
     };
-    let mut tx = state.db.begin().await?;
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     let updated = sqlx::query(sql)
         .bind(now)
         .bind(&user.id)

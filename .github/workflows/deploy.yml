@@ -17,6 +17,9 @@ permissions:
 env:
   IMAGE: ghcr.io/anukulrajan7/email-agents
   APP_DIR: /docker/email-agents
+  # No debug info in test builds: ~55 test binaries with full debug info exhaust the runner disk at link time.
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_INCREMENTAL: "0"
 
 jobs:
   test:

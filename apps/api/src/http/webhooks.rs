@@ -39,7 +39,7 @@ pub async fn resend(State(state): State<AppState>, headers: HeaderMap, body: Byt
 
     let event_id = new_id("evt");
     let raw = String::from_utf8(body.to_vec()).map_err(|_| AppError::BadRequest("payload is not UTF-8".into()))?;
-    let mut tx = state.db.begin().await?;
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     let inserted = sqlx::query(
         "INSERT OR IGNORE INTO inbound_events (id, provider, provider_event_id, payload_json, created_at)
          VALUES (?1, 'resend', ?2, ?3, ?4)",
@@ -94,7 +94,7 @@ pub async fn nango(State(state): State<AppState>, headers: HeaderMap, body: Byte
     // Nango sends no delivery ID header; the body digest identifies a delivery.
     let digest: String = sha2::Sha256::digest(&body).iter().map(|b| format!("{b:02x}")).collect();
     let raw = String::from_utf8(body.to_vec()).map_err(|_| AppError::BadRequest("payload is not UTF-8".into()))?;
-    let mut tx = state.db.begin().await?;
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     let inserted = sqlx::query(
         "INSERT OR IGNORE INTO inbound_events (id, provider, provider_event_id, payload_json, created_at)
          VALUES (?1, 'nango', ?2, ?3, ?4)",

@@ -126,7 +126,7 @@ async fn create(
         None if role != Role::Admin => return Err(AppError::Forbidden),
         _ => {}
     }
-    let mut tx = state.db.begin().await?;
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     let target = Target { ws: &ws, agent_id: agent_id.as_deref(), user_id: person.as_deref() };
     let id = preferences::create_manual(&mut tx, &target, &body.category, &body.content).await?.map_err(rejected)?;
     let pref = preferences::get(&mut tx, &ws, &id).await?.ok_or(AppError::NotFound)?;
@@ -170,7 +170,7 @@ async fn update(
     if body.status.as_deref().is_some_and(|s| !preferences::STATUSES.contains(&s)) {
         return Err(AppError::BadRequest("status must be suggested, active or archived".into()));
     }
-    let mut tx = state.db.begin().await?;
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     if body.content.is_some() || body.category.is_some() {
         let content = body.content.as_deref().unwrap_or(&pref.content);
         match preferences::set_content(&mut tx, &ws, &id, body.category.as_deref(), content).await?.map_err(rejected)? {

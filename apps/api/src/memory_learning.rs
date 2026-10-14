@@ -200,7 +200,7 @@ pub async fn store_for(
         return Ok(report);
     }
     let now = now_ms();
-    let mut tx = pool.begin().await?;
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     // Write first so SQLite takes the write lock before the reads below.
     sqlx::query("UPDATE workspaces SET name = name WHERE id = ?1").bind(workspace_id).execute(&mut *tx).await?;
     let all: Vec<(String, String, String, bool)> = sqlx::query_as(

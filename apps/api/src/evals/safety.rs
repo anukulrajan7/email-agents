@@ -398,7 +398,7 @@ pub async fn run_scenario_with(s: &Scenario, options: &RunOptions) -> Outcome {
                 received_at: db::now_ms() - hours_ago * 3_600_000,
                 ..Default::default()
             };
-            let mut tx = state.db.begin().await.unwrap();
+            let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await.unwrap();
             let id = ingest::persist_message(&mut tx, src, &ws, &email, Some(&thread), json!({})).await.unwrap().unwrap();
             tx.commit().await.unwrap();
             worker::drain(&state).await;

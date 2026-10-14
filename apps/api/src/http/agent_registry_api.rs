@@ -276,7 +276,7 @@ async fn update(
     let agent = visible_agent(&state, &ws, &user, &id).await?;
     require_edit(&state, &ws, &user, &agent).await?;
     let is_lead = agent.kind == "lead";
-    let mut tx = state.db.begin().await?;
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     if let Some(status) = body.status.as_deref() {
         match status {
             "active" => {
@@ -349,7 +349,7 @@ async fn remove(State(state): State<AppState>, user: AuthUser, Path((ws, id)): P
     if agent.kind != "custom" {
         return Err(AppError::Conflict("lead and system agents cannot be deleted; pause or tune them instead".into()));
     }
-    let mut tx = state.db.begin().await?;
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     sqlx::query("DELETE FROM agents WHERE id = ?1 AND workspace_id = ?2").bind(&id).bind(&ws).execute(&mut *tx).await?;
     audit_change(&mut tx, &ws, &user, "agent.deleted", &id, json!({"key": agent.key})).await?;
     tx.commit().await?;
@@ -373,7 +373,7 @@ async fn insert_custom(
     color: &str,
     cloned_from: Option<&str>,
 ) -> AppResult<AgentRow> {
-    let mut tx = state.db.begin().await?;
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     let id = store::insert(
         &mut tx,
         NewAgent {
@@ -496,7 +496,7 @@ async fn put_spec(
     }
     let source = if agent.kind == "custom" { "manual" } else { "tuned" };
     let note = body.note.as_deref().map(agent_note).filter(|n| !n.is_empty());
-    let mut tx = state.db.begin().await?;
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     let version = versions::create(
         &mut tx,
         &ws,
@@ -570,7 +570,7 @@ async fn get_version(
 async fn activate_version(State(state): State<AppState>, user: AuthUser, Path((ws, id, version)): Path<(String, String, i64)>) -> AppResult<Json<Value>> {
     let agent = visible_agent(&state, &ws, &user, &id).await?;
     require_edit(&state, &ws, &user, &agent).await?;
-    let mut tx = state.db.begin().await?;
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     let new_version = match versions::activate(&mut tx, &ws, &agent, version, Some(&user.id)).await? {
         Ok(v) => v,
         Err(versions::ActivateError::NoSuchVersion) => return Err(AppError::NotFound),
@@ -593,7 +593,7 @@ pub struct PauseBody {
 async fn pause_all(State(state): State<AppState>, user: AuthUser, Path(ws): Path<String>, Json(body): Json<PauseBody>) -> AppResult<Json<Value>> {
     require_role(&state.db, &ws, &user, Role::Admin).await?;
     seed::ensure_workspace(&state.db, &ws).await?;
-    let mut tx = state.db.begin().await?;
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     let affected = if body.paused {
         sqlx::query("UPDATE agents SET status = 'paused', paused_reason = 'pause_all', updated_at = ?2 WHERE workspace_id = ?1 AND status = 'active'")
     } else {
@@ -687,7 +687,7 @@ async fn set_route(
         .fetch_optional(&state.db)
         .await?;
     let route = routing::Route { agent_id: agent.id.clone(), source: routing::Source::Manual, shadow: chosen.level == 0, handler_id: agent.id.clone() };
-    let mut tx = state.db.begin().await?;
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     routing::record(&mut tx, &ws, &id, &route, chosen.version).await?;
     audit::record(
         &mut tx,

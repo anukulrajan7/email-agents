@@ -171,7 +171,7 @@ impl Finished {
 }
 
 async fn finish(db: &SqlitePool, run: &EvalRun, f: Finished) -> sqlx::Result<()> {
-    let mut tx = db.begin().await?;
+    let mut tx = db.begin_with("BEGIN IMMEDIATE").await?;
     sqlx::query("DELETE FROM eval_results WHERE run_id = ?1").bind(&run.id).execute(&mut *tx).await?;
     for (key, passed, score, detail) in f.results {
         sqlx::query("INSERT INTO eval_results (run_id, case_key, passed, score, detail_json) VALUES (?1, ?2, ?3, ?4, ?5)")

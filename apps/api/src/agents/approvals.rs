@@ -135,7 +135,7 @@ async fn live_preview(state: &AppState, case: &case::Case, approval: &ApprovalRo
 
 /// Puts a decision back to pending so a person can look at the changed reply and decide again.
 async fn reopen(state: &AppState, ws: &str, approval_id: &str, user_id: &str, case_id: &str) -> sqlx::Result<()> {
-    let mut tx = state.db.begin().await?;
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     let reopened = sqlx::query(
         "UPDATE agent_approvals SET status = 'pending', decided_by = NULL, decided_at = NULL, approved_hash = NULL
          WHERE id = ?1 AND workspace_id = ?2 AND status = 'approved'",
@@ -193,7 +193,7 @@ pub async fn decide(state: &AppState, ws: &str, approval_id: &str, user_id: &str
     let live = if d.approve { live_preview(state, &case, &approval, user_id).await } else { None };
     let hash = d.approve.then(|| approved_hash(&approval, live.as_ref(), edited.as_deref().unwrap_or(&approval.body)));
 
-    let mut tx = state.db.begin().await?;
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     let decided = sqlx::query(
         "UPDATE agent_approvals SET status = ?1, decided_by = ?2, decided_at = ?3, note = ?4, body = COALESCE(?5, body), approved_hash = ?7
          WHERE id = ?6 AND status = 'pending'",
@@ -292,7 +292,7 @@ pub async fn decide(state: &AppState, ws: &str, approval_id: &str, user_id: &str
     };
     let (summary, output, status, patch) = step;
 
-    let mut tx = state.db.begin().await?;
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     case::insert_step(
         &mut tx,
         &case,

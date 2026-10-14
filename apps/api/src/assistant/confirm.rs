@@ -125,7 +125,7 @@ async fn draft_reply(state: &AppState, ws: &str, user: &AuthUser, params: &Value
         payload["instructions"] = json!(i);
     }
     let key = format!("draft:{message_id}:manual:{}", new_id("req"));
-    let mut tx = state.db.begin().await?;
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     jobs::enqueue(&mut tx, kind::GENERATE_DRAFT, &key, Some(ws), &payload).await?;
     audit::record(
         &mut tx,
@@ -173,7 +173,7 @@ async fn create_automation(state: &AppState, ws: &str, user: &AuthUser, params: 
     let input: AutomationInput =
         serde_json::from_value(params.clone()).map_err(|e| AppError::BadRequest(format!("invalid automation: {e}")))?;
     automations::validate(&input.name, &input.conditions, &input.actions).map_err(AppError::BadRequest)?;
-    let mut tx = state.db.begin().await?;
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     let id = automations::insert(&mut tx, ws, &input, None).await?;
     let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM automations WHERE workspace_id = ?1").bind(ws).fetch_one(&mut *tx).await?;
     if total > automations::MAX_AUTOMATIONS {
@@ -200,7 +200,7 @@ async fn snooze_alert(state: &AppState, ws: &str, user: &AuthUser, params: &Valu
     let id = str_param(params, "alert_id")?;
     let hours = params.get("hours").and_then(Value::as_i64).filter(|h| (1..=168).contains(h)).ok_or_else(|| AppError::BadRequest("hours must be 1 to 168".into()))?;
     let now = now_ms();
-    let mut tx = state.db.begin().await?;
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     let updated = sqlx::query(
         "UPDATE alerts SET status = 'snoozed', snoozed_until = ?1 + ?2 * 3600000, resolved_at = NULL, resolved_by = NULL, updated_at = ?1
          WHERE id = ?3 AND workspace_id = ?4 AND status != 'resolved'",

@@ -86,7 +86,7 @@ async fn create_validated(
     preset_key: Option<&str>,
 ) -> ApiResult<Automation> {
     check(&input.name, &input.conditions, &input.actions)?;
-    let mut tx = state.db.begin().await?;
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     let id = automations::insert(&mut tx, ws, input, preset_key).await?;
     let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM automations WHERE workspace_id = ?1")
         .bind(ws)
@@ -140,7 +140,7 @@ pub async fn update(
     let actions = patch.actions.unwrap_or(current.actions);
     check(&name, &conditions, &actions)?;
 
-    let mut tx = state.db.begin().await?;
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     sqlx::query(
         "UPDATE automations SET name = ?1, enabled = ?2, conditions_json = ?3, actions_json = ?4, updated_at = ?5
          WHERE id = ?6 AND workspace_id = ?7",
@@ -178,7 +178,7 @@ pub async fn remove(
     Path((ws, id)): Path<(String, String)>,
 ) -> ApiResult<StatusCode> {
     require_role(&state.db, &ws, &user, Role::Admin).await?;
-    let mut tx = state.db.begin().await?;
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     let deleted = sqlx::query("DELETE FROM automations WHERE id = ?1 AND workspace_id = ?2")
         .bind(&id)
         .bind(&ws)

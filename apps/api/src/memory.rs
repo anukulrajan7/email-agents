@@ -321,7 +321,7 @@ pub async fn store_suggestions(
     .await?;
     let mut known: HashSet<String> = existing.iter().map(|c| dedupe_key(c)).collect();
     let now = now_ms();
-    let mut tx = pool.begin().await?;
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     let mut stored = 0;
     for s in suggestions {
         if !known.insert(dedupe_key(&s.content)) {

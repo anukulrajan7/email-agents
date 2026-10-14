@@ -88,7 +88,7 @@ impl Authenticator {
         .await?;
         // Dev and OIDC emails are verified (OIDC stores only `email_verified` addresses).
         if !email.is_empty() {
-            let mut tx = db.begin().await?;
+            let mut tx = db.begin_with("BEGIN IMMEDIATE").await?;
             accept_invitations(&mut tx, &id, &email).await?;
             tx.commit().await?;
         }

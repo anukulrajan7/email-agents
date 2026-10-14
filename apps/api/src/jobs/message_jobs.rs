@@ -32,7 +32,7 @@ pub async fn clean_stored_text(state: &AppState) -> Result<(), JobError> {
     .await?;
     let full_batch = rows.len() as i64 == BATCH;
     let last_id = rows.last().map(|r| r.0.clone());
-    let mut tx = state.db.begin().await?;
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     for (id, workspace_id, text, html) in rows {
         let cleaned = text_clean::clean_body(&text, html.as_deref());
         sqlx::query("UPDATE email_messages SET body_text = ?1, text_clean_v = 1 WHERE id = ?2")
@@ -263,7 +263,7 @@ pub async fn is_outbound(state: &AppState, message_id: &str) -> sqlx::Result<boo
 /// The full body replaced a stored snippet: re-index it and re-read what the sender asks
 /// (the old insight may have been built from the snippet alone).
 async fn refresh_understanding(state: &AppState, workspace_id: &str, message_id: &str) -> Result<(), JobError> {
-    let mut tx = state.db.begin().await?;
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     super::knowledge_jobs::enqueue_reindex_message(&mut tx, workspace_id, message_id, "html_refetch").await?;
     let had_insight = sqlx::query("DELETE FROM message_insights WHERE message_id = ?1").bind(message_id).execute(&mut *tx).await?.rows_affected() > 0;
     if had_insight {

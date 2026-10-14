@@ -523,7 +523,7 @@ pub async fn seed_if_needed(db: &SqlitePool, workspace_id: &str) -> sqlx::Result
     if seeded.is_some() {
         return Ok(());
     }
-    let mut tx = db.begin().await?;
+    let mut tx = db.begin_with("BEGIN IMMEDIATE").await?;
     seed_defaults(&mut tx, workspace_id).await?;
     tx.commit().await
 }

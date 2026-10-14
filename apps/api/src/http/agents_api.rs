@@ -235,7 +235,7 @@ fn ensure_enabled(state: &AppState) -> AppResult<()> {
 async fn cancel_case(State(state): State<AppState>, user: AuthUser, Path((ws, id)): Path<(String, String)>) -> AppResult<Json<Value>> {
     require_role(&state.db, &ws, &user, Role::Admin).await?;
     let c = visible_case(&state, &ws, &user.id, &id).await?;
-    let mut tx = state.db.begin().await?;
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     if !case::set_status(&mut tx, &ws, &c.id, "cancelled").await? {
         return Err(AppError::Conflict("this case already ended".into()));
     }
