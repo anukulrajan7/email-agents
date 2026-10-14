@@ -405,6 +405,7 @@ pub fn map_gmail_record(rec: &Value, max_body_chars: usize) -> Option<MappedReco
         attachments,
         // Only a snippet unless an explicit body field was present.
         preview_only: str_of(rec, &["body", "text", "bodyText"]).is_none(),
+        bulk_signals: crate::bulk::header_signals(&header, &label_ids(rec)),
     };
     let mut mapped = MappedRecord { email, thread_id: str_of(rec, &["threadId", "thread_id"]), deleted, cursor };
     // If the record already carries MIME parts (full format), use them directly.
@@ -412,6 +413,10 @@ pub fn map_gmail_record(rec: &Value, max_body_chars: usize) -> Option<MappedReco
         apply_gmail_payload(&mut mapped.email, payload, max_body_chars);
     }
     Some(mapped)
+}
+
+fn label_ids(rec: &Value) -> Vec<String> {
+    rec.get("labelIds").and_then(Value::as_array).map(|l| l.iter().filter_map(|x| x.as_str().map(str::to_string)).collect()).unwrap_or_default()
 }
 
 /// Gmail marks mail the mailbox itself sent with the SENT label.
@@ -488,6 +493,7 @@ pub fn apply_gmail_payload(email: &mut NormalizedEmail, payload: &Value, max_bod
     if !content.attachments.is_empty() {
         email.attachments = content.attachments;
     }
+    crate::bulk::merge(&mut email.bulk_signals, crate::bulk::header_signals(&|n| gmail_header(Some(payload), n), &[]));
     if email.sender_address.is_empty()
         && let Some(from) = gmail_header(Some(payload), "From")
     {

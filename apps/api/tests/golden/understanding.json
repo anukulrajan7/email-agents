@@ -1,0 +1,140 @@
+{
+  "body": [
+    {
+      "id": "thread_quoted_history_old_ask",
+      "description": "The new message only says thanks; the old question lives in the quote and must not reach a model.",
+      "subject": "Re: Where is my payslip?",
+      "text": "Thanks, that solved it.\n\nOn Tue, Oct 13, 2026 at 11:30 AM Support <support@acme.example.com>\nwrote:\n\n> Hi Priya,\n> Could you tell us which month's payslip you are missing?\n>\n> On Mon, Oct 12, 2026 at 9:00 AM Priya Sharma <priya@acme.com> wrote:\n>> Where is my payslip?\n",
+      "must_contain": ["Thanks, that solved it."],
+      "must_not_contain": ["which month", "Where is my payslip", "wrote:"]
+    },
+    {
+      "id": "thread_inline_reply",
+      "description": "The customer answers between our quoted lines; the answers are the new content.",
+      "subject": "Re: A few questions",
+      "text": "On Tue, Oct 13, 2026 at 11:30 AM Support <support@acme.example.com> wrote:\n\n> 1. What is your employee ID?\nE-4471.\n\n> 2. Which month is the payslip for?\nSeptember 2026.\n\n> 3. Do you need it by a date?\nYes, by Friday 16 October.\n",
+      "must_contain": ["E-4471.", "September 2026.", "by Friday 16 October."],
+      "must_not_contain": ["What is your employee ID", "Which month is the payslip"]
+    },
+    {
+      "id": "forwarded_from_boss",
+      "description": "FYI over a forwarded customer email: the forwarded content is the context and stays.",
+      "subject": "Fwd: Refund still pending",
+      "text": "FYI, can you handle this?\n\n---------- Forwarded message ---------\nFrom: Sunita Verma <sunita@customer.example.com>\nDate: Mon, Oct 12, 2026 at 9:00 AM\nSubject: Refund still pending\nTo: boss@acme.example.com\n\nThis is the third time I am writing. Refund of 3,499 INR for order 88121 is still pending.\n\nRegards,\nSunita",
+      "must_contain": ["FYI, can you handle this?", "third time I am writing", "3,499 INR", "order 88121", "From: Sunita Verma"],
+      "must_not_contain": []
+    },
+    {
+      "id": "outlook_reply_with_signature_and_disclaimer",
+      "description": "Outlook desktop: request on top, signature, disclaimer, then the From/Sent block.",
+      "subject": "RE: Leave request 20-24 Oct",
+      "text": "Hi team,\n\nPlease approve leave for Karan from 20 to 24 October. His backup is Nisha.\n\nThanks,\nMeera Rao\nHR Business Partner\nT: +91 40 5555 0101\n\nThis email and any attachments are confidential and intended solely for the use of the individual to whom it is addressed.\n\nFrom: Karan Nair <karan@acme.example.com>\nSent: Monday, October 12, 2026 4:15 PM\nTo: Meera Rao <meera@acme.example.com>\nSubject: Leave request 20-24 Oct\n\nI would like to take leave for a family function.",
+      "must_contain": ["approve leave for Karan", "backup is Nisha"],
+      "must_not_contain": ["HR Business Partner", "confidential", "family function", "Sent:"]
+    },
+    {
+      "id": "closing_word_before_a_real_request",
+      "description": "A closing word is not a signature when real content follows.",
+      "subject": "Offer letter",
+      "text": "Hello.\nThanks,\nPlease send the signed offer letter by Friday.\nAlso confirm the joining date?",
+      "must_contain": ["signed offer letter", "joining date"],
+      "must_not_contain": []
+    }
+  ],
+  "bulk": [
+    {
+      "id": "newsletter_with_question_bait",
+      "description": "Marketing mail that ends in 'Have questions? Reply!' is still bulk.",
+      "sender": "news@brand.example",
+      "subject": "Our October picks",
+      "text": "Ten books you will love this month. Have questions? Just reply to this email!",
+      "signals": ["list_unsubscribe", "gmail_category"],
+      "filed": true
+    },
+    {
+      "id": "bulk_invoice_with_unsubscribe",
+      "description": "A transactional invoice from billing@ with an unsubscribe footer and a due date must not be filed away.",
+      "sender": "billing@vendor.example",
+      "subject": "Invoice INV-2291 due 28 October",
+      "text": "Amount due: 1,18,000 INR by 28 October. To stop these emails, unsubscribe.",
+      "signals": ["list_unsubscribe", "gmail_category"],
+      "filed": false
+    },
+    {
+      "id": "ordinary_address_invoice",
+      "description": "The same invoice from a person's address is protected by its content.",
+      "sender": "ana@vendor.example",
+      "subject": "Your October statement",
+      "text": "Please find the statement attached. Unsubscribe.",
+      "signals": ["list_unsubscribe", "gmail_category"],
+      "filed": false
+    },
+    {
+      "id": "single_signal_is_not_enough",
+      "description": "One header signal alone never files mail away.",
+      "sender": "sam@brand.example",
+      "subject": "Quick hello",
+      "text": "Hi there, wanted to follow up on our call.",
+      "signals": ["list_unsubscribe"],
+      "filed": false
+    },
+    {
+      "id": "automated_digest",
+      "description": "A no-reply sender plus Precedence: bulk.",
+      "sender": "no-reply@service.example",
+      "subject": "Your weekly digest",
+      "text": "Top stories this week.",
+      "signals": ["precedence"],
+      "filed": true
+    },
+    {
+      "id": "security_alert_is_protected",
+      "description": "Account-security mail is never filed away, whatever its headers.",
+      "sender": "no-reply@accounts.example",
+      "subject": "Security alert: new sign-in to your account",
+      "text": "We noticed a sign-in from a new device.",
+      "signals": ["auto_submitted", "list_unsubscribe"],
+      "filed": false
+    }
+  ],
+  "verify": [
+    {
+      "id": "deadline_relative_dates",
+      "description": "Received on a Friday: 'by EOD tomorrow' is copied as written; a date the email never states is dropped.",
+      "received_at_ms": 1792144800000,
+      "subject": "Report",
+      "text": "Please send the report by EOD tomorrow. The old plan was next Tuesday but that moved.",
+      "reply": {
+        "label": "other", "label_confidence": 0.9, "priority": "normal", "needs_reply": true, "intent": "request", "sentiment": "calm",
+        "summary": "Wants the report.",
+        "asks": [{"text": "Send the report", "kind": "request", "quote": "Please send the report by EOD tomorrow."}],
+        "commitments": [],
+        "deadlines": [
+          {"what": "report", "when_text": "EOD tomorrow", "when_iso": "2026-10-17"},
+          {"what": "invented", "when_text": "Monday 3 November", "when_iso": "2026-11-03"}
+        ],
+        "entities": [], "missing_info": [], "facts_to_remember": [], "alert_signals": [], "injection_signals": [], "language": "en"
+      },
+      "expect": {"asks": 1, "deadlines": 1, "dropped": 1, "priority": "high", "first_deadline_text": "EOD tomorrow", "first_deadline_iso": "2026-10-17"}
+    },
+    {
+      "id": "hallucinated_extraction",
+      "description": "Asks, commitments and entities the email never contained are dropped and counted.",
+      "received_at_ms": 1792144800000,
+      "subject": "Hello",
+      "text": "Hi, can you share the Q3 report? Thanks.",
+      "reply": {
+        "label": "other", "label_confidence": 0.9, "priority": "normal", "needs_reply": true, "intent": "request", "sentiment": "calm",
+        "summary": "Wants the Q3 report.",
+        "asks": [
+          {"text": "Share the Q3 report", "kind": "request", "quote": "can you share the Q3 report?"},
+          {"text": "Wire 50,000 INR", "kind": "request", "quote": "please wire 50,000 INR today"}
+        ],
+        "commitments": [{"who": "us", "what": "Call back", "due_text": "tomorrow", "due_iso": "2026-10-17", "quote": "we will call you back"}],
+        "deadlines": [], "entities": [{"type": "amount", "value": "50,000 INR"}],
+        "missing_info": [], "facts_to_remember": [], "alert_signals": [], "injection_signals": [], "language": "en"
+      },
+      "expect": {"asks": 1, "deadlines": 0, "dropped": 3, "priority": "normal"}
+    }
+  ]
+}

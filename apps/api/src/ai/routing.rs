@@ -18,6 +18,16 @@ pub const DEFAULT_REPLY_STYLE: &str = "We are the company's HR and staffing team
 - Never reject anyone and never say we are not hiring.\n\
 Keep replies 60 to 120 words, in short paragraphs, signed off.";
 
+/// True when `sender` is one of the owner's important people: an exact address, or any address at a listed domain.
+pub fn is_vip(vips: &[String], sender: &str) -> bool {
+    let sender = sender.trim().to_ascii_lowercase();
+    let domain = sender.rsplit_once('@').map(|(_, d)| d).unwrap_or_default();
+    vips.iter().map(|v| v.trim().trim_start_matches('@').to_ascii_lowercase()).any(|v| !v.is_empty() && (v == sender || v == domain))
+}
+
+/// Premium only where a mistake costs more: high priority, a VIP sender, three or more asks, or (staffing
+/// workspaces) client and referral labels. Missing information alone does not qualify: about half of real
+/// mail has some, and the draft already marks it with `[NEEDS: …]`.
 /// `staffing`: the workspace has the staffing pack, so its client/referral labels count as premium.
 pub fn draft_quality(
     priority: Priority,
@@ -25,10 +35,11 @@ pub fn draft_quality(
     insight: Option<&Insight>,
     requested: Option<DraftQuality>,
     staffing: bool,
+    vip: bool,
 ) -> DraftQuality {
-    let complex = insight.is_some_and(|i| i.asks.len() >= PREMIUM_ASKS || !i.missing_info.is_empty());
+    let complex = insight.is_some_and(|i| i.asks.len() >= PREMIUM_ASKS);
     let premium_label = staffing && PREMIUM_LABELS.contains(&label);
-    if requested == Some(DraftQuality::Premium) || priority == Priority::High || premium_label || complex {
+    if requested == Some(DraftQuality::Premium) || priority == Priority::High || vip || premium_label || complex {
         DraftQuality::Premium
     } else {
         DraftQuality::Standard
@@ -51,37 +62,50 @@ mod tests {
 
     #[test]
     fn routine_mail_is_standard() {
-        assert_eq!(draft_quality(Priority::Normal, "leave", Some(&insight(2, 0)), None, true), DraftQuality::Standard);
-        assert_eq!(draft_quality(Priority::Low, "timesheet", None, None, true), DraftQuality::Standard);
+        assert_eq!(draft_quality(Priority::Normal, "leave", Some(&insight(2, 0)), None, true, false), DraftQuality::Standard);
+        assert_eq!(draft_quality(Priority::Low, "timesheet", None, None, true, false), DraftQuality::Standard);
     }
 
     #[test]
     fn high_priority_is_premium() {
-        assert_eq!(draft_quality(Priority::High, "leave", None, None, true), DraftQuality::Premium);
+        assert_eq!(draft_quality(Priority::High, "leave", None, None, true, false), DraftQuality::Premium);
     }
 
     #[test]
     fn client_and_referral_labels_are_premium() {
-        assert_eq!(draft_quality(Priority::Normal, "client_requirement", None, None, true), DraftQuality::Premium);
-        assert_eq!(draft_quality(Priority::Low, "candidate_referral", None, None, true), DraftQuality::Premium);
+        assert_eq!(draft_quality(Priority::Normal, "client_requirement", None, None, true, false), DraftQuality::Premium);
+        assert_eq!(draft_quality(Priority::Low, "candidate_referral", None, None, true, false), DraftQuality::Premium);
     }
 
     #[test]
     fn staffing_labels_are_standard_without_the_staffing_pack() {
-        assert_eq!(draft_quality(Priority::Normal, "client_requirement", None, None, false), DraftQuality::Standard);
-        assert_eq!(draft_quality(Priority::High, "client_requirement", None, None, false), DraftQuality::Premium);
-        assert_eq!(draft_quality(Priority::Normal, "question", Some(&insight(3, 0)), None, false), DraftQuality::Premium);
+        assert_eq!(draft_quality(Priority::Normal, "client_requirement", None, None, false, false), DraftQuality::Standard);
+        assert_eq!(draft_quality(Priority::High, "client_requirement", None, None, false, false), DraftQuality::Premium);
+        assert_eq!(draft_quality(Priority::Normal, "question", Some(&insight(3, 0)), None, false, false), DraftQuality::Premium);
     }
 
     #[test]
-    fn many_asks_or_missing_info_is_premium() {
-        assert_eq!(draft_quality(Priority::Normal, "leave", Some(&insight(3, 0)), None, true), DraftQuality::Premium);
-        assert_eq!(draft_quality(Priority::Normal, "leave", Some(&insight(1, 1)), None, true), DraftQuality::Premium);
+    fn three_asks_are_premium_but_missing_info_alone_is_not() {
+        assert_eq!(draft_quality(Priority::Normal, "leave", Some(&insight(3, 0)), None, true, false), DraftQuality::Premium);
+        assert_eq!(draft_quality(Priority::Normal, "leave", Some(&insight(2, 0)), None, true, false), DraftQuality::Standard);
+        assert_eq!(draft_quality(Priority::Normal, "leave", Some(&insight(1, 4)), None, true, false), DraftQuality::Standard);
+        assert_eq!(draft_quality(Priority::Normal, "leave", Some(&insight(0, 1)), None, false, false), DraftQuality::Standard);
+    }
+
+    #[test]
+    fn a_vip_sender_is_premium() {
+        assert_eq!(draft_quality(Priority::Normal, "leave", None, None, false, true), DraftQuality::Premium);
+        let vips = vec!["ceo@client.com".to_string(), "bigco.com".to_string()];
+        assert!(is_vip(&vips, "CEO@Client.com"));
+        assert!(is_vip(&vips, "anyone@bigco.com"));
+        assert!(!is_vip(&vips, "intern@client.com"));
+        assert!(!is_vip(&[], "ceo@client.com"));
+        assert!(!is_vip(&["".to_string()], "ceo@client.com"));
     }
 
     #[test]
     fn explicit_request_is_premium() {
-        assert_eq!(draft_quality(Priority::Low, "timesheet", None, Some(DraftQuality::Premium), true), DraftQuality::Premium);
-        assert_eq!(draft_quality(Priority::Low, "timesheet", None, Some(DraftQuality::Standard), true), DraftQuality::Standard);
+        assert_eq!(draft_quality(Priority::Low, "timesheet", None, Some(DraftQuality::Premium), true, false), DraftQuality::Premium);
+        assert_eq!(draft_quality(Priority::Low, "timesheet", None, Some(DraftQuality::Standard), true, false), DraftQuality::Standard);
     }
 }

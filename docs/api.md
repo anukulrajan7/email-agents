@@ -971,3 +971,20 @@ window closes. New kinds: `below_target` (every workspace), `timesheet_missing` 
 owner. For an alert with an owner: level 1 goes to the person, level 2 to their manager (else the final contacts), level 3
 to the final contacts (else the alert recipients). Delays: `manager_after_hours` then `final_after_hours`. Rule alerts
 (`important_unanswered`, `approval_pending`) get the owner of the mailbox they arrived in.
+
+## Email understanding v2 (`UNDERSTAND_V2`)
+
+`off` (default) keeps classify + analyze + judges. `shadow` keeps them in charge and also runs `ai::understand` once per
+email, recording label agreement. `on` lets the one call decide (label, priority, needs_reply, asks, commitments, deadlines,
+entities, facts, alert signals); `classifications` and `message_insights` are written exactly as before, plus
+`message_insights.understanding_json`. Asks, commitments, deadlines and entities whose quote is not in the email are dropped;
+`*_iso` dates outside received -30/+365 days are nulled; a deadline within 2 days forces `priority = high`. Any failure falls
+back to the separate calls.
+
+| Method | Path | Role | Response |
+|---|---|---|---|
+| GET | `/api/v1/workspaces/:ws/understanding-shadow` | admin | `{compared, failed, label_agreement, needs_reply_agreement, priority_agreement, min_agreement: 0.95, min_samples: 100, ready_to_switch}` |
+
+Bulk mail (two or more of List-Unsubscribe, Precedence bulk/list, Auto-Submitted, Gmail promotions/social/updates/forums, or a
+no-reply sender; unknown sender; not billing, legal or security content) is filed by rules with no model call
+(`classifications.model_id = 'bulk-rules-v1'`, `source = 'fallback'`). Opening it (`POST …/messages/:id/insight`) runs the full pipeline.

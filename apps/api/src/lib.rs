@@ -10,6 +10,7 @@ pub mod automations;
 pub mod attachments;
 pub mod auth;
 pub mod backup;
+pub mod bulk;
 pub mod config;
 pub mod db;
 pub mod domain;
@@ -75,7 +76,7 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
             tracing::info!(model = %config.openrouter_classifier_model_id, "classifying with OpenRouter");
             Arc::new(
                 OpenRouterClassifier::new(client.clone(), &config.openrouter_classifier_model_id)
-                    .with_escalation(&config.openrouter_model_id),
+                    .with_escalation(&config.openrouter_escalation_model_id),
             )
         }
         _ => {
@@ -142,6 +143,17 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
         _ => Arc::new(ai::RulesAnalyst),
     };
 
+    // Email understanding v2: used only when UNDERSTAND_V2 is shadow or on; without a model it is the rules reader.
+    let understand_model = [&config.openrouter_understand_model_id, &config.openrouter_classifier_model_id, &config.openrouter_model_id]
+        .into_iter()
+        .find(|m| !m.is_empty())
+        .cloned()
+        .unwrap_or_default();
+    let understander: Arc<dyn ai::understand::Understander> = match &openrouter {
+        Some(client) if !understand_model.is_empty() => Arc::new(ai::understand::OpenRouterUnderstander::new(client.clone(), &understand_model)),
+        _ => Arc::new(ai::understand::RulesUnderstander),
+    };
+
     let embedder: Arc<dyn ai::embeddings::Embedder> =
         if openrouter.is_some() && !config.openrouter_embedding_model_id.is_empty() {
             Arc::new(
@@ -158,19 +170,18 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
             Arc::new(ai::embeddings::HashEmbedder)
         };
 
-    // Label suggestions read many emails at once and feed the taxonomy: use the drafting model.
-    let label_suggester: Arc<dyn ai::label_suggest::LabelSuggester> = match &openrouter {
-        Some(client) if !config.openrouter_model_id.is_empty() => {
-            Arc::new(ai::label_suggest::OpenRouterLabelSuggester::new(client.clone(), &config.openrouter_model_id))
-        }
+    // Label suggestions read many emails at once and feed the taxonomy: their own model variable.
+    let suggest_model = [&config.openrouter_suggest_model_id, &config.openrouter_classifier_model_id].into_iter().find(|m| !m.is_empty());
+    let label_suggester: Arc<dyn ai::label_suggest::LabelSuggester> = match (&openrouter, suggest_model) {
+        (Some(client), Some(model)) => Arc::new(ai::label_suggest::OpenRouterLabelSuggester::new(client.clone(), model)),
         _ => Arc::new(ai::label_suggest::RulesLabelSuggester),
     };
 
-    // Memory learning: efficient model for incoming mail, drafting model for the team's replies.
+    // Memory learning: the efficient model for incoming mail, OPENROUTER_LEARN_MODEL_ID for the team's replies.
     let memory_extractor: Arc<dyn ai::memory_extractor::MemoryExtractor> = match &openrouter {
-        Some(client) if !(config.openrouter_classifier_model_id.is_empty() && config.openrouter_model_id.is_empty()) => {
-            let incoming = if config.openrouter_classifier_model_id.is_empty() { &config.openrouter_model_id } else { &config.openrouter_classifier_model_id };
-            let reply = if config.openrouter_model_id.is_empty() { incoming } else { &config.openrouter_model_id };
+        Some(client) if !(config.openrouter_classifier_model_id.is_empty() && config.openrouter_learn_model_id.is_empty()) => {
+            let incoming = if config.openrouter_classifier_model_id.is_empty() { &config.openrouter_learn_model_id } else { &config.openrouter_classifier_model_id };
+            let reply = if config.openrouter_learn_model_id.is_empty() { incoming } else { &config.openrouter_learn_model_id };
             Arc::new(ai::memory_extractor::OpenRouterMemoryExtractor::new(client.clone(), incoming, reply))
         }
         _ => Arc::new(ai::memory_extractor::NoopMemoryExtractor),
@@ -264,6 +275,7 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
         memory_extractor,
         alert_mailer: mailer.clone(),
         analyst,
+        understander,
         embedder,
         label_suggester,
         extractor,

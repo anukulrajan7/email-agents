@@ -365,13 +365,14 @@ impl Judge for OpenRouterJudge {
         let max_tokens = 60 + 60 * questions.len() as u32;
         let (content, _) = self
             .client
-            .chat_json(
+            .chat_json_checked(
                 &self.model,
                 JUDGE_SYSTEM_PROMPT,
                 openrouter_prompt(context, questions),
                 "judge",
                 openrouter_schema(questions),
                 max_tokens,
+                |raw| parse_openrouter(questions, raw).map(|_| ()),
             )
             .await?;
         parse_openrouter(questions, &content)
@@ -482,10 +483,11 @@ pub async fn ask_cached(
 
 // ---------------------------------------------------------------- small decisions
 
-/// Email material for a judge call (body bounded and with secret-looking lines masked).
+/// Email material for a judge call: only what the sender wrote this time, bounded, with secret-looking lines masked.
 pub fn email_context(sender: &str, subject: &str, summary: Option<&str>, body: &str) -> String {
     let summary = summary.map(|s| format!("Summary: {s}\n")).unwrap_or_default();
-    format!("From: {sender}\nSubject: {subject}\n{summary}<email>\n{}\n</email>", super::prepare_text(body))
+    let body = super::body::model_body(subject, body);
+    format!("From: {sender}\nSubject: {subject}\n{summary}<email>\n{}\n</email>", super::prepare_text(&body))
 }
 
 pub const NEEDS_REPLY: &str = "needs_reply";

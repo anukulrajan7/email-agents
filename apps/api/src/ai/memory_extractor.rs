@@ -2,7 +2,7 @@
 //! The model only proposes; `memory_learning` filters, scores and stores what it returns.
 
 use async_trait::async_trait;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 pub use super::fence::{fence, fence_inline};
@@ -40,7 +40,7 @@ pub struct MemoryExtractInput {
 }
 
 /// Categories: `contact`, `client` (any direction); `answer`, `preference`, `style` (team text only).
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct ExtractedFact {
     pub category: String,
     pub about_counterpart: bool,
@@ -191,8 +191,10 @@ impl MemoryExtractor for OpenRouterMemoryExtractor {
             LearnDirection::Incoming => &self.incoming_model,
             LearnDirection::Reply => &self.reply_model,
         };
-        let (content, _) =
-            self.client.chat_json(model, SYSTEM_PROMPT, user_prompt(input), "memory_facts", schema(), 600).await?;
+        let (content, _) = self
+            .client
+            .chat_json_checked(model, SYSTEM_PROMPT, user_prompt(input), "memory_facts", schema(), 600, |raw| parse_facts(raw).map(|_| ()))
+            .await?;
         parse_facts(&content)
     }
 }

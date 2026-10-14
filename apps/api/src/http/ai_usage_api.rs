@@ -27,3 +27,9 @@ pub async fn get(
     let usage = ai_ledger::usage(&state.db, &ws, q.days.unwrap_or(30), state.config.ai_daily_budget_usd).await?;
     Ok(Json(usage))
 }
+
+/// Shadow-mode report: how often the one-call understanding agrees with production labelling.
+pub async fn shadow(State(state): State<AppState>, user: AuthUser, Path(ws): Path<String>) -> AppResult<Json<crate::ai::understand::ShadowReport>> {
+    require_role(&state.db, &ws, &user, Role::Admin).await?;
+    Ok(Json(crate::ai::understand::shadow_report(&state.db, &ws).await?))
+}

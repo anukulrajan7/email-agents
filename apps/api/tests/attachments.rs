@@ -299,6 +299,27 @@ async fn every_attachment_becomes_text_that_search_insight_and_the_ui_can_use() 
 }
 
 #[tokio::test]
+async fn attachment_text_triggers_at_most_one_refresh_and_only_when_it_adds_enough() {
+    let h = harness().await;
+    let refreshes = "SELECT COUNT(*) FROM jobs WHERE kind = 'analyze_message' AND dedupe_key LIKE 'analyze:%:attachments%'";
+
+    // A short receipt reading is not worth reading the email again.
+    let small = h.message("Receipt", 0, &[("receipt.png", "image/png", "att-img")]).await;
+    let added: String = sqlx::query_scalar("SELECT text_content FROM attachments WHERE message_id = ?1").bind(&small).fetch_one(&h.state.db).await.unwrap();
+    assert!(added.chars().count() < 200, "{added}");
+    let n: i64 = sqlx::query_scalar(refreshes).fetch_one(&h.state.db).await.unwrap();
+    assert_eq!(n, 0);
+    assert_eq!(h.analyst.0.lock().unwrap().len(), 1, "one reading for the receipt email");
+
+    // A spreadsheet plus voicemail adds plenty: exactly one refresh job, one more reading.
+    h.analyst.0.lock().unwrap().clear();
+    let big = h.message("Q3 numbers", 0, &ALL).await;
+    let n: i64 = sqlx::query_scalar(&format!("{refreshes} AND dedupe_key LIKE 'analyze:{big}:%'")).fetch_one(&h.state.db).await.unwrap();
+    assert_eq!(n, 1);
+    assert!(h.analyst.0.lock().unwrap().len() <= 2, "the email is read at most twice: before and after its files");
+}
+
+#[tokio::test]
 async fn old_mail_reads_documents_now_and_ai_files_when_opened() {
     let h = harness().await;
     let id = h.message("Old numbers", 10 * DAY_MS, &ALL).await;

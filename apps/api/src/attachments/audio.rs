@@ -19,6 +19,8 @@ pub const CHUNK_SECONDS: f64 = 45.0;
 /// Pieces transcribed per file; the rest is dropped and the result marked truncated.
 pub const MAX_CHUNKS: usize = 12;
 const TRANSCRIBE_TIMEOUT: Duration = Duration::from_secs(65);
+/// Speech to text is billed per hour of audio (about $0.03/h); priced per chunk when the provider reports no cost.
+const ASR_EST_USD_PER_CHUNK: f64 = 0.03 / 3600.0 * CHUNK_SECONDS;
 const SUMMARY_MAX_TOKENS: u32 = 500;
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -317,7 +319,7 @@ impl AudioReader for OpenRouterAudio {
             .mime_str(media_type)
             .map_err(|e| AiError::Permanent(format!("bad audio media type: {e}")))?;
         let form = reqwest::multipart::Form::new().text("model", self.asr_model.clone()).part("file", file);
-        let reply = self.client.post_multipart("/audio/transcriptions", &self.asr_model, form, TRANSCRIBE_TIMEOUT).await?;
+        let reply = self.client.post_multipart("/audio/transcriptions", &self.asr_model, form, TRANSCRIBE_TIMEOUT, Some(ASR_EST_USD_PER_CHUNK)).await?;
         reply
             .get("text")
             .and_then(Value::as_str)

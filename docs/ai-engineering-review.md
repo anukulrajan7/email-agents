@@ -2,6 +2,8 @@
 
 Scope: every model call in `apps/api` at `dd8b18a` (packs-m1 plus the golden evals), checked against docs/product-v1-plan.md, docs/specialist-agents.md §3, docs/evals.md and outside guidance (sources in §8). This review changes no application code. Files that WP-B owns are marked **[WP-B]**: `src/agent_registry/*`, `agents/{runner,autonomy,triggers,tools,case}.rs`, `agent_profiles.rs`, `packs.rs`, `assistant/command.rs`.
 
+**Status (WP-AI-FIX):** items 1, 2, 3 (behind a flag), 4, 5 and 8 (a, b) are implemented; see the "Done" column in §2 and the before/after cost table in §1c. Items 6, 7, 9, 10 and 8c are not done (6 and 9 are free for a later pass; 7, 10 and 8c belong to WP-B and `agent_profiles.rs`).
+
 Short version:
 - Today one new email costs about **$0.0010 with labelling only** and about **$0.0020 with auto-reply agents on**. If the agent tier is "best", the agentic figure is about $0.0034.
 - About 60% of the labelling cost comes from reading the same email 3–5 times in separate calls. These are classify, analyze, a needs-reply tie-break judge, incoming memory extraction and the alert-importance judge, plus duplicate analyses caused by races.
@@ -108,6 +110,37 @@ The §2.8 roadmap additions (learning loop, shadow cases, replay evals) add abou
 | One learner call per approved draft (V4 Flash) | #8, #9 | 0.000035 |
 | **Agentic target** | | **≈ 0.00046** (-77%) |
 
+### 1c. After the implemented changes (estimated)
+
+These are estimates from the same per-100-emails assumptions as 1a, not production measurements: no live traffic ran. What *is* measured is call counts, asserted in the offline tests (`tests/single_flight.rs`, `tests/bulk_filter.rs`, `tests/understanding_v2.rs`, `tests/attachments.rs`): one analysis per message however many stages need it, no model call for filed bulk mail, and with `UNDERSTAND_V2=on` one understanding call and zero classify, analyze, tie-break judge or incoming-memory calls.
+
+Assumptions beyond 1a: 70% of the 35% bulk mail carries two or more signals and is filed by rules (24.5% of all mail); the new-part body is ~320 tokens shorter than today's (620 → ~300) and the thread digest adds ~60 on average; escalation falls from 15% to ~5% and is priced on V4 Pro (~$0.00061 per call); 70% of the 25% of mail with text attachments adds ≥ 200 characters and triggers one refresh; the HR workflow premium share falls from 45% to 15%; reply memory drops to ~1,000 input tokens on V4 Flash; **no prompt caching** (item 6 is not done), so the understanding call is priced uncached at ~$0.0002 (about $0.00012 if a 1,000-token prefix were cached).
+
+| Path | Before ($/email) | After, v2 off | After, `UNDERSTAND_V2=on` | What changed |
+|---|---|---|---|---|
+| Classify | 0.000260 | 0.000160 | – (in understand) | new-part body (-$0.000048/call), 24.5% filed by rules |
+| Classifier escalation | 0.000178 (Kimi, <0.75) | 0.000023 (V4 Pro, <0.5) | – | item 8a |
+| Analyze | 0.000197 | 0.000119 | – (in understand) | new-part body, bulk filter |
+| Analyze duplicates + attachment refresh | 0.000132 | 0.000051 | 0.000045 (refresh is an understanding call) | item 5: no races, refresh only for ≥ 200 chars, once |
+| Understanding call (new) | – | – | 0.000151 | 1 call on the 75.5% not filed, uncached |
+| Needs-reply judge | 0.000014 | 0.000007 | 0 | v2 decides needs_reply |
+| Incoming memory extraction | 0.000135 | 0.000112 | 0 | facts come from the one call |
+| Alert gate judge | 0.000007 | 0.000005 | 0 | v2 alert signals |
+| Embeddings | 0.000010 | 0.000009 | 0.000009 | label-example query skipped for filed mail |
+| Vision | 0.000044 | 0.000044 | 0.000044 | unchanged |
+| **Labelling-only subtotal** | **0.00098** | **0.00053 (-46%)** | **0.00025 (-75%)** | |
+| Inbox agent case: planner | 0.000345 | 0.000345 | 0.000345 | WP-B (items 7, 10) |
+| Critic | 0.000081 | 0.000081 | 0.000081 | |
+| Agent draft | 0.000076 | 0.000069 | 0.000069 | new-part body, digest |
+| Send-safety judge | 0.000105 | 0.000091 | 0.000091 | new-part body in the judge context |
+| HR workflow drafts | 0.000058 | 0.000032 | 0.000032 | item 8b (premium only for high priority, VIP, 3+ asks, staffing labels) |
+| Reply memory | 0.000314 (Kimi) | 0.000028 (V4 Flash) | 0.000028 | item 8a |
+| Draft lessons | 0.000011 | 0.000011 | 0.000011 | item 9 not done |
+| **Agentic total (balanced agent)** | **0.00197** | **0.00119 (-40%)** | **0.00091 (-54%)** | |
+| Agentic total, "best" agent | 0.0034 | ≈ 0.0026 | ≈ 0.0023 | same savings, planner untouched |
+
+What stays on the table: item 6 (caching) would take the understanding call from $0.0002 to about $0.00012 (-$0.00006 per email); items 7 and 10 (WP-B) remove most of the planner row ($0.00035 balanced, $0.0015 best); item 9 removes the draft-lessons call. With all of them the 1b targets (≈ $0.0002 labelling, ≈ $0.0005 agentic) stay reachable. The v2-on figures are only worth having once shadow mode shows ≥ 95% label agreement (`GET /workspaces/:ws/understanding-shadow`).
+
 Latency targets:
 - p95 from email received to insight shown: ≤ 6 s.
 - p95 from email received to draft or approval ready: ≤ 15 s for routine replies.
@@ -118,6 +151,19 @@ Latency targets:
 ## 2. Top 10 changes, in priority order
 
 Each item lists the change, the files it touches, the expected saving, the risk, and whether it touches WP-B's files.
+
+| # | Change | Done | Where it landed |
+|---|---|---|---|
+| 1 | Ledger tells the truth | **Done** | `ai_ledger.rs` (provider `usage.cost` first, table as fallback, `cost_source`), `ai/openrouter.rs` (cached/cache-write/reasoning tokens, provider, answered model, finish_reason, generation id, `prompt_version`, `attempt` from the job, error class, `schema_ok`; invalid or unparseable answers marked as failures via `chat_json_checked`), deprecated `usage.include` removed (confirmed against OpenRouter's usage-accounting docs), ASR priced per chunk when the provider reports no cost, `judge`/`vision`/`audio`/`understand` counted as automatic tasks. Migration `0040_ai_ledger_detail.sql`. `vision` already had its own task. |
+| 2 | New part only | **Done** | `ai/body.rs` (`model_body`, `split`, `thread_digest`); used by classify, analyze, draft, incoming and reply memory, and every judge context (alerts, send safety, needs-reply). Forwards kept whole, inline replies keep their answers, never empty. Prompt versions bumped (`classify-v3`, `analyze-v2`, `ack-draft-v3`). |
+| 3 | Understanding v2 | **Done, flag off** | `ai/understand.rs`; `UNDERSTAND_V2=off|shadow|on`; shadow table and `GET …/understanding-shadow`; `message_insights.understanding_json`. Not built: `thread_state`, `contact_cards`, the outbound call, the hourly overdue pass, VIP priority from a contact card, forced approval on `injection_signals` (signals are stored, not yet enforced). Migration `0041_bulk_signals.sql` (shared with item 4). |
+| 4 | Bulk filter | **Done** | `bulk.rs`; signals stored at ingest (`sources/nango.rs`, `sources/resend.rs`, `ingest.rs`); `classify_email` files by rules (`model_id = bulk-rules-v1`); a person opening the email runs everything. |
+| 5 | Single flight | **Done** | `jobs/handlers.rs` (analysis job enqueues workflow, automations, learning; per-message lock; dead-letter still continues), `jobs/attachment_jobs.rs` (one refresh, ≥ 200 chars). |
+| 6 | Prompt caching | Not done | Needs `session_id` and the prompt reorder; touches `agents/runner.rs` (WP-B). The v2 prompt is already ordered stable-first. |
+| 7 | Routine replies as a workflow | Not done | WP-B. |
+| 8 | Model and tier routing | **Partly** | (a) `OPENROUTER_ESCALATION_MODEL_ID` (V4 Pro, only below 0.5, never for a missing confidence), `OPENROUTER_LEARN_MODEL_ID`, `OPENROUTER_SUGGEST_MODEL_ID`; (b) premium drafts for high priority, VIP sender, 3+ asks or staffing labels, no longer for any `missing_info`. (c) agent tier vs drafting tier is in `agent_profiles.rs` (WP-B): not done. |
+| 9 | Consolidate the learner | Not done | WP-A owns the learner. |
+| 10 | Planner on a diet | Not done | WP-B. |
 
 1. **Make the ledger tell the truth first.**
    - Record `prompt_tokens_details.cached_tokens`, `cache_write_tokens`, `reasoning_tokens`, `finish_reason`, the answering `provider`, the generation id, `prompt_version`, `schema_ok` and `attempt`.

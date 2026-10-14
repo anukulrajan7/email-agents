@@ -1,6 +1,7 @@
 //! AI adapters. Models only *propose*: a category, or draft text. `policy` and the
 //! workflow engine decide what actually happens.
 
+pub mod body;
 pub mod embeddings;
 pub mod fallback;
 pub mod fence;
@@ -13,13 +14,15 @@ pub mod policy;
 pub mod router;
 pub mod routing;
 pub mod selftest;
+pub mod understand;
 
 use async_trait::async_trait;
 
 use crate::domain::{ClassificationSource, Label, Priority};
 
-pub const PROMPT_VERSION: &str = "classify-v2";
-pub const DRAFT_PROMPT_VERSION: &str = "ack-draft-v2";
+pub const PROMPT_VERSION: &str = "classify-v3";
+pub const DRAFT_PROMPT_VERSION: &str = "ack-draft-v3";
+pub const ANALYZE_PROMPT_VERSION: &str = "analyze-v2";
 /// Upper bound on email text sent to any model.
 pub const MAX_MODEL_INPUT_CHARS: usize = 6_000;
 
@@ -106,6 +109,9 @@ pub struct DraftInput {
     pub signature: Option<String>,
     /// Sign-off when `signature` is unset (`packs::default_sign_off`): "HR Operations" for staffing, else the workspace name.
     pub default_sign_off: String,
+    /// Short digest of the earlier messages in this conversation (`ai::body::thread_digest`). `body_text` is only
+    /// what the sender wrote this time.
+    pub thread_digest: Option<String>,
 }
 
 /// The AI's reading of an email, produced before any reply is drafted.
@@ -121,6 +127,11 @@ pub struct Insight {
 #[async_trait]
 pub trait Analyst: Send + Sync {
     async fn analyze(&self, subject: &str, sender: &str, body: &str) -> Result<(Insight, String), AiError>;
+
+    /// Like `analyze`, with a digest of the earlier messages as context (asks answered there are not new).
+    async fn analyze_in_thread(&self, subject: &str, sender: &str, body: &str, _thread_digest: Option<&str>) -> Result<(Insight, String), AiError> {
+        self.analyze(subject, sender, body).await
+    }
 }
 
 /// No-AI fallback: questions are sentences ending in '?'.

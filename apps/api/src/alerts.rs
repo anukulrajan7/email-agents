@@ -361,6 +361,12 @@ async fn worth_alerting(state: &AppState, workspace_id: &str, c: &Candidate) -> 
     if exists {
         return Ok(true);
     }
+    // Understanding v2 already decided what is time-sensitive while reading the email: no judge call.
+    if state.config.understand_mode == crate::config::UnderstandMode::On
+        && let Some(u) = crate::ai::understand::stored(&state.db, &c.id).await?
+    {
+        return Ok(u.important());
+    }
     let body: String = sqlx::query_scalar("SELECT body_text FROM email_messages WHERE id = ?1")
         .bind(&c.id)
         .fetch_optional(&state.db)

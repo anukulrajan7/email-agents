@@ -54,3 +54,14 @@ exists.
 
 Append to `scenarios.json` (ids are unique; `script` is what the offline planner does; `offline_draft` is the
 canned reply, the template reply when absent). Run the offline eval; run live with `GOLDEN_FILTER=<id>`.
+
+## Understanding golden (offline)
+
+`tests/golden/understanding.json`, run by `tests/golden_understanding.rs` in CI, no model involved. It covers the review's
+scenarios that need no planner: `thread_quoted_history_old_ask`, `thread_inline_reply`, `forwarded_from_boss`,
+`bulk_invoice_with_unsubscribe`, `newsletter_with_question_bait`, `deadline_relative_dates`, plus an Outlook reply with signature and
+disclaimer, a closing word before a real request, a protected security alert, and hallucinated-extraction dropping. Graders are
+code: required and forbidden text in the new part, filed or not filed, and counts of verified asks and deadlines. Also covered
+elsewhere: `schema_failure_recovery` (`tests/ai_usage.rs`: invalid JSON is logged `ok = 0`, `schema_ok = 0`), the shadow gate
+(`ready_to_switch` at 95% over 100+ emails, `tests/understanding_v2.rs`). Not yet built: VIP priority, injection-signal approval
+forcing, the live variant, and the 60-email labelled set.

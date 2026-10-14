@@ -62,6 +62,8 @@ pub struct AppState {
     pub learner: Option<Arc<dyn Learner>>,
     pub extractor: Arc<dyn crate::ai::Extractor>,
     pub analyst: Arc<dyn crate::ai::Analyst>,
+    /// One structured call replacing classify + analyze + judges when `UNDERSTAND_V2` is shadow or on.
+    pub understander: Arc<dyn crate::ai::understand::Understander>,
     pub embedder: Arc<dyn crate::ai::embeddings::Embedder>,
     pub label_suggester: Arc<dyn crate::ai::label_suggest::LabelSuggester>,
     pub login_limiter: Arc<crate::sessions::LoginLimiter>,
@@ -154,6 +156,7 @@ pub fn router(state: AppState) -> Router {
         .route("/workspaces/{ws}/alert-settings/test", post(alerts_api::test))
         .route("/workspaces/{ws}/reply-settings", get(reply_settings_api::get_settings).put(reply_settings_api::put_settings))
         .route("/workspaces/{ws}/ai-usage", get(ai_usage_api::get))
+        .route("/workspaces/{ws}/understanding-shadow", get(ai_usage_api::shadow))
         .route("/workspaces/{ws}/jobs", get(jobs_api::list))
         .route("/workspaces/{ws}/jobs/{id}/retry", post(jobs_api::retry))
         .merge(automations_api::routes())

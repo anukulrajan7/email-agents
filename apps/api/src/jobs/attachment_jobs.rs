@@ -17,6 +17,8 @@ use crate::{
 };
 
 const MAX_PER_MESSAGE: i64 = 20;
+/// New attachment text must add at least this much before the insight is read again.
+pub const REFRESH_MIN_CHARS: usize = 200;
 
 /// Queues reading of this message's attachments. `open` marks a person opening an older email.
 pub async fn enqueue_extract(conn: &mut SqliteConnection, workspace_id: &str, message_id: &str, open: bool) -> sqlx::Result<bool> {
@@ -91,10 +93,14 @@ pub async fn extract_attachments(state: &AppState, job: &Job, payload: &Value) -
     .await?;
 
     let mut with_text = 0;
+    let mut added_chars = 0;
     for a in &rows {
         let outcome = read_one(state, job, &msg, a, ai_allowed).await?;
-        if matches!(&outcome, Outcome::Done { text, .. } if !text.is_empty()) {
+        if let Outcome::Done { text, .. } = &outcome
+            && !text.is_empty()
+        {
             with_text += 1;
+            added_chars += text.chars().count();
         }
         store(state, &a.id, outcome).await?;
     }
@@ -113,14 +119,17 @@ pub async fn extract_attachments(state: &AppState, job: &Job, payload: &Value) -
         &json!({ "message_id": message_id }),
     )
     .await?;
-    jobs::enqueue(
-        &mut tx,
-        kind::ANALYZE_MESSAGE,
-        &format!("analyze:{message_id}:attachments{open}:{}", job.id),
-        Some(&msg.workspace_id),
-        &json!({ "message_id": message_id, "refresh_attachments": true }),
-    )
-    .await?;
+    // At most one refresh per email (and one more when a person opens it), and only for real new text.
+    if added_chars >= REFRESH_MIN_CHARS {
+        jobs::enqueue(
+            &mut tx,
+            kind::ANALYZE_MESSAGE,
+            &format!("analyze:{message_id}:attachments{open}"),
+            Some(&msg.workspace_id),
+            &json!({ "message_id": message_id, "refresh_attachments": true }),
+        )
+        .await?;
+    }
     tx.commit().await?;
     state.jobs_notify.notify_one();
     Ok(())

@@ -6,6 +6,7 @@ use serde_json::{Value, json};
 use super::{handlers::JobError, kind};
 use crate::{
     ai::memory_extractor::{LearnDirection, MemoryExtractInput},
+    config::UnderstandMode,
     http::AppState,
     memory_learning::{self, AUTO_MEMORY_CAP},
 };
@@ -33,6 +34,12 @@ struct MessageRow {
     category: Option<String>,
     needs_reply: Option<bool>,
     display_name: Option<String>,
+}
+
+/// What the sender wrote this time plus their sign-off (role and company are usually there).
+fn incoming_text(subject: &str, body: &str) -> String {
+    let split = crate::ai::body::split(subject, body);
+    if split.signature.is_empty() { split.new_part } else { format!("{}\n\n{}", split.new_part, split.signature) }
 }
 
 pub async fn learn_from_message(state: &AppState, payload: &Value) -> Result<(), JobError> {
@@ -82,13 +89,15 @@ pub async fn learn_from_message(state: &AppState, payload: &Value) -> Result<(),
         .bind(&message_id)
         .fetch_optional(&state.db)
         .await?;
+        let text = crate::ai::body::model_body(&m.subject, &m.body_text);
+        let context = context.map(|c| crate::ai::body::model_body(&m.subject, &c));
         MemoryExtractInput {
             direction: LearnDirection::Reply,
             subject: m.subject,
             counterpart,
             counterpart_name: None,
             label: m.category,
-            text: m.body_text,
+            text,
             context,
         }
     } else {
@@ -97,17 +106,26 @@ pub async fn learn_from_message(state: &AppState, payload: &Value) -> Result<(),
         if is_noise || memory_learning::is_automated_sender(&m.sender_address) {
             return Ok(());
         }
+        let text = incoming_text(&m.subject, &m.body_text);
         MemoryExtractInput {
             direction: LearnDirection::Incoming,
             subject: m.subject,
             counterpart: Some(m.sender_address.clone()),
             counterpart_name: m.display_name,
             label: m.category,
-            text: m.body_text,
+            text,
             context: None,
         }
     };
-    let facts = state.memory_extractor.extract(&input).await?;
+    // With understanding v2 the facts came out of the one reading already: no second call on the same email.
+    let v2_facts = match (input.direction, state.config.understand_mode) {
+        (LearnDirection::Incoming, UnderstandMode::On) => crate::ai::understand::stored(&state.db, &message_id).await?.map(|u| u.facts),
+        _ => None,
+    };
+    let facts = match v2_facts {
+        Some(facts) => facts,
+        None => state.memory_extractor.extract(&input).await?,
+    };
     let learned = memory_learning::sanitize(input.direction, input.counterpart.as_deref(), facts);
     let report =
         memory_learning::store(&state.db, &m.workspace_id, &message_id, &message_id, input.direction, learned, AUTO_MEMORY_CAP)
@@ -158,6 +176,7 @@ pub async fn learn_from_reply(state: &AppState, payload: &Value) -> Result<(), J
     if !matches!(status.as_str(), "approved" | "sent") || reply.trim().chars().count() < MIN_TEXT_CHARS {
         return Ok(());
     }
+    let context = crate::ai::body::model_body(&subject, &original);
     let input = MemoryExtractInput {
         direction: LearnDirection::Reply,
         subject,
@@ -165,7 +184,7 @@ pub async fn learn_from_reply(state: &AppState, payload: &Value) -> Result<(), J
         counterpart_name: None,
         label: category,
         text: reply,
-        context: Some(original),
+        context: Some(context),
     };
     let facts = state.memory_extractor.extract(&input).await?;
     let learned = memory_learning::sanitize(LearnDirection::Reply, input.counterpart.as_deref(), facts);

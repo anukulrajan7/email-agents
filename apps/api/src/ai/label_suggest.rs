@@ -158,7 +158,10 @@ impl LabelSuggester for OpenRouterLabelSuggester {
             "required": ["labels"],
             "additionalProperties": false
         });
-        let (content, _) = self.client.chat_json(&self.model, SUGGEST_SYSTEM_PROMPT, user, "label_suggestions", schema, 900).await?;
+        let (content, _) = self
+            .client
+            .chat_json_checked(&self.model, SUGGEST_SYSTEM_PROMPT, user, "label_suggestions", schema, 900, |raw| parse_proposals(raw).map(|_| ()))
+            .await?;
         parse_proposals(&content)
     }
 }
