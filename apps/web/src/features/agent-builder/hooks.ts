@@ -47,7 +47,8 @@ export function useDryRun(ws: string, id: string) {
 export function useSaveDesign(ws: string, id: string) {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (start_level: 0 | 1) => api<SavedAgent>(`/workspaces/${ws}/designer/sessions/${id}/save`, { method: 'POST', body: { start_level } }),
+    mutationFn: (body: { start_level: 0 | 1; confirm_steals: boolean }) =>
+      api<SavedAgent>(`/workspaces/${ws}/designer/sessions/${id}/save`, { method: 'POST', body }),
     onSuccess: (saved) => {
       qc.setQueryData(sessionKey(ws, id), saved.session);
       void qc.invalidateQueries({ queryKey: ['ws', ws, 'agents'] });

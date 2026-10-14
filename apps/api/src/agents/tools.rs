@@ -94,6 +94,8 @@ pub struct ToolOutput {
     pub state: Option<Value>,
     /// The case sleeps until this time (unix ms).
     pub sleep_until: Option<i64>,
+    /// What the tool itself spent on models (reading an email, say); added to the case's spend.
+    pub cost_usd: f64,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -534,6 +536,12 @@ impl Tool for RecallMemory {
 
 // ---------------------------------------------------------------- low tools
 
+/// Stable short key of a draft's instructions, so retrying the same step finds the draft it already made.
+fn instruction_key(text: &str) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(text.as_bytes()).iter().take(8).map(|b| format!("{b:02x}")).collect()
+}
+
 struct DraftEmail;
 
 #[async_trait]
@@ -603,7 +611,10 @@ impl Tool for DraftEmail {
                         ..Default::default()
                     });
                 }
-                let origin = format!("agent:{}:{}", ctx.case.id, ctx.turn);
+                let origin = match instructions {
+                    Some(text) => format!("agent:{}:{}:{}", ctx.case.id, msg.id, instruction_key(text)),
+                    None => format!("agent:{}:{}", ctx.case.id, ctx.turn),
+                };
                 crate::agent_profiles::with_draft_style(style, handlers::create_agent_draft(ctx.state, &msg.id, instructions, quality, &origin))
                     .await?
                     .ok_or_else(|| ToolError::Failed("The writer judged that this email needs no reply.".into()))?
@@ -798,12 +809,16 @@ impl Tool for ExtractFields {
         if fields.is_empty() || fields.len() > 12 {
             return failed("Ask for 1 to 12 details.");
         }
-        let found = ctx
+        if !fields.iter().all(crate::agent_registry::spec::field_ok) {
+            return failed("Each detail needs a lower-case name and a description of at most 200 characters.");
+        }
+        let extracted = ctx
             .state
             .field_extractor
             .extract(&msg.subject, &knowledge::clean_body(&msg.body_text), &fields)
             .await
             .map_err(|_| ToolError::Failed("The details could not be read right now.".into()))?;
+        let found = extracted.found;
         let missing: Vec<&str> = fields.iter().map(|f| f.name.as_str()).filter(|n| !found.contains_key(*n)).collect();
         let list = |names: Vec<String>| if names.is_empty() { "nothing".to_string() } else { names.join(", ") };
         Ok(ToolOutput {
@@ -814,6 +829,7 @@ impl Tool for ExtractFields {
             ),
             value: json!({"found": found, "missing": missing}),
             state: Some(json!({"extracted": found, "extract_missing": missing})),
+            cost_usd: extracted.cost_usd,
             ..Default::default()
         })
     }

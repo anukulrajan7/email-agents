@@ -20,7 +20,9 @@ pub async fn designer_dry_run(state: &AppState, job: &Job, payload: &Value) -> R
         .and_then(Value::as_array)
         .map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect())
         .unwrap_or_default();
-    dry_run::run(state, workspace_of(job)?, session_id(payload)?, &picked).await
+    let hash = payload.get("spec_hash").and_then(Value::as_str).ok_or_else(|| JobError::Permanent("payload missing spec_hash".into()))?;
+    let call_id = payload.get("call_id").and_then(Value::as_str).unwrap_or_default();
+    dry_run::run(state, workspace_of(job)?, session_id(payload)?, &picked, hash, call_id).await
 }
 
 /// A dry run that kept failing is shown as failed instead of running forever.
@@ -35,5 +37,8 @@ pub async fn on_dead(state: &AppState, job: &Job, payload: &Value) -> Result<(),
     .bind(workspace_of(job)?)
     .execute(&state.db)
     .await?;
+    if let Some(call_id) = payload.get("call_id").and_then(Value::as_str) {
+        dry_run::settle(state, call_id, "failed", 0.0).await?;
+    }
     Ok(())
 }

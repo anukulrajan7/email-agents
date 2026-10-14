@@ -165,6 +165,8 @@ pub struct SaveBody {
     start_level: Option<i64>,
     avatar: Option<String>,
     color: Option<String>,
+    #[serde(default)]
+    confirm_steals: bool,
 }
 
 async fn save(
@@ -177,7 +179,7 @@ async fn save(
     require_target(&state, &ws, &user, &s).await?;
     let body = body.map(|Json(b)| b).unwrap_or_default();
     let (avatar, color) = look(body.avatar.as_deref(), body.color.as_deref())?;
-    let saved = session::save(&state, &ws, &user.id, &id, SaveOptions { start_level: body.start_level.unwrap_or(0), avatar: &avatar, color: &color }).await?;
+    let saved = session::save(&state, &ws, &user.id, &id, SaveOptions { start_level: body.start_level.unwrap_or(0), avatar: &avatar, color: &color, confirm_steals: body.confirm_steals }).await?;
     let agent = store::get_in(&state.db, &ws, &saved.agent_id).await?.ok_or(AppError::NotFound)?;
     let session = respond(&state, &ws, &id).await?.0;
     Ok(Json(json!({"agent": detail_json(&state, &ws, &agent).await?, "version": saved.version, "session": session})))

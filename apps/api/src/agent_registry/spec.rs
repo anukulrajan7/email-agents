@@ -391,6 +391,11 @@ fn check_match(m: &TriggerMatch, path: &str, out: &mut Vec<Issue>) {
     }
 }
 
+/// A field to extract needs a lower-case name and a description of at most 200 characters.
+pub fn field_ok(f: &ExtractField) -> bool {
+    is_slug(&f.name) && f.description.chars().count() <= 200
+}
+
 fn check_step(step: &Step, path: &str, out: &mut Vec<Issue>) {
     match step {
         Step::Extract { fields } => {
@@ -398,7 +403,7 @@ fn check_step(step: &Step, path: &str, out: &mut Vec<Issue>) {
                 out.push(issue(format!("{path}.fields"), "bad_fields", "extract 1 to 12 fields"));
             }
             for (i, f) in fields.iter().enumerate() {
-                if !is_slug(&f.name) || f.description.chars().count() > 200 {
+                if !field_ok(f) {
                     out.push(issue(format!("{path}.fields[{i}]"), "bad_field", "a field needs a lower-case name and a description of at most 200 characters"));
                 }
             }

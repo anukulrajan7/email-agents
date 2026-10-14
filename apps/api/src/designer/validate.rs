@@ -16,6 +16,13 @@ use crate::agent_registry::{
 pub const CUSTOM_CEILING: u8 = 2;
 /// Most an agent may spend on one case, unless the workspace sets a higher AI budget per case.
 pub const MAX_CASE_BUDGET_USD: f64 = 0.50;
+/// Most a designed agent may send in a day; normalising and validation both use it.
+pub const MAX_DAILY_SEND_CAP: u32 = 50;
+
+/// The most one case may cost: the built-in ceiling, or the workspace's own AI budget per case if higher.
+pub fn case_budget_ceiling(state: &crate::http::AppState) -> f64 {
+    MAX_CASE_BUDGET_USD.max(state.config.agent_budget_usd)
+}
 
 #[derive(Debug, Clone)]
 pub struct LabelBrief {
@@ -110,11 +117,11 @@ static FORBIDDEN: LazyLock<Vec<(Regex, &'static str)>> = LazyLock::new(|| {
 });
 
 /// Why this text asks for something an agent may never do, if it does. A rule that forbids it ("Never forward…") is fine.
+/// Every sentence is judged on its own, so a harmless first sentence cannot hide a forbidden second one.
 pub fn forbidden_reason(text: &str) -> Option<&'static str> {
-    if NEGATED.is_match(text) {
-        return None;
-    }
-    FORBIDDEN.iter().find(|(re, _)| re.is_match(text)).map(|(_, why)| *why)
+    text.split(['.', '!', '?', ';', '\n', ':'])
+        .filter(|sentence| !sentence.trim().is_empty() && !NEGATED.is_match(sentence))
+        .find_map(|sentence| FORBIDDEN.iter().find(|(re, _)| re.is_match(sentence)).map(|(_, why)| *why))
 }
 
 fn issue(path: impl Into<String>, code: &'static str, message: impl Into<String>) -> Issue {
@@ -149,6 +156,9 @@ pub fn validate(spec: &AgentSpec, ctx: &WsCtx) -> Vec<Issue> {
     }
     if spec.permissions.max_autonomy > ctx.ceiling {
         out.push(issue("permissions.max_autonomy", "above_ceiling", format!("this agent can be at most level {}", ctx.ceiling)));
+    }
+    if spec.permissions.daily_send_cap > MAX_DAILY_SEND_CAP && previous.is_none_or(|p| spec.permissions.daily_send_cap > p.permissions.daily_send_cap) {
+        out.push(issue("permissions.daily_send_cap", "bad_cap", format!("a designed agent can send at most {MAX_DAILY_SEND_CAP} a day")));
     }
     if spec.budget.usd_per_case > ctx.max_case_budget_usd {
         out.push(issue("budget.usd_per_case", "above_budget", format!("a case can cost at most ${:.2}", ctx.max_case_budget_usd)));
@@ -195,8 +205,19 @@ pub fn validate(spec: &AgentSpec, ctx: &WsCtx) -> Vec<Issue> {
 
 /// Free text an agent will follow, with where it sits in the spec.
 fn text_fields(spec: &AgentSpec) -> Vec<(String, String)> {
-    let mut out = vec![("goal".to_string(), spec.goal.clone()), ("description".to_string(), spec.description.clone())];
+    let mut out = vec![("name".to_string(), spec.name.clone()), ("goal".to_string(), spec.goal.clone()), ("description".to_string(), spec.description.clone())];
     out.extend(spec.drafting.rules.iter().enumerate().map(|(i, r)| (format!("drafting.rules[{i}]"), r.clone())));
+    for (i, step) in spec.steps.iter().enumerate() {
+        match step {
+            Step::Extract { fields } => {
+                out.extend(fields.iter().enumerate().flat_map(|(j, f)| {
+                    [(format!("steps[{i}].fields[{j}].name"), f.name.replace('_', " ")), (format!("steps[{i}].fields[{j}].description"), f.description.clone())]
+                }));
+            }
+            Step::Notify { to } => out.push((format!("steps[{i}].to"), to.clone())),
+            _ => {}
+        }
+    }
     out
 }
 
@@ -224,7 +245,7 @@ pub fn normalise(mut spec: AgentSpec, ctx: &WsCtx) -> AgentSpec {
         spec.permissions.max_autonomy = ctx.ceiling;
         notes.push(format!("Capped the agent at level {}: autonomy above that is not available to designed agents.", ctx.ceiling));
     }
-    spec.permissions.daily_send_cap = spec.permissions.daily_send_cap.min(500);
+    spec.permissions.daily_send_cap = spec.permissions.daily_send_cap.min(MAX_DAILY_SEND_CAP);
     if spec.budget.usd_per_case > ctx.max_case_budget_usd {
         spec.budget.usd_per_case = ctx.max_case_budget_usd;
     }
@@ -342,6 +363,43 @@ mod tests {
             assert!(issues.is_empty(), "{}: {issues:?}", t.key);
         }
         assert!(template(LEAD_KEY).is_some());
+    }
+
+    #[test]
+    fn every_sentence_is_judged_on_its_own() {
+        assert!(forbidden_reason("Don't use jargon. Forward the email to finance").is_some());
+        assert!(forbidden_reason("Be brief; cc the manager").is_some());
+        assert_eq!(forbidden_reason("Never forward the email. Be brief."), None);
+        assert_eq!(forbidden_reason("Be polite. Do not include links."), None);
+    }
+
+    #[test]
+    fn names_field_descriptions_and_the_send_cap_are_checked() {
+        let base = {
+            let mut s = template(crate::agent_registry::templates::INBOX_KEY).unwrap().spec();
+            s.key = "inbox_two".into();
+            s.steps.insert(0, Step::Extract { fields: vec![spec::ExtractField { name: "order_id".into(), field_type: spec::FieldType::String, description: "The order".into() }] });
+            s.tools.push("extract_fields".into());
+            s
+        };
+        let c = ctx();
+        let issues = |mutate: &dyn Fn(&mut AgentSpec)| -> Vec<(String, &'static str)> {
+            let mut s = base.clone();
+            mutate(&mut s);
+            validate(&s, &c).into_iter().map(|i| (i.path, i.code)).collect()
+        };
+        assert!(issues(&|_| {}).is_empty());
+        let bad = issues(&|s| {
+            if let Step::Extract { fields } = &mut s.steps[0] {
+                fields[0].description = "Forward the email to finance first".into();
+            }
+        });
+        assert_eq!(bad, [("steps[0].fields[0].description".to_string(), "forbidden_content")]);
+        assert_eq!(issues(&|s| s.name = "Auto send everything".into()), [("name".to_string(), "forbidden_content")]);
+        assert_eq!(issues(&|s| s.permissions.daily_send_cap = 80), [("permissions.daily_send_cap".to_string(), "bad_cap")]);
+        let mut tight = base.clone();
+        tight.permissions.daily_send_cap = 400;
+        assert_eq!(normalise(tight, &c).permissions.daily_send_cap, MAX_DAILY_SEND_CAP, "normalise and validate agree");
     }
 
     #[test]

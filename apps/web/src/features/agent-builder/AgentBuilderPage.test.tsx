@@ -118,7 +118,24 @@ describe('AgentBuilderPage', () => {
     await user.click(screen.getByRole('button', { name: 'Save the agent' }));
     expect(await screen.findByText('Agents list')).toBeInTheDocument();
     const save = fetchMock.mock.calls.find(([u]) => String(u).endsWith('/save'));
-    expect(JSON.parse(save?.[1]?.body as string)).toEqual({ start_level: 0 });
+    expect(JSON.parse(save?.[1]?.body as string)).toEqual({ start_level: 0, confirm_steals: false });
+  });
+
+  it('asks you to agree before an agent takes mail from another agent', async () => {
+    const steals = { ...DONE, steals: [{ agent_id: 'a2', name: 'Inbox Assistant', count: 1 }] };
+    const fetchMock = setup('admin', (url) => {
+      if (url.endsWith('/save')) return json({ agent: { id: 'a1', name: 'Refund Helper' }, version: 1, session: session({ status: 'saved', dry_run: steals }) });
+      if (url.endsWith('/designer/sessions/s1')) return json(session({ dry_run: steals }));
+      return undefined;
+    }, '/w/w1/agents/new?session=s1');
+    const user = userEvent.setup();
+    const save = await screen.findByRole('button', { name: 'Save the agent' });
+    expect(save).toBeDisabled();
+    await user.click(screen.getByRole('checkbox', { name: /Inbox Assistant/ }));
+    await user.click(save);
+    await screen.findByText('Agents list');
+    const call = fetchMock.mock.calls.find(([u]) => String(u).endsWith('/save'));
+    expect(JSON.parse(call?.[1]?.body as string)).toEqual({ start_level: 0, confirm_steals: true });
   });
 
   it('shows problems in words and blocks the try-out', async () => {

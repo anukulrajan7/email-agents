@@ -171,9 +171,12 @@ function TryAndSave({ ws, session }: { ws: string; session: DesignerSession }) {
   const dry = useDryRun(ws, session.id);
   const save = useSaveDesign(ws, session.id);
   const [level, setLevel] = useState<'0' | '1'>('0');
+  const [confirmed, setConfirmed] = useState(false);
   const valid = session.spec !== null && session.issues.length === 0;
   const report = session.dry_run;
   const tried = report?.status === 'done';
+  const steals = tried ? (report.steals ?? []) : [];
+  const needsConfirm = steals.length > 0 && !confirmed;
   return (
     <Card className="flex flex-col gap-4" aria-labelledby="try-heading">
       <CardTitle id="try-heading">Try it, then save it</CardTitle>
@@ -190,12 +193,18 @@ function TryAndSave({ ws, session }: { ws: string; session: DesignerSession }) {
           <option value="0">Watching only. It shows what it would do.</option>
           <option value="1">Drafting. It prepares drafts for you to approve.</option>
         </Select>
+        {steals.length > 0 && (
+          <label className="flex items-start gap-2 text-sm text-ink">
+            <input type="checkbox" className="mt-1" checked={confirmed} onChange={(e) => setConfirmed(e.target.checked)} />
+            <span>I am happy for this agent to take emails that {steals.map((s) => s.name).join(', ')} handle today.</span>
+          </label>
+        )}
         <ErrorNote error={save.error} />
         <div>
           <Button
             loading={save.isPending}
-            disabled={!valid || !tried}
-            onClick={() => save.mutate(Number(level) as 0 | 1, { onSuccess: () => navigate(`/w/${ws}/agents`) })}
+            disabled={!valid || !tried || needsConfirm}
+            onClick={() => save.mutate({ start_level: Number(level) as 0 | 1, confirm_steals: confirmed }, { onSuccess: () => navigate(`/w/${ws}/agents`) })}
           >
             Save the agent
           </Button>

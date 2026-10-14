@@ -80,7 +80,10 @@ async fn the_refund_example_is_designed_dry_run_without_writes_and_saved_at_leve
     assert!(!dry["examples"].as_array().unwrap().is_empty());
     assert_eq!(writes(&env).await, before, "a dry run writes nothing");
 
-    let saved = env.ok("POST", &format!("{path}/save"), ADMIN, Some(json!({}))).await;
+    let (st, body) = env.req("POST", &format!("{path}/save"), ADMIN, Some(json!({}))).await;
+    assert_eq!(st, StatusCode::CONFLICT, "it would take mail from the Inbox Assistant: {body}");
+    assert!(body["error"]["message"].as_str().unwrap().contains("Inbox Assistant"));
+    let saved = env.ok("POST", &format!("{path}/save"), ADMIN, Some(json!({"confirm_steals": true}))).await;
     assert_eq!(saved["version"], 1);
     let agent = &saved["agent"];
     assert_eq!((agent["name"].as_str(), agent["autonomy"]["earned"].as_i64()), (Some("Refund Helper"), Some(0)));
@@ -189,4 +192,226 @@ async fn a_proposed_automation_opens_a_designer_session_and_runs_nothing() {
     let s = session::open_from_proposal(&env.state, &env.ws, &env.admin_id, "Refund helper", "Collect the order number on refund emails").await.unwrap();
     assert!(s.spec.is_some() && s.status == "ready");
     assert_eq!(env.count("SELECT COUNT(*) FROM agents WHERE workspace_id = ?1").await, before, "nothing is saved until an admin saves");
+}
+
+async fn dry_run_and_wait(env: &Env, id: &str) {
+    env.req("POST", &format!("/designer/sessions/{id}/dry-run"), ADMIN, None).await;
+    worker::drain(&env.state).await;
+}
+
+#[tokio::test]
+async fn racing_requests_cannot_go_past_the_daily_limit() {
+    let mut script = ScriptedDesigner::new();
+    for _ in 0..30 {
+        script = script.reply(refund_spec());
+    }
+    let env = env_with(script).await;
+    let url = format!("/api/v1/workspaces/{}/designer/sessions", env.ws);
+    let tasks: Vec<_> = (0..30)
+        .map(|_| {
+            let (app, url) = (env.app.clone(), url.clone());
+            tokio::spawn(async move { call(&app, "POST", &url, ADMIN, Some(json!({"goal": "refunds"}))).await.0 })
+        })
+        .collect();
+    let mut created = 0;
+    let mut refused = 0;
+    for t in tasks {
+        match t.await.unwrap() {
+            StatusCode::CREATED => created += 1,
+            StatusCode::TOO_MANY_REQUESTS => refused += 1,
+            other => panic!("unexpected {other}"),
+        }
+    }
+    assert_eq!((created, refused), (DAILY_LIMIT, 30 - DAILY_LIMIT), "exactly the daily limit got through");
+    assert_eq!(env.designer.calls() as i64, DAILY_LIMIT, "refused requests never reached the model");
+}
+
+#[tokio::test]
+async fn a_session_has_one_designer_call_at_a_time_and_failed_calls_are_recorded() {
+    let env = env_with(ScriptedDesigner::new().reply(refund_spec()).fail(email_ai_api::ai::AiError::Permanent("down".into()))).await;
+    let s = open(&env, json!({"goal": "refunds"})).await;
+    let id = s["id"].as_str().unwrap();
+    sqlx::query("INSERT INTO designer_calls (id, workspace_id, session_id, user_id, kind, status, created_at) VALUES ('dcl_busy', ?1, ?2, 'u', 'design', 'pending', ?3)")
+        .bind(&env.ws)
+        .bind(id)
+        .bind(email_ai_api::db::now_ms())
+        .execute(&env.state.db)
+        .await
+        .unwrap();
+    let (st, _) = env.req("POST", &format!("/designer/sessions/{id}/messages"), ADMIN, Some(json!({"text": "again"}))).await;
+    assert_eq!(st, StatusCode::CONFLICT);
+    sqlx::query("UPDATE designer_calls SET status = 'done'").execute(&env.state.db).await.unwrap();
+    let (st, _) = env.req("POST", &format!("/designer/sessions/{id}/messages"), ADMIN, Some(json!({"text": "again"}))).await;
+    assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(env.count("SELECT COUNT(*) FROM designer_calls WHERE workspace_id = ?1 AND status = 'failed'").await, 1, "a failed call still counts");
+    assert_eq!(env.count("SELECT COUNT(*) FROM designer_calls WHERE workspace_id = ?1 AND status = 'pending'").await, 0);
+}
+
+struct Bumper(sqlx::SqlitePool);
+
+#[async_trait::async_trait]
+impl email_ai_api::designer::Designer for Bumper {
+    async fn design(&self, _: &email_ai_api::designer::DesignRequest) -> Result<email_ai_api::designer::DesignReply, email_ai_api::ai::AiError> {
+        sqlx::query("UPDATE designer_sessions SET rev = rev + 1").execute(&self.0).await.unwrap();
+        Ok(email_ai_api::designer::DesignReply { json: refund_spec().to_string(), cost_usd: 0.01 })
+    }
+}
+
+#[tokio::test]
+async fn a_design_turn_that_lost_a_race_does_not_overwrite_the_newer_session() {
+    let env = env_with(ScriptedDesigner::new().reply(refund_spec())).await;
+    let s = open(&env, json!({"goal": "refunds"})).await;
+    let id = s["id"].as_str().unwrap().to_string();
+    let mut racing = env.state.clone();
+    racing.designer = std::sync::Arc::new(Bumper(env.state.db.clone()));
+    let err = session::design_turn(&racing, &env.ws, &id, "shorter please").await;
+    assert!(matches!(err, Err(email_ai_api::error::AppError::Conflict(_))), "{err:?}");
+    let after = session::get(&env.state.db, &env.ws, &id).await.unwrap().unwrap();
+    assert_eq!(after.turns.len(), 2, "the losing turn wrote nothing");
+    assert!(after.cost_usd >= 0.01, "but what it cost is still charged");
+}
+
+#[tokio::test]
+async fn dry_runs_are_metered_rate_limited_and_claimed_once() {
+    let env = env_with(ScriptedDesigner::new().reply(refund_spec())).await;
+    env.receive(&env.shared_src, "g1", "t1", CLIENT, "Refund for my order", "Please refund order #4411.", "billing").await;
+    let s = open(&env, json!({"goal": "refunds"})).await;
+    let id = s["id"].as_str().unwrap().to_string();
+    let path = format!("/designer/sessions/{id}/dry-run");
+
+    let (a, b) = tokio::join!(env.req("POST", &path, ADMIN, None), env.req("POST", &path, ADMIN, None));
+    assert_eq!((a.0, b.0), (StatusCode::ACCEPTED, StatusCode::ACCEPTED));
+    assert_eq!(env.count("SELECT COUNT(*) FROM designer_calls WHERE workspace_id = ?1 AND kind = 'dry_run'").await, 1, "two requests, one run");
+    worker::drain(&env.state).await;
+    let after = env.ok("GET", &format!("/designer/sessions/{id}"), ADMIN, None).await;
+    assert_eq!(after["dry_run"]["status"], "done");
+    assert!(after["cost_usd"].as_f64().unwrap() > 0.0, "the run is charged to the session: {after}");
+    let call_cost: f64 = sqlx::query_scalar("SELECT cost_usd FROM designer_calls WHERE kind = 'dry_run'").fetch_one(&env.state.db).await.unwrap();
+    assert!(call_cost > 0.0);
+
+    for _ in 0..4 {
+        dry_run_and_wait(&env, &id).await;
+    }
+    let (st, body) = env.req("POST", &path, ADMIN, None).await;
+    assert_eq!(st, StatusCode::TOO_MANY_REQUESTS, "{body}");
+}
+
+#[tokio::test]
+async fn a_dry_run_for_an_older_spec_is_dropped() {
+    let env = env_with(ScriptedDesigner::new().reply(refund_spec())).await;
+    let s = open(&env, json!({"goal": "refunds"})).await;
+    let id = s["id"].as_str().unwrap().to_string();
+    env.req("POST", &format!("/designer/sessions/{id}/dry-run"), ADMIN, None).await;
+    let mut other = refund_spec();
+    other["description"] = json!("Something else entirely.");
+    env.ok("PUT", &format!("/designer/sessions/{id}/spec"), ADMIN, Some(json!({"spec": other}))).await;
+    worker::drain(&env.state).await;
+    let after = env.ok("GET", &format!("/designer/sessions/{id}"), ADMIN, None).await;
+    assert_eq!(after["dry_run"], Value::Null, "the finished report of the old spec was not stored");
+}
+
+#[tokio::test]
+async fn a_personal_agents_session_only_sees_its_owners_mailbox_and_has_its_own_quota() {
+    let mut personal: AgentSpec = templates::template(templates::PERSONAL_KEY).unwrap().spec();
+    personal.description = "Drafts my replies carefully.".into();
+    let spec = serde_json::to_value(&personal).unwrap();
+    let mut script = ScriptedDesigner::new();
+    for _ in 0..8 {
+        script = script.reply(spec.clone());
+    }
+    let env = env_with(script).await;
+    env.receive(&env.shared_src, "g1", "t1", CLIENT, "Shared mailbox mail", "Hello team", "question").await;
+    let mine = env.receive(&env.op_src, "g2", "t2", CLIENT, "Mail to Priya", "Hello Priya", "question").await;
+    let agent_id = env.personal_id(OPERATOR).await;
+
+    let (st, s) = env.req("POST", "/designer/sessions", OPERATOR, Some(json!({"goal": "be careful", "agent_id": agent_id}))).await;
+    assert_eq!(st, StatusCode::CREATED, "{s}");
+    let id = s["id"].as_str().unwrap().to_string();
+    assert_eq!(s["issues"], json!([]), "{s}");
+    let shared: String = sqlx::query_scalar("SELECT id FROM email_messages WHERE workspace_id = ?1 AND source_id = 'src_shared'").bind(&env.ws).fetch_one(&env.state.db).await.unwrap();
+    let (st, _) = env.req("POST", &format!("/designer/sessions/{id}/dry-run"), OPERATOR, Some(json!({"message_ids": [shared]}))).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "someone else's mailbox cannot be picked");
+    env.req("POST", &format!("/designer/sessions/{id}/dry-run"), OPERATOR, Some(json!({"message_ids": [mine]}))).await;
+    worker::drain(&env.state).await;
+    let after = env.ok("GET", &format!("/designer/sessions/{id}"), OPERATOR, None).await;
+    assert_eq!(after["dry_run"]["sampled"], 1, "{after}");
+    env.req("POST", &format!("/designer/sessions/{id}/dry-run"), OPERATOR, None).await;
+    worker::drain(&env.state).await;
+    let after = env.ok("GET", &format!("/designer/sessions/{id}"), OPERATOR, None).await;
+    assert_eq!(after["dry_run"]["sampled"], 1, "the default sample is the owner's mailbox too");
+
+    for n in 0..4 {
+        let (st, _) = env.req("POST", &format!("/designer/sessions/{id}/messages"), OPERATOR, Some(json!({"text": format!("tweak {n}")}))).await;
+        assert_eq!(st, StatusCode::OK);
+    }
+    let (st, _) = env.req("POST", &format!("/designer/sessions/{id}/messages"), OPERATOR, Some(json!({"text": "one more"}))).await;
+    assert_eq!(st, StatusCode::TOO_MANY_REQUESTS, "5 a day for a member's own agent");
+    assert_eq!(session::calls_today(&env.state.db, &env.ws).await.unwrap(), 0, "the workspace quota is untouched");
+}
+
+#[tokio::test]
+async fn only_an_admin_approver_opens_a_designer_session_from_a_proposal() {
+    let env = env_with(ScriptedDesigner::new().reply(refund_spec())).await;
+    let err = session::open_from_proposal(&env.state, &env.ws, &env.op_id, "Refund helper", "Collect order numbers").await;
+    assert!(matches!(err, Err(email_ai_api::error::AppError::Forbidden)));
+    assert_eq!(env.count("SELECT COUNT(*) FROM designer_sessions WHERE workspace_id = ?1").await, 0);
+}
+
+#[tokio::test]
+async fn saving_an_edit_of_an_agent_that_changed_since_is_refused() {
+    let env = env_with(ScriptedDesigner::new().reply(refund_spec())).await;
+    let s = open(&env, json!({"goal": "refunds"})).await;
+    let id = s["id"].as_str().unwrap().to_string();
+    dry_run_and_wait(&env, &id).await;
+    let saved = env.ok("POST", &format!("/designer/sessions/{id}/save"), ADMIN, Some(json!({"confirm_steals": true}))).await;
+    let agent_id = saved["agent"]["id"].as_str().unwrap().to_string();
+
+    let mut edit = refund_spec();
+    edit["description"] = json!("A second version.");
+    env.designer.push(edit.clone());
+    let s = open(&env, json!({"goal": "tune it", "agent_id": agent_id})).await;
+    let edit_id = s["id"].as_str().unwrap().to_string();
+    dry_run_and_wait(&env, &edit_id).await;
+
+    let mut other = refund_spec();
+    other["description"] = json!("Changed by someone else meanwhile.");
+    env.designer.push(other);
+    let s2 = open(&env, json!({"goal": "tune it too", "agent_id": agent_id})).await;
+    let other_id = s2["id"].as_str().unwrap().to_string();
+    dry_run_and_wait(&env, &other_id).await;
+    env.ok("POST", &format!("/designer/sessions/{other_id}/save"), ADMIN, Some(json!({"confirm_steals": true}))).await;
+
+    let (st, body) = env.req("POST", &format!("/designer/sessions/{edit_id}/save"), ADMIN, Some(json!({"confirm_steals": true}))).await;
+    assert_eq!(st, StatusCode::CONFLICT, "{body}");
+}
+
+struct CostlyExtractor;
+
+#[async_trait::async_trait]
+impl email_ai_api::ai::field_extract::FieldExtractor for CostlyExtractor {
+    async fn extract(&self, _: &str, _: &str, _: &[email_ai_api::agent_registry::spec::ExtractField]) -> Result<email_ai_api::ai::field_extract::Extracted, email_ai_api::ai::AiError> {
+        Ok(email_ai_api::ai::field_extract::Extracted { found: [("order_id".to_string(), "4411".to_string())].into(), cost_usd: 0.0042 })
+    }
+}
+
+#[tokio::test]
+async fn reading_details_is_charged_to_the_case_and_a_retried_draft_is_not_duplicated() {
+    let mut env = env_with(ScriptedDesigner::new().reply(refund_spec())).await;
+    env.state.field_extractor = std::sync::Arc::new(CostlyExtractor);
+    let s = open(&env, json!({"goal": "refunds"})).await;
+    let id = s["id"].as_str().unwrap().to_string();
+    dry_run_and_wait(&env, &id).await;
+    env.ok("POST", &format!("/designer/sessions/{id}/save"), ADMIN, Some(json!({"start_level": 1, "confirm_steals": true}))).await;
+    let msg = env.receive(&env.shared_src, "g1", "t1", CLIENT, "Refund for my order", "Please refund order #4411.", "billing").await;
+    let case_id = env.start(&msg).await;
+    let case = env.case(ADMIN, &case_id).await;
+    let extract = case["steps"].as_array().unwrap().iter().find(|s| s["tool"] == "extract_fields").expect("an extract step");
+    assert_eq!(extract["status"], "ok", "{case}");
+    assert!(case["spent_usd"].as_f64().unwrap() >= 0.0042, "the reading cost reached the case: {case}");
+
+    let drafts = || env.count("SELECT COUNT(*) FROM drafts WHERE workspace_id = ?1");
+    let before = drafts().await;
+    assert_eq!(before, 1);
+    let origin: String = sqlx::query_scalar("SELECT origin_key FROM drafts WHERE workspace_id = ?1").bind(&env.ws).fetch_one(&env.state.db).await.unwrap();
+    assert!(origin.starts_with(&format!("agent:{case_id}:{msg}:")), "{origin}");
 }

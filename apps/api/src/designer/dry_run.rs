@@ -41,15 +41,26 @@ struct Sampled {
     received_at: i64,
 }
 
-async fn sample(state: &AppState, ws: &str, picked: &[String]) -> sqlx::Result<Vec<Sampled>> {
-    sqlx::query_as(
-        "SELECT id, subject, received_at FROM email_messages
-         WHERE workspace_id = ?1 AND direction = 'inbound' AND (json_array_length(?2) = 0 OR id IN (SELECT value FROM json_each(?2)))
-         ORDER BY received_at DESC, id DESC LIMIT ?3",
+/// SQL for "this message (alias `m`) is in the mailbox of the member bound at `?n`", the rule `routing::message_facts`
+/// uses for `owner_user_id`; with no member bound every message of the workspace qualifies.
+pub fn owned_clause(n: usize) -> String {
+    format!(
+        "(?{n} IS NULL OR EXISTS (SELECT 1 FROM email_sources s JOIN memberships ms ON ms.workspace_id = m.workspace_id AND ms.user_id = s.connected_by_user_id
+           WHERE s.id = m.source_id AND s.connected_by_user_id = ?{n}))"
     )
+}
+
+async fn sample(state: &AppState, ws: &str, picked: &[String], owner: Option<&str>) -> sqlx::Result<Vec<Sampled>> {
+    sqlx::query_as(&format!(
+        "SELECT m.id, m.subject, m.received_at FROM email_messages m
+         WHERE m.workspace_id = ?1 AND m.direction = 'inbound' AND (json_array_length(?2) = 0 OR m.id IN (SELECT value FROM json_each(?2))) AND {}
+         ORDER BY m.received_at DESC, m.id DESC LIMIT ?3",
+        owned_clause(4)
+    ))
     .bind(ws)
     .bind(json!(picked).to_string())
     .bind(SAMPLE_SIZE)
+    .bind(owner)
     .fetch_all(&state.db)
     .await
 }
@@ -112,17 +123,31 @@ fn reason_in_words(source: Source) -> &'static str {
 
 // ---------------------------------------------------------------- safety and cost
 
+/// Whether a step sends mail on its own. Every variant is named, so a new step type has to be judged here.
+fn step_sends(step: &Step) -> bool {
+    match step {
+        Step::Extract { .. }
+        | Step::DraftReply { .. }
+        | Step::CreateReview { .. }
+        | Step::RemindIfNoReply { .. }
+        | Step::SaveToGmailDrafts
+        | Step::Label { .. }
+        | Step::StartCase
+        | Step::Notify { .. } => false,
+    }
+}
+
 /// The checks every designed spec must pass before it is saved. Stands in for the evals safety suite.
-pub fn safety(spec: &AgentSpec) -> Value {
+pub fn safety(spec: &AgentSpec, max_case_budget_usd: f64) -> Value {
     let checks: Vec<(&str, bool)> = vec![
         ("autonomy is capped at level 2", spec.permissions.max_autonomy <= validate::CUSTOM_CEILING),
         ("sending needs the send tool and a level of 2 or more", spec.permissions.send != SendMode::Earned || (spec.has_tool("send_email") && spec.permissions.max_autonomy >= 2)),
         ("an agent that never sends has no send tool", spec.permissions.send != SendMode::Never || !spec.has_tool("send_email")),
         ("no rule forwards, copies, links, attaches or weakens approval", spec.drafting.rules.iter().all(|r| validate::forbidden_reason(r).is_none())),
-        ("no step is a send step", !spec.steps.iter().any(|s| s.describe().to_lowercase().contains("send the reply"))),
+        ("no step sends mail by itself", !spec.steps.iter().any(step_sends)),
         ("every tool is one agents can use", spec.tools.iter().all(|t| tools::registry().get(t).is_some())),
         ("the daily send cap is at most 50", spec.permissions.daily_send_cap <= 50),
-        ("the cost of one case is capped", spec.budget.usd_per_case <= validate::MAX_CASE_BUDGET_USD && spec.budget.max_steps <= 30),
+        ("the cost of one case is capped", spec.budget.usd_per_case <= max_case_budget_usd && spec.budget.max_steps <= 30),
     ];
     let failed: Vec<&str> = checks.iter().filter(|(_, ok)| !ok).map(|(name, _)| *name).collect();
     json!({"passed": failed.is_empty(), "cases": checks.len(), "failed": failed})
@@ -199,7 +224,8 @@ async fn simulate_workflow(state: &AppState, ws: &str, spec: &AgentSpec, message
     for step in workflow::steps_for(spec) {
         match step {
             WfStep::Extract(fields) => match state.field_extractor.extract(&subject, &crate::knowledge::clean_body(&body), &fields).await {
-                Ok(found) => {
+                Ok(extracted) => {
+                    let found = extracted.found;
                     let missing: Vec<&str> = fields.iter().map(|f| f.name.as_str()).filter(|n| !found.contains_key(*n)).collect();
                     let list = found.iter().map(|(k, v)| format!("{k} = {v}")).collect::<Vec<_>>().join(", ");
                     ex.step(
@@ -350,7 +376,8 @@ pub async fn report(state: &AppState, s: &Session, picked: &[String]) -> Result<
         Some(id) => crate::agent_registry::store::get_in(&state.db, ws, id).await?,
         None => None,
     };
-    let messages = sample(state, ws, picked).await?;
+    let owner = session::owner_of(state, ws, s).await.map_err(|_| JobError::Permanent("the agent's owner could not be found".into()))?;
+    let messages = sample(state, ws, picked, owner.as_deref()).await?;
     let baseline = routing::active_agents(&state.db, &state.config, ws).await?;
     let (candidates, candidate_id) = candidate_agents(&baseline, &spec, existing.as_ref(), ws);
     let name_of = |id: &str| baseline.iter().find(|a| a.row.id == id).map(|a| a.row.name.clone()).unwrap_or_else(|| "another agent".into());
@@ -410,30 +437,71 @@ pub async fn report(state: &AppState, s: &Session, picked: &[String]) -> Result<
     }
     Ok(json!({
         "would_handle": would_handle, "sampled": sampled, "window_days": (window_days * 10.0).round() / 10.0,
-        "steals": steals, "examples": examples, "safety": safety(&spec),
+        "steals": steals, "examples": examples, "safety": safety(&spec, validate::case_budget_ceiling(state)),
         "est_cost_per_email_usd": per_email, "est_monthly_usd": (monthly * 100.0).round() / 100.0,
-        "warnings": warnings, "spec_hash": spec.hash(), "ran_at": crate::db::iso(now_ms()),
+        "warnings": warnings, "spec_hash": spec.hash(), "charged_usd": (per_email * examples.len() as f64 * 1e6).round() / 1e6, "ran_at": crate::db::iso(now_ms()),
     }))
 }
 
-/// The `designer_dry_run` job: builds the report and stores it (or the failure) on the session.
-pub async fn run(state: &AppState, ws: &str, session_id: &str, picked: &[String]) -> Result<(), JobError> {
+/// The `designer_dry_run` job: builds the report and stores it (or the failure) on the session. The report is
+/// for the spec whose hash the job was queued with; if the spec changed since, nothing is stored. What the run
+/// cost is added to the session and to its reserved call.
+pub async fn run(state: &AppState, ws: &str, session_id: &str, picked: &[String], spec_hash: &str, call_id: &str) -> Result<(), JobError> {
     let Some(s) = session::get(&state.db, ws, session_id).await? else { return Ok(()) };
     if s.dry_run_status != "running" {
+        settle(state, call_id, "failed", 0.0).await?;
         return Ok(());
     }
-    let (status, body) = match report(state, &s, picked).await {
-        Ok(report) => ("done", report),
+    if s.spec.as_ref().map(AgentSpec::hash).as_deref() != Some(spec_hash) {
+        settle(state, call_id, "failed", 0.0).await?;
+        return Ok(());
+    }
+    let (status, body, cost) = match report(state, &s, picked).await {
+        Ok(report) => {
+            let cost = report["charged_usd"].as_f64().unwrap_or(0.0);
+            ("done", report, cost)
+        }
         Err(JobError::Retry(m)) => return Err(JobError::Retry(m)),
-        Err(JobError::Permanent(m)) => ("failed", json!({"error": crate::agents::sentence(&m, 200)})),
+        Err(JobError::Permanent(m)) => ("failed", json!({"error": crate::agents::sentence(&m, 200)}), 0.0),
     };
-    sqlx::query("UPDATE designer_sessions SET dry_run_status = ?1, dry_run_json = ?2, updated_at = ?3 WHERE id = ?4 AND workspace_id = ?5 AND dry_run_status = 'running'")
-        .bind(status)
-        .bind(body.to_string())
-        .bind(now_ms())
-        .bind(session_id)
-        .bind(ws)
-        .execute(&state.db)
-        .await?;
+    let stored = sqlx::query(
+        "UPDATE designer_sessions SET dry_run_status = ?1, dry_run_json = ?2, updated_at = ?3, cost_usd = cost_usd + ?4, rev = rev + 1
+         WHERE id = ?5 AND workspace_id = ?6 AND dry_run_status = 'running' AND dry_run_spec_hash = ?7",
+    )
+    .bind(status)
+    .bind(body.to_string())
+    .bind(now_ms())
+    .bind(cost)
+    .bind(session_id)
+    .bind(ws)
+    .bind(spec_hash)
+    .execute(&state.db)
+    .await?
+    .rows_affected();
+    settle(state, call_id, if status == "done" { "done" } else { "failed" }, if stored == 1 { cost } else { 0.0 }).await?;
     Ok(())
+}
+
+pub async fn settle(state: &AppState, call_id: &str, status: &str, cost_usd: f64) -> Result<(), JobError> {
+    sqlx::query("UPDATE designer_calls SET status = ?1, cost_usd = ?2 WHERE id = ?3").bind(status).bind(cost_usd).bind(call_id).execute(&state.db).await?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent_registry::templates::{INBOX_KEY, template};
+
+    #[test]
+    fn safety_is_structural_and_uses_the_given_cost_ceiling() {
+        let mut spec = template(INBOX_KEY).unwrap().spec();
+        assert_eq!(safety(&spec, 0.50)["passed"], true);
+        spec.steps.push(Step::Extract { fields: vec![] });
+        assert_eq!(safety(&spec, 0.50)["passed"], true, "a step whose text mentions sending is not a send step");
+        spec.budget.usd_per_case = 0.8;
+        assert_eq!(safety(&spec, 0.50)["passed"], false);
+        assert_eq!(safety(&spec, 1.0)["passed"], true, "a workspace with a higher AI budget per case raises the ceiling");
+        spec.permissions.daily_send_cap = 51;
+        assert_eq!(safety(&spec, 1.0)["passed"], false);
+    }
 }
