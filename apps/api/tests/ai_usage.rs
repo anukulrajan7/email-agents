@@ -212,7 +212,7 @@ async fn ledger_records_cache_provider_finish_reason_prompt_version_and_provider
     let (cost, source, cached, provider, finish, gen_id, version, schema_ok, attempt, ok, class) = rows[0].clone();
     assert_eq!((cost, source.as_str()), (0.00002, "provider"), "the provider's own cost wins over the price table");
     assert_eq!((cached, provider.as_deref(), finish.as_deref(), gen_id.as_deref()), (900, Some("DeepSeek"), Some("stop"), Some("gen-abc")));
-    assert_eq!(version.as_deref(), Some("analyze-v2"));
+    assert_eq!(version.as_deref(), Some("analyze-v3"));
     assert_eq!((schema_ok, attempt, ok, class), (None, 1, true, None));
 }
 
@@ -263,7 +263,7 @@ async fn understanding_calls_are_verified_and_recorded_under_their_own_task_and_
     let (u, _) = OpenRouterUnderstander::new(client, "deepseek/deepseek-v4-flash").understand(&input).await.unwrap();
     assert_eq!((u.asks.len(), u.dropped_unverified), (1, 1));
     let (task, version): (String, Option<String>) = sqlx::query_as("SELECT task, prompt_version FROM ai_calls").fetch_one(&env.state.db).await.unwrap();
-    assert_eq!((task.as_str(), version.as_deref()), ("understand", Some("understand-v1")));
+    assert_eq!((task.as_str(), version.as_deref()), ("understand", Some("understand-v2")));
 }
 
 #[tokio::test]

@@ -649,7 +649,12 @@ async fn another_members_personal_work_stays_out_of_the_timeline_and_case_creati
     let mine = env.personal_id(OPERATOR).await;
     assert_eq!(env.route(&msg).await.route.agent_id, mine);
     let (s, body) = env.req("POST", "/cases", ADMIN, Some(json!({"kind": "inbox", "message_id": msg}))).await;
-    assert_eq!(s, StatusCode::NOT_FOUND, "an admin is not shown a case of Priya's personal agent: {body}");
+    assert_eq!(s, StatusCode::CONFLICT, "an admin cannot start a case on Priya's personal mail: {body}");
+    assert!(body.to_string().contains("personal mailbox"), "{body}");
+    let created: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM cases WHERE workspace_id = ?1").bind(&env.ws).fetch_one(&env.state.db).await.unwrap();
+    assert_eq!(created, 0, "no case row for the refused start");
+    let (s, _) = env.req("POST", "/cases", OPERATOR, Some(json!({"kind": "inbox", "message_id": msg}))).await;
+    assert_eq!(s, StatusCode::OK);
     worker::drain(&env.state).await;
     let case_id: String = sqlx::query_scalar("SELECT id FROM cases WHERE workspace_id = ?1 AND message_id = ?2").bind(&env.ws).bind(&msg).fetch_one(&env.state.db).await.unwrap();
     let rows_for = |token: &'static str| {

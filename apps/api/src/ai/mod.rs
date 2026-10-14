@@ -23,7 +23,7 @@ use crate::domain::{ClassificationSource, Label, Priority};
 
 pub const PROMPT_VERSION: &str = "classify-v3";
 pub const DRAFT_PROMPT_VERSION: &str = "ack-draft-v3";
-pub const ANALYZE_PROMPT_VERSION: &str = "analyze-v2";
+pub const ANALYZE_PROMPT_VERSION: &str = "analyze-v3";
 /// Upper bound on email text sent to any model.
 pub const MAX_MODEL_INPUT_CHARS: usize = 6_000;
 
@@ -150,10 +150,11 @@ impl Analyst for RulesAnalyst {
             .take(5)
             .map(str::to_string)
             .collect();
-        let first: String = crate::attachments::strip_attachment_markup(body).split_whitespace().take(40).collect::<Vec<_>>().join(" ");
+        let plain = crate::attachments::strip_attachment_markup(body);
+        let summary = crate::format::summary::rules_summary(subject, plain, crate::db::now_ms());
         Ok((
             Insight {
-                summary: if first.is_empty() { subject.to_string() } else { first },
+                summary,
                 // Rules can't tell "no reply needed" safely; only the model may skip a reply.
                 needs_reply: true,
                 asks,

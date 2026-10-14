@@ -50,10 +50,39 @@ pub enum Started {
     NotAllowed(String),
 }
 
+/// Why a person may not start a case on mail in another member's own mailbox (their own agent handles it).
+fn foreign_personal_refusal(ctx: &agent_profiles::AgentContext, started_by: Option<&str>) -> Option<String> {
+    let starter = started_by?;
+    let owner = ctx.owner.as_ref().filter(|o| o.user_id != starter)?;
+    let name = owner
+        .profile
+        .as_ref()
+        .map(|p| p.display_name.trim())
+        .filter(|n| !n.is_empty())
+        .or_else(|| owner.email.split('@').next().filter(|n| !n.is_empty()))
+        .unwrap_or(&owner.email);
+    Some(format!("This is in {name}'s personal mailbox \u{2014} their own {} handles it.", ctx.agent.name))
+}
+
+/// Same refusal for the assistant's plan step, before any card is prepared.
+pub async fn personal_refusal(state: &AppState, ws: &str, message_id: &str, started_by: &str) -> sqlx::Result<Option<String>> {
+    let ctx = agent_profiles::context_for_message(&state.db, &state.config, ws, message_id).await?;
+    Ok(foreign_personal_refusal(&ctx, Some(started_by)))
+}
+
 /// The person whose mailbox the email arrived in, if the agent does `task`; else why not.
-async fn agent_for(state: &AppState, ws: &str, message_id: &str, task: &str) -> sqlx::Result<Result<Option<String>, String>> {
+async fn agent_for(
+    state: &AppState,
+    ws: &str,
+    message_id: &str,
+    task: &str,
+    started_by: Option<&str>,
+) -> sqlx::Result<Result<Option<String>, String>> {
     let ctx = agent_profiles::context_for_message(&state.db, &state.config, ws, message_id).await?;
     let name = &ctx.agent.name;
+    if let Some(why) = foreign_personal_refusal(&ctx, started_by) {
+        return Ok(Err(why));
+    }
     if !ctx.agent.enabled {
         return Ok(Err(format!("{name} is switched off for this workspace")));
     }
@@ -70,7 +99,7 @@ pub async fn start_requirement_case(state: &AppState, ws: &str, requirement_id: 
     if !crate::packs::has_feature(&state.db, ws, crate::packs::FEATURE_REQUIREMENT_AGENT).await? {
         return Ok(Started::NotAllowed("The HR & recruiting pack is not turned on for this workspace".into()));
     }
-    let owner = match agent_for(state, ws, &r.message_id, TASK_REQUIREMENTS).await? {
+    let owner = match agent_for(state, ws, &r.message_id, TASK_REQUIREMENTS, created_by).await? {
         Ok(owner) => owner,
         Err(why) => return Ok(Started::NotAllowed(why)),
     };
@@ -187,7 +216,7 @@ async fn message_facts(state: &AppState, ws: &str, message_id: &str) -> sqlx::Re
 /// real one, unless a person started this case by hand.
 pub async fn start_inbox_case(state: &AppState, ws: &str, message_id: &str, created_by: Option<&str>) -> sqlx::Result<Started> {
     let Some(m) = message_facts(state, ws, message_id).await?.filter(|m| m.direction == "inbound") else { return Ok(Started::NotFound) };
-    let owner = match agent_for(state, ws, message_id, TASK_REPLY).await? {
+    let owner = match agent_for(state, ws, message_id, TASK_REPLY, created_by).await? {
         Ok(owner) => owner,
         Err(why) => return Ok(Started::NotAllowed(why)),
     };

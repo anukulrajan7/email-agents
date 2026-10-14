@@ -16,6 +16,7 @@ pub mod db;
 pub mod domain;
 pub mod error;
 pub mod evals;
+pub mod format;
 pub mod http;
 pub mod ingest;
 pub mod jobs;

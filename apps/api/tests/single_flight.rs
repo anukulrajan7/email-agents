@@ -134,7 +134,7 @@ async fn concurrent_callers_share_one_analysis() {
 
     let payload = json!({"message_id": id});
     let results = futures_join(&env.state, &payload).await;
-    assert!(results.iter().all(|r| r.summary == "About Payslip"));
+    assert!(results.iter().all(|r| r.summary == "About Payslip."));
     assert_eq!(env.analyst.0.load(Ordering::SeqCst) - before, 1, "draft, automations, agent tools and the job raced: one reading");
 }
 

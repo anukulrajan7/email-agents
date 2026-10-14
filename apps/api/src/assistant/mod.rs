@@ -61,6 +61,7 @@ Rules:\n\
 - A <history> block holds the earlier turns of this conversation, so follow-ups make sense. It can be out of date: use tools for current facts.\n\
 - Use only ids and facts from tool results. Never invent ids, names, numbers or dates. If you cannot find something, say so.\n\
 - Never send, forward or submit anything yourself, and never promise money, offers or dates.\n\
+- Talk to the person like a helpful colleague: \"you\", plain everyday words, the key fact first, one to three short sentences. Rupees as ₹ (never INR), a card as \"card ending 4755\" (never XX4755), dates as \"12 Oct\". Copy amounts exactly from tool results.\n\
 - Finish with the answer tool: plain sentences, at most 120 words, no lists or markdown. Put the message_ids you relied on in citations, and the attachment_ids you read in attachment_ids.";
 
 #[derive(Debug, Clone)]
