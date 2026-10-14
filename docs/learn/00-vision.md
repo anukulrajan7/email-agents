@@ -111,6 +111,28 @@ From `docs/status-2026-10-15.md` ("After v1") and `docs/roadmap.md`:
 | 6 | Restore drill in CI | Backups exist nightly; a tested restore does not |
 | 7 | Scheduled performance summary and a "correction needed" alert | Managers asked for it |
 
+## 7. Where the product can still improve (a product view)
+
+A product manager reading `docs/features.md`, `docs/research-2026-10.md` and the status page would push on these.
+They are suggestions, not commitments; the first four are already on the after-v1 list.
+
+| Area | Gap today | Why it matters to a user | Evidence |
+|---|---|---|---|
+| **Prove quality on real mail** | Golden evals run with scripted planners; no recorded live baseline | "Does it write a good reply?" is the first question every pilot asks | `docs/status-2026-10-15.md` After v1 item 3 |
+| **Each member connects their own Gmail** | An admin connects every mailbox | The "one Meera per person" promise needs per-person consent and private mail from day one | After v1 item 2 |
+| **Switch to understanding v2** | Runs in shadow; 75% cheaper labelling waiting on 95% agreement | Lower cost per email is a sales argument for HR firms with thousands of mails a month | After v1 item 4 |
+| **Ask Meera on numbers** | Metric functions exist but the assistant does not call them | "How many submissions did Priya make this week?" is the manager's daily question | After v1 item 5, `docs/roadmap.md` R8 |
+| **Hide, do not just lock, agents of a switched-off pack** | Pack off pauses its agents and the hub still shows them locked ("Its pack is turned off") | A smaller team sees helpers it did not ask for; the user asked about exactly this | `apps/api/src/agent_registry/seed.rs:158`, `apps/web/src/features/agents-hub/AgentCard.tsx:36` |
+| **Show the "why" of every automatic action in one sentence** | The timeline has steps; the inbox row does not say "Rohan acknowledged this at 10:14, held until 10:24" | Trust comes from seeing the helper work, not from a settings page | `docs/features.md` section 9 |
+| **Onboarding with the user's own sent mail** | Profile is a form; past replies are retrieved as examples but not imported on sign-up | The research brief lists "paste 1–2 typical replies or import last N sent emails" as the fastest route to drafts in your voice | `docs/research-2026-10.md` Personalization |
+| **Follow-up detection as a first-class view** | Alerts cover "important mail unanswered"; there is no "waiting on them / waiting on me" list | Users value needs-reply versus FYI sorting above almost everything | `docs/research-2026-10.md` Market |
+| **End-to-end latency metric** | Per-call latency only; nothing measures email received to draft ready | A draft that lands in 10 s feels different from one in 60 s | `docs/ai-engineering-review.md` finding 11 |
+| **Restore drill** | Nightly backups exist; a tested restore does not | A company will ask before it trusts you with its mail | After v1 item 6 |
+| **Pricing and billing** | No plans, seats or invoices in the product | Predictable cost is a top user concern in the research; the ledger already has the numbers | `docs/research-2026-10.md` Market |
+
+How to use this list: pick one, write a one-page spec (user, problem, what "done" looks like, how it is measured),
+then follow the build path in modules 05 and 06 (an eval scenario ships with every AI change).
+
 ## In this repo
 
 - `README.md`: how to run it, what is real versus stubbed.

@@ -6,6 +6,7 @@ Forward an HR email → it shows up in the inbox → it is classified → a time
 - `apps/api` — Rust + Axum + SQLx (SQLite, WAL) + a Tokio worker on a SQLite `jobs` table
 - `apps/web` — React + TypeScript + Vite + TanStack Query + Tailwind
 - `docs/api.md` — the REST contract both sides follow
+- `docs/learn/README.md` — the learning path: Rust, architecture, tools, AI basics, agents, evals, with exercises
 
 ## Run locally
 

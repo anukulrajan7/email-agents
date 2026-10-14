@@ -77,7 +77,7 @@ and `priority`.
   `README.md` ("Key design choices").
 - **Wake-up**: the API calls `state.jobs_notify.notify_one()` after writing a job; the worker sleeps on that
   `Notify` or a 1 s poll (`jobs/worker.rs:46`).
-- **Maintenance** every 30 s (`jobs/worker.rs:108`): sweep expired leases, enqueue mailbox polling, alert
+- **Maintenance** every 30 s (`jobs/worker.rs:105`): sweep expired leases, enqueue mailbox polling, alert
   evaluation, agent ticks, metrics rollup, match digest, staffing scan, hourly purge, nightly backup, text clean.
 
 Compare to Node: this is BullMQ without Redis. The trade: simpler ops, one writer at a time.

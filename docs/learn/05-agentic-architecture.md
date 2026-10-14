@@ -21,14 +21,14 @@ its own; do it with the app running.
 
 Both run on the **same runtime**: a case, durable steps, the same tools, the same critic rules, the same send
 guards. A workflow case can hand over to the planner when a step needs judgement (`decide` returns `None`,
-`workflow.rs:138`, for example a reply arrived during a `remind_if_no_reply` wait).
+`workflow.rs:135`, for example a reply arrived during a `remind_if_no_reply` wait).
 
 Analogy: a workflow is a checklist taped to the desk. An agent is a colleague with a goal and a phone list. You give
 the checklist to the intern; you give the goal to someone who has proven they ask before promising money.
 
 ## 2. The agent spec
 
-An agent *is* its spec: plain data, validated in code before anything runs (`apps/api/src/agent_registry/spec.rs:299`).
+An agent *is* its spec: plain data, validated in code before anything runs (`apps/api/src/agent_registry/spec.rs:294`).
 
 ```json
 {
@@ -141,7 +141,7 @@ conversation passed the injection gate, and every fixed rule in `blocker` (`:150
 trail. Stop calls `automated_send_stopped` (`:360`): the send is cancelled, a signal and an incident are recorded,
 and the agent loses a level.
 
-**The sensitive floor** is the `SENSITIVE` regex (`autonomy.rs:58`) applied to both the reply and the inbound
+**The sensitive floor** is the `SENSITIVE` regex (`autonomy.rs:61`) applied to both the reply and the inbound
 text: currency symbols and amounts, salary, rates, payments, bank, invoice, refund, legal, contract, NDA,
 confidential, visa, GDPR, harassment, termination, security, password, OTP, attachments, rejection words. Plus the
 leak check (`leaks`, `:104`: an address not in the conversation, or a 9+ digit number) and `never_do_hit` (`:83`).

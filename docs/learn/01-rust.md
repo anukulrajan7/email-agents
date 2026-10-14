@@ -127,7 +127,7 @@ A `struct` is data. An `impl` block adds methods. `#[derive(...)]` asks the comp
 #[serde(deny_unknown_fields)]
 pub struct AgentSpec { pub name: String, pub key: String, ... }
 ```
-`apps/api/src/agent_registry/spec.rs:299`. `Debug` lets you print it, `Clone` copy it, `PartialEq` compare it,
+`apps/api/src/agent_registry/spec.rs:294`. `Debug` lets you print it, `Clone` copy it, `PartialEq` compare it,
 `Serialize`/`Deserialize` turn it to and from JSON. `deny_unknown_fields` is a safety choice: a JSON spec with a
 field the code does not know is rejected, so a typo or an injected field never silently does something.
 
