@@ -30,7 +30,8 @@ const HEADERS: &[(&str, &str)] = &[
     ("x-content-type-options", "nosniff"),
     ("referrer-policy", "strict-origin-when-cross-origin"),
     ("x-frame-options", "DENY"),
-    ("permissions-policy", "camera=(), microphone=(), geolocation=(), payment=(), usb=(), interest-cohort=()"),
+    // Microphone only for our own origin: Ask Meera voice input. Everything else stays off.
+    ("permissions-policy", "camera=(), microphone=(self), geolocation=(), payment=(), usb=(), interest-cohort=()"),
 ];
 
 pub async fn security_headers(req: Request, next: Next) -> Response {

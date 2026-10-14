@@ -372,6 +372,7 @@ async fn every_response_carries_security_headers() {
         assert_eq!(get("x-frame-options"), "DENY");
         assert_eq!(get("referrer-policy"), "strict-origin-when-cross-origin");
         assert!(get("permissions-policy").contains("camera=()"));
+        assert!(get("permissions-policy").contains("microphone=(self)"), "Ask Meera voice needs the microphone on our own origin");
     }
 }
 
