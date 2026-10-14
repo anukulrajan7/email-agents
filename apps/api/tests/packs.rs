@@ -130,7 +130,8 @@ async fn enabling_staffing_restores_hr_behaviour_and_disabling_keeps_data() {
 
     let (s, v) = call(&app, "PUT", &format!("{base}/packs"), ADMIN, Some(json!({"packs": ["general"]}))).await;
     assert_eq!((s, v["enabled"].clone()), (StatusCode::OK, json!(["general"])));
-    assert!(labels(&app, &ws).await.contains(&"timesheet".to_string()));
+    let after = labels(&app, &ws).await;
+    assert!(!after.contains(&"timesheet".to_string()) && after.contains(&"other".to_string()));
     assert_eq!(count(&state, "requirements", &ws).await, 1);
     receive(&app, &state, &ws, &src, "Requirement: Python Developer", "Need 2 developers with Python, Django. 3-5 yrs. Location Chennai.").await;
     assert_eq!(count(&state, "requirements", &ws).await, 1);
@@ -200,4 +201,140 @@ async fn migration_backfills_existing_workspaces_onto_staffing() {
     for w in ["ws_old1", "ws_old2"] {
         assert!(email_ai_api::packs::enabled(&pool, w, email_ai_api::packs::STAFFING).await.unwrap());
     }
+}
+
+async fn put(app: &Router, ws: &str, query: &str, packs: Value) -> (StatusCode, Value) {
+    call(app, "PUT", &format!("/api/v1/workspaces/{ws}/packs{query}"), ADMIN, Some(json!({"packs": packs}))).await
+}
+
+async fn all_labels(app: &Router, ws: &str) -> Vec<Value> {
+    let (_, v) = call(app, "GET", &format!("/api/v1/workspaces/{ws}/labels?include_archived=true"), ADMIN, None).await;
+    v["items"].as_array().unwrap().clone()
+}
+
+fn label<'a>(all: &'a [Value], key: &str) -> &'a Value {
+    all.iter().find(|l| l["key"] == key).unwrap_or_else(|| panic!("no label {key}"))
+}
+
+fn names(v: &Value) -> Vec<String> {
+    v.as_array().unwrap().iter().map(|l| l["key"].as_str().unwrap().to_string()).collect()
+}
+
+#[tokio::test]
+async fn removing_a_pack_hides_its_labels_and_adding_it_back_restores_the_same_rows() {
+    let (_state, app, _d) = setup().await;
+    let ws = create(&app, json!({"name": "Acme"})).await;
+    let base = format!("/api/v1/workspaces/{ws}");
+
+    let (s, v) = put(&app, &ws, "", json!(["general", "support"])).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(names(&v["labels_added"]), ["bug_report", "complaint", "refund_request", "general"]);
+    assert!(names(&v["labels_hidden"]).is_empty());
+    let before = all_labels(&app, &ws).await;
+    let bug = label(&before, "bug_report").clone();
+    assert_eq!(bug["archived"], false);
+
+    let (_, src) = call(&app, "POST", &format!("{base}/sources/forwarding"), ADMIN, None).await;
+    call(&app, "POST", &format!("{base}/sources/{}/test-email", src["id"].as_str().unwrap()), ADMIN,
+        Some(json!({"subject": "Hello", "body_text": "Something broke."}))).await;
+    worker::drain(&_state).await;
+    let (_, msgs) = call(&app, "GET", &format!("{base}/messages"), ADMIN, None).await;
+    let mid = msgs["items"][0]["id"].as_str().unwrap().to_string();
+    let patch = format!("{base}/messages/{mid}/classification");
+    assert_eq!(call(&app, "PATCH", &patch, ADMIN, Some(json!({"category": "bug_report"}))).await.0, StatusCode::OK);
+
+    let (s, v) = put(&app, &ws, "", json!(["general"])).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(names(&v["labels_hidden"]), ["bug_report", "complaint", "refund_request", "general"]);
+    let hidden = all_labels(&app, &ws).await;
+    assert_eq!(label(&hidden, "bug_report")["archived"], true);
+    assert_eq!(label(&hidden, "bug_report")["id"], bug["id"]);
+    assert_eq!(label(&hidden, "bug_report")["message_count"], 1);
+    assert!(!labels(&app, &ws).await.contains(&"bug_report".to_string()));
+    assert!(labels(&app, &ws).await.contains(&"question".to_string()));
+    // The message keeps its label; the classifier can no longer pick it.
+    let (_, msgs) = call(&app, "GET", &format!("{base}/messages"), ADMIN, None).await;
+    assert_eq!(msgs["items"][0]["category"], "bug_report");
+    assert_eq!(call(&app, "PATCH", &patch, ADMIN, Some(json!({"category": "complaint"}))).await.0, StatusCode::BAD_REQUEST);
+
+    let (s, v) = put(&app, &ws, "", json!(["general", "support"])).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(names(&v["labels_restored"]), ["bug_report", "complaint", "refund_request", "general"]);
+    assert!(names(&v["labels_added"]).is_empty());
+    let back = all_labels(&app, &ws).await;
+    assert_eq!(back.len(), before.len());
+    for k in ["bug_report", "complaint", "refund_request"] {
+        let (a, b) = (label(&before, k), label(&back, k));
+        assert_eq!((&a["id"], b["archived"].as_bool()), (&b["id"], Some(false)));
+    }
+}
+
+#[tokio::test]
+async fn shared_user_made_edited_and_other_labels_are_handled() {
+    let (_state, app, _d) = setup().await;
+    let ws = create(&app, json!({"name": "Acme", "packs": ["staffing", "support"]})).await;
+    let base = format!("/api/v1/workspaces/{ws}");
+    let l = all_labels(&app, &ws).await;
+    // `general` is brought by both packs; Complaint is renamed by a user.
+    let (s, _) = call(&app, "PATCH", &format!("{base}/labels/{}", label(&l, "complaint")["id"].as_str().unwrap()), ADMIN,
+        Some(json!({"name": "Unhappy", "description": "Customers who are upset about something."}))).await;
+    assert_eq!(s, StatusCode::OK);
+    let (s, custom) = call(&app, "POST", &format!("{base}/labels"), ADMIN,
+        Some(json!({"name": "Bug report", "description": "A label the user made with the same key."}))).await;
+    assert_eq!(s, StatusCode::CONFLICT, "{custom}");
+    let (s, mine) = call(&app, "POST", &format!("{base}/labels"), ADMIN,
+        Some(json!({"name": "VIP", "description": "People we always answer first."}))).await;
+    assert_eq!(s, StatusCode::CREATED);
+
+    let (_, v) = put(&app, &ws, "?dry_run=1", json!(["staffing"])).await;
+    assert_eq!(names(&v["labels_hidden"]), ["question", "bug_report", "complaint", "refund_request"]);
+    let (_, v) = put(&app, &ws, "", json!(["staffing"])).await;
+    assert_eq!(names(&v["labels_hidden"]), ["question", "bug_report", "complaint", "refund_request"]);
+    let l = all_labels(&app, &ws).await;
+    assert_eq!(label(&l, "general")["archived"], false, "still provided by staffing");
+    assert_eq!(label(&l, "other")["archived"], false);
+    assert_eq!(label(&l, "vip")["archived"], false, "user-created labels are untouched");
+    assert_eq!(label(&l, "vip")["id"], mine["id"]);
+    assert_eq!(label(&l, "complaint")["archived"], true);
+    assert_eq!(label(&l, "complaint")["name"], "Unhappy");
+
+    let (_, v) = put(&app, &ws, "", json!(["staffing", "support"])).await;
+    assert_eq!(names(&v["labels_restored"]), ["question", "bug_report", "complaint", "refund_request"]);
+    let l = all_labels(&app, &ws).await;
+    assert_eq!((label(&l, "complaint")["archived"].as_bool(), label(&l, "complaint")["name"].as_str()), (Some(false), Some("Unhappy")));
+}
+
+#[tokio::test]
+async fn dry_run_matches_the_real_change_and_saves_nothing() {
+    let (_state, app, _d) = setup().await;
+    let ws = create(&app, json!({"name": "Acme"})).await;
+    let (s, preview) = put(&app, &ws, "?dry_run=1", json!(["general", "finance"])).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(preview["dry_run"], true);
+    assert_eq!(names(&preview["labels_added"]), ["invoice", "payment", "expense", "general"]);
+    assert_eq!(call(&app, "GET", &format!("/api/v1/workspaces/{ws}/packs"), ADMIN, None).await.1["enabled"], json!(["general"]));
+    assert!(!labels(&app, &ws).await.contains(&"invoice".to_string()));
+    let (_, real) = put(&app, &ws, "", json!(["general", "finance"])).await;
+    assert_eq!(real["labels_added"], preview["labels_added"]);
+    assert_eq!(real["labels_restored"], preview["labels_restored"]);
+    assert_eq!(real["labels_hidden"], preview["labels_hidden"]);
+    assert!(labels(&app, &ws).await.contains(&"invoice".to_string()));
+}
+
+#[tokio::test]
+async fn enabling_a_pack_over_the_label_cap_is_refused_and_lists_the_labels() {
+    let (_state, app, _d) = setup().await;
+    let ws = create(&app, json!({"name": "Acme"})).await;
+    let base = format!("/api/v1/workspaces/{ws}");
+    for i in 0..(30 - 8) {
+        let name = format!("Custom {}", (b'a' + i as u8) as char);
+        let (s, _) = call(&app, "POST", &format!("{base}/labels"), ADMIN, Some(json!({"name": name, "description": "A label made by a person."}))).await;
+        assert_eq!(s, StatusCode::CREATED);
+    }
+    for query in ["?dry_run=1", ""] {
+        let (s, e) = put(&app, &ws, query, json!(["general", "finance"])).await;
+        assert_eq!(s, StatusCode::CONFLICT);
+        assert!(e.to_string().contains("Invoice") && e.to_string().contains("30"), "{e}");
+    }
+    assert_eq!(call(&app, "GET", &format!("{base}/packs"), ADMIN, None).await.1["enabled"], json!(["general"]));
 }

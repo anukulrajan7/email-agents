@@ -14,6 +14,11 @@ function mockFetch(role: 'admin' | 'operator') {
         new Response(JSON.stringify({ user: { id: 'u', email: 'a@b.test', name: null }, workspaces: [{ id: 'w1', name: 'W', role, created_at: '' }], auth_mode: 'password' })),
       );
     }
+    if (url.includes('dry_run=1')) {
+      return Promise.resolve(
+        new Response(JSON.stringify({ labels_added: [{ key: 'timesheet', name: 'Timesheet' }, { key: 'leave', name: 'Leave' }], labels_restored: [{ key: 'payroll', name: 'Payroll' }], labels_hidden: [{ key: 'fyi', name: 'FYI' }] })),
+      );
+    }
     const enabled = init?.method === 'PUT' ? ['general', 'staffing'] : ['general'];
     return Promise.resolve(
       new Response(JSON.stringify({ enabled, items: [pack('general', 'Business inbox', true), pack('staffing', 'HR & recruiting', enabled.includes('staffing'))] })),
@@ -48,6 +53,7 @@ describe('PacksPage', () => {
     const staffing = await screen.findByRole('checkbox', { name: /HR & recruiting/ });
     expect(staffing).not.toBeChecked();
     await userEvent.click(staffing);
+    expect(await screen.findByText(/This will add 3 and hide 1 labels/)).toBeInTheDocument();
     await userEvent.click(screen.getByRole('button', { name: 'Save packs' }));
     await waitFor(() =>
       expect(fetchMock).toHaveBeenCalledWith(

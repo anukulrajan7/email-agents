@@ -65,7 +65,9 @@ export type Pack = {
   features: string[];
 };
 export type WorkspacePack = Pack & { enabled: boolean };
-export type WorkspacePacks = { enabled: string[]; items: WorkspacePack[] };
+export type PackLabelRef = { key: string; name: string };
+export type PackLabelChanges = { labels_added: PackLabelRef[]; labels_restored: PackLabelRef[]; labels_hidden: PackLabelRef[] };
+export type WorkspacePacks = { enabled: string[]; items: WorkspacePack[] } & Partial<PackLabelChanges>;
 
 export type MeResponse = {
   user: { id: string; email: string; name: string | null };

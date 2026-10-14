@@ -311,8 +311,12 @@ workspaces get `general` unless they choose otherwise. Packs: `general` (default
 (timesheet, leave, candidate referral, client requirement, payroll), the built-in HR workflows, CV and
 requirement extraction, candidate matching, requirement-agent cases and the "HR Operations" sign-off. Without it
 none of these run. Existing workspaces were backfilled onto `staffing` (migration `0032_packs.sql`).
-Turning a pack on adds its missing labels (archived labels stay archived; 409 if the 30-active-label cap would be
-exceeded). Turning it off deletes nothing; it only stops the pack's features.
+Labels follow the packs (migration `0042_label_packs.sql` adds `labels.source_pack` and `labels.archived_by_pack`).
+Turning a pack on seeds its missing labels and restores the ones an earlier removal hid (same rows and ids; 409
+listing the labels if the 30-active-label cap would be exceeded). Turning it off hides (archives) the labels that
+pack brought, unless another enabled pack also provides them; user-created labels and `other` are never touched,
+user edits to a pack label are kept, and nothing is deleted: mail keeps its label (shown greyed) and the classifier
+stops using hidden labels at once. Labels you archived yourself are not restored by a pack.
 
 ```ts
 type Pack = {
@@ -329,7 +333,8 @@ type Workspace = { id; name; role; created_at; packs: string[] };   // packs als
 |---|---|---|---|---|
 | GET | `/api/v1/packs` | any | – | `{items: Pack[]}` |
 | GET | `/api/v1/workspaces/:ws/packs` | member | – | `{enabled: string[], items: (Pack & {enabled: boolean})[]}` |
-| PUT | `/api/v1/workspaces/:ws/packs` | admin | `{packs: string[]}` (at least one; 400 on unknown key) | same as GET |
+| PUT | `/api/v1/workspaces/:ws/packs` | admin | `{packs: string[]}` (at least one; 400 on unknown key) | same as GET plus `labels_added`, `labels_restored`, `labels_hidden` |
+| PUT | `/api/v1/workspaces/:ws/packs?dry_run=1` | admin | same body | `{dry_run: true, labels_added, labels_restored, labels_hidden}` (each `{key, name}[]`); saves nothing; same 409 as a real save |
 
 `POST /workspaces` accepts `packs` (same validation) and an optional `goal` (what the workspace is for, max 1,000
 chars). Reply defaults follow the packs: staffing keeps the HR reply style and "HR Operations" sign-off, every

@@ -189,7 +189,7 @@ pub async fn setup(
     sqlx::query(
         "INSERT INTO labels (id, workspace_id, key, name, description, color, position, created_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, (SELECT COALESCE(MAX(position), 0) + 1 FROM labels WHERE workspace_id = ?2), ?7)
-         ON CONFLICT(workspace_id, key) DO UPDATE SET archived = 0",
+         ON CONFLICT(workspace_id, key) DO UPDATE SET archived = 0, archived_by_pack = 0",
     )
     .bind(crate::db::new_id("lbl"))
     .bind(&ws)

@@ -4,7 +4,7 @@ import { Button, Card, EmptyState, Page, PageHeader, Skeleton, useToast } from '
 import { riseStyle } from '../../lib/motion';
 import { useWorkspace } from '../../app/useWorkspace';
 import { PackPicker } from './PackPicker';
-import { useSetPacks, useWorkspacePacks } from './hooks';
+import { usePackPreview, useSetPacks, useWorkspacePacks } from './hooks';
 
 export function PacksPage() {
   const { ws, isAdmin } = useWorkspace();
@@ -15,6 +15,11 @@ export function PacksPage() {
   const enabled = packs.data?.enabled ?? [];
   const selected = draft ?? enabled;
   const changed = draft !== undefined && (draft.length !== enabled.length || draft.some((k) => !enabled.includes(k)));
+
+  const canSave = changed && selected.length > 0;
+  const preview = usePackPreview(ws, selected, isAdmin && canSave);
+  const added = (preview.data?.labels_added.length ?? 0) + (preview.data?.labels_restored.length ?? 0);
+  const hidden = preview.data?.labels_hidden.length ?? 0;
 
   if (!isAdmin) {
     return (
@@ -30,18 +35,26 @@ export function PacksPage() {
       <PageHeader
         kicker="Settings"
         title="Packs"
-        description="A pack is a bundle for one kind of work: labels, automation presets, reply style and features. Turning a pack on adds its labels. Turning it off keeps your data and only stops its features."
+        description="A pack is a bundle for one kind of work: labels, automation presets, reply style and features. Turning a pack on adds its labels. Turning it off hides its labels and stops its features; your mail and data stay."
       />
       {packs.isLoading && <Skeleton className="h-40" />}
       <ErrorNote error={packs.error} />
       {packs.data && (
         <Card className="rise flex flex-col gap-5 p-6" style={riseStyle(0)}>
           <PackPicker packs={packs.data.items} selected={selected} onChange={setDraft} disabled={save.isPending} />
+          {canSave && preview.data && (
+            <p className="text-sm text-ink-muted" role="status">
+              {added + hidden === 0
+                ? 'No label changes.'
+                : `This will add ${added} and hide ${hidden} ${added === 1 && hidden === 0 ? 'label' : 'labels'}. Hidden labels keep their mail and come back when you turn the pack on again.`}
+            </p>
+          )}
+          {canSave && <ErrorNote error={preview.error} />}
           <ErrorNote error={save.error} />
           <div>
             <Button
               loading={save.isPending}
-              disabled={!changed || selected.length === 0}
+              disabled={!canSave || preview.isError}
               onClick={() =>
                 save.mutate(selected, {
                   onSuccess: () => {

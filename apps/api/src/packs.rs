@@ -1,6 +1,6 @@
 //! Packs: use-case bundles a workspace turns on (labels, automation presets, reply style and
 //! features). `general` is the default; HR/recruiting is the optional `staffing` pack.
-//! Disabling a pack never deletes data: it only gates the pack's features.
+//! Disabling a pack never deletes data: it gates the pack's features and hides (archives) its labels.
 
 use serde_json::{Value, json};
 use sqlx::{SqliteConnection, SqliteExecutor, SqlitePool};
@@ -200,36 +200,117 @@ pub fn presets_for(keys: &[&str]) -> Vec<&'static str> {
         .collect()
 }
 
-/// Labels the packs bring, deduplicated by key (first pack wins), with `other` last.
-pub fn labels_for(keys: &[&str]) -> Vec<&'static LabelSeed> {
-    let mut out: Vec<&'static LabelSeed> = Vec::new();
-    for l in keys.iter().filter_map(|k| pack(k)).flat_map(|p| p.labels.iter()) {
-        if l.key != OTHER_LABEL && !out.iter().any(|o| o.key == l.key) {
-            out.push(l);
+/// Labels the packs bring with the pack that brings each, deduplicated by key (first pack wins),
+/// with `other` last and no source (it belongs to no pack).
+pub fn labels_with_source(keys: &[&str]) -> Vec<(Option<&'static str>, &'static LabelSeed)> {
+    let mut out: Vec<(Option<&'static str>, &'static LabelSeed)> = Vec::new();
+    for p in keys.iter().filter_map(|k| pack(k)) {
+        for l in p.labels {
+            if l.key != OTHER_LABEL && !out.iter().any(|(_, o)| o.key == l.key) {
+                out.push((Some(p.key), l));
+            }
         }
     }
-    out.push(&OTHER_SEED);
+    out.push((None, &OTHER_SEED));
     out
 }
 
-/// Label keys these seeds would add to the workspace (not present at all, archived or not).
-pub async fn missing_labels(conn: &mut SqliteConnection, workspace_id: &str, seeds: &[&LabelSeed]) -> sqlx::Result<usize> {
-    let existing: Vec<String> = sqlx::query_scalar("SELECT key FROM labels WHERE workspace_id = ?1")
-        .bind(workspace_id)
-        .fetch_all(&mut *conn)
-        .await?;
-    Ok(seeds.iter().filter(|s| !existing.iter().any(|e| e == s.key)).count())
+/// Labels the packs bring, deduplicated by key (first pack wins), with `other` last.
+pub fn labels_for(keys: &[&str]) -> Vec<&'static LabelSeed> {
+    labels_with_source(keys).into_iter().map(|(_, l)| l).collect()
 }
 
-/// Adds labels that don't exist yet, after the existing ones. Archived labels stay archived.
+pub struct LabelRef {
+    pub id: String,
+    pub key: String,
+    pub name: String,
+}
+
+/// What a change of enabled packs does to the label list.
+pub struct LabelChanges {
+    pub added: Vec<(Option<&'static str>, &'static LabelSeed)>,
+    pub restored: Vec<LabelRef>,
+    pub hidden: Vec<LabelRef>,
+}
+
+impl LabelChanges {
+    /// Net change in active labels (hidden ones free their slot first).
+    pub fn active_delta(&self) -> i64 {
+        (self.added.len() + self.restored.len()) as i64 - self.hidden.len() as i64
+    }
+
+    pub fn to_json(&self) -> Value {
+        let refs = |v: &[LabelRef]| v.iter().map(|l| json!({"key": l.key, "name": l.name})).collect::<Vec<_>>();
+        json!({
+            "labels_added": self.added.iter().map(|(_, l)| json!({"key": l.key, "name": l.name})).collect::<Vec<_>>(),
+            "labels_restored": refs(&self.restored),
+            "labels_hidden": refs(&self.hidden),
+        })
+    }
+}
+
+fn pack_label_keys(keys: &[&str]) -> Vec<&'static str> {
+    keys.iter().filter_map(|k| pack(k)).flat_map(|p| p.labels.iter().map(|l| l.key)).collect()
+}
+
+/// Works out the label changes for going from the `before` packs to the `chosen` packs, without writing.
+/// Hidden: pack-sourced active labels of a removed pack that no remaining pack provides (`other` never).
+/// Restored: labels an earlier removal hid, for the packs being added. Added: seeds not in the workspace at all.
+pub async fn plan_labels(conn: &mut SqliteConnection, workspace_id: &str, before: &[&str], chosen: &[&str]) -> sqlx::Result<LabelChanges> {
+    let added_packs: Vec<&str> = chosen.iter().copied().filter(|k| !before.contains(k)).collect();
+    let removed_packs: Vec<&str> = before.iter().copied().filter(|k| !chosen.contains(k)).collect();
+    let kept = pack_label_keys(chosen);
+    let leaving = pack_label_keys(&removed_packs);
+    let returning = pack_label_keys(&added_packs);
+
+    let rows: Vec<(String, String, String, bool, bool, Option<String>)> =
+        sqlx::query_as("SELECT id, key, name, archived, archived_by_pack, source_pack FROM labels WHERE workspace_id = ?1 ORDER BY position, created_at")
+            .bind(workspace_id)
+            .fetch_all(&mut *conn)
+            .await?;
+    let mut hidden = Vec::new();
+    let mut restored = Vec::new();
+    for (id, key, name, archived, by_pack, source) in &rows {
+        let l = LabelRef { id: id.clone(), key: key.clone(), name: name.clone() };
+        if !archived && source.is_some() && key != OTHER_LABEL && leaving.contains(&key.as_str()) && !kept.contains(&key.as_str()) {
+            hidden.push(l);
+        } else if *archived && *by_pack && source.is_some() && returning.contains(&key.as_str()) {
+            restored.push(l);
+        }
+    }
+    let added = labels_with_source(&added_packs).into_iter().filter(|(_, s)| !rows.iter().any(|r| r.1 == s.key)).collect();
+    Ok(LabelChanges { added, restored, hidden })
+}
+
+/// Hides, restores and seeds the planned labels. Nothing is deleted; ids of restored labels do not change.
+pub async fn apply_labels(conn: &mut SqliteConnection, workspace_id: &str, changes: &LabelChanges) -> sqlx::Result<()> {
+    for l in &changes.hidden {
+        sqlx::query("UPDATE labels SET archived = 1, archived_by_pack = 1 WHERE id = ?1 AND workspace_id = ?2")
+            .bind(&l.id)
+            .bind(workspace_id)
+            .execute(&mut *conn)
+            .await?;
+    }
+    for l in &changes.restored {
+        sqlx::query("UPDATE labels SET archived = 0, archived_by_pack = 0 WHERE id = ?1 AND workspace_id = ?2")
+            .bind(&l.id)
+            .bind(workspace_id)
+            .execute(&mut *conn)
+            .await?;
+    }
+    seed_labels(conn, workspace_id, &changes.added).await?;
+    Ok(())
+}
+
+/// Adds labels that don't exist yet, after the existing ones, tagged with the pack that brought them.
 /// Keeps the `other` safety net last when anything was added.
-pub async fn seed_labels(conn: &mut SqliteConnection, workspace_id: &str, seeds: &[&LabelSeed]) -> sqlx::Result<u64> {
+pub async fn seed_labels(conn: &mut SqliteConnection, workspace_id: &str, seeds: &[(Option<&'static str>, &'static LabelSeed)]) -> sqlx::Result<u64> {
     let now = now_ms();
     let mut added = 0;
-    for l in seeds {
+    for (source, l) in seeds {
         added += sqlx::query(
-            "INSERT INTO labels (id, workspace_id, key, name, description, color, position, system, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, (SELECT COUNT(*) FROM labels WHERE workspace_id = ?2), ?7, ?8)
+            "INSERT INTO labels (id, workspace_id, key, name, description, color, position, system, created_at, source_pack)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, (SELECT COUNT(*) FROM labels WHERE workspace_id = ?2), ?7, ?8, ?9)
              ON CONFLICT(workspace_id, key) DO NOTHING",
         )
         .bind(new_id("lbl"))
@@ -240,6 +321,7 @@ pub async fn seed_labels(conn: &mut SqliteConnection, workspace_id: &str, seeds:
         .bind(l.color)
         .bind(l.key == OTHER_LABEL)
         .bind(now)
+        .bind(source)
         .execute(&mut *conn)
         .await?
         .rows_affected();
@@ -291,7 +373,7 @@ pub async fn enable(conn: &mut SqliteConnection, workspace_id: &str, keys: &[&st
     Ok(())
 }
 
-/// Turns packs off. Their labels, workflows and records stay; only features stop.
+/// Turns packs off. Their workflows and records stay; features stop. Labels are hidden by `apply_labels`.
 pub async fn disable(conn: &mut SqliteConnection, workspace_id: &str, keys: &[&str]) -> sqlx::Result<()> {
     for key in keys {
         sqlx::query("DELETE FROM workspace_packs WHERE workspace_id = ?1 AND pack_key = ?2")
