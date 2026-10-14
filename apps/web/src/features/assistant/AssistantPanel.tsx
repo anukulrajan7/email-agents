@@ -8,7 +8,7 @@ import { ASSISTANT_NAME as assistantName } from './labels';
 import { dayKey, dayLabel, linkTarget } from './labels';
 import { readPageContext } from './pageContext';
 import { PlanCardView } from './PlanCardView';
-import { canSpeak, speak, stopSpeaking } from './speech';
+import { canSpeak, speak, stopSpeaking, unlockSpeech } from './speech';
 import type { HistoryMessage, PlanItem, PlanState, StoredPlanItem, Turn } from './types';
 import { useVoiceInput } from './useVoiceInput';
 
@@ -254,7 +254,14 @@ export function AssistantPanel({ ws, onClose }: { ws: string; onClose: () => voi
           {speakable && (
             <label className="flex items-center gap-2 text-[13px] text-ink-muted">
               Read aloud
-              <Switch checked={readAloud} label="Read answers aloud" onChange={setReadAloud} />
+              <Switch
+                checked={readAloud}
+                label="Read answers aloud"
+                onChange={(on) => {
+                  if (on) unlockSpeech();
+                  setReadAloud(on);
+                }}
+              />
             </label>
           )}
           <Button variant="ghost" size="sm" aria-label="Close assistant" onClick={onClose}>

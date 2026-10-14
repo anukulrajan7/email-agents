@@ -221,7 +221,7 @@ describe('Ask Meera', () => {
   it('reads answers aloud only when asked to', async () => {
     const speak = vi.fn();
     vi.stubGlobal('SpeechSynthesisUtterance', class { constructor(readonly text: string) {} });
-    Object.defineProperty(window, 'speechSynthesis', { value: { speak, cancel: vi.fn() }, configurable: true });
+    Object.defineProperty(window, 'speechSynthesis', { value: { speak, cancel: vi.fn(), resume: vi.fn(), getVoices: () => [] }, configurable: true });
     mockFetch((url) => (url.endsWith('/assistant/command') ? json(answer({ citations: [] })) : undefined));
     renderAssistant();
     const { user, panel } = await openPanel();
@@ -233,8 +233,9 @@ describe('Ask Meera', () => {
 
     await user.click(within(panel).getByRole('switch', { name: 'Read answers aloud' }));
     await user.type(box, 'second{Enter}');
-    await waitFor(() => expect(speak).toHaveBeenCalledTimes(1));
-    expect((speak.mock.calls[0]![0] as { text: string }).text).toMatch(/offer letter will be ready/);
+    // The switch click speaks a silent unlock first (Safari); then the answer, after a short delay (Chrome).
+    const spoken = () => speak.mock.calls.map((c) => (c[0] as { text: string }).text).join(' ');
+    await waitFor(() => expect(spoken()).toMatch(/offer letter will be ready/));
     Reflect.deleteProperty(window, 'speechSynthesis');
   });
 

@@ -27,10 +27,63 @@ export function createRecognition(): Recognition | undefined {
 
 export const canSpeak = () => typeof window !== 'undefined' && 'speechSynthesis' in window && typeof SpeechSynthesisUtterance !== 'undefined';
 
+/** Plain words only: no markdown, links or citation markers read aloud. */
+export function speakableText(text: string): string {
+  return text
+    .replace(/\[(?:\d+|[a-z]_[\w-]+)\]/gi, '')
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+    .replace(/[*_`#>]+/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/** Short pieces: Chrome stops a long utterance after about 15 seconds. */
+export function speechChunks(text: string, max = 180): string[] {
+  const sentences = speakableText(text).match(/[^.!?]+[.!?]*\s*/g) ?? [];
+  const chunks: string[] = [];
+  let current = '';
+  for (const s of sentences) {
+    if ((current + s).length > max && current) {
+      chunks.push(current.trim());
+      current = '';
+    }
+    current += s;
+  }
+  if (current.trim()) chunks.push(current.trim());
+  return chunks;
+}
+
+function voiceFor(lang: string): SpeechSynthesisVoice | undefined {
+  const voices = window.speechSynthesis.getVoices();
+  const base = lang.split('-')[0] ?? lang;
+  return voices.find((v) => v.lang === lang) ?? voices.find((v) => v.lang.startsWith(base)) ?? voices.find((v) => v.default);
+}
+
 export function speak(text: string) {
   if (!canSpeak()) return;
-  window.speechSynthesis.cancel();
-  window.speechSynthesis.speak(new SpeechSynthesisUtterance(text));
+  const synth = window.speechSynthesis;
+  synth.cancel();
+  const lang = navigator.language || 'en-US';
+  // Chrome drops an utterance queued in the same tick as cancel(), and can be left paused.
+  window.setTimeout(() => {
+    synth.resume();
+    for (const chunk of speechChunks(text)) {
+      const u = new SpeechSynthesisUtterance(chunk);
+      u.lang = lang;
+      const voice = voiceFor(lang);
+      if (voice) u.voice = voice;
+      synth.speak(u);
+    }
+  }, 60);
+}
+
+/** Call from the click that turns read-aloud on: Safari only speaks after a gesture unlocked audio. */
+export function unlockSpeech() {
+  if (!canSpeak()) return;
+  window.speechSynthesis.getVoices();
+  const u = new SpeechSynthesisUtterance(' ');
+  u.volume = 0;
+  window.speechSynthesis.speak(u);
 }
 
 export function stopSpeaking() {
