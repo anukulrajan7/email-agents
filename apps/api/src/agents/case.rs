@@ -309,11 +309,125 @@ pub async fn set_status(conn: &mut SqliteConnection, ws: &str, case_id: &str, to
     Ok(changed)
 }
 
+const ESCALATION_MARK: &str = "unresolved_reply";
+
+fn open_needs(body: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    let mut rest = body;
+    while let Some(at) = rest.find("[NEEDS:") {
+        let tail = &rest[at + "[NEEDS:".len()..];
+        let end = tail.find(']').unwrap_or(tail.len());
+        let item = tail[..end].trim();
+        if !item.is_empty() && !found.iter().any(|f| f == item) {
+            found.push(item.to_string());
+        }
+        rest = &tail[end..];
+    }
+    found
+}
+
+/// A case must never end silently while its reply is unresolved: if the email's newest unsent draft still has
+/// `[NEEDS: ...]` gaps, or a send was stopped by a safety check and nothing was sent or put up for approval
+/// after it, a review task goes to the mailbox owner and the case counts as a handoff. One task per case;
+/// observing cases never create one. Returns true if a task was created.
+pub async fn escalate_unresolved_reply(conn: &mut SqliteConnection, case: &Case, turn: i64) -> sqlx::Result<bool> {
+    let Some(message_id) = case.message_id.as_deref() else { return Ok(false) };
+    if case.shadow {
+        return Ok(false);
+    }
+    let already: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM case_steps WHERE case_id = ?1 AND workspace_id = ?2 AND tool = 'create_task' AND kind = 'tool' AND status = 'ok')")
+        .bind(&case.id)
+        .bind(&case.workspace_id)
+        .fetch_one(&mut *conn)
+        .await?;
+    if already {
+        return Ok(false);
+    }
+    let draft: Option<(String, String)> = sqlx::query_as(
+        "SELECT id, body_text FROM drafts WHERE message_id = ?1 AND workspace_id = ?2 AND status != 'sent' ORDER BY created_at DESC, rowid DESC LIMIT 1",
+    )
+    .bind(message_id)
+    .bind(&case.workspace_id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    let needs = draft.as_ref().map(|(_, body)| open_needs(body)).unwrap_or_default();
+    let unresolved_block: bool = sqlx::query_scalar(
+        "SELECT COALESCE((SELECT MAX(seq) FROM case_steps WHERE case_id = ?1 AND workspace_id = ?2 AND tool = 'send_email' AND status = 'blocked'), 0)
+              > COALESCE((SELECT MAX(seq) FROM case_steps WHERE case_id = ?1 AND workspace_id = ?2
+                          AND (kind = 'approval' OR (tool = 'send_email' AND kind = 'tool' AND status = 'ok'))), 0)",
+    )
+    .bind(&case.id)
+    .bind(&case.workspace_id)
+    .fetch_one(&mut *conn)
+    .await?;
+    if needs.is_empty() && !unresolved_block {
+        return Ok(false);
+    }
+    let draft_id = draft.map(|(id, _)| id);
+    let title = if needs.is_empty() {
+        "I couldn't reply safely - please check the draft and send it yourself".to_string()
+    } else {
+        format!("I couldn't reply safely - please confirm: {}", needs.join("; "))
+    };
+    let title = super::sentence(&title, 200);
+    let review_id = new_id("rev");
+    sqlx::query(
+        "INSERT INTO review_items (id, workspace_id, message_id, workflow_run_id, kind, title, status, assigned_user_id, created_at)
+         VALUES (?1, ?2, ?3, NULL, 'agent_task', ?4, 'open', ?5, ?6)",
+    )
+    .bind(&review_id)
+    .bind(&case.workspace_id)
+    .bind(message_id)
+    .bind(&title)
+    .bind(&case.agent_user_id)
+    .bind(now_ms())
+    .execute(&mut *conn)
+    .await?;
+    insert_step(
+        &mut *conn,
+        case,
+        NewStep {
+            turn,
+            kind: "tool",
+            tool: Some("create_task"),
+            summary: format!("Asked the team: {title}"),
+            input: json!({ ESCALATION_MARK: true, "title": title, "draft_id": draft_id }),
+            output: json!({"created": true, "title": title, "review_id": review_id, "draft_id": draft_id}),
+            status: "ok",
+            tokens_in: 0,
+            tokens_out: 0,
+            cost_usd: 0.0,
+            model_id: None,
+        },
+    )
+    .await?;
+    audit::record(
+        &mut *conn,
+        Entry {
+            workspace_id: &case.workspace_id,
+            actor: Actor::System,
+            action: "review.created",
+            entity_type: "review_item",
+            entity_id: &review_id,
+            message_id: Some(message_id),
+            metadata: json!({"kind": "agent_task", "case_id": case.id, "draft_id": draft_id, "reason": ESCALATION_MARK}),
+        },
+    )
+    .await?;
+    sqlx::query("UPDATE cases SET outcome_detail = COALESCE(outcome_detail, 'handoff') WHERE id = ?1 AND workspace_id = ?2")
+        .bind(&case.id)
+        .bind(&case.workspace_id)
+        .execute(conn)
+        .await?;
+    Ok(true)
+}
+
 /// Ends a case as failed with a plain reason (no-op if it already ended).
 pub async fn fail(conn: &mut SqliteConnection, case: &Case, reason: &str) -> sqlx::Result<bool> {
     if !set_status(&mut *conn, &case.workspace_id, &case.id, "failed").await? {
         return Ok(false);
     }
+    escalate_unresolved_reply(&mut *conn, case, case.step_count).await?;
     sqlx::query("UPDATE cases SET failure_reason = ?1, next_wake_at = NULL WHERE id = ?2 AND workspace_id = ?3")
         .bind(super::sentence(reason, 240))
         .bind(&case.id)

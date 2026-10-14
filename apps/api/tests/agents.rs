@@ -484,3 +484,44 @@ async fn agents_are_off_without_a_planner_model() {
     let (s, _) = call(&app, "POST", &format!("/api/v1/workspaces/{ws}/cases"), ADMIN, Some(json!({"kind": "inbox", "message_id": msg}))).await;
     assert_eq!(s, StatusCode::CONFLICT);
 }
+
+#[tokio::test]
+async fn finishing_with_an_unresolved_reply_hands_off_to_the_owner() {
+    let blocked_then_finish = vec![
+        tool("read_email", json!({"message_id": "$message_id"})),
+        tool("draft_email", json!({"message_id": "$message_id"})),
+        tool("send_email", json!({"draft_id": "$draft_id"})),
+        finish(None, "Nothing more to do."),
+    ];
+    let env = env(ScriptedPlanner::new().script("inbox", blocked_then_finish)).await;
+    call(&env.app, "PUT", &format!("{}/reply-settings", env.base()), ADMIN, Some(json!({"auto_reply": true, "reply_instructions": "", "signature": null}))).await;
+    let msg = env.receive("u1", "t-u1", "ravi@acme.com", "Leave request", "Can I take annual leave on Monday?", 1).await;
+    let cases = env.cases("inbox").await;
+    assert_eq!(cases.len(), 1);
+    let detail = env.case(cases[0]["id"].as_str().unwrap()).await;
+    assert_eq!(detail["status"], "done");
+    let steps = detail["steps"].as_array().unwrap();
+    assert!(steps.iter().any(|s| s["status"] == "blocked" && s["tool"] == "send_email"));
+    let tasks: Vec<(String, String)> = sqlx::query_as("SELECT title, status FROM review_items WHERE kind = 'agent_task' AND message_id = ?1")
+        .bind(&msg)
+        .fetch_all(&env.state.db)
+        .await
+        .unwrap();
+    assert_eq!(tasks.len(), 1, "{tasks:?}");
+    assert!(tasks[0].0.starts_with("I couldn't reply safely - please confirm:") && tasks[0].1 == "open", "{tasks:?}");
+    let handoff = steps.iter().filter(|s| s["tool"] == "create_task" && s["kind"] == "tool" && s["status"] == "ok").count();
+    assert_eq!(handoff, 1, "recorded as a handoff");
+    assert!(env.sends().is_empty());
+}
+
+#[tokio::test]
+async fn a_normal_finish_creates_no_task() {
+    let script = vec![tool("read_email", json!({"message_id": "$message_id"})), finish(None, "No reply needed.")];
+    let env = env(ScriptedPlanner::new().script("inbox", script)).await;
+    call(&env.app, "PUT", &format!("{}/reply-settings", env.base()), ADMIN, Some(json!({"auto_reply": true, "reply_instructions": "", "signature": null}))).await;
+    env.receive("n1", "t-n1", "ravi@acme.com", "FYI", "Just letting you know the office is closed Monday.", 1).await;
+    let cases = env.cases("inbox").await;
+    assert_eq!(env.case(cases[0]["id"].as_str().unwrap()).await["status"], "done");
+    let tasks: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM review_items WHERE kind = 'agent_task'").fetch_one(&env.state.db).await.unwrap();
+    assert_eq!(tasks, 0);
+}

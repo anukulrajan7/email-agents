@@ -620,6 +620,7 @@ async fn commit(state: &AppState, case: &Case, turn: i64, usage: &Usage, result:
         TurnResult::Finish { outcome, summary } => {
             let summary = sentence(&summary, 240);
             case::insert_step(&mut tx, case, step("finish", None, summary.clone(), json!({"outcome": outcome}), Value::Null, "ok")).await?;
+            case::escalate_unresolved_reply(&mut tx, case, turn).await?;
             sqlx::query("UPDATE cases SET status = 'done', outcome = COALESCE(?1, outcome), status_note = ?2 WHERE id = ?3 AND workspace_id = ?4")
                 .bind(&outcome)
                 .bind(&summary)
