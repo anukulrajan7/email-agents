@@ -297,6 +297,9 @@ pub async fn add_member(
         tx.commit().await?;
         return Ok((StatusCode::ACCEPTED, Json(json!({ "invited": true, "email": email, "role": role.as_str() }))));
     };
+    if role != Role::Admin && crate::team::access::owner_user_id(&state.db, &ws).await?.as_deref() == Some(member_id.as_str()) {
+        return Err(AppError::Conflict("this person is the workspace's super admin; transfer ownership before changing their role".into()));
+    }
     let mut tx = state.db.begin().await?;
     sqlx::query(
         "INSERT INTO memberships (workspace_id, user_id, role) VALUES (?1, ?2, ?3)

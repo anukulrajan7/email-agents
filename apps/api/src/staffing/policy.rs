@@ -35,8 +35,11 @@ pub fn address_of(raw: &str) -> String {
     }
 }
 
-/// True when this mail must not be stored: it involves a billable person and does not come through the HR mailbox.
-pub async fn blocks_ingest(conn: &mut SqliteConnection, source_id: &str, workspace_id: &str, email: &NormalizedEmail) -> sqlx::Result<bool> {
+/// True when the billable policy keeps this mail out of sight: a billable person SENT it (the sender or, for
+/// forwarded mail, the original sender), or it arrived in a mailbox linked to a billable person, and it did not
+/// come through the HR mailbox. Recipients and Cc never count, so a client copying a consultant, a team list, or a
+/// recruiter's sent CV mail copying a consultant are all kept. The mail is stored but marked `suppressed`.
+pub async fn should_suppress(conn: &mut SqliteConnection, source_id: &str, workspace_id: &str, email: &NormalizedEmail) -> sqlx::Result<bool> {
     let hr: Option<String> = sqlx::query_scalar("SELECT hr_source_id FROM team_settings WHERE workspace_id = ?1")
         .bind(workspace_id)
         .fetch_optional(&mut *conn)
@@ -46,17 +49,45 @@ pub async fn blocks_ingest(conn: &mut SqliteConnection, source_id: &str, workspa
     if hr == source_id || !packs::enabled(&mut *conn, workspace_id, packs::STAFFING).await? {
         return Ok(false);
     }
-    let addresses: Vec<String> =
-        std::iter::once(&email.sender_address).chain(&email.recipients).chain(&email.cc).map(|a| address_of(a)).filter(|a| !a.is_empty()).collect();
+    let senders: Vec<String> = std::iter::once(&email.sender_address)
+        .chain(email.original_sender_address.as_ref())
+        .map(|a| address_of(a))
+        .filter(|a| !a.is_empty())
+        .collect();
     sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM person_emails e JOIN people p ON p.id = e.person_id
-                       WHERE e.workspace_id = ?1 AND p.active = 1 AND p.employee_type = 'billable'
-                         AND e.email IN (SELECT value FROM json_each(?2)))",
+        "SELECT EXISTS(SELECT 1 FROM people p
+                       WHERE p.workspace_id = ?1 AND p.active = 1 AND p.employee_type = 'billable'
+                         AND (p.source_id = ?3
+                              OR EXISTS (SELECT 1 FROM person_emails e WHERE e.person_id = p.id AND e.email IN (SELECT value FROM json_each(?2)))))",
     )
     .bind(workspace_id)
-    .bind(json!(addresses).to_string())
+    .bind(json!(senders).to_string())
+    .bind(source_id)
     .fetch_one(conn)
     .await
+}
+
+/// Policy changed (HR mailbox changed or cleared): suppressed mail is released and goes through the normal pipeline.
+pub async fn release_suppressed(db: &SqlitePool, workspace_id: &str) -> sqlx::Result<usize> {
+    let ids: Vec<(String, String)> = sqlx::query_as("SELECT id, direction FROM email_messages WHERE workspace_id = ?1 AND suppressed = 1")
+        .bind(workspace_id)
+        .fetch_all(db)
+        .await?;
+    let mut conn = db.acquire().await?;
+    for (id, direction) in &ids {
+        sqlx::query("UPDATE email_messages SET suppressed = 0 WHERE id = ?1").bind(id).execute(&mut *conn).await?;
+        if direction == "inbound" {
+            crate::jobs::enqueue(
+                &mut conn,
+                crate::jobs::kind::CLASSIFY_EMAIL,
+                &format!("classify:{id}:{}:released", crate::domain::TAXONOMY_VERSION),
+                Some(workspace_id),
+                &json!({ "message_id": id }),
+            )
+            .await?;
+        }
+    }
+    Ok(ids.len())
 }
 
 static HOURS_TOTAL: OnceLock<Regex> = OnceLock::new();
@@ -80,25 +111,62 @@ pub struct Timesheet {
     pub hours: Option<f64>,
 }
 
-/// The newest `timesheet` mail from this person received in `[from, to)`, with hours read from the mail
-/// and its attachments.
-pub async fn timesheet_mail(db: &SqlitePool, workspace_id: &str, person_id: &str, from: i64, to: i64) -> sqlx::Result<Option<Timesheet>> {
-    let row: Option<(String, String, i64, String)> = sqlx::query_as(
+const MONTHS: [(&str, &str); 12] = [
+    ("jan", "january"), ("feb", "february"), ("mar", "march"), ("apr", "april"), ("may", "may"), ("jun", "june"),
+    ("jul", "july"), ("aug", "august"), ("sep", "september"), ("oct", "october"), ("nov", "november"), ("dec", "december"),
+];
+
+/// The month a timesheet mail is for (`YYYY-MM`). A month named in the subject wins ("September timesheet",
+/// "Timesheet Sept (late)", "2026-09"); the year is the explicit one, else the latest such month not after the
+/// mail. Otherwise it is the month of `received_at` minus the grace period, so a timesheet sent on 2 Sep
+/// belongs to August.
+pub fn period_of(subject: &str, received_at: i64, tz_min: i64, grace_days: i64) -> String {
+    let received = clock::month_of(received_at, tz_min);
+    let lower = subject.to_lowercase();
+    let words: Vec<&str> = lower.split(|c: char| !c.is_alphanumeric() && c != '-').filter(|w| !w.is_empty()).collect();
+    if let Some(w) = words.iter().find(|w| w.len() == 7 && w.as_bytes()[4] == b'-' && clock::valid_month(w)) {
+        return (*w).to_string();
+    }
+    let named = words.iter().find_map(|w| MONTHS.iter().position(|(short, long)| *w == *long || *w == *short || (*w == "sept" && *short == "sep")));
+    if let Some(i) = named {
+        let m = i as i64 + 1;
+        let year_word = words.iter().find(|w| w.len() == 4 && w.chars().all(|c| c.is_ascii_digit()) && w.starts_with("20"));
+        let (ry, rm): (i64, i64) = (received[..4].parse().unwrap_or(1970), received[5..].parse().unwrap_or(1));
+        let year = match year_word {
+            Some(y) => y.parse().unwrap_or(ry),
+            None if m <= rm => ry,
+            None => ry - 1,
+        };
+        return format!("{year:04}-{m:02}");
+    }
+    clock::month_of(received_at - grace_days * DAY_MS, tz_min)
+}
+
+/// The newest `timesheet` mail from this person that is for `month` (see `period_of`), with hours read from the
+/// mail and its attachments. A late timesheet still counts for its own month; another month's never does.
+pub async fn timesheet_mail(db: &SqlitePool, workspace_id: &str, person_id: &str, month: &str) -> sqlx::Result<Option<Timesheet>> {
+    let s = settings::load(db, workspace_id).await?;
+    let Some((start, end)) = clock::month_bounds(month, s.tz_offset_minutes) else { return Ok(None) };
+    let rows: Vec<(String, String, i64, String)> = sqlx::query_as(
         "SELECT m.id, m.subject, m.received_at, m.body_text
          FROM email_messages m JOIN classifications c ON c.message_id = m.id
-         WHERE m.workspace_id = ?1 AND m.direction = 'inbound' AND c.category = 'timesheet'
+         WHERE m.workspace_id = ?1 AND m.direction = 'inbound' AND m.suppressed = 0 AND c.category = 'timesheet'
            AND m.received_at >= ?3 AND m.received_at < ?4
            AND (lower(m.sender_address) IN (SELECT email FROM person_emails WHERE person_id = ?2)
                 OR lower(COALESCE(m.original_sender_address, '')) IN (SELECT email FROM person_emails WHERE person_id = ?2))
-         ORDER BY m.received_at DESC LIMIT 1",
+         ORDER BY m.received_at DESC LIMIT 30",
     )
     .bind(workspace_id)
     .bind(person_id)
-    .bind(from)
-    .bind(to)
-    .fetch_optional(db)
+    .bind(start)
+    .bind(end + 62 * DAY_MS)
+    .fetch_all(db)
     .await?;
-    let Some((message_id, subject, received_at, body)) = row else { return Ok(None) };
+    let Some((message_id, subject, received_at, body)) =
+        rows.into_iter().find(|(_, subject, at, _)| period_of(subject, *at, s.tz_offset_minutes, s.timesheet_grace_days) == month)
+    else {
+        return Ok(None);
+    };
     let attachments: Vec<String> =
         sqlx::query_scalar("SELECT text_content FROM attachments WHERE message_id = ?1 AND text_content IS NOT NULL").bind(&message_id).fetch_all(db).await?;
     let hours = parse_hours(&format!("{subject}\n{body}")).or_else(|| attachments.iter().find_map(|t| parse_hours(t)));
@@ -123,11 +191,11 @@ pub fn started_by_month(p: &Person, month: &str) -> bool {
 /// Every active billable person's timesheet status for `month` (`YYYY-MM`), at time `now`.
 pub async fn month_status(db: &SqlitePool, workspace_id: &str, month: &str, now: i64) -> sqlx::Result<Vec<TimesheetRow>> {
     let s = settings::load(db, workspace_id).await?;
-    let Some((start, end)) = clock::month_bounds(month, s.tz_offset_minutes) else { return Ok(vec![]) };
+    let Some((_, end)) = clock::month_bounds(month, s.tz_offset_minutes) else { return Ok(vec![]) };
     let due_at = end + s.timesheet_grace_days * DAY_MS;
     let mut rows = vec![];
     for p in people::list(db, workspace_id, false).await?.into_iter().filter(|p| p.is_billable() && started_by_month(p, month)) {
-        let timesheet = timesheet_mail(db, workspace_id, &p.id, start, now.max(due_at) + 1).await?;
+        let timesheet = timesheet_mail(db, workspace_id, &p.id, month).await?;
         let status = match (&timesheet, now >= due_at) {
             (Some(_), _) => "received",
             (None, true) => "missing",
@@ -158,6 +226,7 @@ pub async fn evaluate_timesheets(state: &AppState, workspace_id: &str, now: i64)
                 dedupe_key: format!("{TIMESHEET_MISSING}:{}:{month}", row.person_id),
                 message_id: None,
                 now,
+                period_key: None,
             },
         )
         .await?;
@@ -172,8 +241,7 @@ pub async fn evaluate_timesheets(state: &AppState, workspace_id: &str, now: i64)
     for (id, key) in open {
         let mut parts = key.splitn(3, ':').skip(1);
         let (Some(person_id), Some(month)) = (parts.next(), parts.next()) else { continue };
-        let Some((start, _)) = clock::month_bounds(month, s.tz_offset_minutes) else { continue };
-        if timesheet_mail(db, workspace_id, person_id, start, now + 1).await?.is_some() {
+        if timesheet_mail(db, workspace_id, person_id, month).await?.is_some() {
             sqlx::query("UPDATE alerts SET status = 'resolved', resolved_at = ?1, resolved_by = 'system', snoozed_until = NULL, updated_at = ?1 WHERE id = ?2")
                 .bind(now)
                 .bind(&id)

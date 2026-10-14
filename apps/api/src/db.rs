@@ -72,7 +72,21 @@ pub async fn migrate(pool: &SqlitePool) -> anyhow::Result<()> {
     sqlx::migrate!("./migrations").run(pool).await.context("running migrations")
 }
 
+thread_local! {
+    static FROZEN_CLOCK: std::cell::Cell<Option<i64>> = const { std::cell::Cell::new(None) };
+}
+
+/// Tests only: pins `now_ms()` on the current thread (a `#[tokio::test]` runs on one thread), so day-boundary
+/// logic does not depend on when the test happens to run.
+#[doc(hidden)]
+pub fn freeze_clock(ms: i64) {
+    FROZEN_CLOCK.with(|c| c.set(Some(ms)));
+}
+
 pub fn now_ms() -> i64 {
+    if let Some(ms) = FROZEN_CLOCK.with(std::cell::Cell::get) {
+        return ms;
+    }
     (OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000) as i64
 }
 

@@ -19,6 +19,8 @@ pub struct TeamSettings {
     pub client_domains: Vec<String>,
     pub timesheet_grace_days: i64,
     pub hours_tolerance: f64,
+    pub route_alerts_by_owner: bool,
+    pub restrict_mail_to_team: bool,
 }
 
 impl Default for TeamSettings {
@@ -34,6 +36,8 @@ impl Default for TeamSettings {
             client_domains: vec![],
             timesheet_grace_days: 3,
             hours_tolerance: 0.5,
+            route_alerts_by_owner: false,
+            restrict_mail_to_team: false,
         }
     }
 }
@@ -50,12 +54,15 @@ struct Row {
     client_domains_json: String,
     timesheet_grace_days: i64,
     hours_tolerance: f64,
+    route_alerts_by_owner: bool,
+    restrict_mail_to_team: bool,
 }
 
 pub async fn load(db: &SqlitePool, workspace_id: &str) -> sqlx::Result<TeamSettings> {
     let row: Option<Row> = sqlx::query_as(
         "SELECT tz_offset_minutes, manager_after_hours, final_after_hours, final_emails_json, below_target_hour,
-                weekly_check_hour, hr_source_id, client_domains_json, timesheet_grace_days, hours_tolerance
+                weekly_check_hour, hr_source_id, client_domains_json, timesheet_grace_days, hours_tolerance,
+                route_alerts_by_owner, restrict_mail_to_team
          FROM team_settings WHERE workspace_id = ?1",
     )
     .bind(workspace_id)
@@ -72,6 +79,8 @@ pub async fn load(db: &SqlitePool, workspace_id: &str) -> sqlx::Result<TeamSetti
         client_domains: serde_json::from_str(&r.client_domains_json).unwrap_or_default(),
         timesheet_grace_days: r.timesheet_grace_days,
         hours_tolerance: r.hours_tolerance,
+        route_alerts_by_owner: r.route_alerts_by_owner,
+        restrict_mail_to_team: r.restrict_mail_to_team,
     }))
 }
 
@@ -91,6 +100,8 @@ pub struct SettingsInput {
     pub client_domains: Vec<String>,
     pub timesheet_grace_days: Option<i64>,
     pub hours_tolerance: Option<f64>,
+    pub route_alerts_by_owner: Option<bool>,
+    pub restrict_mail_to_team: Option<bool>,
 }
 
 impl SettingsInput {
@@ -118,6 +129,8 @@ impl SettingsInput {
             final_emails: finals,
             below_target_hour: in_range(self.below_target_hour, 0, 23, "below_target_hour")?,
             weekly_check_hour: in_range(self.weekly_check_hour, 0, 23, "weekly_check_hour")?,
+            route_alerts_by_owner: self.route_alerts_by_owner.unwrap_or(current.route_alerts_by_owner),
+            restrict_mail_to_team: staffing && self.restrict_mail_to_team.unwrap_or(current.restrict_mail_to_team),
             ..current.clone()
         };
         if staffing {
@@ -147,14 +160,16 @@ impl SettingsInput {
 pub async fn save(db: &SqlitePool, workspace_id: &str, s: &TeamSettings) -> sqlx::Result<()> {
     sqlx::query(
         "INSERT INTO team_settings (workspace_id, tz_offset_minutes, manager_after_hours, final_after_hours, final_emails_json,
-                below_target_hour, weekly_check_hour, hr_source_id, client_domains_json, timesheet_grace_days, hours_tolerance, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                below_target_hour, weekly_check_hour, hr_source_id, client_domains_json, timesheet_grace_days, hours_tolerance, route_alerts_by_owner,
+                restrict_mail_to_team, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
          ON CONFLICT(workspace_id) DO UPDATE SET
            tz_offset_minutes = excluded.tz_offset_minutes, manager_after_hours = excluded.manager_after_hours,
            final_after_hours = excluded.final_after_hours, final_emails_json = excluded.final_emails_json,
            below_target_hour = excluded.below_target_hour, weekly_check_hour = excluded.weekly_check_hour,
            hr_source_id = excluded.hr_source_id, client_domains_json = excluded.client_domains_json,
            timesheet_grace_days = excluded.timesheet_grace_days, hours_tolerance = excluded.hours_tolerance,
+           route_alerts_by_owner = excluded.route_alerts_by_owner, restrict_mail_to_team = excluded.restrict_mail_to_team,
            updated_at = excluded.updated_at",
     )
     .bind(workspace_id)
@@ -168,6 +183,8 @@ pub async fn save(db: &SqlitePool, workspace_id: &str, s: &TeamSettings) -> sqlx
     .bind(json!(s.client_domains).to_string())
     .bind(s.timesheet_grace_days)
     .bind(s.hours_tolerance)
+    .bind(s.route_alerts_by_owner)
+    .bind(s.restrict_mail_to_team)
     .bind(now_ms())
     .execute(db)
     .await?;

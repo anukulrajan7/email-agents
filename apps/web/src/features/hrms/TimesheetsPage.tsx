@@ -17,10 +17,11 @@ function PolicyForm({ ws, settings }: { ws: string; settings: TeamSettings }) {
   const notify = useToast();
   const [hr, setHr] = useState(settings.hr_source_id ?? '');
   const [grace, setGrace] = useState(settings.timesheet_grace_days ?? 3);
+  const [wall, setWall] = useState(settings.restrict_mail_to_team ?? false);
 
   const submit = (e: FormEvent) => {
     e.preventDefault();
-    save.mutate({ ...settings, hr_source_id: hr || null, timesheet_grace_days: grace }, { onSuccess: () => notify('success', 'Billable policy saved.') });
+    save.mutate({ ...settings, hr_source_id: hr || null, timesheet_grace_days: grace, restrict_mail_to_team: wall }, { onSuccess: () => notify('success', 'Billable policy saved.') });
   };
 
   return (
@@ -46,6 +47,10 @@ function PolicyForm({ ws, settings }: { ws: string; settings: TeamSettings }) {
             <Input id={`${uid}-grace`} type="number" min={0} max={28} className="w-24" value={grace} onChange={(e) => setGrace(Number(e.target.value))} />
           </div>
         </div>
+        <label className="flex items-center gap-2 text-sm text-ink">
+          <input type="checkbox" checked={wall} onChange={(e) => setWall(e.target.checked)} />
+          Members read only the mailboxes of their own team
+        </label>
         <ErrorNote error={save.error} />
         <div>
           <Button type="submit" loading={save.isPending}>

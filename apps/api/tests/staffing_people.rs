@@ -66,15 +66,24 @@ async fn billable_people_cannot_link_their_own_mailbox() {
     let ws = h.workspace(&["staffing"]).await;
     let own = h.mailbox(&ws, "ravi@gmail.test").await;
     let hr = h.mailbox(&ws, "hr@acme.test").await;
+    // Billable needs a connected HR mailbox to exist first.
+    let (s, e) = h.call("POST", &format!("{}/team/people", api(&ws)), OWNER, Some(json!({"name": "Early", "emails": ["early@client.test"], "employee_type": "billable"}))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    assert!(e["error"]["message"].as_str().unwrap().contains("connected HR mailbox"), "{e}");
+    let (s, _) = h.call("PUT", &format!("{}/team/settings", api(&ws)), OWNER, Some(settings(json!({"hr_source_id": hr})))).await;
+    assert_eq!(s, StatusCode::OK);
     let (s, e) = h
         .call("POST", &format!("{}/team/people", api(&ws)), OWNER, Some(json!({"name": "Ravi", "emails": ["ravi@client.test"], "employee_type": "billable", "source_id": own})))
         .await;
     assert_eq!(s, StatusCode::BAD_REQUEST);
     assert!(e["error"]["message"].as_str().unwrap().contains("only through the HR mailbox"), "{e}");
-    // Naming the HR mailbox in settings makes it the one place a billable person may be linked.
-    let (s, _) = h.call("PUT", &format!("{}/team/settings", api(&ws)), OWNER, Some(settings(json!({"hr_source_id": hr})))).await;
-    assert_eq!(s, StatusCode::OK);
+    // The HR mailbox is the one place a billable person may be linked. It cannot be unset while they exist.
     h.person(&ws, json!({"name": "Ravi", "emails": ["ravi@client.test"], "employee_type": "billable", "source_id": hr})).await;
+    let (s, e) = h.call("PUT", &format!("{}/team/settings", api(&ws)), OWNER, Some(settings(json!({"hr_source_id": null})))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    assert!(e["error"]["message"].as_str().unwrap().contains("must stay set"), "{e}");
+    sqlx::query("UPDATE email_sources SET status = 'disconnected' WHERE id = ?1").bind(&hr).execute(&h.state.db).await.unwrap();
+    assert_eq!(h.call("PUT", &format!("{}/team/settings", api(&ws)), OWNER, Some(settings(json!({"hr_source_id": hr})))).await.0, StatusCode::BAD_REQUEST);
 }
 
 pub fn settings(extra: serde_json::Value) -> serde_json::Value {
@@ -90,6 +99,8 @@ pub fn settings(extra: serde_json::Value) -> serde_json::Value {
 async fn csv_import_reports_every_problem_and_dry_run_changes_nothing() {
     let h = harness().await;
     let ws = h.workspace(&["staffing"]).await;
+    let hr = h.mailbox(&ws, "hr@acme.test").await;
+    h.call("PUT", &format!("{}/team/settings", api(&ws)), OWNER, Some(settings(json!({"hr_source_id": hr})))).await;
     let url = format!("{}/team/people/import", api(&ws));
     let csv = "name,email,employee_type,client,manager_email,role,joining_date,daily_target,weekly_target\n\
                Neha Rao,neha@acme.test,non-billable,,,team lead,2025-01-06,,\n\

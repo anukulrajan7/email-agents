@@ -174,7 +174,7 @@ pub async fn list(
         Some(_) => return Err(AppError::BadRequest("reply must be replied or awaiting".into())),
     };
     let filters = format!(
-        "WHERE m.workspace_id = ?1
+        "WHERE m.workspace_id = ?1 AND m.suppressed = 0
            AND (?2 IS NULL OR c.category = ?2)
            AND (?3 IS NULL OR m.subject LIKE ?3 ESCAPE '\\' OR m.sender_address LIKE ?3 ESCAPE '\\'
                 OR m.original_sender_address LIKE ?3 ESCAPE '\\')
@@ -350,7 +350,8 @@ pub async fn detail(
     user: AuthUser,
     Path((ws, id)): Path<(String, String)>,
 ) -> AppResult<Json<Value>> {
-    require_role(&state.db, &ws, &user, Role::Operator).await?;
+    let access = crate::team::access::resolve(&state.db, &ws, &user).await?;
+    let wall = crate::team::scope::wall(&state.db, &ws, &access).await?.map(|ids| json!(ids).to_string());
     let m: DetailRow = sqlx::query_as(
         "SELECT m.id, m.source_id, s.kind AS source_kind, s.capabilities_json, m.sender_address, m.original_sender_address,
                 m.recipients_json, m.subject, m.body_text, m.body_html, m.received_at, m.processing_status,
@@ -358,10 +359,12 @@ pub async fn detail(
          FROM email_messages m
          LEFT JOIN contacts ct ON ct.workspace_id = m.workspace_id AND ct.email = m.sender_address
          JOIN email_sources s ON s.id = m.source_id
-         WHERE m.id = ?1 AND m.workspace_id = ?2",
+         WHERE m.id = ?1 AND m.workspace_id = ?2 AND m.suppressed = 0
+           AND (?3 IS NULL OR m.source_id IN (SELECT value FROM json_each(?3)))",
     )
     .bind(&id)
     .bind(&ws)
+    .bind(&wall)
     .fetch_optional(&state.db)
     .await?
     .ok_or(AppError::NotFound)?;

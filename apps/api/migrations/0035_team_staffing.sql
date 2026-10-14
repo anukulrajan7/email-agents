@@ -19,6 +19,10 @@ CREATE TABLE team_settings (
   client_domains_json TEXT NOT NULL DEFAULT '[]',
   timesheet_grace_days INTEGER NOT NULL DEFAULT 3 CHECK (timesheet_grace_days BETWEEN 0 AND 28),
   hours_tolerance REAL NOT NULL DEFAULT 0.5 CHECK (hours_tolerance >= 0),
+  -- Opt-ins. route_alerts_by_owner: rule alerts follow owner -> manager -> final (the staffing pack always does).
+  -- restrict_mail_to_team (staffing pack only): operators read only the mailboxes of their own manager-chain subtree.
+  route_alerts_by_owner INTEGER NOT NULL DEFAULT 0,
+  restrict_mail_to_team INTEGER NOT NULL DEFAULT 0,
   updated_at INTEGER NOT NULL
 );
 
@@ -67,6 +71,11 @@ CREATE INDEX idx_person_emails_person ON person_emails(person_id, position);
 
 -- The owner of an alert, for the owner -> manager -> final escalation chain.
 ALTER TABLE alerts ADD COLUMN person_id TEXT;
+-- The window a rolling alert (below_target) is about, e.g. d2026-10-14 or w2026-10-12.
+ALTER TABLE alerts ADD COLUMN period_key TEXT;
+
+-- Mail the billable policy kept out of sight. Stored, never processed, recoverable when the policy changes.
+ALTER TABLE email_messages ADD COLUMN suppressed INTEGER NOT NULL DEFAULT 0;
 
 -- Submissions: a recruiter's sent mail to a client with a CV attached.
 CREATE TABLE submissions (

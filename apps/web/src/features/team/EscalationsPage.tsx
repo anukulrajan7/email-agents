@@ -15,10 +15,11 @@ function DelaysForm({ initial, current }: { initial: TeamSettings; current: { ma
   const [manager, setManager] = useState(initial.manager_after_hours ?? current.manager);
   const [final, setFinal] = useState(initial.final_after_hours ?? current.final);
   const [emails, setEmails] = useState(initial.final_emails);
+  const [byOwner, setByOwner] = useState(initial.route_alerts_by_owner ?? false);
 
   const submit = (e: FormEvent) => {
     e.preventDefault();
-    save.mutate({ ...initial, manager_after_hours: manager, final_after_hours: final, final_emails: emails }, { onSuccess: () => notify('success', 'Escalation settings saved.') });
+    save.mutate({ ...initial, manager_after_hours: manager, final_after_hours: final, final_emails: emails, route_alerts_by_owner: byOwner }, { onSuccess: () => notify('success', 'Escalation settings saved.') });
   };
 
   return (
@@ -35,6 +36,10 @@ function DelaysForm({ initial, current }: { initial: TeamSettings; current: { ma
           </div>
         </div>
         <EmailChipInput label="Final contacts (HR or admins)" hint="Leave empty to use the alert recipients." value={emails} onChange={setEmails} />
+        <label className="flex items-center gap-2 text-sm text-ink">
+          <input type="checkbox" checked={byOwner} onChange={(e) => setByOwner(e.target.checked)} />
+          Tell the owner of the mailbox first (always on for HR &amp; recruiting)
+        </label>
         <ErrorNote error={save.error} />
         <div>
           <Button type="submit" loading={save.isPending}>
@@ -89,7 +94,7 @@ export function EscalationsPage() {
                   <ol className="mt-1 flex flex-wrap gap-x-6 gap-y-1 text-sm text-ink-muted">
                     {c.steps.map((s) => (
                       <li key={s.level}>
-                        {s.level}. {s.label}: <span className="text-ink">{s.emails.join(', ') || 'no one set'}</span>
+                        {s.level}. {s.label}: <span className="text-ink">{s.emails.join(', ') || s.name || 'set by the super admin'}</span>
                       </li>
                     ))}
                   </ol>

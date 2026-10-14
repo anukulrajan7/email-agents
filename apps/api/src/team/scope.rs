@@ -16,8 +16,9 @@ pub async fn source_filter(
 ) -> AppResult<Option<Vec<String>>> {
     let source_id = source_id.filter(|s| !s.is_empty());
     let person_id = person_id.filter(|s| !s.is_empty());
+    let wall = wall(db, workspace_id, access).await?;
     if source_id.is_none() && person_id.is_none() {
-        return Ok(None);
+        return Ok(wall);
     }
     let mut allowed: Option<Vec<String>> = None;
     if let Some(s) = source_id {
@@ -53,5 +54,31 @@ pub async fn source_filter(
             None => linked,
         });
     }
-    Ok(allowed)
+    Ok(match (allowed, wall) {
+        (Some(a), Some(w)) => Some(a.into_iter().filter(|s| w.contains(s)).collect()),
+        (a, w) => a.or(w),
+    })
+}
+
+/// The access wall. With the staffing pack's `restrict_mail_to_team` on, operators (not admins, not the super
+/// admin) can only read mailboxes linked to people in their own manager-chain subtree. `None` = no wall.
+pub async fn wall(db: &SqlitePool, workspace_id: &str, access: &Access) -> AppResult<Option<Vec<String>>> {
+    if access.level != super::access::Level::Operator {
+        return Ok(None);
+    }
+    if !super::settings::load(db, workspace_id).await?.restrict_mail_to_team || !crate::staffing::enabled(db, workspace_id).await? {
+        return Ok(None);
+    }
+    let Some(visible) = access.visible() else { return Ok(None) };
+    let ids = serde_json::json!(visible.iter().collect::<Vec<_>>()).to_string();
+    Ok(Some(
+        sqlx::query_scalar(
+            "SELECT DISTINCT source_id FROM people WHERE workspace_id = ?1 AND active = 1 AND source_id IS NOT NULL
+               AND id IN (SELECT value FROM json_each(?2))",
+        )
+        .bind(workspace_id)
+        .bind(ids)
+        .fetch_all(db)
+        .await?,
+    ))
 }

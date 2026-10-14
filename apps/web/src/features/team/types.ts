@@ -104,6 +104,8 @@ export type TeamSettings = {
   final_emails: string[];
   below_target_hour: number;
   weekly_check_hour: number;
+  route_alerts_by_owner?: boolean;
+  restrict_mail_to_team?: boolean;
   hr_source_id?: string | null;
   client_domains?: string[];
   timesheet_grace_days?: number;

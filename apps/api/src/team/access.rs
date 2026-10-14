@@ -128,7 +128,7 @@ pub async fn person_for_email(db: &SqlitePool, workspace_id: &str, email: &str) 
 pub async fn resolve(db: &SqlitePool, workspace_id: &str, user: &AuthUser) -> AppResult<Access> {
     let role = require_role(db, workspace_id, user, Role::Operator).await?;
     let person_id = person_for_email(db, workspace_id, &user.email).await?;
-    let owner = owner_user_id(db, workspace_id).await?.is_some_and(|o| o == user.id);
+    let owner = role == Role::Admin && owner_user_id(db, workspace_id).await?.is_some_and(|o| o == user.id);
     let (level, visible) = if owner {
         (Level::SuperAdmin, None)
     } else {

@@ -46,9 +46,7 @@ pub async fn persist_message(
         return Ok(None);
     }
 
-    if crate::staffing::policy::blocks_ingest(conn, source_id, workspace_id, email).await? {
-        return Ok(None);
-    }
+    let suppressed = crate::staffing::policy::should_suppress(conn, source_id, workspace_id, email).await?;
 
     let now = now_ms();
     let thread_id = match provider_thread_id {
@@ -125,6 +123,25 @@ pub async fn persist_message(
     .execute(&mut *conn)
     .await?;
 
+    if suppressed {
+        sqlx::query("UPDATE email_messages SET suppressed = 1 WHERE id = ?1").bind(&message_id).execute(&mut *conn).await?;
+        tracing::warn!(%message_id, %source_id, "billable policy: mail from a billable person outside the HR mailbox stored as suppressed");
+        audit::record(
+            &mut *conn,
+            Entry {
+                workspace_id,
+                actor: Actor::System,
+                action: "message.suppressed",
+                entity_type: "message",
+                entity_id: &message_id,
+                message_id: Some(&message_id),
+                metadata: json!({ "source_id": source_id, "reason": "billable_policy" }),
+            },
+        )
+        .await?;
+        return Ok(Some(message_id));
+    }
+
     if !outbound {
         memory::record_contact(&mut *conn, workspace_id, &email.sender_address, email.sender_name.as_deref(), email.received_at)
             .await?;
@@ -197,7 +214,7 @@ pub async fn refresh_content(
                 sender_name = COALESCE(?5, sender_name), cc_json = ?6,
                 direction = CASE WHEN ?7 THEN 'outbound' ELSE direction END,
                 processing_status = CASE WHEN ?7 THEN 'processed' ELSE processing_status END
-         WHERE source_id = ?3 AND source_message_id = ?4 AND content_complete = 0
+         WHERE source_id = ?3 AND source_message_id = ?4 AND content_complete = 0 AND suppressed = 0
          RETURNING id, workspace_id, direction",
     )
     .bind(&body_text)

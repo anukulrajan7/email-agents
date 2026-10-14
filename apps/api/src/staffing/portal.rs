@@ -221,7 +221,7 @@ pub async fn reconcile(db: &SqlitePool, workspace_id: &str, now: i64) -> sqlx::R
 
     let hour_months: Vec<String> = sqlx::query_scalar("SELECT DISTINCT month FROM portal_hours WHERE workspace_id = ?1 ORDER BY month").bind(workspace_id).fetch_all(db).await?;
     for month in &hour_months {
-        let Some((start, end)) = clock::month_bounds(month, cfg.tz_offset_minutes) else { continue };
+        let Some((_, end)) = clock::month_bounds(month, cfg.tz_offset_minutes) else { continue };
         let due = end + cfg.timesheet_grace_days * DAY_MS;
         let portal: HashMap<String, f64> = sqlx::query_as::<_, (String, f64)>("SELECT person_id, hours FROM portal_hours WHERE workspace_id = ?1 AND month = ?2")
             .bind(workspace_id)
@@ -232,7 +232,7 @@ pub async fn reconcile(db: &SqlitePool, workspace_id: &str, now: i64) -> sqlx::R
             .collect();
         out.months.push(month.clone());
         for p in all.iter().filter(|p| (p.is_billable() && started_by_month(p, month)) || portal.contains_key(&p.id)) {
-            let email = policy::timesheet_mail(db, workspace_id, &p.id, start, now.max(due) + 1).await?;
+            let email = policy::timesheet_mail(db, workspace_id, &p.id, month).await?;
             let mut push = |kind: &'static str, detail: Value| {
                 out.mismatches.push(Mismatch { person_id: p.id.clone(), person_name: p.name.clone(), month: month.clone(), kind, detail })
             };
@@ -358,6 +358,7 @@ pub async fn reconcile_and_alert(state: &AppState, workspace_id: &str, now: i64)
                 dedupe_key: dedupe(&m.person_id, &m.month, m.kind),
                 message_id: None,
                 now,
+                period_key: None,
             },
         )
         .await?;
@@ -407,13 +408,15 @@ pub struct MismatchRow {
     pub updated_at: i64,
 }
 
-pub async fn list_mismatches(db: &SqlitePool, workspace_id: &str) -> sqlx::Result<Vec<MismatchRow>> {
+pub async fn list_mismatches(db: &SqlitePool, workspace_id: &str, visible: Option<&std::collections::HashSet<String>>) -> sqlx::Result<Vec<MismatchRow>> {
     sqlx::query_as(
         "SELECT x.id, x.person_id, p.name AS person_name, x.month, x.kind, x.detail_json, x.status, x.updated_at
          FROM portal_mismatches x JOIN people p ON p.id = x.person_id
-         WHERE x.workspace_id = ?1 ORDER BY x.status = 'open' DESC, x.month DESC, p.name LIMIT 500",
+         WHERE x.workspace_id = ?1 AND (?2 IS NULL OR x.person_id IN (SELECT value FROM json_each(?2)))
+         ORDER BY x.status = 'open' DESC, x.month DESC, p.name LIMIT 500",
     )
     .bind(workspace_id)
+    .bind(visible.map(|v| json!(v.iter().collect::<Vec<_>>()).to_string()))
     .fetch_all(db)
     .await
 }

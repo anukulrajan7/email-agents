@@ -828,12 +828,32 @@ email; requirement by client (recipient domain vs requirement client), role word
 only suggest and never link on their own. Outcomes come from the client's replies in the thread, or from replies
 labelled `submission_update` that name the candidate, read by plain phrases (interview / rejected / selected / joined).
 
-Billable policy: with `hr_source_id` set, any message to or from a billable person's address that arrives in another
-mailbox is not stored (`ingest::persist_message`). A billable person cannot have their own mailbox linked.
+Billable policy: with `hr_source_id` set, mail that a billable person SENT (sender or, for forwarded mail,
+`original_sender_address`), or that sits in a mailbox linked to a billable person, and that did not arrive through the HR
+mailbox, is stored with `email_messages.suppressed = 1` (audit `message.suppressed` + a warn log). It is never classified,
+indexed, listed, searched or alerted on. Recipients and Cc never match, so a client copying a consultant, a team list and a
+recruiter's sent CV mail copying a consultant are all kept. Changing `hr_source_id` releases suppressed mail into the normal
+pipeline. Marking anyone billable needs a connected HR mailbox, and `hr_source_id` cannot be unset or point at a
+disconnected mailbox while billable people exist. A billable person cannot have their own mailbox linked.
+
+Timesheets belong to a month: a month named in the subject ("September timesheet", "Sept", `2026-09`) wins, otherwise
+`received_at` minus the grace days decides (a timesheet sent 2 Sep is August's). Portal hours for a month are only compared
+with that month's timesheet.
+
+### Ownership, redaction and the mail wall
+
+The super admin needs the owner row and the `admin` role. The members route refuses to demote them;
+`POST /team/ownership {email}` (super admin only, target must be an admin member) hands the role over. Non-owners get
+`GET /team/settings` and `/team/escalations` without any email addresses, HR mailbox or sources. With the staffing pack and
+team setting `restrict_mail_to_team`, operators read only mailboxes linked to people in their own manager-chain subtree
+(inbox list, message detail and search; filters cannot step outside it). Off by default. Team setting
+`route_alerts_by_owner` (always on in the staffing pack) opts rule alerts into owner routing.
 
 ### Alerts and escalation
 
-New kinds: `below_target` (every workspace), `timesheet_missing` and `portal_mismatch` (pack). `alerts.person_id` is the
+A resolved alert whose condition returns is reopened at level 1 when the system closed it (a person's own resolve sticks).
+`below_target` is one rolling alert per person (`alerts.period_key` = the window), resolved when the target is met or the
+window closes. New kinds: `below_target` (every workspace), `timesheet_missing` and `portal_mismatch` (pack). `alerts.person_id` is the
 owner. For an alert with an owner: level 1 goes to the person, level 2 to their manager (else the final contacts), level 3
 to the final contacts (else the alert recipients). Delays: `manager_after_hours` then `final_after_hours`. Rule alerts
 (`important_unanswered`, `approval_pending`) get the owner of the mailbox they arrived in.

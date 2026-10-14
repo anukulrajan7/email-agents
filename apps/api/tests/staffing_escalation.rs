@@ -11,7 +11,7 @@ const FRI_13: i64 = 1_792_155_600_000;
 
 fn settings(manager: i64, finals: i64) -> Value {
     json!({"tz_offset_minutes": 0, "manager_after_hours": manager, "final_after_hours": finals, "final_emails": ["hr@acme.test"],
-           "below_target_hour": 16, "weekly_check_hour": 12})
+           "below_target_hour": 16, "weekly_check_hour": 12, "route_alerts_by_owner": true})
 }
 
 fn recipients(h: &H) -> Vec<String> {
@@ -125,4 +125,53 @@ async fn below_target_alerts_daily_and_weekly_and_clear_when_the_target_is_met()
     assert_eq!(r.raised, 1);
     let (_, list) = h.get(OWNER, &format!("{}/alerts", api(&ws))).await;
     assert_eq!(list["items"][0]["title"], "Below target this week: Asha Nair");
+}
+
+#[tokio::test]
+async fn without_the_opt_in_a_general_workspace_keeps_todays_alert_routing_even_with_a_linked_mailbox() {
+    let h = harness().await;
+    let ws = h.workspace(&["general"]).await;
+    let src = h.mailbox(&ws, "asha@acme.test").await;
+    h.member(&ws, "boss@acme.test", "operator").await;
+    h.person(&ws, json!({"name": "Asha", "emails": ["asha@acme.test"], "source_id": src})).await;
+    // The default team settings: no owner routing.
+    h.call("PUT", &format!("{}/alert-settings", api(&ws)), OWNER, Some(json!({"enabled": true, "recipients": ["owner@acme.test"], "escalate_to": ["boss@acme.test"],
+        "unanswered_hours": 4, "escalate_after_hours": 24, "daily_digest": false, "digest_hour": 9}))).await;
+    let t0 = now_ms();
+    let m = h.ingest(&ws, &src, email("cust@shop.test", &["asha@acme.test"], "Where is my order", "?", t0 - 6 * HOUR), "s1").await.unwrap();
+    sqlx::query("INSERT INTO classifications (message_id, category, priority, requires_reply, confidence, needs_review, source, taxonomy_version, updated_at) VALUES (?1, 'question', 'high', 1, 1.0, 0, 'manual', 'taxonomy-v1', 1)")
+        .bind(&m).execute(&h.state.db).await.unwrap();
+    alerts::evaluate_workspace(&h.state, &ws, t0).await.unwrap();
+    assert_eq!(recipients(&h), vec!["owner@acme.test"], "level 1 goes to the alert recipients, not the mailbox owner");
+    alerts::evaluate_workspace(&h.state, &ws, t0 + 25 * HOUR).await.unwrap();
+    assert_eq!(recipients(&h), vec!["boss@acme.test"], "escalate_to is honoured");
+    let owner: Option<String> = sqlx::query_scalar("SELECT person_id FROM alerts WHERE workspace_id = ?1").bind(&ws).fetch_one(&h.state.db).await.unwrap();
+    assert!(owner.is_none());
+}
+
+#[tokio::test]
+async fn below_target_is_one_rolling_alert_per_person() {
+    let h = harness().await;
+    let ws = h.workspace(&["general"]).await;
+    let src = h.mailbox(&ws, "asha@acme.test").await;
+    h.person(&ws, json!({"name": "Asha Nair", "emails": ["asha@acme.test"], "source_id": src, "daily_target": 5, "joining_date": "2026-01-05"})).await;
+    h.call("PUT", &format!("{}/alert-settings", api(&ws)), OWNER, Some(json!({"enabled": true, "recipients": ["owner@acme.test"], "escalate_to": [], "unanswered_hours": 4, "escalate_after_hours": 24, "daily_digest": false, "digest_hour": 9}))).await;
+    let count = || async { sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM alerts WHERE kind = 'below_target'").fetch_one(&h.state.db).await.unwrap() };
+    let status = || async { sqlx::query_scalar::<_, String>("SELECT status FROM alerts WHERE kind = 'below_target'").fetch_one(&h.state.db).await.unwrap() };
+
+    alerts::evaluate_workspace(&h.state, &ws, WED + 7 * HOUR).await.unwrap();
+    assert_eq!((count().await, status().await.as_str()), (1, "open"));
+    // The next morning the old window has closed: the alert resolves itself.
+    alerts::evaluate_workspace(&h.state, &ws, WED + DAY + 2 * HOUR).await.unwrap();
+    assert_eq!((count().await, status().await.as_str()), (1, "resolved"));
+    // Thursday evening, still under target: the same alert reopens at level 1 rather than a second one appearing.
+    let r = alerts::evaluate_workspace(&h.state, &ws, WED + DAY + 7 * HOUR).await.unwrap();
+    assert_eq!(r.raised, 1);
+    assert_eq!((count().await, status().await.as_str()), (1, "open"));
+    let level: i64 = sqlx::query_scalar("SELECT escalation_level FROM alerts WHERE kind = 'below_target'").fetch_one(&h.state.db).await.unwrap();
+    assert_eq!(level, 1);
+    // A person who resolves it by hand is not nagged again within the same window.
+    sqlx::query("UPDATE alerts SET status = 'resolved', resolved_by = 'usr_x' WHERE kind = 'below_target'").execute(&h.state.db).await.unwrap();
+    alerts::evaluate_workspace(&h.state, &ws, WED + DAY + 8 * HOUR).await.unwrap();
+    assert_eq!(status().await, "resolved");
 }

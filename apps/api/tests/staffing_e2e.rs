@@ -33,6 +33,9 @@ async fn company() -> Co {
     let hr_box = h.mailbox(&ws, "hr@acme.test").await;
     let priya_box = h.mailbox(&ws, "priya@acme.test").await;
     let neha_box = h.mailbox(&ws, "neha@acme.test").await;
+    let settings = json!({"tz_offset_minutes": 0, "manager_after_hours": 24, "final_after_hours": 24, "final_emails": ["hr-head@acme.test"], "below_target_hour": 16,
+                          "weekly_check_hour": 12, "hr_source_id": hr_box, "client_domains": [], "timesheet_grace_days": 3, "hours_tolerance": 0.5});
+    assert_eq!(h.call("PUT", &format!("{}/team/settings", api(&ws)), OWNER, Some(settings)).await.0, StatusCode::OK);
     let csv = "name,email,employee_type,client,manager_email,role,joining_date,daily_target,weekly_target,mailbox\n\
                Neha Rao,neha@acme.test,non_billable,,,team lead,2025-01-06,,,neha@acme.test\n\
                Priya Sharma,priya@acme.test,non_billable,,neha@acme.test,recruiter,2026-03-02,5,25,priya@acme.test\n\
@@ -42,9 +45,6 @@ async fn company() -> Co {
     assert_eq!((s, r["created"].as_i64(), r["errors"].clone()), (StatusCode::OK, Some(4), json!([])), "{r}");
     let (_, list) = h.get(OWNER, &format!("{}/team/people", api(&ws))).await;
     let ids = list["items"].as_array().unwrap().iter().map(|p| (p["name"].as_str().unwrap().split(' ').next().unwrap().to_string(), p["id"].as_str().unwrap().to_string())).collect();
-    let settings = json!({"tz_offset_minutes": 0, "manager_after_hours": 24, "final_after_hours": 24, "final_emails": ["hr-head@acme.test"], "below_target_hour": 16,
-                          "weekly_check_hour": 12, "hr_source_id": hr_box, "client_domains": [], "timesheet_grace_days": 3, "hours_tolerance": 0.5});
-    assert_eq!(h.call("PUT", &format!("{}/team/settings", api(&ws)), OWNER, Some(settings)).await.0, StatusCode::OK);
     h.call("PUT", &format!("{}/alert-settings", api(&ws)), OWNER, Some(json!({"enabled": true, "recipients": ["owner@acme.test"], "escalate_to": [], "unanswered_hours": 4, "escalate_after_hours": 24, "daily_digest": false, "digest_hour": 9}))).await;
     Co { h, ws, intake, hr_box, priya_box, neha_box, priya_t, neha_t, ids }
 }
@@ -86,10 +86,12 @@ async fn r7_referrals_match_requirements_and_a_sent_cv_links_to_both() {
 
 #[tokio::test]
 async fn r1_a_recruiter_sees_today_and_this_week_against_target_and_a_manager_sees_the_team() {
+    // A fixed clock (Wednesday 10:00 UTC): "today" must not depend on when the test runs.
+    email_ai_api::db::freeze_clock(WED);
     let co = company().await;
     let (h, ws) = (&co.h, &co.ws);
     matching_pipeline(&co).await;
-    let t = now_ms();
+    let t = WED;
     for (n, (cv, subject)) in [("Rahul_Verma_CV.pdf", "Java Developer profile - Rahul Verma"), ("Anita_Desai_CV.pdf", "Profile - Anita Desai"), ("Kiran_Rao_CV.docx", "Profile - Kiran Rao")].into_iter().enumerate() {
         h.ingest(ws, &co.priya_box, sent(with_files(email("priya@acme.test", &["hr@capgemini.com"], subject, "Profile attached.", t - 600_000 + n as i64), &[cv])), &format!("p{n}")).await.unwrap();
     }
@@ -135,7 +137,10 @@ async fn r2_billable_staff_mail_is_limited_to_the_hr_mailbox_and_missing_timeshe
     let co = company().await;
     let (h, ws) = (&co.h, &co.ws);
     // Billable Ravi's client mail never enters a personal mailbox; his timesheet through HR does.
-    assert!(h.ingest(ws, &co.neha_box, email("ravi@client.test", &["neha@acme.test"], "Client escalation", "private client details", OCT5 - 9 * DAY), "n1").await.is_none());
+    let hidden = h.ingest(ws, &co.neha_box, email("ravi@client.test", &["neha@acme.test"], "Client escalation", "private client details", OCT5 - 9 * DAY), "n1").await.unwrap();
+    let flag: bool = sqlx::query_scalar("SELECT suppressed FROM email_messages WHERE id = ?1").bind(&hidden).fetch_one(&h.state.db).await.unwrap();
+    assert!(flag, "stored but hidden");
+    assert_eq!(h.get(OWNER, &format!("{}/messages?direction=all", api(ws))).await.1["items"].as_array().unwrap().len(), 0);
     let ts = h.ingest(ws, &co.hr_box, email("dev@client.test", &["hr@acme.test"], "September timesheet", "Total hours: 168", OCT5 - 4 * DAY), "h1").await.unwrap();
     h.classify(&ts, "timesheet").await;
     assert!(h.ingest(ws, &co.neha_box, email("customer@shop.test", &["neha@acme.test"], "Quote", "price?", OCT5 - 9 * DAY), "n2").await.is_some(), "non-billable: full mailbox");

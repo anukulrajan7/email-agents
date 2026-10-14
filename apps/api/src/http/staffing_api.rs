@@ -79,6 +79,7 @@ pub async fn list_submissions(State(state): State<AppState>, user: AuthUser, Pat
     }
     let rows: Vec<submissions::SubmissionRow> = sqlx::query_as(&format!(
         "{} WHERE s.workspace_id = ?1 AND (?2 IS NULL OR s.person_id = ?2) AND (?3 IS NULL OR s.link_status = ?3) AND s.status = COALESCE(?4, 'active')
+           AND (?6 IS NULL OR s.person_id IN (SELECT value FROM json_each(?6)))
          ORDER BY s.sent_at DESC LIMIT ?5",
         submissions::SELECT
     ))
@@ -87,6 +88,7 @@ pub async fn list_submissions(State(state): State<AppState>, user: AuthUser, Pat
     .bind(q.link_status.as_deref().filter(|p| !p.is_empty()))
     .bind(q.status.as_deref().filter(|p| !p.is_empty()))
     .bind(q.limit.unwrap_or(100).clamp(1, 500))
+    .bind(a.visible().map(|v| json!(v.iter().collect::<Vec<_>>()).to_string()))
     .fetch_all(&state.db)
     .await?;
     let items: Vec<Value> = rows.into_iter().filter(|r| a.can_see(&r.person_id)).map(submissions::row_json).collect();
@@ -229,7 +231,7 @@ pub async fn mismatches(State(state): State<AppState>, user: AuthUser, Path(ws):
     let a = gate(&state, &ws, &user).await?;
     let hours: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM portal_hours WHERE workspace_id = ?1").bind(&ws).fetch_one(&state.db).await?;
     let subs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM portal_submissions WHERE workspace_id = ?1").bind(&ws).fetch_one(&state.db).await?;
-    let items: Vec<Value> = portal::list_mismatches(&state.db, &ws)
+    let items: Vec<Value> = portal::list_mismatches(&state.db, &ws, a.visible())
         .await?
         .into_iter()
         .filter(|m| a.can_see(&m.person_id))

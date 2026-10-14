@@ -163,6 +163,8 @@ fn err<T>(field: &'static str, message: impl Into<String>) -> Result<T, FieldErr
 pub struct Context {
     pub staffing: bool,
     pub hr_source_id: Option<String>,
+    /// The HR mailbox exists and is not disconnected.
+    pub hr_connected: bool,
 }
 
 /// Fully resolved values, ready to validate and write.
@@ -323,6 +325,9 @@ pub async fn validate(conn: &mut SqliteConnection, workspace_id: &str, id: Optio
         if t.is_some_and(|v| !(0..=max).contains(&v)) {
             return err(field, format!("must be 0-{max}"));
         }
+    }
+    if d.employee_type == BILLABLE && ctx.staffing && !ctx.hr_connected {
+        return err("employee_type", "name a connected HR mailbox in the settings before marking anyone billable: their mail is only read through it");
     }
     if let Some(src) = &d.source_id {
         let ok: Option<i64> = sqlx::query_scalar("SELECT 1 FROM email_sources WHERE id = ?1 AND workspace_id = ?2")
@@ -672,13 +677,13 @@ mod tests {
         assert_eq!(parse_employee_type(" Non-Billable "), Some(NON_BILLABLE));
         assert_eq!(parse_employee_type("BILLABLE"), Some(BILLABLE));
         assert_eq!(parse_employee_type("contractor"), None);
-        let general = Context { staffing: false, hr_source_id: None };
+        let general = Context { staffing: false, hr_source_id: None, hr_connected: false };
         let f = Fields { name: Some(" Asha ".into()), emails: Some(vec!["Asha@Acme.com".into(), "asha@acme.com".into()]), ..Default::default() };
         let d = merge(blank_draft(), f, &general).unwrap();
         assert_eq!((d.name.as_str(), d.emails.clone()), ("Asha", vec!["asha@acme.com".to_string()]));
         let f = Fields { employee_type: Some("billable".into()), ..Default::default() };
         assert_eq!(merge(blank_draft(), f, &general).unwrap_err().field, "employee_type");
         let f = Fields { employee_type: Some("billable".into()), ..Default::default() };
-        assert_eq!(merge(blank_draft(), f, &Context { staffing: true, hr_source_id: None }).unwrap().employee_type, BILLABLE);
+        assert_eq!(merge(blank_draft(), f, &Context { staffing: true, hr_source_id: None, hr_connected: true }).unwrap().employee_type, BILLABLE);
     }
 }

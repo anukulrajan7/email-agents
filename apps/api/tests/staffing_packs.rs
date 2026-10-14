@@ -69,6 +69,9 @@ async fn a_staffing_workspace_gets_everything_at_once_with_defaults() {
     let (s, p) = h.call("GET", &format!("{}/matching/requirements", api(&ws)), OWNER, None).await;
     assert_eq!(s, StatusCode::OK, "{p}");
     // The HRMS metric definitions replace the generic primary and still include the generic ones.
+    let hr = h.mailbox(&ws, "hr@acme.test").await;
+    let body = json!({"tz_offset_minutes": 0, "manager_after_hours": null, "final_after_hours": null, "final_emails": [], "below_target_hour": 16, "weekly_check_hour": 12, "hr_source_id": hr});
+    assert_eq!(h.call("PUT", &format!("{}/team/settings", api(&ws)), OWNER, Some(body)).await.0, StatusCode::OK);
     let p = h.person(&ws, json!({"name": "P", "emails": ["p@acme.test"], "employee_type": "billable"})).await;
     assert_eq!(p["employee_type"], "billable");
     let (_, m) = h.get(OWNER, &format!("{}/team/metrics/people/{}", api(&ws), p["id"].as_str().unwrap())).await;

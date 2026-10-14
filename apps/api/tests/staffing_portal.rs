@@ -87,6 +87,9 @@ async fn portal_data_is_joined_exactly_and_mismatches_alert_then_clear() {
 async fn only_the_super_admin_imports_and_everyone_sees_their_own_mismatches() {
     let h = harness().await;
     let ws = h.workspace(&["staffing"]).await;
+    let hr = h.mailbox(&ws, "hr@acme.test").await;
+    h.call("PUT", &format!("{}/team/settings", api(&ws)), OWNER, Some(json!({"tz_offset_minutes": 0, "manager_after_hours": null, "final_after_hours": null, "final_emails": [],
+        "below_target_hour": 16, "weekly_check_hour": 12, "hr_source_id": hr}))).await;
     let admin = h.member(&ws, "admin2@acme.test", "admin").await;
     let ravi_t = h.member(&ws, "ravi@client.test", "operator").await;
     let dev_t = h.member(&ws, "dev@client.test", "operator").await;
@@ -104,4 +107,35 @@ async fn only_the_super_admin_imports_and_everyone_sees_their_own_mismatches() {
     assert_eq!(names(&h.get(&dev_t, &format!("{url}/mismatches")).await.1), vec!["Dev"]);
     assert_eq!(names(&h.get(OWNER, &format!("{url}/mismatches")).await.1).len(), 2);
     assert!(names(&h.get(&admin, &format!("{url}/mismatches")).await.1).is_empty());
+}
+
+#[tokio::test]
+async fn a_cleared_mismatch_reopens_at_level_one_when_it_comes_back_but_a_manual_resolve_sticks() {
+    let h = harness().await;
+    let ws = h.workspace(&["staffing"]).await;
+    let hr = h.mailbox(&ws, "hr@acme.test").await;
+    h.call("PUT", &format!("{}/team/settings", api(&ws)), OWNER, Some(json!({"tz_offset_minutes": 0, "manager_after_hours": null, "final_after_hours": null, "final_emails": [],
+        "below_target_hour": 16, "weekly_check_hour": 12, "hr_source_id": hr}))).await;
+    h.person(&ws, json!({"name": "Ravi", "emails": ["ravi@client.test"], "employee_type": "billable", "joining_date": "2026-01-12"})).await;
+    let m = h.ingest(&ws, &hr, email("ravi@client.test", &["hr@acme.test"], "September timesheet", "Total hours: 152", OCT5 - 4 * DAY), "t1").await.unwrap();
+    h.classify(&m, "timesheet").await;
+    let url = format!("{}/staffing/portal/hours", api(&ws));
+    let state = || async { sqlx::query_as::<_, (String, i64)>("SELECT status, escalation_level FROM alerts WHERE kind = 'portal_mismatch'").fetch_one(&h.state.db).await.unwrap() };
+
+    h.call("POST", &url, OWNER, Some(json!({"csv": "email,month,hours\nravi@client.test,2026-09,160\n"}))).await;
+    portal::reconcile_and_alert(&h.state, &ws, OCT5).await.unwrap();
+    sqlx::query("UPDATE alerts SET escalation_level = 3").execute(&h.state.db).await.unwrap();
+    h.call("POST", &url, OWNER, Some(json!({"csv": "email,month,hours\nravi@client.test,2026-09,152\n"}))).await;
+    portal::reconcile_and_alert(&h.state, &ws, OCT5 + HOUR).await.unwrap();
+    assert_eq!(state().await.0, "resolved");
+
+    h.call("POST", &url, OWNER, Some(json!({"csv": "email,month,hours\nravi@client.test,2026-09,140\n"}))).await;
+    let raised = portal::reconcile_and_alert(&h.state, &ws, OCT5 + 2 * HOUR).await.unwrap();
+    assert_eq!(raised, 1);
+    assert_eq!(state().await, ("open".to_string(), 1), "reopened at level 1, same alert");
+
+    // Resolved by a person: the same mismatch does not reopen it.
+    sqlx::query("UPDATE alerts SET status = 'resolved', resolved_by = 'usr_x'").execute(&h.state.db).await.unwrap();
+    assert_eq!(portal::reconcile_and_alert(&h.state, &ws, OCT5 + 3 * HOUR).await.unwrap(), 0);
+    assert_eq!(state().await.0, "resolved");
 }

@@ -35,6 +35,7 @@ pub fn routes() -> Router<AppState> {
         .route("/workspaces/{ws}/team/metrics/people/{id}", get(person_metrics))
         .route("/workspaces/{ws}/team/metrics/team", get(team_metrics))
         .route("/workspaces/{ws}/team/escalations", get(escalations))
+        .route("/workspaces/{ws}/team/ownership", post(transfer_ownership))
 }
 
 fn bad(e: people::FieldError) -> AppError {
@@ -43,7 +44,17 @@ fn bad(e: people::FieldError) -> AppError {
 
 async fn context(state: &AppState, ws: &str) -> AppResult<Context> {
     let staffing = packs::enabled(&state.db, ws, packs::STAFFING).await?;
-    Ok(Context { staffing, hr_source_id: settings::load(&state.db, ws).await?.hr_source_id })
+    let hr_source_id = settings::load(&state.db, ws).await?.hr_source_id;
+    let hr_connected = match &hr_source_id {
+        Some(id) => sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM email_sources WHERE id = ?1 AND workspace_id = ?2 AND status != 'disconnected'")
+            .bind(id)
+            .bind(ws)
+            .fetch_one(&state.db)
+            .await?
+            > 0,
+        None => false,
+    };
+    Ok(Context { staffing, hr_source_id, hr_connected })
 }
 
 fn shape(p: Person, staffing: bool) -> Person {
@@ -69,12 +80,19 @@ pub async fn get_access(State(state): State<AppState>, user: AuthUser, Path(ws):
 
 // ---------------------------------------------------------------- settings
 
-fn settings_json(s: &settings::TeamSettings, staffing: bool, sources: Vec<Value>) -> Value {
+fn settings_json(s: &settings::TeamSettings, staffing: bool, owner: bool, sources: Vec<Value>) -> Value {
     let mut v = json!({
         "tz_offset_minutes": s.tz_offset_minutes, "manager_after_hours": s.manager_after_hours, "final_after_hours": s.final_after_hours,
         "final_emails": s.final_emails, "below_target_hour": s.below_target_hour, "weekly_check_hour": s.weekly_check_hour,
+        "route_alerts_by_owner": s.route_alerts_by_owner,
     });
+    if !owner {
+        // Everyone may know the delays; the contacts and the HR configuration are the super admin's.
+        v["final_emails"] = json!([]);
+        return v;
+    }
     if staffing {
+        v["restrict_mail_to_team"] = json!(s.restrict_mail_to_team);
         v["hr_source_id"] = json!(s.hr_source_id);
         v["client_domains"] = json!(s.client_domains);
         v["timesheet_grace_days"] = json!(s.timesheet_grace_days);
@@ -94,11 +112,11 @@ async fn source_options(state: &AppState, ws: &str) -> AppResult<Vec<Value>> {
 }
 
 pub async fn get_settings(State(state): State<AppState>, user: AuthUser, Path(ws): Path<String>) -> AppResult<Json<Value>> {
-    access::resolve(&state.db, &ws, &user).await?;
+    let owner = access::resolve(&state.db, &ws, &user).await?.is_owner();
     let staffing = packs::enabled(&state.db, &ws, packs::STAFFING).await?;
     let s = settings::load(&state.db, &ws).await?;
-    let sources = if staffing { source_options(&state, &ws).await? } else { vec![] };
-    Ok(Json(settings_json(&s, staffing, sources)))
+    let sources = if staffing && owner { source_options(&state, &ws).await? } else { vec![] };
+    Ok(Json(settings_json(&s, staffing, owner, sources)))
 }
 
 pub async fn put_settings(State(state): State<AppState>, user: AuthUser, Path(ws): Path<String>, Json(body): Json<SettingsInput>) -> AppResult<Json<Value>> {
@@ -106,17 +124,29 @@ pub async fn put_settings(State(state): State<AppState>, user: AuthUser, Path(ws
     let staffing = packs::enabled(&state.db, &ws, packs::STAFFING).await?;
     let current = settings::load(&state.db, &ws).await?;
     let next = body.validated(&current, staffing).map_err(AppError::BadRequest)?;
+    let mut connected = false;
     if let Some(src) = &next.hr_source_id {
-        let ok: Option<i64> = sqlx::query_scalar("SELECT 1 FROM email_sources WHERE id = ?1 AND workspace_id = ?2").bind(src).bind(&ws).fetch_optional(&state.db).await?;
-        if ok.is_none() {
-            return Err(AppError::BadRequest("hr_source_id: unknown mailbox".into()));
+        let status: Option<String> = sqlx::query_scalar("SELECT status FROM email_sources WHERE id = ?1 AND workspace_id = ?2").bind(src).bind(&ws).fetch_optional(&state.db).await?;
+        match status.as_deref() {
+            None => return Err(AppError::BadRequest("hr_source_id: unknown mailbox".into())),
+            Some("disconnected") => return Err(AppError::BadRequest("hr_source_id: that mailbox is disconnected".into())),
+            Some(_) => connected = true,
+        }
+    }
+    if staffing && !connected {
+        let billable: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM people WHERE workspace_id = ?1 AND active = 1 AND employee_type = 'billable'").bind(&ws).fetch_one(&state.db).await?;
+        if billable > 0 {
+            return Err(AppError::BadRequest("hr_source_id: billable people exist, so a connected HR mailbox must stay set".into()));
         }
     }
     settings::save(&state.db, &ws, &next).await?;
+    if staffing && next.hr_source_id != current.hr_source_id {
+        crate::staffing::policy::release_suppressed(&state.db, &ws).await?;
+    }
     let mut conn = state.db.acquire().await?;
     audit::record(&mut conn, Entry { workspace_id: &ws, actor: Actor::User(&user.id), action: "team_settings.updated", entity_type: "workspace", entity_id: &ws, message_id: None, metadata: json!({}) }).await?;
     let sources = if staffing { source_options(&state, &ws).await? } else { vec![] };
-    Ok(Json(settings_json(&next, staffing, sources)))
+    Ok(Json(settings_json(&next, staffing, true, sources)))
 }
 
 // ---------------------------------------------------------------- people
@@ -257,7 +287,10 @@ pub async fn escalations(State(state): State<AppState>, user: AuthUser, Path(ws)
     let alert_settings = crate::alerts::load_settings(&state.db, &ws).await?;
     let mut rows = vec![];
     for p in people::list(&state.db, &ws, false).await?.into_iter().filter(|p| a.can_see(&p.id)) {
-        let steps = escalation::chain(&state.db, &ws, &p.id, &alert_settings.recipients).await?;
+        let mut steps = escalation::chain(&state.db, &ws, &p.id, &alert_settings.recipients).await?;
+        if !a.is_owner() {
+            steps.iter_mut().for_each(|s| s.emails.clear());
+        }
         rows.push(json!({ "person": { "id": p.id, "name": p.name, "role": p.role }, "steps": steps }));
     }
     let default_hours = alert_settings.escalate_after_hours;
@@ -265,8 +298,36 @@ pub async fn escalations(State(state): State<AppState>, user: AuthUser, Path(ws)
     Ok(Json(json!({
         "manager_after_hours": s.manager_after_hours.unwrap_or(default_hours),
         "final_after_hours": s.final_after_hours.unwrap_or(default_hours),
-        "final_emails": if s.final_emails.is_empty() { alert_settings.recipients.clone() } else { s.final_emails.clone() },
+        "final_emails": if !a.is_owner() { vec![] } else if s.final_emails.is_empty() { alert_settings.recipients.clone() } else { s.final_emails.clone() },
         "chains": rows,
         "can_edit": a.is_owner(),
     })))
+}
+
+#[derive(Deserialize)]
+pub struct Transfer {
+    email: String,
+}
+
+/// The super admin hands the role to another admin of the workspace. They stay an admin.
+pub async fn transfer_ownership(State(state): State<AppState>, user: AuthUser, Path(ws): Path<String>, Json(body): Json<Transfer>) -> AppResult<Json<Value>> {
+    access::resolve(&state.db, &ws, &user).await?.require_owner()?;
+    let target: Option<String> = sqlx::query_scalar(
+        "SELECT u.id FROM memberships m JOIN users u ON u.id = m.user_id WHERE m.workspace_id = ?1 AND m.role = 'admin' AND lower(u.email) = lower(?2)",
+    )
+    .bind(&ws)
+    .bind(body.email.trim())
+    .fetch_optional(&state.db)
+    .await?;
+    let target = target.ok_or_else(|| AppError::BadRequest("the new super admin must be an admin member of this workspace".into()))?;
+    let mut tx = state.db.begin().await?;
+    sqlx::query("INSERT INTO workspace_owners (workspace_id, user_id, created_at) VALUES (?1, ?2, ?3) ON CONFLICT(workspace_id) DO UPDATE SET user_id = excluded.user_id")
+        .bind(&ws)
+        .bind(&target)
+        .bind(crate::db::now_ms())
+        .execute(&mut *tx)
+        .await?;
+    audit::record(&mut tx, Entry { workspace_id: &ws, actor: Actor::User(&user.id), action: "ownership.transferred", entity_type: "workspace", entity_id: &ws, message_id: None, metadata: json!({ "to": target }) }).await?;
+    tx.commit().await?;
+    Ok(Json(json!({ "super_admin": body.email.trim().to_lowercase() })))
 }
