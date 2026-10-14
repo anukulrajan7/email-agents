@@ -228,6 +228,15 @@ pub async fn run_step(state: &AppState, ws: &str, case_id: &str, turn: i64) -> R
             Err(AiError::Permanent(e)) => {
                 // The same request fails the same way: stop now instead of retrying it.
                 tracing::warn!(case_id = %case.id, error = %e, "planner refused the request");
+                crate::incidents::record(
+                    &state.db,
+                    crate::incidents::NewIncident::new(&case.workspace_id, crate::incidents::Kind::Refusal, json!({"source": "planner"}))
+                        .agent(case.agent_id.as_deref())
+                        .case(Some(&case.id))
+                        .message(case.message_id.as_deref())
+                        .dedupe(format!("refusal:{}", case.id)),
+                )
+                .await;
                 let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
                 case::fail(&mut tx, &case, &format!("The AI model couldn't take this request ({e})")).await?;
                 tx.commit().await?;

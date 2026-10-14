@@ -6,7 +6,7 @@
 use std::sync::LazyLock;
 
 use regex::Regex;
-use serde_json::json;
+use serde_json::{Value, json};
 
 use super::{case::Case, tools::Preview};
 use crate::{
@@ -14,6 +14,7 @@ use crate::{
     agent_registry::runtime::CaseAgent,
     audit::{self, Actor, Entry},
     http::AppState,
+    incidents::{self, Kind, NewIncident},
     replies,
 };
 
@@ -123,6 +124,21 @@ pub struct SendFacts<'a> {
     pub known_addresses: &'a [String],
 }
 
+const LEAK_REASON: &str = "it mentions an address or number that is not from this conversation";
+
+async fn record_for_case(state: &AppState, case: &Case, kind: Kind, details: Value, severity: &'static str) {
+    incidents::record(
+        &state.db,
+        NewIncident::new(&case.workspace_id, kind, details)
+            .severity(severity)
+            .agent(case.agent_id.as_deref())
+            .case(Some(&case.id))
+            .message(case.message_id.as_deref())
+            .dedupe(format!("{}:{}", kind.as_str(), case.id)),
+    )
+    .await;
+}
+
 /// Why this send must go to a person, if it must. Pure; the hard rules already ran.
 pub fn blocker(f: &SendFacts<'_>) -> Option<&'static str> {
     let to = f.to.trim().to_lowercase();
@@ -155,7 +171,7 @@ pub fn blocker(f: &SendFacts<'_>) -> Option<&'static str> {
         return Some("it mentions money, rates or a decision about someone");
     }
     if leaks(f.body, f.known_addresses) {
-        return Some("it mentions an address or number that is not from this conversation");
+        return Some(LEAK_REASON);
     }
     if never_do_hit(f.body, f.never_do).is_some() {
         return Some("it touches something this agent must never do");
@@ -269,7 +285,14 @@ pub async fn may_send_on_its_own(state: &AppState, case: &Case, ctx: &AgentConte
         injected,
         known_addresses: &known_addresses,
     };
-    match blocker(&facts) {
+    let blocked = blocker(&facts);
+    if let Some(why) = injected {
+        record_for_case(state, case, Kind::InjectionDetected, json!({"gate": "send", "why": why}), "medium").await;
+    }
+    if blocked == Some(LEAK_REASON) {
+        record_for_case(state, case, Kind::LeakBlocked, json!({"check": "autonomy_leak_rule"}), "medium").await;
+    }
+    match blocked {
         None => Ok(true),
         Some(why) => {
             tracing::info!(case_id = %case.id, why, "routine send needs a person");
@@ -315,8 +338,16 @@ pub async fn automated_send_stopped(state: &AppState, ws: &str, draft_id: &str) 
     .fetch_optional(&state.db)
     .await?;
     if let Some((thread, message)) = conversation
-        && super::injection::scan_conversation(&state.db, ws, thread.as_deref(), Some(&message)).await?.is_some()
+        && let Some(why) = super::injection::scan_conversation(&state.db, ws, thread.as_deref(), Some(&message)).await?
     {
+        incidents::record(
+            &state.db,
+            NewIncident::new(ws, Kind::InjectionDetected, json!({"gate": "held_send", "why": why}))
+                .agent(Some(&agent_id))
+                .message(Some(&message))
+                .dedupe(format!("injection:{draft_id}")),
+        )
+        .await;
         return Ok(Some("mail in the conversation tries to instruct the agent"));
     }
     let Some(row) = crate::agent_registry::store::get_in(&state.db, ws, &agent_id).await? else { return Ok(Some("the agent no longer exists")) };

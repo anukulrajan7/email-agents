@@ -215,7 +215,7 @@ async fn snooze_alert(state: &AppState, ws: &str, user: &AuthUser, params: &Valu
     if updated == 0 {
         return Err(AppError::NotFound);
     }
-    let message_id: Option<String> = sqlx::query_scalar("SELECT message_id FROM alerts WHERE id = ?1").bind(id).fetch_one(&mut *tx).await?;
+    let message_id: Option<String> = sqlx::query_scalar("SELECT message_id FROM alerts WHERE id = ?1 AND workspace_id = ?2").bind(id).bind(ws).fetch_one(&mut *tx).await?;
     audit::record(
         &mut tx,
         Entry {

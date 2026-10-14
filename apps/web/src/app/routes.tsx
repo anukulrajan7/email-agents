@@ -18,6 +18,7 @@ import { WelcomePage } from '../features/onboarding/WelcomePage';
 import { GuidePage } from '../features/help/GuidePage';
 import { PacksPage } from '../features/packs/PacksPage';
 import { UsagePage } from '../features/usage/UsagePage';
+import { AiHealthPage } from '../features/ai-health/AiHealthPage';
 import { PeoplePage } from '../features/team/PeoplePage';
 import { PerformancePage } from '../features/team/PerformancePage';
 import { EscalationsPage } from '../features/team/EscalationsPage';
@@ -69,6 +70,7 @@ export function AppRoutes() {
           <Route path="integrations" element={<IntegrationsPage />} />
           <Route path="guide" element={<GuidePage />} />
           <Route path="usage" element={<UsagePage />} />
+          <Route path="ai-health" element={<AiHealthPage />} />
           <Route path="jobs" element={<JobsPage />} />
         </Route>
       </Route>

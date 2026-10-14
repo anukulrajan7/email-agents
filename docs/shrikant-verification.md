@@ -1,5 +1,7 @@
 # Shrikant requirements: verification audit (14 Oct 2026)
 
+**Re-checked 15 Oct 2026 (WP-E).** No verdict changed. R1 to R3 and R7 stay Working. R4 stays Partial (bounded backfill; older mail understood when opened, though attachments of all kinds are now read). R5 stays Partial (mailbox-to-person scoping live; only admins connect mailboxes). R6 stays Partial: Ask Meera now reads the open email and sheets in one continuous conversation, but it still does not call the performance metrics, so exact counts per person are not answerable by chat. See `status-2026-10-15.md`.
+
 Original audit checked at `dbf45f8` on branch `wp-verify` (main plus Packs M1). Method: read code and migrations, then ran the tests that
 claim to cover each item. Strict rule: code with no test and no UI is **Partial**; nothing at all is **Missing**.
 

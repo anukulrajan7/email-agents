@@ -560,6 +560,7 @@ pub async fn evaluate_workspace(state: &AppState, workspace_id: &str, now: i64) 
     }
     report.escalated = escalated.len();
 
+    report.raised += crate::ai_health::evaluate_spikes(pool, workspace_id, now).await?;
     report.emails_sent = deliver(state, workspace_id, &settings).await?;
     if settings.daily_digest && (now / HOUR_MS) % 24 == settings.digest_hour {
         report.digest_sent = digest(state, workspace_id, &settings, now).await?;

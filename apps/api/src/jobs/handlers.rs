@@ -1071,6 +1071,13 @@ async fn compose_draft(
         let unsupported = learning::context_pack::check_draft(&pack, &mut out);
         if !unsupported.is_empty() {
             tracing::info!(message_id, claims = unsupported.len(), "draft claims not in the context pack were turned into [NEEDS]");
+            crate::incidents::record(
+                &state.db,
+                crate::incidents::NewIncident::new(&msg.workspace_id, crate::incidents::Kind::UnsupportedClaim, json!({"claims": unsupported.len()}))
+                    .message(Some(message_id))
+                    .dedupe(format!("unsupported:{message_id}")),
+            )
+            .await;
         }
     }
     Ok((out, ctx, quality))
