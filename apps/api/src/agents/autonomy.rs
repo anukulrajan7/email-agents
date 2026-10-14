@@ -60,7 +60,7 @@ pub fn effective_level(i: LevelInputs) -> Effective {
 /// Money, rates, rejections, legal, security and attachments: never sent without a person.
 static SENSITIVE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-        r"(?i)(₹|\$|€|£|\b(inr|usd|eur|rs)\.?\s?\d|\b\d+(\.\d+)?\s?k\b|\b(inr|usd|eur|rs\.?|lakhs?|lpa|ctc|salary|salaries|rates?|payments?|pay(ing|able)?|paid|owe[sd]?|amounts?|bank(ing)?|wire( transfer)?|iban|ifsc|invoice|budget|refunds?|prices?|pricing|quote[ds]?|discount|fees?|costs?|rupees?|dollars?|legal|lawyers?|attorneys?|lawsuit|sue|contracts?|agreements?|nda|confidential|visa|gdpr|harassment|terminat\w*|security|password|passcode|otp|credentials?|attach(ed|ments?)|offer letter|unfortunately|regret|reject(ed|ion)?|not (been )?(selected|shortlisted)|decline[ds]?)\b)",
+        r"(?i)(₹|\$|€|£|\b(inr|usd|eur|rs)\.?\s?\d|\b\d+(\.\d+)?\s?k\b|\b(inr|usd|eur|rs\.?|lakhs?|lpa|ctc|salary|salaries|rates?|payments?|pay(ing|able)?|paid|owe[sd]?|amounts?|bank(ing)?|wire( transfer)?|iban|ifsc|invoice|budget|refunds?|prices?|pricing|quote[ds]?|discount|fees?|costs?|rupees?|dollars?|payslips?|pay slips?|reimburs\w*|tax(es)?|tds|form[\s-]?16|pf|provident fund|uan|bonus(es)?|increments?|hikes?|apprais\w*|deductions?|credited|debited|upi|pan (card|number|no)|aadhaar|aadhar|account (number|no)|a/c|resign\w*|notice period|full and final|f&f|sick|medical|illness|surgery|hospital|diagnos\w*|legal|lawyers?|attorneys?|lawsuit|sue|contracts?|agreements?|nda|confidential|visa|gdpr|harassment|terminat\w*|security|password|passcode|otp|credentials?|attach(ed|ments?)|offer letter|unfortunately|regret|reject(ed|ion)?|not (been )?(selected|shortlisted)|decline[ds]?)\b|(?-i:\bPAN\b))",
     )
     .expect("valid regex")
 });
@@ -129,6 +129,10 @@ pub struct SendFacts<'a> {
     pub known_addresses: &'a [String],
     /// Subject and body of the inbound mail of the conversation: a sensitive ask needs a person even when the reply looks harmless.
     pub inbound_text: &'a str,
+    /// The classifier labelled the conversation `payroll`.
+    pub payroll_label: bool,
+    /// Template the agent was made from.
+    pub template_key: Option<&'a str>,
 }
 
 const LEAK_REASON: &str = "it mentions an address or number that is not from this conversation";
@@ -174,11 +178,17 @@ pub fn blocker(f: &SendFacts<'_>) -> Option<&'static str> {
     if f.level < 3 && !f.known_contact {
         return Some("it is the first email to this address");
     }
+    if f.payroll_label || f.template_key == Some("hrms.payroll") {
+        return Some("payroll mail always goes to a person");
+    }
     if SENSITIVE.is_match(f.body) {
         return Some("it mentions money, rates or a decision about someone");
     }
     if SENSITIVE.is_match(f.inbound_text) {
         return Some("the conversation is about money, legal or security matters");
+    }
+    if LONG_NUMBER.is_match(f.inbound_text) {
+        return Some("the conversation contains a bank or account number");
     }
     if leaks(f.body, f.known_addresses) {
         return Some(LEAK_REASON);
@@ -302,6 +312,16 @@ pub async fn may_send_on_its_own(state: &AppState, case: &Case, ctx: &AgentConte
     .fetch_all(&state.db)
     .await?;
     let inbound_text = inbound.iter().map(|(s, b)| format!("{s}\n{b}")).collect::<Vec<_>>().join("\n");
+    let payroll_label: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM classifications c JOIN email_messages m ON m.id = c.message_id
+                        WHERE m.workspace_id = ?1 AND c.category = 'payroll' AND m.direction = 'inbound'
+                          AND (m.thread_id = ?2 OR (?2 IS NULL AND m.id = ?3)))",
+    )
+    .bind(&case.workspace_id)
+    .bind(&case.thread_id)
+    .bind(&case.message_id)
+    .fetch_one(&state.db)
+    .await?;
     let mut known_addresses = participants.clone();
     known_addresses.push(to.clone());
     known_addresses.extend(ctx.mailbox.clone());
@@ -319,6 +339,8 @@ pub async fn may_send_on_its_own(state: &AppState, case: &Case, ctx: &AgentConte
         injected,
         known_addresses: &known_addresses,
         inbound_text: &inbound_text,
+        payroll_label,
+        template_key: agent.row.template_key.as_deref(),
     };
     let blocked = blocker(&facts);
     if let Some(why) = injected {
@@ -440,6 +462,8 @@ mod tests {
             injected: None,
             known_addresses: &[],
             inbound_text: "",
+            payroll_label: false,
+            template_key: None,
         }
     }
 
@@ -462,6 +486,30 @@ mod tests {
         let harmless = SendFacts { inbound_text: "Please wire the refund and sign the NDA", ..facts("ravi@client.com", "Hello Ravi,\n\nSure, will do.\n\nPriya") };
         assert!(blocker(&harmless).is_some(), "a sensitive ask in the inbound mail needs a person");
         assert_eq!(blocker(&SendFacts { inbound_text: "Is the meeting still on?", ..harmless }), None);
+    }
+
+    #[test]
+    fn payroll_and_hr_sensitive_topics_ask_a_person() {
+        for body in [
+            "Your salary was not credited.", "Please update my bank account.", "Your payslip is missing.", "Send Form 16 please.", "My reimbursement is pending.",
+            "I want to resign.", "TDS applies.", "Your PF is updated.", "Check your UAN.", "Bonus this month.", "Your increment letter.", "The hike is approved.",
+            "Appraisal cycle.", "A deduction was made.", "It was debited.", "Pay by UPI.", "Share the IFSC.", "Send your PAN.", "Your Aadhaar number.",
+            "Serve the notice period.", "Full and final settlement.", "F&F is ready.", "Your sick leave details.", "Medical certificate.",
+        ] {
+            assert!(blocker(&facts("ravi@client.com", body)).is_some(), "{body}");
+        }
+        for body in ["Hello,\n\nThe company offsite agenda is ready.", "Hello,\n\nThe meeting about the panel is at 3.", "Hello,\n\nHappy to help with the plan."] {
+            assert_eq!(blocker(&facts("ravi@client.com", body)), None, "{body}");
+        }
+    }
+
+    #[test]
+    fn payroll_label_template_and_bank_numbers_always_ask() {
+        let body = "Hello Ravi,\n\nThanks, we got your note.\n\nMeera";
+        assert!(blocker(&SendFacts { payroll_label: true, ..facts("ravi@client.com", body) }).is_some());
+        assert!(blocker(&SendFacts { template_key: Some("hrms.payroll"), level: 3, ..facts("ravi@client.com", body) }).is_some());
+        assert_eq!(blocker(&SendFacts { template_key: Some("hrms.leave"), ..facts("ravi@client.com", body) }), None);
+        assert!(blocker(&SendFacts { inbound_text: "My number is 1234 5678 9012", ..facts("ravi@client.com", body) }).is_some());
     }
 
     #[test]

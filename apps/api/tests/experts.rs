@@ -484,3 +484,50 @@ async fn a_user_capped_paused_or_demoted_agent_is_not_raised_until_eligible() {
     env.ok("GET", "/agents", ADMIN, None).await;
     assert_eq!(levels(&env).await["personal.scheduling"], 3, "raised once it is switched on again");
 }
+
+#[tokio::test]
+async fn the_hr_team_is_raised_to_level_three_and_finance_keeps_asking() {
+    let env = Env::new(Opts::packs(&["general", "staffing", "finance"])).await;
+    env.ok("GET", "/agent", ADMIN, None).await;
+    sqlx::query("UPDATE agents SET autonomy_level = CASE template_key WHEN 'hrms.requirements' THEN 1 WHEN 'finance.invoices' THEN 1 ELSE 0 END, autonomy_cap = CASE template_key WHEN 'hrms.timesheets' THEN 2 ELSE 1 END WHERE workspace_id = ?1 AND scope = 'workspace' AND template_key LIKE 'hrms.%' OR template_key = 'finance.invoices'")
+        .bind(&env.ws)
+        .execute(&env.state.db)
+        .await
+        .unwrap();
+    let rohan = env.agent_id(ADMIN, "hrms.timesheets").await;
+    sqlx::query("UPDATE workspace_agents SET permissions_json = json_set(permissions_json, '$.send', 'auto') WHERE workspace_id = ?1").bind(&env.ws).execute(&env.state.db).await.unwrap();
+    let old = templates::template("hrms.timesheets").unwrap().spec();
+    let mut old_spec = old.clone();
+    old_spec.permissions.max_autonomy = 2;
+    let mut conn = env.state.db.acquire().await.unwrap();
+    versions::create(&mut conn, &env.ws, &rohan, &old_spec, NewVersion { source: "template", note: None, created_by: None, designer_session_id: None, activate: true }).await.unwrap();
+    sqlx::query("UPDATE agents SET template_version = 2 WHERE workspace_id = ?1 AND template_key LIKE 'hrms.%'").bind(&env.ws).execute(&env.state.db).await.unwrap();
+    for _ in 0..2 {
+        seed::seed_workspace(&mut conn, &env.ws).await.unwrap();
+    }
+    drop(conn);
+    let rows: Vec<(String, i64, i64)> = sqlx::query_as("SELECT template_key, autonomy_level, autonomy_cap FROM agents WHERE workspace_id = ?1 AND scope = 'workspace' AND template_key LIKE 'hrms.%'").bind(&env.ws).fetch_all(&env.state.db).await.unwrap();
+    assert_eq!(rows.len(), 5);
+    assert!(rows.iter().all(|(_, level, cap)| *level == 3 && *cap == 3), "{rows:?}");
+    let a = env.ok("GET", &format!("/agents/{rohan}"), ADMIN, None).await;
+    assert_eq!(a["autonomy"]["effective"].as_i64(), Some(3), "the upgraded spec no longer limits Rohan: {a}");
+    assert_eq!(levels(&env).await["finance.invoices"], 1, "Vikram still asks");
+}
+
+#[tokio::test]
+async fn agents_paused_by_a_pack_being_off_and_personal_meera_come_back_at_level_three() {
+    let env = Env::new(Opts::packs(&["general", "staffing", "finance"])).await;
+    env.ok("GET", "/agent", ADMIN, None).await;
+    sqlx::query("UPDATE agents SET autonomy_level = 0, autonomy_cap = 0, status = 'paused', paused_reason = 'pack_off' WHERE workspace_id = ?1 AND template_key = 'hrms.onboarding'").bind(&env.ws).execute(&env.state.db).await.unwrap();
+    sqlx::query("UPDATE agents SET autonomy_level = 1, autonomy_cap = 2 WHERE workspace_id = ?1 AND (scope = 'personal' OR template_key = 'hrms.leave')").bind(&env.ws).execute(&env.state.db).await.unwrap();
+    sqlx::query("UPDATE agents SET autonomy_level = 1, autonomy_cap = 1 WHERE workspace_id = ?1 AND template_key = 'finance.invoices'").bind(&env.ws).execute(&env.state.db).await.unwrap();
+    let mut conn = env.state.db.acquire().await.unwrap();
+    seed::adopt_automatic_defaults(&mut conn, &env.ws).await.unwrap();
+    drop(conn);
+    let rows: Vec<(String, String, i64, i64)> = sqlx::query_as("SELECT COALESCE(template_key, kind), status, autonomy_level, autonomy_cap FROM agents WHERE workspace_id = ?1 AND (template_key IN ('hrms.onboarding', 'hrms.leave', 'finance.invoices') OR scope = 'personal') ORDER BY 1").bind(&env.ws).fetch_all(&env.state.db).await.unwrap();
+    for (key, status, level, cap) in &rows {
+        let expected = if key == "finance.invoices" { (1, 1) } else { (3, 3) };
+        assert_eq!((*level, *cap), expected, "{key} ({status}): {rows:?}");
+    }
+    assert!(rows.iter().any(|r| r.0 == "hrms.onboarding" && r.1 == "paused"), "still paused until the pack is on: {rows:?}");
+}

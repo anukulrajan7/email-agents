@@ -97,6 +97,17 @@ function Plan({ ws, session }: { ws: string; session: DesignerSession }) {
         <p className="mt-2 max-w-[62ch] text-[15px] text-ink-muted">{spec.description}</p>
       </div>
       <List title="When it acts" items={spec.triggers.map(describeTrigger)} />
+      {session.routing_preview && <p className="text-[15px] text-ink-muted">{session.routing_preview}</p>}
+      {(session.warnings?.length ?? 0) > 0 && (
+        <div role="note" className="rounded-sm border-l-[3px] border-review bg-review-tint px-3 py-2 text-sm text-review-ink">
+          <p className="font-semibold">Worth a look</p>
+          <ul className="mt-1 list-disc pl-5">
+            {session.warnings.map((w) => (
+              <li key={w}>{w}</li>
+            ))}
+          </ul>
+        </div>
+      )}
       {spec.mode === 'workflow' ? <List title="What it does, in order" items={spec.steps.map(describeStep)} /> : <List title="How it works" items={[spec.goal]} />}
       <section>
         <h3 className="kicker">Sending</h3>

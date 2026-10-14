@@ -48,11 +48,12 @@ test('creating the forwarding source again returns the same one (idempotent)', a
 
 test('a connected Gmail mailbox can be disconnected, after a confirmation, and stops syncing', async ({ page }) => {
   const s = seed();
-  await nango('/__e2e/connections', { connection_id: 'conn_connect_lab', organization_id: lab, end_user_id: s.admin.id });
-  await nango('/__e2e/mailbox', { connection_id: 'conn_connect_lab', address: 'lab@acme-desk.example', messages: [], attachments: {} });
+  const connection = `conn_connect_${lab}`;
+  await nango('/__e2e/connections', { connection_id: connection, organization_id: lab, end_user_id: s.admin.id });
+  await nango('/__e2e/mailbox', { connection_id: connection, address: 'lab@acme-desk.example', messages: [], attachments: {} });
   const source = await ok<{ id: string; status: string }>(`/workspaces/${lab}/sources/nango-connections`, {
     token: s.admin.token,
-    body: { connection_id: 'conn_connect_lab', provider_config_key: 'google-mail' },
+    body: { connection_id: connection, provider_config_key: 'google-mail' },
   });
   expect(source.status).toBe('connected');
   await call(`/workspaces/${lab}/me/agent-profile/skip`, { token: s.admin.token, method: 'POST' });
@@ -63,13 +64,16 @@ test('a connected Gmail mailbox can be disconnected, after a confirmation, and s
 
   await page.getByRole('button', { name: 'Disconnect' }).click();
   const dialog = page.getByRole('dialog', { name: 'Disconnect Gmail?' });
-  await expect(dialog).toContainText('Emails already here stay in Post Room.');
+  await expect(dialog).toContainText('New mail from this inbox stops arriving.');
+  await expect(dialog).toContainText(
+    "0 emails, 0 attachments, 0 drafts and their summaries will be permanently deleted from Post Room. Labels, settings and other mailboxes stay. This can't be undone.",
+  );
   await dialog.getByRole('button', { name: 'Cancel' }).click();
   await expect(dialog).toBeHidden();
   await expect(page.getByRole('button', { name: 'Sync now' })).toBeVisible();
 
   await page.getByRole('button', { name: 'Disconnect' }).click();
-  await page.getByRole('dialog', { name: 'Disconnect Gmail?' }).getByRole('button', { name: 'Disconnect' }).click();
+  await page.getByRole('dialog', { name: 'Disconnect Gmail?' }).getByRole('button', { name: 'Disconnect and delete' }).click();
   await expect(page.getByRole('button', { name: 'Connect Gmail' })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Sync now' })).toHaveCount(0);
 

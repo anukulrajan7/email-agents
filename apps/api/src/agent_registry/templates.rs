@@ -319,8 +319,8 @@ fn leave() -> AgentSpec {
         "Handles leave requests and questions about time off. Approvals are always a person's call.",
         "Acknowledge each leave request and prepare it for a manager's decision",
         vec![on_labels(&["leave"])],
-        SendMode::Ask,
-        1,
+        SendMode::Earned,
+        3,
     )
 }
 
@@ -332,7 +332,7 @@ fn timesheets() -> AgentSpec {
         "Acknowledge each timesheet and flag anything missing",
         vec![on_labels(&["timesheet"])],
         SendMode::Earned,
-        2,
+        3,
     )
 }
 
@@ -343,8 +343,8 @@ fn onboarding() -> AgentSpec {
         "Collects new-joiner documents and walks them through the checklist.",
         "Collect a new joiner's documents and keep their checklist moving",
         vec![on_keywords(&["onboarding", "new joiner", "joining formalities"])],
-        SendMode::Ask,
-        1,
+        SendMode::Earned,
+        3,
     )
 }
 
@@ -361,7 +361,7 @@ fn requirements() -> AgentSpec {
         vec![on_labels(&["client_requirement", "candidate_referral"])],
         vec![],
         tools(&["find_candidates", "find_requirements", "draft_email", "create_task", "schedule_check", "update_case", "send_email", "submit_candidate"]),
-        perms(SendMode::Ask, 1),
+        perms(SendMode::Ask, 3),
     );
     spec.drafting.quality_tier = QualityTier::Best;
     spec.drafting.never_do = strings(&["Share a candidate's contact details before approval"]);
@@ -375,8 +375,8 @@ fn payroll() -> AgentSpec {
         "Acknowledges payroll questions and routes them to a person. Never states amounts.",
         "Acknowledge each payroll question and hand it to the payroll owner",
         vec![on_labels(&["payroll"])],
-        SendMode::Ask,
-        1,
+        SendMode::Earned,
+        3,
     );
     spec.drafting.never_do = strings(&["State a salary, rate or payment amount", "Promise a payment date"]);
     spec
@@ -471,15 +471,15 @@ pub fn persona(template_key: &str) -> &'static str {
 
 pub const TEMPLATES: &[AgentTemplate] = &[
     template!(LEAD_KEY, "general", "general", "lead", "workspace", 3, "Meera", "🌼", "ochre", lead, 4),
-    template!("support.resolver", "support", "support", "system", "workspace", 3, "Ishaan", "🎧", "teal", resolver, 3),
+    template!("support.resolver", "support", "support", "system", "workspace", 3, "Ishaan", "🎧", "teal", resolver, 4),
     template!("sales.qualifier", "sales", "sales", "system", "workspace", 3, "Kabir", "🎯", "sage", qualifier, 3),
-    template!("finance.invoices", "finance", "finance", "system", "workspace", 1, "Vikram", "🧾", "teal", invoices, 3),
-    template!("personal.scheduling", "personal", "personal", "system", "workspace", 3, "Nisha", "📅", "ochre", scheduling, 3),
-    template!("hrms.leave", "hrms", "staffing", "system", "workspace", 0, "Ananya", "🌴", "sage", leave),
-    template!("hrms.timesheets", "hrms", "staffing", "system", "workspace", 0, "Rohan", "⏱", "slate", timesheets),
-    template!("hrms.onboarding", "hrms", "staffing", "system", "workspace", 0, "Sneha", "🧭", "plum", onboarding),
-    template!(REQUIREMENTS_KEY, "hrms", "staffing", "system", "workspace", 1, "Arjun", "🧩", "postmark", requirements),
-    template!("hrms.payroll", "hrms", "staffing", "system", "workspace", 0, "Aditya", "💼", "teal", payroll),
+    template!("finance.invoices", "finance", "finance", "system", "workspace", 1, "Vikram", "🧾", "teal", invoices, 4),
+    template!("personal.scheduling", "personal", "personal", "system", "workspace", 3, "Nisha", "📅", "ochre", scheduling, 4),
+    template!("hrms.leave", "hrms", "staffing", "system", "workspace", 3, "Ananya", "🌴", "sage", leave, 3),
+    template!("hrms.timesheets", "hrms", "staffing", "system", "workspace", 3, "Rohan", "⏱", "slate", timesheets, 3),
+    template!("hrms.onboarding", "hrms", "staffing", "system", "workspace", 3, "Sneha", "🧭", "plum", onboarding, 3),
+    template!(REQUIREMENTS_KEY, "hrms", "staffing", "system", "workspace", 3, "Arjun", "🧩", "postmark", requirements, 3),
+    template!("hrms.payroll", "hrms", "staffing", "system", "workspace", 3, "Aditya", "💼", "teal", payroll, 3),
     template!(PERSONAL_KEY, "personal", "general", "system", "personal", 3, PERSONAL_NAME, "🙋", "sage", mailbox, 3),
 ];
 
@@ -540,8 +540,9 @@ mod tests {
 
     #[test]
     fn every_template_is_valid_and_consistent() {
-        let all_labels: Vec<&str> = packs::PACKS.iter().flat_map(|p| p.labels.iter().map(|l| l.key)).collect();
         for t in TEMPLATES {
+            let pack_labels: Vec<&str> =
+                packs::pack(t.pack).unwrap().labels.iter().chain(packs::pack("general").unwrap().labels.iter()).map(|l| l.key).collect();
             let spec = t.spec();
             assert!(validate_basic(&spec).is_empty(), "{}: {:?}", t.key, validate_basic(&spec));
             assert_eq!(spec.category, t.category, "{}", t.key);
@@ -551,7 +552,7 @@ mod tests {
             for trigger in &spec.triggers {
                 if let Trigger::EmailReceived { matcher } = trigger {
                     for l in &matcher.labels {
-                        assert!(all_labels.contains(&l.as_str()), "{}: unknown label {l}", t.key);
+                        assert!(pack_labels.contains(&l.as_str()), "{}: label {l} is produced by neither the {} pack nor the general pack", t.key, t.pack);
                     }
                 }
             }
@@ -580,7 +581,10 @@ mod tests {
         assert_eq!(names(&["staffing"]), ["hrms.leave", "hrms.timesheets", "hrms.onboarding", "hrms.requirements", "hrms.payroll"]);
         assert_eq!(template(LEAD_KEY).unwrap().kind, "lead");
         assert_eq!(template(PERSONAL_KEY).unwrap().scope, "personal");
-        assert_eq!(template("support.resolver").unwrap().max_autonomy(), 3, "experts act on their own");
+        for t in TEMPLATES.iter().filter(|t| t.key != "finance.invoices") {
+            assert_eq!((t.initial_level, t.max_autonomy()), (3, 3), "{} acts on its own", t.key);
+        }
+        assert_eq!(template("finance.invoices").unwrap().initial_level, 1, "Vikram asks");
         assert!(RETIRED.iter().all(|t| merged_into(t.key).is_some() && !TEMPLATES.iter().any(|x| x.key == t.key)));
         assert_eq!(template("hrms.requirements").unwrap().spec().permissions.send, SendMode::Ask, "submissions always ask");
     }

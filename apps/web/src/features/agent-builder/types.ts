@@ -70,6 +70,8 @@ export type DesignerSession = {
   issues: SpecIssue[];
   questions: string[];
   assumptions: string[];
+  warnings: string[];
+  routing_preview: string | null;
   dry_run: DryRunReport | null;
   cost_usd: number;
   limits: { calls_today: number; daily_limit: number; session_budget_usd: number };

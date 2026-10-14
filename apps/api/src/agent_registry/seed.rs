@@ -133,7 +133,7 @@ pub async fn seed_for_packs(conn: &mut SqliteConnection, ws: &str, keys: &[&str]
         .execute(&mut *conn)
         .await?;
     }
-    Ok(())
+    adopt_automatic_defaults(conn, ws).await
 }
 
 /// Existing requirement cases belong to the Candidates & Requirements desk, not the lead.
@@ -265,16 +265,16 @@ async fn repoint_work(conn: &mut SqliteConnection, ws: &str, from: &str, to: &Ag
     Ok(())
 }
 
-/// Active, untuned helpers that should be acting on their own but are not: Meera (lead and personal) and the
-/// experts seeded at level 3, still at their seeded cap, in a workspace whose send setting is "auto".
+/// Active (or paused only because their pack is off, so they come back ready), untuned helpers that should be acting on their own but are not: Meera (lead and personal) and every
+/// expert that is seeded at level 3 (the HR team included), still below it, in a workspace whose send setting is "auto".
 /// Anyone a person touched (a user-actor level or limit change) or an incident demoted is left alone.
 async fn automatic_candidates(conn: &mut SqliteConnection, ws: &str) -> sqlx::Result<Vec<(String, i64)>> {
     let keys: Vec<&str> = templates::TEMPLATES.iter().filter(|t| t.initial_level >= 3).map(|t| t.key).collect();
     sqlx::query_as(
         "SELECT a.id, a.autonomy_level FROM agents a
-         WHERE a.workspace_id = ?1 AND a.status = 'active' AND a.tuned = 0 AND a.autonomy_level < 3 AND a.autonomy_cap BETWEEN 1 AND 2
-           AND EXISTS (SELECT 1 FROM workspace_agents w WHERE w.workspace_id = a.workspace_id AND json_valid(w.permissions_json)
-                       AND json_extract(w.permissions_json, '$.send') = 'auto')
+         WHERE a.workspace_id = ?1 AND (a.status = 'active' OR (a.status = 'paused' AND a.paused_reason = 'pack_off')) AND a.tuned = 0 AND a.autonomy_level < 3 AND a.autonomy_cap < 3
+           AND NOT EXISTS (SELECT 1 FROM workspace_agents w WHERE w.workspace_id = a.workspace_id
+                           AND NOT (json_valid(w.permissions_json) AND json_extract(w.permissions_json, '$.send') = 'auto'))
            AND (a.kind = 'lead' OR a.scope = 'personal' OR a.template_key IN (SELECT value FROM json_each(?2)))
            AND NOT EXISTS (SELECT 1 FROM autonomy_changes c WHERE c.agent_id = a.id AND (c.actor LIKE 'user:%' OR (c.to_level < c.from_level AND c.actor = 'system')))",
     )

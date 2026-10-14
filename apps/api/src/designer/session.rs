@@ -10,7 +10,7 @@ use super::{
 };
 use crate::{
     agent_registry::{
-        spec::{AgentSpec, Issue},
+        spec::{AgentSpec, Issue, Trigger},
         store::{self, AgentRow, NewAgent},
         versions::{self, NewVersion},
     },
@@ -34,6 +34,8 @@ struct Row {
     turns_json: String,
     spec_json: Option<String>,
     issues_json: String,
+    warnings_json: String,
+    routing_preview: Option<String>,
     dry_run_json: Option<String>,
     dry_run_status: String,
     status: String,
@@ -43,7 +45,7 @@ struct Row {
     updated_at: i64,
 }
 
-const COLUMNS: &str = "id, workspace_id, user_id, agent_id, base_version, goal, turns_json, spec_json, issues_json, dry_run_json,
+const COLUMNS: &str = "id, workspace_id, user_id, agent_id, base_version, goal, turns_json, spec_json, issues_json, warnings_json, routing_preview, dry_run_json,
     dry_run_status, status, cost_usd, rev, created_at, updated_at";
 
 #[derive(Debug, Clone)]
@@ -57,6 +59,8 @@ pub struct Session {
     pub turns: Vec<Turn>,
     pub spec: Option<AgentSpec>,
     pub issues: Vec<Value>,
+    pub warnings: Vec<String>,
+    pub routing_preview: Option<String>,
     pub dry_run: Option<Value>,
     pub dry_run_status: String,
     pub status: String,
@@ -72,6 +76,8 @@ impl From<Row> for Session {
             turns: serde_json::from_str(&r.turns_json).unwrap_or_default(),
             spec: r.spec_json.as_deref().and_then(|s| serde_json::from_str(s).ok()),
             issues: serde_json::from_str(&r.issues_json).unwrap_or_default(),
+            warnings: serde_json::from_str(&r.warnings_json).unwrap_or_default(),
+            routing_preview: r.routing_preview,
             dry_run: r.dry_run_json.as_deref().and_then(|s| serde_json::from_str(s).ok()),
             id: r.id,
             workspace_id: r.workspace_id,
@@ -205,7 +211,8 @@ pub async fn load_ctx(state: &AppState, ws: &str, editing: Option<&AgentRow>) ->
     let mut conn = state.db.acquire().await?;
     for row in store::list(&mut *conn, ws).await?.into_iter().filter(|a| !a.is_personal() && a.status != "archived") {
         let (spec, _) = versions::active_spec(&mut conn, &row).await?;
-        agents.push(AgentBrief { key: row.key, name: row.name, category: row.category, triggers: validate::trigger_summary(&spec) });
+        let labels = spec.triggers.iter().filter_map(|t| if let Trigger::EmailReceived { matcher } = t { Some(matcher.labels.clone()) } else { None }).flatten().collect();
+        agents.push(AgentBrief { key: row.key, name: row.name, category: row.category, triggers: validate::trigger_summary(&spec), labels });
     }
     let current = match editing {
         Some(row) => Some(versions::active_spec(&mut conn, row).await?.0),
@@ -219,6 +226,7 @@ pub async fn load_ctx(state: &AppState, ws: &str, editing: Option<&AgentRow>) ->
         ceiling: CUSTOM_CEILING,
         max_case_budget_usd: validate::case_budget_ceiling(state),
         editing: current,
+        request: String::new(),
     })
 }
 
@@ -303,7 +311,7 @@ pub async fn design_turn(state: &AppState, ws: &str, id: &str, text: &str) -> Ap
     let kind = if editing.as_ref().is_some_and(AgentRow::is_personal) { "personal" } else { "design" };
     let call_id = reserve_call(&mut *state.db.acquire().await?, ws, &session, kind).await?;
     let ctx = match load_ctx(state, ws, editing.as_ref()).await {
-        Ok(ctx) => ctx,
+        Ok(ctx) => WsCtx { request: format!("{} {}", session.goal, text), ..ctx },
         Err(e) => {
             settle_call(&state.db, &call_id, "failed", 0.0).await?;
             return Err(e.into());
@@ -342,11 +350,16 @@ pub async fn design_turn(state: &AppState, ws: &str, id: &str, text: &str) -> Ap
     };
     let ready = if unreadable { session.spec.is_some() && session.issues.is_empty() } else { outcome.issues.is_empty() };
     let changed = spec.as_ref().map(AgentSpec::hash) != session.spec.as_ref().map(AgentSpec::hash);
+    let (warnings, routing) = match (&spec, unreadable) {
+        (Some(spec), false) => (validate::warnings(spec, &ctx), Some(validate::routing_preview(spec))),
+        _ => (session.warnings.clone(), session.routing_preview.clone()),
+    };
     let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     sqlx::query("UPDATE designer_calls SET status = 'done', cost_usd = ?1 WHERE id = ?2").bind(outcome.cost_usd).bind(&call_id).execute(&mut *tx).await?;
     let swapped = sqlx::query(
         "UPDATE designer_sessions SET turns_json = ?1, spec_json = ?2, issues_json = ?3, status = ?4, cost_usd = cost_usd + ?5, updated_at = ?6, rev = rev + 1,
-           dry_run_json = CASE WHEN ?7 THEN NULL ELSE dry_run_json END, dry_run_status = CASE WHEN ?7 THEN 'idle' ELSE dry_run_status END
+           dry_run_json = CASE WHEN ?7 THEN NULL ELSE dry_run_json END, dry_run_status = CASE WHEN ?7 THEN 'idle' ELSE dry_run_status END,
+           warnings_json = ?11, routing_preview = ?12
          WHERE id = ?8 AND workspace_id = ?9 AND rev = ?10 AND status IN ('drafting', 'ready', 'failed')",
     )
     .bind(serde_json::to_string(&turns).unwrap_or_else(|_| "[]".into()))
@@ -359,6 +372,8 @@ pub async fn design_turn(state: &AppState, ws: &str, id: &str, text: &str) -> Ap
     .bind(&session.id)
     .bind(ws)
     .bind(session.rev)
+    .bind(json!(warnings).to_string())
+    .bind(routing)
     .execute(&mut *tx)
     .await?
     .rows_affected();
@@ -386,7 +401,8 @@ pub async fn set_spec(state: &AppState, ws: &str, id: &str, spec: AgentSpec) -> 
     let changed = session.spec.as_ref().map(AgentSpec::hash) != Some(spec.hash());
     let swapped = sqlx::query(
         "UPDATE designer_sessions SET spec_json = ?1, issues_json = ?2, status = ?3, updated_at = ?4, rev = rev + 1,
-           dry_run_json = CASE WHEN ?5 THEN NULL ELSE dry_run_json END, dry_run_status = CASE WHEN ?5 THEN 'idle' ELSE dry_run_status END
+           dry_run_json = CASE WHEN ?5 THEN NULL ELSE dry_run_json END, dry_run_status = CASE WHEN ?5 THEN 'idle' ELSE dry_run_status END,
+           warnings_json = ?9, routing_preview = ?10
          WHERE id = ?6 AND workspace_id = ?7 AND rev = ?8",
     )
     .bind(spec.to_json())
@@ -397,6 +413,8 @@ pub async fn set_spec(state: &AppState, ws: &str, id: &str, spec: AgentSpec) -> 
     .bind(id)
     .bind(ws)
     .bind(session.rev)
+    .bind(json!(validate::warnings(&spec, &ctx)).to_string())
+    .bind(validate::routing_preview(&spec))
     .execute(&state.db)
     .await?
     .rows_affected();
@@ -671,7 +689,9 @@ pub async fn view(state: &AppState, ws: &str, s: &Session) -> AppResult<Value> {
             v
         }
     };
+    let routing = s.routing_preview.clone().or_else(|| s.spec.as_ref().map(validate::routing_preview));
     Ok(json!({
+        "warnings": s.warnings, "routing_preview": routing,
         "id": s.id, "goal": s.goal, "agent_id": s.agent_id, "base_version": s.base_version, "status": s.status,
         "turns": s.turns, "spec": s.spec, "issues": s.issues,
         "questions": s.spec.as_ref().map(|x| x.questions_for_user.clone()).unwrap_or_default(),
