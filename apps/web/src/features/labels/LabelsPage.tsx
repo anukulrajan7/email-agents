@@ -174,7 +174,7 @@ export function LabelsPage() {
                 </Card>
               ) : (
                 <Card className="rise p-0" style={riseStyle(1)}>
-                  <ul className="divide-y divide-rule" aria-label="Labels" data-guide="labels-list">
+                  <ul className="divide-y divide-rule" aria-label="Labels">
                     {items.map((l, i) => (
                       <LabelRow
                         key={l.id}

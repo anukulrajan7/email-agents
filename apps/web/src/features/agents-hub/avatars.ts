@@ -1,4 +1,4 @@
-import type { AgentCategory, AgentSummary } from '../../api/types';
+import type { AgentCategory } from '../../api/types';
 
 export type AvatarChoice = { key: string; label: string };
 
@@ -38,7 +38,7 @@ export const avatarLabel = (key: string) => AVATARS.find((a) => a.key === key)?.
 export const avatarSrc = (key: string) => `/avatars/${key}.webp`;
 
 const BY_TEMPLATE: Record<string, string> = {
-  'general.lead': 'blossom',
+  'general.lead': 'panda',
   'general.inbox': 'sparkles',
   'support.resolver': 'dolphin',
   'support.escalation': 'penguin',
@@ -46,7 +46,7 @@ const BY_TEMPLATE: Record<string, string> = {
   'sales.followups': 'rabbit',
   'finance.invoices': 'owl',
   'personal.scheduling': 'rocket',
-  'personal.mailbox': 'panda',
+  'personal.mailbox': 'blossom',
   'hrms.leave': 'turtle',
   'hrms.timesheets': 'hedgehog',
   'hrms.onboarding': 'koala',
@@ -64,15 +64,20 @@ const BY_CATEGORY: Record<AgentCategory, string> = {
   custom: 'robot',
 };
 
-type AvatarSource = Pick<AgentSummary, 'avatar' | 'kind' | 'template_key' | 'category' | 'scope'>;
+type AvatarSource = {
+  avatar?: string;
+  kind?: string;
+  template_key?: string | null;
+  category?: string;
+  scope?: string;
+};
 
-/** The picked avatar if there is one, otherwise the template's default. */
-export function resolveAvatar(agent: AvatarSource | { avatar?: string }): string | undefined {
+/** The picked avatar if there is one, otherwise the template's default. Works for agent summaries and the badges on cases and approvals. */
+export function resolveAvatar(agent: AvatarSource): string | undefined {
   const picked = parseAvatar(agent.avatar);
   if (picked) return picked;
-  if (!('kind' in agent)) return undefined;
-  if (agent.kind === 'lead') return 'blossom';
+  if (agent.kind === 'lead') return 'panda';
   if (agent.template_key && BY_TEMPLATE[agent.template_key]) return BY_TEMPLATE[agent.template_key];
-  if (agent.scope === 'personal') return 'panda';
-  return BY_CATEGORY[agent.category];
+  if (agent.scope === 'personal') return 'blossom';
+  return agent.category ? (BY_CATEGORY as Record<string, string | undefined>)[agent.category] : undefined;
 }

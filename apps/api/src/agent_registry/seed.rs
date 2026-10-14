@@ -70,30 +70,45 @@ pub async fn ensure_lead(conn: &mut SqliteConnection, ws: &str) -> sqlx::Result<
 }
 
 /// The member's own agent. It starts at the lead's level, so a workspace that already lets routine
-/// replies go keeps that behaviour for every mailbox.
+/// replies go keeps that behaviour for every mailbox. Its name is Meera for everyone.
 pub async fn ensure_personal(conn: &mut SqliteConnection, ws: &str, user_id: &str) -> sqlx::Result<()> {
     ensure_lead(conn, ws).await?;
     let lead = store::lead(&mut *conn, ws).await?;
     let level = lead.as_ref().map_or(1, |l| l.autonomy_level.clamp(1, 2));
-    let name = personal_name(lead.as_ref().map_or(templates::lead_template().name, |l| l.name.as_str()));
-    ensure_template_agent(conn, ws, templates::personal_template(), &personal_key(user_id), Some(user_id), level, &name).await?;
+    ensure_template_agent(conn, ws, templates::personal_template(), &personal_key(user_id), Some(user_id), level, templates::PERSONAL_NAME).await?;
     Ok(())
 }
 
-/// A member's own agent shows as "<lead name> (personal)", e.g. "Meera (personal)".
-pub fn personal_name(lead_name: &str) -> String {
-    format!("{} (personal)", lead_name.trim())
-}
+/// The lead's first personality line, before the lead was called Aarav.
+const OLD_LEAD_PERSONALITY: &str = "I'm Meera, the team's email assistant. I'm warm, upbeat and a little playful, \
+but always professional: friendly greetings, clear next steps, no jargon, and never more words than needed.";
 
-/// Renames personal agents still carrying the old generic name to "<lead name> (personal)".
-async fn rename_generic_personal(conn: &mut SqliteConnection, ws: &str) -> sqlx::Result<()> {
-    let Some(lead) = store::lead(&mut *conn, ws).await? else { return Ok(()) };
-    sqlx::query("UPDATE agents SET name = ?2 WHERE workspace_id = ?1 AND scope = 'personal' AND name = ?3")
-        .bind(ws)
-        .bind(personal_name(&lead.name))
-        .bind(templates::GENERIC_PERSONAL_NAME)
-        .execute(&mut *conn)
-        .await?;
+/// Gives agents that still carry an old default name (and were never tuned) their new one. A name an
+/// admin chose, or an agent that was tuned, is left alone.
+async fn rename_old_defaults(conn: &mut SqliteConnection, ws: &str) -> sqlx::Result<()> {
+    for (key, olds) in templates::OLD_DEFAULT_NAMES {
+        let Some(t) = templates::template(key) else { continue };
+        for old in *olds {
+            let renamed = sqlx::query("UPDATE agents SET name = ?1 WHERE workspace_id = ?2 AND template_key = ?3 AND tuned = 0 AND name = ?4")
+                .bind(t.name)
+                .bind(ws)
+                .bind(t.key)
+                .bind(old)
+                .execute(&mut *conn)
+                .await?
+                .rows_affected();
+            if renamed > 0 && t.key == templates::LEAD_KEY {
+                sqlx::query("UPDATE workspace_agents SET name = ?1, persona = REPLACE(persona, ?2, ?3) WHERE workspace_id = ?4 AND name = ?5")
+                    .bind(t.name)
+                    .bind(OLD_LEAD_PERSONALITY)
+                    .bind(crate::agent_profiles::DEFAULT_PERSONALITY)
+                    .bind(ws)
+                    .bind(old)
+                    .execute(&mut *conn)
+                    .await?;
+            }
+        }
+    }
     Ok(())
 }
 
@@ -207,7 +222,7 @@ pub async fn seed_workspace(conn: &mut SqliteConnection, ws: &str) -> sqlx::Resu
     }
     ensure_versions(conn, ws).await?;
     upgrade_templates(conn, ws, templates::TEMPLATES).await?;
-    rename_generic_personal(conn, ws).await?;
+    rename_old_defaults(conn, ws).await?;
     Ok(())
 }
 
@@ -216,7 +231,6 @@ async fn incomplete(conn: &mut SqliteConnection, ws: &str) -> sqlx::Result<bool>
     let gaps: i64 = sqlx::query_scalar(
         "SELECT (NOT EXISTS (SELECT 1 FROM agents WHERE workspace_id = ?1 AND kind = 'lead'))
              + EXISTS (SELECT 1 FROM agents WHERE workspace_id = ?1 AND active_version IS NULL)
-             + EXISTS (SELECT 1 FROM agents WHERE workspace_id = ?1 AND scope = 'personal' AND name = 'My assistant')
              + EXISTS (SELECT 1 FROM memberships m WHERE m.workspace_id = ?1 AND NOT EXISTS
                          (SELECT 1 FROM agents a WHERE a.workspace_id = ?1 AND a.scope = 'personal' AND a.owner_user_id = m.user_id))",
     )

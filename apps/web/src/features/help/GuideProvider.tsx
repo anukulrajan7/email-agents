@@ -1,20 +1,13 @@
-import { createContext, useCallback, useContext, useMemo, useRef, useState, type ReactNode } from 'react';
-import { useLocation, useNavigate } from 'react-router';
-import { Spotlight } from './Spotlight';
-import { GUIDES, pageOfPath, startHereGuides, visibleGuides, type Guide } from './guides';
-import { readTried, writeTried } from './guideStorage';
-
-type Active = { guideId: string; step: number; queue: string[] };
+import { createContext, useCallback, useContext, useMemo, useState, type ReactNode } from 'react';
+import { visibleGuides, type Guide } from './guides';
+import { readDismissed, writeDismissed } from './guideStorage';
 
 type GuideContextValue = {
   ws: string;
-  user: string;
   guides: Guide[];
-  startHere: Guide[];
-  tried: ReadonlySet<string>;
-  setTried: (id: string, on: boolean) => void;
-  start: (id: string, queue?: string[]) => void;
-  running: boolean;
+  dismissed: ReadonlySet<string>;
+  dismiss: (id: string) => void;
+  restoreAll: () => void;
 };
 
 const GuideContext = createContext<GuideContextValue | undefined>(undefined);
@@ -38,80 +31,25 @@ export function GuideProvider({
   hasStaffing: boolean;
   children: ReactNode;
 }) {
-  const navigate = useNavigate();
-  const location = useLocation();
-  const [tried, setTriedState] = useState(() => readTried(user, ws));
-  const [active, setActive] = useState<Active>();
-  const opener = useRef<HTMLElement | null>(null);
-
+  const [dismissed, setDismissed] = useState(() => readDismissed(user, ws));
   const guides = useMemo(() => visibleGuides({ isAdmin, hasStaffing }), [isAdmin, hasStaffing]);
-  const startHere = useMemo(() => startHereGuides({ isAdmin, hasStaffing }), [isAdmin, hasStaffing]);
 
-  const setTried = useCallback(
-    (id: string, on: boolean) =>
-      setTriedState((prev) => {
-        const next = new Set(prev);
-        if (on) next.add(id);
-        else next.delete(id);
-        writeTried(user, ws, next);
+  const dismiss = useCallback(
+    (id: string) =>
+      setDismissed((prev) => {
+        const next = new Set(prev).add(id);
+        writeDismissed(user, ws, next);
         return next;
       }),
     [user, ws],
   );
 
-  const begin = useCallback(
-    (id: string, queue: string[]) => {
-      const guide = GUIDES.find((g) => g.id === id);
-      if (!guide) return;
-      if (pageOfPath(location.pathname) !== guide.page) navigate(`/w/${ws}/${guide.page}`);
-      setActive({ guideId: id, step: 0, queue });
-    },
-    [location.pathname, navigate, ws],
-  );
+  const restoreAll = useCallback(() => {
+    const none = new Set<string>();
+    writeDismissed(user, ws, none);
+    setDismissed(none);
+  }, [user, ws]);
 
-  const start = useCallback(
-    (id: string, queue: string[] = []) => {
-      if (!active) opener.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-      begin(id, queue);
-    },
-    [active, begin],
-  );
-
-  const guide = active ? GUIDES.find((g) => g.id === active.guideId) : undefined;
-
-  const close = (finished: boolean) => {
-    if (!active || !guide) return;
-    if (finished) {
-      setTried(guide.id, true);
-      const [next, ...rest] = active.queue;
-      if (next) {
-        begin(next, rest);
-        return;
-      }
-    }
-    setActive(undefined);
-    const target = opener.current;
-    if (target?.isConnected) target.focus();
-  };
-
-  const value = useMemo<GuideContextValue>(
-    () => ({ ws, user, guides, startHere, tried, setTried, start, running: active !== undefined }),
-    [ws, user, guides, startHere, tried, setTried, start, active],
-  );
-
-  return (
-    <GuideContext.Provider value={value}>
-      {children}
-      {active && guide && (
-        <Spotlight
-          key={guide.id}
-          guide={guide}
-          step={active.step}
-          hasNextGuide={active.queue.length > 0}
-          onStep={(step) => setActive({ ...active, step })}
-          onClose={close}
-        />
-      )}
-    </GuideContext.Provider>
-  );
+  const value = useMemo(() => ({ ws, guides, dismissed, dismiss, restoreAll }), [ws, guides, dismissed, dismiss, restoreAll]);
+  return <GuideContext.Provider value={value}>{children}</GuideContext.Provider>;
 }

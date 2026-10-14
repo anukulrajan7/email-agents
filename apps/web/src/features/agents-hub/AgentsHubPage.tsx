@@ -7,6 +7,7 @@ import { riseStyle } from '../../lib/motion';
 import type { AgentCategory, AgentSummary } from '../../api/types';
 import { HelpPopover } from '../help/HelpPopover';
 import { AgentCard } from './AgentCard';
+import { agentDisplayName } from './agentCopy';
 import { AgentDrawer } from './AgentDrawer';
 import { CATEGORY_ORDER, CATEGORY_TITLE } from './autonomy';
 import { FriendlyEmpty } from './FriendlyEmpty';
@@ -39,6 +40,7 @@ export function AgentsHubPage() {
   const data = registry.data;
   const groups = data ? groupAgents(data.categories, data.me?.id) : [];
   const all = data ? [...(data.me ? [data.me] : []), ...data.categories.flatMap((c) => c.agents)] : [];
+  const lead = all.find((a) => a.kind === 'lead');
   const open = all.find((a) => a.id === openId);
   const empty = data !== undefined && !data.me && groups.length === 0;
   let index = 0;
@@ -46,13 +48,12 @@ export function AgentsHubPage() {
   const toggle = (agent: AgentSummary, on: boolean) =>
     patch.mutate(
       { id: agent.id, status: on ? 'active' : 'paused' },
-      { onSuccess: () => notify('success', on ? `${agent.name} is back to work` : `${agent.name} is paused`) },
+      { onSuccess: () => notify('success', on ? `${agentDisplayName(agent)} is back to work` : `${agent.name} is paused`) },
     );
 
   return (
     <Page>
       <PageHeader
-        guide="team-header"
         kicker="Your team"
         title="Agents"
         description="Each agent looks after one kind of email. They start careful and ask before sending, and you decide how much freedom they get."
@@ -81,6 +82,15 @@ export function AgentsHubPage() {
           </>
         }
       />
+      {data && (
+        <aside aria-label="About your team" className="rise letter flex flex-col gap-1 rounded-xs p-4 text-sm leading-snug" style={riseStyle(1)}>
+          <p className="type-display text-lg tracking-[-0.01em]">Your team</p>
+          <p className="text-ink">
+            Meera is your own assistant. {lead?.name ?? 'Aarav'} leads the team and hands each email to the right helper. Each helper handles one kind of email.
+            New helpers start by only watching.
+          </p>
+        </aside>
+      )}
       {registry.isLoading && <Skeleton className="h-48" />}
       <ErrorNote error={registry.error ?? patch.error ?? pauseAll.error} />
       {data?.paused_all && (

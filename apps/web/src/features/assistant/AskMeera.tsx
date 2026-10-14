@@ -36,7 +36,7 @@ export function AskMeera({ ws }: { ws: string }) {
     <>
       <Button
         id={triggerId}
-        data-guide="ask-meera"
+       
         aria-haspopup="dialog"
         aria-expanded={open}
         onClick={() => {

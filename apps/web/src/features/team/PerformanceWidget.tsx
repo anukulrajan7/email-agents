@@ -16,7 +16,7 @@ export function PerformanceWidget({ ws }: { ws: string }) {
   return (
     <Link
       to={`/w/${ws}/performance`}
-      data-guide="performance-widget"
+     
       aria-label={`Your performance. ${label} today ${ofTarget(m.today, m.daily_target)}, this week ${ofTarget(m.week, m.weekly_target)}${
         quality ? `, ${quality.label} ${formatMetric(quality.since_joining, quality.unit)}` : ''
       }`}

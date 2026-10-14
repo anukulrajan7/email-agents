@@ -276,6 +276,11 @@ async fn update(
     let agent = visible_agent(&state, &ws, &user, &id).await?;
     require_edit(&state, &ws, &user, &agent).await?;
     let is_lead = agent.kind == "lead";
+    if is_lead && (body.name.is_some() || body.avatar.is_some() || body.color.is_some()) {
+        let input = agent_profiles::AgentInput { name: body.name.clone(), avatar: body.avatar.clone(), color: body.color.clone(), ..Default::default() };
+        let next = agent_profiles::agent(&state.db, &state.config, &ws).await?.apply(&input).map_err(AppError::BadRequest)?;
+        agent_profiles::save_agent(&state.db, &ws, &next, &user.id).await?;
+    }
     let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     if let Some(status) = body.status.as_deref() {
         match status {
@@ -296,10 +301,7 @@ async fn update(
             _ => return Err(AppError::BadRequest("status must be active, paused or archived".into())),
         }
     }
-    if body.name.is_some() || body.avatar.is_some() || body.color.is_some() {
-        if is_lead {
-            return Err(AppError::Conflict("edit the lead on the Agent page".into()));
-        }
+    if !is_lead && (body.name.is_some() || body.avatar.is_some() || body.color.is_some()) {
         let name = match &body.name {
             Some(n) => n.split_whitespace().collect::<Vec<_>>().join(" "),
             None => agent.name.clone(),
@@ -308,7 +310,7 @@ async fn update(
             return Err(AppError::BadRequest(format!("the name must be 1 to {} characters", spec::MAX_NAME_CHARS)));
         }
         let avatar = match &body.avatar {
-            Some(a) => agent_profiles::valid_avatar(a).ok_or_else(|| AppError::BadRequest("the avatar must be one emoji or 1 to 2 letters".into()))?,
+            Some(a) => agent_profiles::valid_avatar(a).ok_or_else(|| AppError::BadRequest("the avatar must be a picture, one emoji or 1 to 2 letters".into()))?,
             None => agent.avatar.clone(),
         };
         let color = match &body.color {
@@ -406,7 +408,7 @@ async fn insert_custom(
 
 pub(super) fn look(avatar: Option<&str>, color: Option<&str>) -> AppResult<(String, String)> {
     let avatar = match avatar {
-        Some(a) => agent_profiles::valid_avatar(a).ok_or_else(|| AppError::BadRequest("the avatar must be one emoji or 1 to 2 letters".into()))?,
+        Some(a) => agent_profiles::valid_avatar(a).ok_or_else(|| AppError::BadRequest("the avatar must be a picture, one emoji or 1 to 2 letters".into()))?,
         None => "🤖".to_string(),
     };
     let color = match color {

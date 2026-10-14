@@ -2,11 +2,12 @@ import type { ReactNode } from 'react';
 import { labelColors } from '../../components/ui';
 import { cn } from '../../lib/cn';
 import { AgentFace } from '../agents-hub/AgentFace';
-import { parseAvatar } from '../agents-hub/avatars';
+import { agentDisplayName } from '../agents-hub/agentCopy';
+import { resolveAvatar } from '../agents-hub/avatars';
 import type { AgentBadge } from './types';
 
-export function AgentAvatar({ agent, size = 'sm', className }: { agent: Pick<AgentBadge, 'avatar' | 'color'>; size?: 'sm' | 'lg'; className?: string }) {
-  const picked = parseAvatar(agent.avatar);
+export function AgentAvatar({ agent, size = 'sm', className }: { agent: Pick<AgentBadge, 'avatar' | 'color' | 'kind' | 'scope' | 'category' | 'template_key'>; size?: 'sm' | 'lg'; className?: string }) {
+  const picked = resolveAvatar(agent);
   if (picked) return <AgentFace avatar={picked} size={size === 'lg' ? 'md' : 'sm'} className={className} />;
   return (
     <span
@@ -23,13 +24,13 @@ export function AgentAvatar({ agent, size = 'sm', className }: { agent: Pick<Age
   );
 }
 
-/** "Meera (agent)" with the avatar, for cases and approvals. */
+/** "Kabir (agent)" with the avatar, for cases and approvals; the personal agent reads "Your Meera". */
 export function AgentByline({ agent, children }: { agent: AgentBadge; children?: ReactNode }) {
   return (
     <span className="inline-flex items-center gap-2 text-sm text-ink-muted">
       <AgentAvatar agent={agent} />
       <span>
-        <span className="font-semibold text-ink">{agent.name}</span> (agent){children}
+        <span className="font-semibold text-ink">{agentDisplayName(agent)}</span> (agent){children}
       </span>
     </span>
   );

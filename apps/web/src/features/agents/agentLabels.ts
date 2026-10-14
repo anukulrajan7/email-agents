@@ -61,8 +61,6 @@ export const APPROVAL_OPTIONS: { value: SendApproval; label: string }[] = [
   { value: 'routine_ok', label: 'Let routine replies go' },
 ];
 
-export const AVATARS = ['🌼', '🌸', '🪷', '🦉', '🐝', '🌿', '⭐', '💬', '🧭', '🫖'];
-
 export const COLORS = ['ochre', 'postmark', 'sage', 'teal', 'slate', 'plum', 'ink'] as const;
 
 export const COLOR_NAME: Record<string, string> = {

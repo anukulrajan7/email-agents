@@ -61,7 +61,7 @@ fn foreign_personal_refusal(ctx: &agent_profiles::AgentContext, started_by: Opti
         .filter(|n| !n.is_empty())
         .or_else(|| owner.email.split('@').next().filter(|n| !n.is_empty()))
         .unwrap_or(&owner.email);
-    Some(format!("This is in {name}'s personal mailbox \u{2014} their own {} handles it.", ctx.agent.name))
+    Some(format!("This is in {name}'s personal mailbox \u{2014} their own {} handles it.", crate::agent_registry::templates::PERSONAL_NAME))
 }
 
 /// Same refusal for the assistant's plan step, before any card is prepared.

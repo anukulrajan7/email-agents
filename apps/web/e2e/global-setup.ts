@@ -1,18 +1,18 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { call, nango, ok, signUp, type Seed, type Session } from './support/api';
 import { AUTH_DIR, authFile, BASE_URL, type Role, SEED_FILE, SIGNUP_DOMAIN } from './support/env';
+import { GUIDES } from '../src/features/help/guides';
 import { gmailPayload, MAILBOX, MAILS } from './support/gmail';
 
-const NUDGE_PAGES = ['inbox', 'labels', 'agent-team', 'agents', 'memory', 'automations', 'alerts', 'packs', 'matching', 'workflows', 'usage', 'people', 'performance', 'timesheets', 'portal', 'escalations'];
+const GUIDE_IDS = GUIDES.map((g) => g.id);
 
-/** Signed-in browser state. The first-run checklist, the welcome tour and the per-page guide nudges are dismissed so they never cover the page under test. */
+/** Signed-in browser state. The first-run checklist, and the per-page explanation cards are dismissed so they never cover the page under test. */
 function saveSession(role: Role, session: Session, workspaceIds: string[]) {
   mkdirSync(AUTH_DIR, { recursive: true });
   const localStorage = [
     { name: 'auth_token', value: session.token },
-    { name: 'tour:v1:done', value: '1' },
     ...workspaceIds.map((id) => ({ name: `getting-started:${id}:dismissed`, value: '1' })),
-    ...workspaceIds.map((id) => ({ name: `guide:v1:${session.id}:${id}:nudged`, value: JSON.stringify(NUDGE_PAGES) })),
+    ...workspaceIds.map((id) => ({ name: `guide:v2:${session.id}:${id}:dismissed`, value: JSON.stringify(GUIDE_IDS) })),
   ];
   writeFileSync(authFile(role), JSON.stringify({ cookies: [], origins: [{ origin: BASE_URL, localStorage }] }));
 }

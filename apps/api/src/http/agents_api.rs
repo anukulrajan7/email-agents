@@ -47,12 +47,17 @@ struct Who {
 
 impl Who {
     async fn load(state: &AppState, ws: &str) -> AppResult<Self> {
-        let agent = agent_profiles::agent(&state.db, &state.config, ws).await?.badge();
+        let mut agent = agent_profiles::agent(&state.db, &state.config, ws).await?.badge();
+        agent["kind"] = json!("lead");
         let agents = crate::agent_registry::store::list(&state.db, ws)
             .await?
             .into_iter()
             .map(|a| {
-                let badge = if a.kind == "lead" || a.is_personal() { agent.clone() } else { json!({"name": a.name, "avatar": a.avatar, "color": a.color}) };
+                let mut badge = if a.kind == "lead" { agent.clone() } else { json!({"name": a.name, "avatar": a.avatar, "color": a.color}) };
+                badge["kind"] = json!(a.kind);
+                badge["scope"] = json!(a.scope);
+                badge["category"] = json!(a.category);
+                badge["template_key"] = json!(a.template_key);
                 (a.id, badge)
             })
             .collect();

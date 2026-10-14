@@ -75,7 +75,7 @@ test.describe('admin, General workspace with mail, drafts and attachments', () =
     await expectClean(page, 'label health');
 
     await page.goto(`/w/${seed.workspaceId}/agents`);
-    await page.getByRole('button', { name: /^Edit Meera/ }).click();
+    await page.getByRole('button', { name: /^Edit Aarav/ }).click();
     await expectClean(page, 'agent editor');
   });
 

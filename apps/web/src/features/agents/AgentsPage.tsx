@@ -23,7 +23,7 @@ function WaitingForYou({ ws }: { ws: string }) {
   const approvals = useApprovals(ws);
   const items = approvals.data?.items ?? [];
   return (
-    <section aria-labelledby="waiting-heading" data-guide="approvals" className="rise flex flex-col gap-3" style={riseStyle(1)}>
+    <section aria-labelledby="waiting-heading" className="rise flex flex-col gap-3" style={riseStyle(1)}>
       <h2 id="waiting-heading" className="type-display text-2xl tracking-[-0.01em]">
         Waiting for you
         {items.length > 0 && <span className="ml-3 rounded-full bg-accent px-2 py-0.5 align-middle font-mono text-xs text-accent-ink">{items.length}</span>}

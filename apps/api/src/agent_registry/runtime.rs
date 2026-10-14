@@ -71,9 +71,12 @@ pub async fn load(db: &SqlitePool, config: &Config, case: &Case, owner: Option<&
     Ok(CaseAgent { row, spec, version, level })
 }
 
-fn playbook(spec: &AgentSpec, persona: &str, personal: bool) -> String {
+fn playbook(spec: &AgentSpec, team_voice: &str, personal: bool) -> String {
     let role = if personal { "the mailbox owner's own assistant" } else { spec.name.as_str() };
     let mut out = format!("Your role: {role}. {}\nYour goal: {}\n", spec.description.trim(), spec.goal.trim());
+    if !spec.persona.trim().is_empty() {
+        out.push_str(&format!("How you think:\n{}\n", spec.persona.trim()));
+    }
     if spec.mode == Mode::Workflow && !spec.steps.is_empty() {
         out.push_str("Work through these steps in order, skipping any that do not apply:\n");
         for (i, s) in spec.steps.iter().enumerate() {
@@ -88,13 +91,15 @@ fn playbook(spec: &AgentSpec, persona: &str, personal: bool) -> String {
         out.push_str("Never:\n");
         spec.drafting.never_do.iter().for_each(|r| out.push_str(&format!("- {r}\n")));
     }
+    out.push_str("\nEmails you write go out in the mailbox owner's voice. Never sign them with your own name.\n");
     if personal {
-        out.push_str("\nYou are working in the mailbox owner's own mail. Write in their voice and follow their profile.\n");
-    }
-    if persona.trim().is_empty() {
+        out.push_str("You are working in the mailbox owner's own mail. Write in their voice and follow their profile.\n");
         return out;
     }
-    format!("{}\n\n{out}", persona.trim())
+    if team_voice.trim().is_empty() {
+        return out;
+    }
+    format!("{out}\nTeam voice and rules:\n{}\n", team_voice.trim())
 }
 
 /// The send permission an agent really has: the workspace ceiling and the agent's own spec, whichever is stricter.
@@ -121,8 +126,7 @@ pub fn adapt(mut ctx: AgentContext, agent: &CaseAgent) -> AgentContext {
         tier => tier.to_string(),
     };
     let personal = agent.row.is_personal();
-    let (name, avatar, color) =
-        if personal { (ws.name.clone(), ws.avatar.clone(), ws.color.clone()) } else { (agent.row.name.clone(), agent.row.avatar.clone(), agent.row.color.clone()) };
+    let (name, avatar, color) = (agent.row.name.clone(), agent.row.avatar.clone(), agent.row.color.clone());
     ctx.agent = WorkspaceAgent {
         name,
         avatar,
@@ -146,4 +150,31 @@ pub async fn context_for_case(db: &SqlitePool, config: &Config, case: &Case) -> 
 /// Does this workspace have the matching feature (tools `find_candidates`, `submit_candidate`)?
 pub async fn matching_enabled(db: &SqlitePool, ws: &str) -> sqlx::Result<bool> {
     packs::has_feature(db, ws, packs::FEATURE_MATCHING).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent_registry::templates;
+
+    #[test]
+    fn the_persona_reaches_the_playbook_and_the_mail_is_never_signed_by_the_agent() {
+        for key in ["support.resolver", "sales.qualifier", "hrms.payroll"] {
+            let t = templates::template(key).unwrap();
+            let book = playbook(&t.spec(), "Team style: short.", false);
+            assert!(book.contains(&format!("You are {}", t.name)), "{key}: {book}");
+            assert!(book.contains("How you think:"), "{key}");
+            assert!(book.contains("Never sign them with your own name"), "{key}");
+            assert!(book.contains("Team voice and rules:\nTeam style: short."), "{key}");
+        }
+    }
+
+    #[test]
+    fn the_personal_agent_uses_its_own_persona_not_the_leads() {
+        let t = templates::personal_template();
+        let book = playbook(&t.spec(), "I'm Aarav, the team's email assistant.", true);
+        assert!(book.contains("You are Meera, the mailbox owner's own assistant"));
+        assert!(!book.contains("Aarav"), "the lead's identity stays out: {book}");
+        assert!(book.contains("Never sign them with your own name"));
+    }
 }

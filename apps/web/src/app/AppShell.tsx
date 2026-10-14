@@ -8,8 +8,8 @@ import { AskMeera } from '../features/assistant/AskMeera';
 import { PerformanceWidget } from '../features/team/PerformanceWidget';
 import { Button, Dialog, EmptyState, Skeleton, SkeletonList, Spinner } from '../components/ui';
 import { cn } from '../lib/cn';
-import { GuideLauncher } from '../features/help/GuideLauncher';
 import { GuideProvider } from '../features/help/GuideProvider';
+import { PageGuideCard } from '../features/help/PageGuideCard';
 import { riseStyle } from '../lib/motion';
 import { initialOf } from '../features/inbox/emailText';
 import { navGroups, type NavBadge } from './nav';
@@ -201,15 +201,17 @@ export function AppShell() {
               <AccountFooter workspaceName={workspace.name} />
             </div>
           </aside>
-          <main className="min-h-0 min-w-0 flex-1 overflow-hidden">
-            <Suspense fallback={<RouteFallback />}>
-              <Outlet />
-            </Suspense>
+          <main className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+            <PageGuideCard />
+            <div className="min-h-0 flex-1">
+              <Suspense fallback={<RouteFallback />}>
+                <Outlet />
+              </Suspense>
+            </div>
           </main>
         </div>
         <OnboardingPrompt ws={ws} />
         <PerformanceWidget ws={ws} />
-        <GuideLauncher />
         <AskMeera ws={ws} />
         {menuOpen && (
           <Dialog title="Menu" variant="drawer" side="left" onClose={() => setMenuOpen(false)} className="gap-6 bg-paper">

@@ -60,6 +60,7 @@ pub fn spec_schema() -> Value {
         "category": string_enum(CATEGORIES),
         "description": {"type": "string"},
         "goal": {"type": "string"},
+        "persona": {"type": "string"},
         "mode": string_enum(&["workflow", "agent"]),
         "triggers": {"type": "array", "items": trigger()},
         "steps": {"type": "array", "items": step()},

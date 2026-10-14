@@ -39,7 +39,7 @@ export function WorkflowsPage() {
       />
       {workflows.isLoading && <SkeletonList rows={2} label="Loading workflows" />}
       <ErrorNote error={workflows.error ?? toggle.error ?? reprocess.error ?? setup.error} />
-      <div data-guide="workflows-grid" className="grid auto-rows-fr gap-4 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
+      <div className="grid auto-rows-fr gap-4 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
         {workflows.data?.items.map((w, i) => (
           <Card key={w.id} className="rise flex h-full flex-col gap-3" style={riseStyle(i + 1)}>
             <div className="flex items-start justify-between gap-2">

@@ -56,7 +56,7 @@ async fn a_database_at_0033_migrates_and_backfills() {
     assert!(count(&pool, "SELECT COUNT(*) FROM agents WHERE workspace_id = 'w1' AND scope = 'workspace' AND kind != 'lead'").await > 1, "pack desks");
     assert_eq!(count(&pool, "SELECT COUNT(*) FROM agents WHERE active_version IS NULL").await, 0, "every agent has a version");
     assert_eq!(count(&pool, "SELECT COUNT(*) FROM agents WHERE name = 'My assistant'").await, 0);
-    assert_eq!(count(&pool, "SELECT COUNT(*) FROM agents WHERE scope = 'personal' AND name = 'Meera (personal)'").await, 3, "named after the lead");
+    assert_eq!(count(&pool, "SELECT COUNT(*) FROM agents WHERE scope = 'personal' AND name = 'Meera'").await, 3, "every personal agent is Meera");
     agent_registry::seed::backfill_all(&pool).await.unwrap();
     assert_eq!(count(&pool, "SELECT COUNT(*) FROM agents WHERE scope = 'personal'").await, 3, "the backfill is idempotent");
 }

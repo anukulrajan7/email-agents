@@ -27,11 +27,11 @@ pub const COLORS: &[&str] = &["slate", "sage", "plum", "ochre", "teal", "postmar
 pub const QUALITIES: &[&str] = &["fast", "balanced", "best"];
 pub const SEND_MODES: &[&str] = &["never", "ask", "auto"];
 
-pub const DEFAULT_NAME: &str = "Meera";
+pub const DEFAULT_NAME: &str = "Aarav";
 pub const DEFAULT_AVATAR: &str = "🌼";
 pub const DEFAULT_COLOR: &str = "ochre";
-const DEFAULT_PERSONALITY: &str = "I'm Meera, the team's email assistant. I'm warm, upbeat and a little playful, \
-but always professional: friendly greetings, clear next steps, no jargon, and never more words than needed.";
+pub(crate) const DEFAULT_PERSONALITY: &str = "I'm Aarav, the team's email assistant. I'm calm and organised, \
+and always professional: friendly greetings, clear next steps, no jargon, and never more words than needed.";
 
 // ---------------------------------------------------------------- the workspace agent
 
@@ -661,7 +661,7 @@ impl WorkspaceAgent {
             }
         }
         if let Some(avatar) = &input.avatar {
-            self.avatar = valid_avatar(avatar).ok_or("the avatar must be one emoji or 1 to 2 letters")?;
+            self.avatar = valid_avatar(avatar).ok_or("the avatar must be a picture, one emoji or 1 to 2 letters")?;
         }
         if let Some(color) = &input.color {
             if !COLORS.contains(&color.as_str()) {
@@ -819,9 +819,17 @@ impl UserProfile {
     }
 }
 
-/// One emoji, or 1–2 letters/digits (upper-cased).
+/// The picture avatars the web app ships in `/avatars`, stored as `fluent:<key>`.
+const PICTURE_AVATARS: &[&str] = &[
+    "blossom", "owl", "bee", "dolphin", "fox", "panda", "koala", "robot", "rocket", "sparkles", "penguin", "otter", "hedgehog", "rabbit", "cat", "turtle",
+];
+
+/// A picture avatar (`fluent:owl`), one emoji, or 1–2 letters/digits (upper-cased).
 pub fn valid_avatar(avatar: &str) -> Option<String> {
     let a = avatar.trim();
+    if let Some(key) = a.strip_prefix("fluent:") {
+        return PICTURE_AVATARS.contains(&key).then(|| a.to_string());
+    }
     let n = a.chars().count();
     if n == 0 {
         return None;
@@ -861,6 +869,8 @@ mod tests {
         assert_eq!(valid_avatar(" as "), Some("AS".into()));
         assert_eq!(valid_avatar("🌼"), Some("🌼".into()));
         assert_eq!(valid_avatar("👩‍💼"), Some("👩‍💼".into()));
+        assert_eq!(valid_avatar("fluent:owl"), Some("fluent:owl".into()));
+        assert_eq!(valid_avatar("fluent:nope"), None);
         assert_eq!(valid_avatar("abc"), None);
         assert_eq!(valid_avatar("a!"), None);
         assert_eq!(valid_avatar(""), None);
@@ -945,7 +955,7 @@ mod tests {
 
     #[test]
     fn seeded_persona_is_friendly_and_adds_workspace_instructions() {
-        assert!(standard_guidance(DEFAULT_REPLY_STYLE).starts_with("I'm Meera") && standard_guidance(DEFAULT_REPLY_STYLE).contains(DEFAULT_REPLY_STYLE));
+        assert!(standard_guidance(DEFAULT_REPLY_STYLE).starts_with("I'm Aarav") && standard_guidance(DEFAULT_REPLY_STYLE).contains(DEFAULT_REPLY_STYLE));
         assert!(default_persona(DEFAULT_REPLY_STYLE, "Mention our 1-day turnaround.").ends_with("\n\nMention our 1-day turnaround."));
     }
 
@@ -960,7 +970,7 @@ mod tests {
             owner: Some(Owner { user_id: "u1".into(), email: "priya@acme.com".into(), profile: Some(profile) }),
         };
         let block = ctx.planner_block();
-        assert!(block.contains("You are Meera, the team's email agent for the mailbox priya@acme.com."));
+        assert!(block.contains("You are Aarav, the team's email agent for the mailbox priya@acme.com."));
         assert!(block.contains("Warm.") && block.contains("You are working for Priya (priya@acme.com), Recruiter."));
         assert!(block.contains("- Never do this for them: Share salary bands"));
         let style = ctx.draft_style(&Config::for_tests("sqlite::memory:"));

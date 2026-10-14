@@ -145,7 +145,7 @@ describe('Your agent', () => {
     const name = within(drawer).getByLabelText('Name');
     await userEvent.clear(name);
     await userEvent.type(name, 'Asha');
-    await userEvent.click(within(drawer).getByRole('button', { name: 'Avatar 🦉' }));
+    await userEvent.click(within(drawer).getByRole('radio', { name: 'Owl' }));
     await userEvent.click(within(drawer).getByRole('button', { name: 'Teal' }));
     await userEvent.click(within(drawer).getByRole('button', { name: 'Start from the standard guidance' }));
     expect(within(drawer).getByLabelText('Who Asha is and how it writes')).toHaveValue('Standard guidance for an HR team.');
@@ -158,7 +158,7 @@ describe('Your agent', () => {
     await waitFor(() => expect(bodiesOf(fetchMock, 'PUT', '/agent')).toHaveLength(1));
     expect(bodiesOf(fetchMock, 'PUT', '/agent')[0]).toEqual({
       name: 'Asha',
-      avatar: '🦉',
+      avatar: 'fluent:owl',
       color: 'teal',
       persona: 'Standard guidance for an HR team.',
       signature: 'Acme HR',

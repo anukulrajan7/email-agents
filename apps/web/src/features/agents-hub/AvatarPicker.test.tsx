@@ -38,7 +38,7 @@ describe('resolveAvatar', () => {
     expect(parseAvatar('fluent:owl')).toBe('owl');
     expect(parseAvatar('fluent:nope')).toBeUndefined();
     expect(resolveAvatar(agent({ id: '1', name: 'x', category: 'finance', avatar: 'fluent:fox' }))).toBe('fox');
-    expect(resolveAvatar(agent({ id: '2', name: 'x', category: 'general', kind: 'lead' }))).toBe('blossom');
+    expect(resolveAvatar(agent({ id: '2', name: 'x', category: 'general', kind: 'lead' }))).toBe('panda');
     expect(resolveAvatar(agent({ id: '3', name: 'x', category: 'finance', template_key: 'finance.invoices' }))).toBe('owl');
     expect(resolveAvatar(agent({ id: '4', name: 'x', category: 'sales' }))).toBe('bee');
     expect(resolveAvatar(agent({ id: '5', name: 'x', category: 'custom' }))).toBe('robot');

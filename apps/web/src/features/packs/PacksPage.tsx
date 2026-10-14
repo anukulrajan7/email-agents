@@ -42,7 +42,7 @@ export function PacksPage() {
       {packs.isLoading && <Skeleton className="h-40" />}
       <ErrorNote error={packs.error} />
       {packs.data && (
-        <Card className="rise flex flex-col gap-5 p-6" style={riseStyle(0)} data-guide="packs-card">
+        <Card className="rise flex flex-col gap-5 p-6" style={riseStyle(0)}>
           <PackPicker packs={packs.data.items} selected={selected} onChange={setDraft} disabled={save.isPending} />
           {canSave && preview.data && (
             <p className="text-sm text-ink-muted" role="status">

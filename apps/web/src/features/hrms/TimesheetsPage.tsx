@@ -73,7 +73,6 @@ export function TimesheetsPage() {
   return (
     <Page className="gap-6">
       <PageHeader
-        guide="timesheets-header"
         kicker="HRMS · Timesheets"
         title="Timesheets"
         description="Billable people send a timesheet each month. If one has not arrived three days after month end, the person is told and then their manager and HR."

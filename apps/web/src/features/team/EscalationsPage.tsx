@@ -62,7 +62,6 @@ export function EscalationsPage() {
   return (
     <Page className="gap-6">
       <PageHeader
-        guide="escalations-header"
         kicker={staffing ? 'HRMS · Escalations' : 'Team · Escalations'}
         title="Escalations"
         description="When an alert is not dealt with, it moves from the person it is about, to their manager, to HR (or the admins), after the delays below."
@@ -86,7 +85,7 @@ export function EscalationsPage() {
             />
           </Card>
         ) : (
-          <section aria-label="Escalation chains" data-guide="escalations-chains" className="rise flex flex-col gap-3" style={riseStyle(1)}>
+          <section aria-label="Escalation chains" className="rise flex flex-col gap-3" style={riseStyle(1)}>
             <CardTitle>Who is told, in order</CardTitle>
             <ul className="flex flex-col gap-2">
               {chains.map((c) => (

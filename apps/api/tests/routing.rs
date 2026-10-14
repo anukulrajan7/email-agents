@@ -64,7 +64,7 @@ async fn precedence_is_manual_thread_rule_label_personal_generic_fallback() {
 
     // Thread: an open case in the conversation keeps the conversation with its agent.
     let case_id = env.start(&label).await;
-    assert_eq!(env.case(ADMIN, &case_id).await["agent"]["name"], "Ticket Resolver");
+    assert_eq!(env.case(ADMIN, &case_id).await["agent"]["name"], "Ishaan");
     let reply = env.receive(&env.shared_src, "m6", "t1", CLIENT, "Re: Where is my parcel?", "Any news?", "general").await;
     assert_eq!((env.route(&reply).await.route.agent_id, env.route(&reply).await.route.source), (resolver.clone(), Source::Thread));
 
@@ -109,9 +109,9 @@ async fn an_observing_agent_runs_a_shadow_case_beside_the_real_one_and_writes_no
     assert_eq!((shadow_agent.as_deref(), shadow_flag), (Some(resolver.as_str()), true));
     assert_eq!(cases[0].1.as_deref(), Some(inbox.as_str()));
 
-    // The real case is Meera's, the lead's: she drafts while the desk only observes.
+    // The real case is Aarav's, the lead's: he drafts while the desk only observes.
     let real = env.case(ADMIN, &real_case).await;
-    assert_eq!((real["status"].as_str(), real["shadow"].as_bool(), real["agent"]["name"].as_str()), (Some("done"), Some(false), Some("Meera")), "{real}");
+    assert_eq!((real["status"].as_str(), real["shadow"].as_bool(), real["agent"]["name"].as_str()), (Some("done"), Some(false), Some("Aarav")), "{real}");
     // The observing case ran the planner, but nothing it did left a mark.
     let shadow = env.case(ADMIN, &shadow_id).await;
     assert_eq!(shadow["shadow"], true);
@@ -123,6 +123,9 @@ async fn an_observing_agent_runs_a_shadow_case_beside_the_real_one_and_writes_no
     assert!(draft_step["output"]["draft_id"].as_str().unwrap().starts_with("shadow:"), "a stand-in id, not a draft");
     assert!(shadow["steps"].as_array().unwrap().iter().filter(|s| s["tool"] == "send_email" || s["tool"] == "create_task").all(|s| s["output"]["simulated"] == true));
     assert_eq!(env.count(&format!("SELECT COUNT(*) FROM drafts WHERE workspace_id = ?1 AND agent_id = '{resolver}'")).await, 0, "shadow cases write no drafts");
+    let prompts = env.planner.systems().join("\n");
+    assert!(prompts.contains("You are Ishaan, a patient problem-solver"), "the desk's persona reaches the planner prompt: {prompts}");
+    assert!(prompts.contains("Never sign them with your own name"), "mail goes out in the owner's voice: {prompts}");
     assert_eq!(env.count("SELECT COUNT(*) FROM drafts WHERE workspace_id = ?1").await, 1, "only the real case drafted");
     assert_eq!(env.count(&format!("SELECT COUNT(*) FROM agent_approvals WHERE workspace_id = ?1 AND agent_id = '{resolver}'")).await, 0);
     assert_eq!(env.count("SELECT COUNT(*) FROM review_items WHERE workspace_id = ?1 AND kind = 'agent_task'").await, 0, "no task was created");

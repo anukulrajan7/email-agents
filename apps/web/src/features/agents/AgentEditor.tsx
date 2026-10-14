@@ -3,8 +3,9 @@ import { Button, Dialog, Input, Label, SegmentedControl, Switch, Textarea, label
 import { ErrorNote } from '../../components/ErrorNote';
 import { cn } from '../../lib/cn';
 import { AgentAvatar } from './AgentAvatar';
+import { AvatarPicker } from '../agents-hub/AvatarPicker';
+import { parseAvatar, resolveAvatar } from '../agents-hub/avatars';
 import {
-  AVATARS,
   COLORS,
   COLOR_NAME,
   MAX_NAME,
@@ -77,7 +78,7 @@ export function AgentEditor({
         }}
       >
         <div className="flex items-center gap-3">
-          <AgentAvatar agent={{ avatar: avatar || '?', color }} size="lg" />
+          <AgentAvatar agent={{ avatar: avatar || '?', color, kind: 'lead' }} size="lg" />
           <div className="flex flex-1 flex-col gap-1">
             <Label htmlFor={`${uid}-name`}>Name</Label>
             <Input id={`${uid}-name`} required maxLength={MAX_NAME} value={name} onChange={(e) => setName(e.target.value)} />
@@ -86,24 +87,7 @@ export function AgentEditor({
 
         <fieldset className="flex flex-col gap-2">
           <legend className="kicker mb-1">Avatar</legend>
-          <div className="flex flex-wrap gap-2">
-            {AVATARS.map((a) => (
-              <button
-                key={a}
-                type="button"
-                aria-pressed={avatar === a}
-                aria-label={`Avatar ${a}`}
-                onClick={() => setAvatar(a)}
-                className={cn(
-                  'flex h-9 w-9 items-center justify-center rounded-full border text-lg',
-                  'focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent',
-                  avatar === a ? 'border-ink bg-raised' : 'border-rule hover:border-ink',
-                )}
-              >
-                {a}
-              </button>
-            ))}
-          </div>
+          <AvatarPicker label="Choose an avatar" value={resolveAvatar({ avatar, kind: 'lead' })} onChange={setAvatar} />
           <div className="flex items-center gap-2">
             <Label htmlFor={`${uid}-initials`} className="normal-case tracking-normal">
               Or initials
@@ -112,7 +96,7 @@ export function AgentEditor({
               id={`${uid}-initials`}
               className="w-20"
               maxLength={2}
-              value={AVATARS.includes(avatar) ? '' : avatar}
+              value={parseAvatar(avatar) ? '' : avatar}
               onChange={(e) => setAvatar(e.target.value.toUpperCase())}
             />
           </div>

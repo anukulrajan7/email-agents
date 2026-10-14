@@ -73,7 +73,7 @@ export function AlertsPage() {
         title="Alerts"
         description="The assistant tells you when an important email has gone unanswered or something is waiting on a person."
       />
-      <div className="rise" style={riseStyle(1)} data-guide="alerts-tabs">
+      <div className="rise" style={riseStyle(1)}>
         <Tabs label="Alert views" tabs={tabs} value={current} onChange={setTab}>
           {current === 'settings' ? <AlertSettingsPanel ws={ws} /> : <AlertList ws={ws} status={current} />}
         </Tabs>

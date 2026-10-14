@@ -215,7 +215,7 @@ async fn level_three_may_answer_a_first_time_sender_that_level_two_asks_about() 
         let msg = env.receive(&env.op_src, "m1", "t1", "newcomer@client.com", "Where is my order?", "Hello, where is my order?", "question").await;
         assert_eq!(env.route(&msg).await.route.agent_id, resolver, "the label trigger picks the resolver");
         let case = env.case(ADMIN, &env.start(&msg).await).await;
-        assert_eq!(case["agent"]["name"], "Ticket Resolver");
+        assert_eq!(case["agent"]["name"], "Ishaan");
         assert_eq!(env.sends().len(), sends, "level {level}: {case}");
         assert_eq!(case["status"], if sends == 1 { "done" } else { "waiting_approval" });
     }
@@ -384,7 +384,7 @@ async fn mail_that_is_not_routine_goes_to_the_planner() {
         let id = env.start(&msg).await;
         let case = env.case(ADMIN, &id).await;
         if why == "it is a complaint" {
-            assert_eq!(case["agent"]["name"], "Meera", "a label desk that only observes leaves the mail to the lead: {case}");
+            assert_eq!(case["agent"]["name"], "Aarav", "a label desk that only observes leaves the mail to the lead: {case}");
         } else {
             assert_eq!(case["state"]["wf"], "planner", "{why}: {case}");
             assert!(case["state"]["wf_why"].is_string(), "{why}");
@@ -424,7 +424,7 @@ async fn schedule_triggers_start_a_case_when_due() {
     let list = env.ok("GET", &format!("/cases?agent_id={followups}"), ADMIN, None).await;
     let items = list["items"].as_array().unwrap();
     assert_eq!(items.len(), 1);
-    assert_eq!((items[0]["trigger"].as_str(), items[0]["status"].as_str(), items[0]["agent"]["name"].as_str()), (Some("schedule"), Some("done"), Some("Follow-ups")));
+    assert_eq!((items[0]["trigger"].as_str(), items[0]["status"].as_str(), items[0]["agent"]["name"].as_str()), (Some("schedule"), Some("done"), Some("Tara")));
     assert_eq!(triggers::run_schedule_tick(&env.state, &env.ws, now + 26 * hour).await.unwrap(), 0, "the clock moved on");
     assert_eq!(triggers::run_schedule_tick(&env.state, &env.ws, now + 50 * hour).await.unwrap(), 1, "due again a day later");
 }

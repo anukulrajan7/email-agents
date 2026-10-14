@@ -26,7 +26,9 @@ pub struct AgentTemplate {
 
 impl AgentTemplate {
     pub fn spec(&self) -> AgentSpec {
-        (self.spec)()
+        let mut spec = (self.spec)();
+        spec.persona = persona(self.key).into();
+        spec
     }
 
     pub fn max_autonomy(&self) -> u8 {
@@ -36,8 +38,24 @@ impl AgentTemplate {
 
 pub const LEAD_KEY: &str = "general.lead";
 pub const INBOX_KEY: &str = "general.inbox";
-/// The placeholder name in the personal template; real rows show as "<lead name> (personal)".
-pub const GENERIC_PERSONAL_NAME: &str = "My assistant";
+/// The personal agent is Meera for every member; the web app shows it as "Your Meera" to its owner.
+pub const PERSONAL_NAME: &str = "Meera";
+/// Names this agent carried before the team got its own names; only untuned agents still holding one are renamed.
+pub const OLD_DEFAULT_NAMES: &[(&str, &[&str])] = &[
+    ("general.lead", &["Meera"]),
+    ("personal.mailbox", &["My assistant", "Meera (personal)"]),
+    ("support.resolver", &["Ticket Resolver"]),
+    ("support.escalation", &["Escalations"]),
+    ("sales.qualifier", &["Lead Qualifier"]),
+    ("sales.followups", &["Follow-ups"]),
+    ("finance.invoices", &["Invoices & Payments"]),
+    ("personal.scheduling", &["Scheduling"]),
+    ("hrms.leave", &["Leave"]),
+    ("hrms.timesheets", &["Timesheets"]),
+    ("hrms.onboarding", &["Onboarding"]),
+    ("hrms.requirements", &["Candidates & Requirements"]),
+    ("hrms.payroll", &["Payroll queries"]),
+];
 
 pub const PERSONAL_KEY: &str = "personal.mailbox";
 pub const REQUIREMENTS_KEY: &str = "hrms.requirements";
@@ -81,6 +99,7 @@ fn build(b: Base, triggers: Vec<Trigger>, steps: Vec<Step>, tools: Vec<String>, 
         category: b.category.into(),
         description: b.description.into(),
         goal: b.goal.into(),
+        persona: String::new(),
         mode: b.mode,
         triggers,
         steps,
@@ -110,7 +129,7 @@ fn lead() -> AgentSpec {
     ];
     build(
         Base {
-            name: "Meera",
+            name: "Aarav",
             key: "lead",
             category: "general",
             description: "Routes mail, answers what no desk owns and keeps the team's voice.",
@@ -145,7 +164,7 @@ fn resolver() -> AgentSpec {
     with_drafting(
         build(
             Base {
-                name: "Ticket Resolver",
+                name: "Ishaan",
                 key: "ticket_resolver",
                 category: "support",
                 description: "Resolves one customer question end to end from what the team already knows.",
@@ -166,7 +185,7 @@ fn escalation() -> AgentSpec {
     with_drafting(
         build(
             Base {
-                name: "Escalations",
+                name: "Diya",
                 key: "escalations",
                 category: "support",
                 description: "Handles complaints and angry customers: asks a person to step in and drafts a calm reply. Never sends on its own.",
@@ -186,7 +205,7 @@ fn escalation() -> AgentSpec {
 fn qualifier() -> AgentSpec {
     build(
         Base {
-            name: "Lead Qualifier",
+            name: "Kabir",
             key: "lead_qualifier",
             category: "sales",
             description: "Reads new enquiries, pulls out budget, timeline and need, and prepares a reply for review.",
@@ -213,7 +232,7 @@ fn qualifier() -> AgentSpec {
 fn followups() -> AgentSpec {
     let mut spec = build(
         Base {
-            name: "Follow-ups",
+            name: "Tara",
             key: "follow_ups",
             category: "sales",
             description: "Keeps deals moving: follows up on proposals and quotes that went quiet.",
@@ -233,7 +252,7 @@ fn invoices() -> AgentSpec {
     with_drafting(
         build(
             Base {
-                name: "Invoices & Payments",
+                name: "Vikram",
                 key: "invoices_payments",
                 category: "finance",
                 description: "Reads invoices and payment mail, acknowledges them and asks a person to approve. Never promises a payment.",
@@ -265,7 +284,7 @@ fn scheduling() -> AgentSpec {
     with_drafting(
         build(
             Base {
-                name: "Scheduling",
+                name: "Nisha",
                 key: "scheduling",
                 category: "personal",
                 description: "Answers meeting requests with the slots you gave it, and marks anything it does not know.",
@@ -282,7 +301,7 @@ fn scheduling() -> AgentSpec {
     )
 }
 
-fn hr_desk(name: &'static str, key: &'static str, description: &'static str, goal: &'static str, triggers: Vec<Trigger>, send: SendMode, max: u8) -> AgentSpec {
+fn hr_desk((name, role): (&'static str, &str), key: &'static str, description: &'static str, goal: &'static str, triggers: Vec<Trigger>, send: SendMode, max: u8) -> AgentSpec {
     let extra: &[&str] = if send == SendMode::Earned {
         &["draft_email", "create_task", "update_case", "send_email"]
     } else {
@@ -291,7 +310,7 @@ fn hr_desk(name: &'static str, key: &'static str, description: &'static str, goa
     build(
         Base { name, key, category: "hrms", description, goal, mode: Mode::Workflow },
         triggers,
-        vec![Step::DraftReply { quality: QualityTier::Balanced }, Step::CreateReview { title: format!("Check: {name}") }],
+        vec![Step::DraftReply { quality: QualityTier::Balanced }, Step::CreateReview { title: format!("Check: {role}") }],
         tools(extra),
         perms(send, max),
     )
@@ -299,7 +318,7 @@ fn hr_desk(name: &'static str, key: &'static str, description: &'static str, goa
 
 fn leave() -> AgentSpec {
     hr_desk(
-        "Leave",
+        ("Ananya", "Leave request"),
         "leave_desk",
         "Handles leave requests and questions about time off. Approvals are always a person's call.",
         "Acknowledge each leave request and prepare it for a manager's decision",
@@ -311,7 +330,7 @@ fn leave() -> AgentSpec {
 
 fn timesheets() -> AgentSpec {
     hr_desk(
-        "Timesheets",
+        ("Rohan", "Timesheet"),
         "timesheets_desk",
         "Acknowledges timesheets and chases missing or unclear hours.",
         "Acknowledge each timesheet and flag anything missing",
@@ -323,7 +342,7 @@ fn timesheets() -> AgentSpec {
 
 fn onboarding() -> AgentSpec {
     hr_desk(
-        "Onboarding",
+        ("Sneha", "Onboarding"),
         "onboarding_desk",
         "Collects new-joiner documents and walks them through the checklist.",
         "Collect a new joiner's documents and keep their checklist moving",
@@ -336,7 +355,7 @@ fn onboarding() -> AgentSpec {
 fn requirements() -> AgentSpec {
     let mut spec = build(
         Base {
-            name: "Candidates & Requirements",
+            name: "Arjun",
             key: "candidates_requirements",
             category: "hrms",
             description: "Works a client's job requirement: shortlists candidates, asks for approval, submits and follows up.",
@@ -355,7 +374,7 @@ fn requirements() -> AgentSpec {
 
 fn payroll() -> AgentSpec {
     let mut spec = hr_desk(
-        "Payroll queries",
+        ("Aditya", "Payroll question"),
         "payroll_desk",
         "Acknowledges payroll questions and routes them to a person. Never states amounts.",
         "Acknowledge each payroll question and hand it to the payroll owner",
@@ -370,7 +389,7 @@ fn payroll() -> AgentSpec {
 fn mailbox() -> AgentSpec {
     let mut spec = build(
         Base {
-            name: GENERIC_PERSONAL_NAME,
+            name: PERSONAL_NAME,
             key: "my_assistant",
             category: "personal",
             description: "Works on your own mailbox, in your voice, using your profile and preferences.",
@@ -392,7 +411,7 @@ macro_rules! template {
             key: $key,
             category: $cat,
             pack: $pack,
-            version: 1,
+            version: 2,
             kind: $kind,
             scope: $scope,
             initial_level: $level,
@@ -404,21 +423,69 @@ macro_rules! template {
     };
 }
 
+/// How each agent thinks. Shapes judgement and checks; outgoing mail is still written in the mailbox owner's voice and signed by them.
+pub fn persona(template_key: &str) -> &'static str {
+    match template_key {
+        LEAD_KEY => "You are Aarav, calm and organised. You look at who is writing and what they need, route it to the helper whose job it is, and answer yourself only what no helper owns. \
+            Check first: is this one person's own matter, a client, a vendor or a colleague, and is a helper already on it. When unsure, hand it to a person with a one-line summary rather than guess. \
+            Never: reply to something a helper owns, promise dates, amounts or decisions.",
+        INBOX_KEY => "You are a careful all-rounder for mail that waits for an answer. Answer the question that was asked, in as few words as it takes. \
+            Check first: what exactly is being asked and by when. Never: invent facts or promise anything that is not in the notes.",
+        "support.resolver" => "You are Ishaan, a patient problem-solver. You restate the customer's problem in one line so they know they were heard, then give the next step and when to expect it. \
+            Check first: what the team already knows (notes, earlier threads) before you answer; if the answer is not there, say you are checking and hand it to a person. \
+            Never: guess a cause, promise a refund or a date that is not in the notes, or blame the customer.",
+        "support.escalation" => "You are Diya, calm under pressure. When someone is upset you slow down: acknowledge the experience first, stay factual, and ask a person to step in before anything else happens. \
+            Check first: is there a legal threat, a safety issue or a key account involved; if so, flag it at the top of the review. \
+            Never: admit fault or liability, offer compensation, argue, or send anything on your own.",
+        "sales.qualifier" => "You are Kabir, curious and to the point. For every new enquiry you work out what they want to achieve, their budget and when they want to start, and you ask the one question that is missing rather than five. \
+            Check first: is this a real buyer (a named company, a clear need) or noise. Say plainly if it looks like a poor fit. \
+            Never: quote prices, promise availability or book a call without a person agreeing.",
+        "sales.followups" => "You are Tara, friendly and persistent but never pushy. You nudge conversations that went quiet with a short, useful note: what was last discussed and one easy next step. \
+            Check first: how long it has been quiet and whether they said not now; if they asked for space, leave it alone. \
+            Never: offer a discount, send more than one nudge in a row, or guilt-trip.",
+        "finance.invoices" => "You are Vikram, exact and watchful. You read every invoice or payment notice line by line, pull out vendor, number, amount and due date as written, and flag anything odd. \
+            Check first: does the amount, vendor or bank detail differ from earlier mail, is the invoice a duplicate, is the due date very close. \
+            Never: promise a payment date, confirm an amount that is not on the invoice, or approve a payment.",
+        "personal.scheduling" => "You are Nisha, quick and tidy. You answer meeting requests with the free slots you were given, in the sender's time zone when known, and keep it to two or three lines. \
+            Check first: is a free slot actually known; if not, mark it [NEEDS: slot] for the owner. \
+            Never: accept a meeting without a known free slot, or share the owner's calendar details beyond free times.",
+        "hrms.leave" => "You are Ananya, warm and fair. You treat every leave or HR request as a person's real plan: restate the type and dates, say who will follow up, and ask only for what is missing. \
+            Check first: dates, leave type and approver; policy questions get a pointer to the team, not an invented rule. \
+            Never: approve, reject or promise leave; state balances, salary, tax or payment dates; give legal or medical advice.",
+        "hrms.timesheets" => "You are Rohan, precise and numbers-first. You confirm receipt with the period and the total hours as written, and chase anything missing or unclear. \
+            Check first: the period, whether it replaces an earlier submission, and gaps or days with unusual hours. \
+            Never: approve or reject hours, mention pay amounts or payment dates, or say an invoice was raised.",
+        "hrms.onboarding" => "You are Sneha, welcoming and checklist-driven. You make a new joiner feel expected and tell them exactly what is still needed, one short list at a time. \
+            Check first: which documents and steps are already done, so you never ask twice. \
+            Never: share another person's documents, promise a start date or equipment, or skip a step on your own.",
+        "hrms.requirements" => "You are Arjun, sharp and fast, written for busy recruiters. For a new requirement you confirm role, location and positions in one line, find the best matches, and ask a person before anything is submitted. \
+            Check first: missing essentials (location, budget, start date, positions, interview process) and whether a match above 60 exists; if not, ask for sourcing instead of replying with nothing. \
+            Never: commit to a number of profiles or a date, quote or agree rates, say we have no candidates, or share a candidate's contact details before approval.",
+        "hrms.payroll" => "You are Aditya, careful, and you never guess amounts. You acknowledge the payroll question, say the payroll owner will check, and note exactly what was asked. \
+            Check first: is it a payslip, reimbursement, tax form or a pay dispute, so it reaches the right person. \
+            Never: state a salary, rate, balance or payment amount, or promise a payment date.",
+        PERSONAL_KEY => "You are Meera, the mailbox owner's own assistant. You know their profile and preferences and you write as them, never as yourself. \
+            Check first: who is writing, whether it is a VIP or on the owner's leave-alone list, and whether the owner has to decide. \
+            Never: sign with your own name, act on mail the owner said to leave alone, or reveal anything about other mailboxes.",
+        _ => "",
+    }
+}
+
 pub const TEMPLATES: &[AgentTemplate] = &[
-    template!(LEAD_KEY, "general", "general", "lead", "workspace", 1, "Meera", "🌼", "ochre", lead),
+    template!(LEAD_KEY, "general", "general", "lead", "workspace", 1, "Aarav", "🌼", "ochre", lead),
     template!(INBOX_KEY, "general", "general", "system", "workspace", 1, "Inbox Assistant", "📥", "slate", inbox),
-    template!("support.resolver", "support", "support", "system", "workspace", 0, "Ticket Resolver", "🎧", "teal", resolver),
-    template!("support.escalation", "support", "support", "system", "workspace", 0, "Escalations", "🚨", "postmark", escalation),
-    template!("sales.qualifier", "sales", "sales", "system", "workspace", 0, "Lead Qualifier", "🎯", "sage", qualifier),
-    template!("sales.followups", "sales", "sales", "system", "workspace", 0, "Follow-ups", "🔔", "ochre", followups),
-    template!("finance.invoices", "finance", "finance", "system", "workspace", 0, "Invoices & Payments", "🧾", "teal", invoices),
-    template!("personal.scheduling", "personal", "personal", "system", "workspace", 0, "Scheduling", "📅", "ochre", scheduling),
-    template!("hrms.leave", "hrms", "staffing", "system", "workspace", 0, "Leave", "🌴", "sage", leave),
-    template!("hrms.timesheets", "hrms", "staffing", "system", "workspace", 0, "Timesheets", "⏱", "slate", timesheets),
-    template!("hrms.onboarding", "hrms", "staffing", "system", "workspace", 0, "Onboarding", "🧭", "plum", onboarding),
-    template!(REQUIREMENTS_KEY, "hrms", "staffing", "system", "workspace", 1, "Candidates & Requirements", "🧩", "postmark", requirements),
-    template!("hrms.payroll", "hrms", "staffing", "system", "workspace", 0, "Payroll queries", "💼", "teal", payroll),
-    template!(PERSONAL_KEY, "personal", "general", "system", "personal", 1, GENERIC_PERSONAL_NAME, "🙋", "sage", mailbox),
+    template!("support.resolver", "support", "support", "system", "workspace", 0, "Ishaan", "🎧", "teal", resolver),
+    template!("support.escalation", "support", "support", "system", "workspace", 0, "Diya", "🚨", "postmark", escalation),
+    template!("sales.qualifier", "sales", "sales", "system", "workspace", 0, "Kabir", "🎯", "sage", qualifier),
+    template!("sales.followups", "sales", "sales", "system", "workspace", 0, "Tara", "🔔", "ochre", followups),
+    template!("finance.invoices", "finance", "finance", "system", "workspace", 0, "Vikram", "🧾", "teal", invoices),
+    template!("personal.scheduling", "personal", "personal", "system", "workspace", 0, "Nisha", "📅", "ochre", scheduling),
+    template!("hrms.leave", "hrms", "staffing", "system", "workspace", 0, "Ananya", "🌴", "sage", leave),
+    template!("hrms.timesheets", "hrms", "staffing", "system", "workspace", 0, "Rohan", "⏱", "slate", timesheets),
+    template!("hrms.onboarding", "hrms", "staffing", "system", "workspace", 0, "Sneha", "🧭", "plum", onboarding),
+    template!(REQUIREMENTS_KEY, "hrms", "staffing", "system", "workspace", 1, "Arjun", "🧩", "postmark", requirements),
+    template!("hrms.payroll", "hrms", "staffing", "system", "workspace", 0, "Aditya", "💼", "teal", payroll),
+    template!(PERSONAL_KEY, "personal", "general", "system", "personal", 1, PERSONAL_NAME, "🙋", "sage", mailbox),
 ];
 
 pub fn template(key: &str) -> Option<&'static AgentTemplate> {
@@ -502,11 +569,34 @@ mod tests {
     }
 
     #[test]
+    fn every_agent_has_its_own_name_and_persona() {
+        let names: Vec<&str> = TEMPLATES.iter().map(|t| t.name).collect();
+        assert_eq!(
+            names,
+            ["Aarav", "Inbox Assistant", "Ishaan", "Diya", "Kabir", "Tara", "Vikram", "Nisha", "Ananya", "Rohan", "Sneha", "Arjun", "Aditya", "Meera"]
+        );
+        let mut distinct = names.clone();
+        distinct.sort_unstable();
+        distinct.dedup();
+        assert_eq!(distinct.len(), names.len());
+        for t in TEMPLATES {
+            let p = t.spec().persona;
+            assert!(!p.trim().is_empty() && p.chars().count() <= 1200, "{}", t.key);
+            assert!(p.contains("Never"), "{}: says what it never does", t.key);
+            if t.key != INBOX_KEY {
+                assert!(p.contains(&format!("You are {}", t.name)), "{}", t.key);
+            }
+        }
+        assert!(template(LEAD_KEY).unwrap().spec().persona.contains("route"));
+        assert!(template("hrms.payroll").unwrap().spec().persona.contains("never guess amounts"));
+    }
+
+    #[test]
     fn templates_match_the_migration_backfill() {
         let lead = template(LEAD_KEY).unwrap();
         let personal = template(PERSONAL_KEY).unwrap();
-        assert_eq!((lead.name, lead.avatar, lead.color), ("Meera", "🌼", "ochre"));
-        assert_eq!((personal.name, personal.avatar, personal.color), ("My assistant", "🙋", "sage"));
+        assert_eq!((lead.name, lead.avatar, lead.color), ("Aarav", "🌼", "ochre"));
+        assert_eq!((personal.name, personal.avatar, personal.color), ("Meera", "🙋", "sage"));
         assert_eq!(lead.spec().description, "Routes mail, answers what no desk owns and keeps the team's voice.");
         assert_eq!(personal.spec().description, "Works on your own mailbox, in your voice, using your profile and preferences.");
     }

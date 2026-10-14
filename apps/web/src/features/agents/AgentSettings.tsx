@@ -31,7 +31,7 @@ export function LeadAgentCard({ ws }: { ws: string }) {
       {agent && view.data && (
         <>
           <div className="flex items-center gap-3">
-            <AgentAvatar agent={agent} size="lg" />
+            <AgentAvatar agent={{ ...agent, kind: 'lead' }} size="lg" />
             <div className="min-w-0">
               <p className="type-display text-2xl leading-tight tracking-[-0.01em] break-words">{agent.name}</p>
               <p className="text-sm text-ink-muted">{tasksSummary(agent.tasks, agent.enabled)}</p>

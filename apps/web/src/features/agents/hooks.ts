@@ -24,7 +24,7 @@ import { FILTER_STATUS } from './labels';
 
 export const AGENT_POLL_MS = 30_000;
 
-const agentsKey = (ws: string) => ['ws', ws, 'agents'] as const;
+export const agentsKey = (ws: string) => ['ws', ws, 'agents'] as const;
 
 export function useApprovals(ws: string) {
   return useQuery({
@@ -80,7 +80,7 @@ export function useCancelCase(ws: string) {
   });
 }
 
-const agentKey = (ws: string) => ['ws', ws, 'agent'] as const;
+export const agentKey = (ws: string) => ['ws', ws, 'agent'] as const;
 const myProfileKey = (ws: string) => ['ws', ws, 'my-agent-profile'] as const;
 
 export function useAgent(ws: string) {
@@ -99,6 +99,7 @@ export function useSaveAgent(ws: string) {
       void qc.invalidateQueries({ queryKey: agentKey(ws) });
       void qc.invalidateQueries({ queryKey: myProfileKey(ws) });
       void qc.invalidateQueries({ queryKey: agentsKey(ws) });
+      void qc.invalidateQueries({ queryKey: ['ws', ws, 'agent-registry'] });
     },
   });
 }

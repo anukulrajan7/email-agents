@@ -55,7 +55,15 @@ export interface Approval {
 }
 
 export type AgentColor = 'slate' | 'sage' | 'plum' | 'ochre' | 'teal' | 'postmark' | 'ink';
-export type AgentBadge = { name: string; avatar: string; color: AgentColor | string };
+export type AgentBadge = {
+  name: string;
+  avatar: string;
+  color: AgentColor | string;
+  kind?: string;
+  scope?: string;
+  category?: string;
+  template_key?: string | null;
+};
 export type WorkingFor = { user_id: string; email: string; name: string | null };
 export type SuggestedAutomation = { name: string; conditions: Condition[]; actions: Action[] };
 

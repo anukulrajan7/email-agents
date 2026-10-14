@@ -44,7 +44,7 @@ function Learned({ ws }: { ws: string }) {
   const loaded = active.data !== undefined;
 
   return (
-    <section aria-label="What the assistant has learned" data-guide="memory-learned" className="rise flex flex-col gap-5" style={riseStyle(1)}>
+    <section aria-label="What the assistant has learned" className="rise flex flex-col gap-5" style={riseStyle(1)}>
       <ErrorNote error={active.error ?? suggested.error} />
       {active.isLoading && <SkeletonList rows={3} label="Loading memories" />}
       {loaded && (

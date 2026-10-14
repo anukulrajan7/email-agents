@@ -298,6 +298,9 @@ pub struct AgentSpec {
     #[serde(default)]
     pub description: String,
     pub goal: String,
+    /// How this agent thinks: what it checks first, its tone and what it never does. Shapes judgement, never the signature.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub persona: String,
     pub mode: Mode,
     #[serde(default)]
     pub triggers: Vec<Trigger>,
@@ -437,6 +440,9 @@ pub fn validate_basic(spec: &AgentSpec) -> Vec<Issue> {
     }
     if spec.description.chars().count() > 500 {
         out.push(issue("description", "bad_length", "the description can be at most 500 characters"));
+    }
+    if spec.persona.chars().count() > 1200 {
+        out.push(issue("persona", "bad_length", "the persona must be at most 1200 characters"));
     }
     let goal_len = spec.goal.trim().chars().count();
     if goal_len == 0 || goal_len > 300 {

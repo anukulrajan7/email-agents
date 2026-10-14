@@ -6,6 +6,8 @@ import { AgentFace } from './AgentFace';
 import { AvatarPicker } from './AvatarPicker';
 import { resolveAvatar } from './avatars';
 import { AUTONOMY, LIMITED_BY } from './autonomy';
+import { agentCopy, agentDisplayName } from './agentCopy';
+import { AgentExplainer } from './AgentExplainer';
 import { FriendlyEmpty } from './FriendlyEmpty';
 import { useActivateVersion, useAgentAudit, useAgentOutgoing, useAgentVersions, usePatchAgent, useStopSend } from './hooks';
 
@@ -132,7 +134,7 @@ function OutgoingTab({ ws, agent, canStop }: { ws: string; agent: AgentSummary; 
   const items = outgoing.data?.items ?? [];
   return (
     <div className="flex flex-col gap-3">
-      <p className="text-sm text-ink-muted">Replies {agent.name} sends on its own wait here for a short hold. Press Stop to cancel one before it leaves.</p>
+      <p className="text-sm text-ink-muted">Replies {agentDisplayName(agent)} sends on its own wait here for a short hold. Press Stop to cancel one before it leaves.</p>
       {outgoing.isLoading && <Skeleton className="h-20" />}
       <ErrorNote error={outgoing.error ?? stop.error} />
       {outgoing.data && items.length === 0 && <FriendlyEmpty title="Nothing waiting to go out" text="When this agent is about to send a reply, you will see it here with a Stop button." />}
@@ -208,13 +210,15 @@ export function AgentDrawer({ ws, agent, isAdmin, onClose }: { ws: string; agent
   const [tab, setTab] = useState<Tab>('tune');
   const personal = agent.scope === 'personal';
   const canEdit = personal || isAdmin;
+  const name = agentDisplayName(agent);
   return (
-    <Dialog title={agent.name} variant="drawer" onClose={onClose}>
+    <Dialog title={name} variant="drawer" onClose={onClose}>
       <div className="flex items-center gap-3">
         <AgentFace avatar={resolveAvatar(agent)} size="lg" />
-        <p className="text-sm text-ink-muted">{agent.description}</p>
+        <p className="text-sm font-semibold text-ink-muted">{agentCopy(agent).role}</p>
       </div>
-      <Tabs label={`${agent.name} settings`} tabs={TABS} value={tab} onChange={setTab}>
+      <AgentExplainer agent={agent} />
+      <Tabs label={`${name} settings`} tabs={TABS} value={tab} onChange={setTab}>
         {tab === 'tune' && <TuneTab key={agent.id} ws={ws} agent={agent} canEdit={canEdit} />}
         {tab === 'versions' && <VersionsTab ws={ws} agent={agent} canEdit={canEdit} />}
         {tab === 'outgoing' && <OutgoingTab ws={ws} agent={agent} canStop />}

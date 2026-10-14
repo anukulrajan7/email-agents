@@ -55,7 +55,6 @@ export function PerformancePage() {
   return (
     <Page className="gap-8">
       <PageHeader
-        guide="performance-header"
         kicker={staffing ? 'HRMS · Performance' : 'Team · Performance'}
         title="Team performance"
         description="Today, this week and since joining, measured against each person's target. Every number is counted from your mail, never estimated by AI."
@@ -64,7 +63,7 @@ export function PerformancePage() {
       {(team.isLoading || mine.isLoading) && <SkeletonList rows={3} label="Loading performance" />}
 
       {me && (
-        <section aria-label="Your numbers" data-guide="performance-numbers" className="rise flex flex-col gap-3" style={riseStyle(1)}>
+        <section aria-label="Your numbers" className="rise flex flex-col gap-3" style={riseStyle(1)}>
           <CardTitle>Your numbers</CardTitle>
           <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
             <Card>

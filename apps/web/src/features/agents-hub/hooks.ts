@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '../../api/client';
+import { agentKey, agentsKey } from '../agents/hooks';
 import type {
   AgentAuditItem,
   AgentDetail,
@@ -54,8 +55,19 @@ export function usePatchAgent(ws: string) {
   return useMutation({
     mutationFn: ({ id, ...body }: AgentPatch & { id: string }) =>
       api<AgentSummary>(`/workspaces/${ws}/agents/${id}`, { method: 'PATCH', body }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: registryKey(ws) }),
+    onSuccess: (saved) => {
+      qc.setQueriesData<AgentList>({ queryKey: [...registryKey(ws), 'list'] }, (list) => (list ? replaceAgent(list, saved) : list));
+      void qc.invalidateQueries({ queryKey: registryKey(ws) });
+      void qc.invalidateQueries({ queryKey: agentsKey(ws) });
+      void qc.invalidateQueries({ queryKey: agentKey(ws) });
+      void qc.invalidateQueries({ queryKey: ['ws', ws, 'metrics'] });
+    },
   });
+}
+
+function replaceAgent(list: AgentList, saved: AgentSummary): AgentList {
+  const swap = (a: AgentSummary): AgentSummary => (a.id === saved.id ? { ...a, ...saved } : a);
+  return { ...list, me: list.me ? swap(list.me) : list.me, categories: list.categories.map((c) => ({ ...c, agents: c.agents.map(swap) })) };
 }
 
 export function usePauseAll(ws: string) {
