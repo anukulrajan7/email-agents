@@ -82,6 +82,16 @@ async fn validate_in_workspace(state: &AppState, ws: &str, spec: &AgentSpec, cei
     let labels: Vec<String> = sqlx::query_scalar("SELECT key FROM labels WHERE workspace_id = ?1 AND archived = 0").bind(ws).fetch_all(&state.db).await?;
     for (i, t) in spec.triggers.iter().enumerate() {
         if let Trigger::EmailReceived { matcher } = t
+            && *matcher == spec::TriggerMatch::default()
+            && !previous.is_some_and(|p| p.triggers.contains(t))
+        {
+            issues.push(Issue {
+                path: format!("triggers[{i}].match"),
+                code: "empty_trigger",
+                message: "an email trigger needs at least one filter (label, sender, subject words or attachment type), or it would catch every email".into(),
+            });
+        }
+        if let Trigger::EmailReceived { matcher } = t
             && let Some(bad) = matcher.labels.iter().find(|l| !labels.contains(l) && !previous.is_some_and(|p| p.triggers.contains(t)))
         {
             issues.push(Issue { path: format!("triggers[{i}].match.labels"), code: "unknown_label", message: format!("this workspace has no label \"{bad}\"") });

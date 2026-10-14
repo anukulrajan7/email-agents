@@ -99,7 +99,9 @@ pub fn trigger_summary(spec: &AgentSpec) -> String {
     parts.join("; ")
 }
 
-static MAIL_WORDS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\b(e-?mails?|mails?|inbox|incoming|inbound|received|arrives?|comes? in)\b").expect("valid regex"));
+static MAIL_WORDS: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)\b(incoming|inbound|arrives?|arriving|comes? in|coming in|received|receives?|from e-?mails?|e-?mails? (that|which) (come|arrive|land)s?)\b").expect("valid regex")
+});
 static BY_HAND: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\b(manual(ly)?|by hand|on demand|on request)\b").expect("valid regex"));
 
 fn is_manual(t: &Trigger) -> bool {
@@ -107,15 +109,25 @@ fn is_manual(t: &Trigger) -> bool {
 }
 
 /// The labels of this workspace that the request names, e.g. "timesheet" in "analyse timesheet emails".
+/// Whole words only (a plural s is fine); names under three characters are ignored; sorted by key.
 fn labels_named(request: &str, ctx: &WsCtx) -> Vec<String> {
     let text = request.to_lowercase();
-    ctx.labels
+    let mut keys: Vec<String> = ctx
+        .labels
         .iter()
         .filter(|l| !matches!(l.key.as_str(), "general" | "other"))
-        .filter(|l| [l.key.replace('_', " "), l.name.to_lowercase()].iter().any(|n| !n.is_empty() && text.contains(n.trim_end_matches('s'))))
+        .filter(|l| {
+            [l.key.replace('_', " "), l.name.to_lowercase()].iter().any(|n| {
+                let n = n.trim();
+                n.chars().count() >= 3 && Regex::new(&format!(r"\b{}s?\b", regex::escape(n))).is_ok_and(|re| re.is_match(&text))
+            })
+        })
         .map(|l| l.key.clone())
-        .take(3)
-        .collect()
+        .collect();
+    keys.sort();
+    keys.dedup();
+    keys.truncate(3);
+    keys
 }
 
 /// An email trigger read from the request when the draft has no way to start besides a person.
@@ -124,13 +136,11 @@ fn email_trigger_for(ctx: &WsCtx) -> Option<(Trigger, String)> {
         return None;
     }
     let labels = labels_named(&ctx.request, ctx);
-    let note = if labels.is_empty() {
-        "You described incoming email, so it starts on emails that need a reply. Narrow it with a label, sender or subject words.".to_string()
-    } else {
-        format!("You described incoming email, so it starts on emails labelled {}.", labels.join(", "))
-    };
-    let needs_reply = labels.is_empty().then_some(true);
-    Some((Trigger::EmailReceived { matcher: spec::TriggerMatch { labels, needs_reply, ..Default::default() } }, note))
+    if labels.is_empty() {
+        return None;
+    }
+    let note = format!("You described incoming email, so it starts on emails labelled {}.", labels.join(", "));
+    Some((Trigger::EmailReceived { matcher: spec::TriggerMatch { labels, ..Default::default() } }, note))
 }
 
 /// Things worth a look that do not stop the agent from being saved.
@@ -138,6 +148,9 @@ pub fn warnings(spec: &AgentSpec, ctx: &WsCtx) -> Vec<String> {
     let mut out = Vec::new();
     if spec.triggers.iter().all(is_manual) {
         out.push("Nothing starts this agent except a person running it: it will never pick up incoming email. Add an email trigger to change that.".to_string());
+    }
+    if spec.triggers.iter().all(is_manual) && MAIL_WORDS.is_match(&ctx.request) && !BY_HAND.is_match(&ctx.request) && labels_named(&ctx.request, ctx).is_empty() {
+        out.push("Tell me which emails it should handle: a label, a sender or subject words.".to_string());
     }
     let mut told: Vec<&str> = Vec::new();
     for t in &spec.triggers {
@@ -593,7 +606,7 @@ mod tests {
 
     #[test]
     fn an_agent_without_steps_needs_tools_and_a_trigger_that_overlaps_an_expert_is_flagged() {
-        let c = timesheet_ctx("timesheet emails");
+        let c = timesheet_ctx("timesheets from incoming emails");
         let mut s = normalise(broken_builder_spec(), &c);
         s.tools.clear();
         s.scopes.clear();
@@ -602,5 +615,31 @@ mod tests {
         let w = warnings(&s, &c);
         assert!(w.iter().any(|m| m.contains("Rohan already handles mail labelled timesheet") && m.contains("Update Rohan")), "{w:?}");
         assert_eq!(routing_preview(&s), "It will get: labels timesheet.");
+    }
+
+    #[test]
+    fn a_bare_email_word_keeps_the_agent_manual_and_incoming_mail_gets_a_label_trigger() {
+        let c = timesheet_ctx("an agent that drafts an email for me when I ask");
+        assert_eq!(normalise(broken_builder_spec(), &c).triggers, [Trigger::Manual]);
+        let c = timesheet_ctx("records timesheets from incoming emails");
+        let fixed = normalise(broken_builder_spec(), &c);
+        let Trigger::EmailReceived { matcher } = &fixed.triggers[0] else { panic!("{:?}", fixed.triggers) };
+        assert_eq!((matcher.labels.clone(), matcher.needs_reply), (vec!["timesheet".to_string()], None));
+    }
+
+    #[test]
+    fn incoming_mail_without_a_known_label_stays_manual_with_a_warning() {
+        let c = timesheet_ctx("handles incoming emails from vendors");
+        let fixed = normalise(broken_builder_spec(), &c);
+        assert_eq!(fixed.triggers, [Trigger::Manual]);
+        assert!(warnings(&fixed, &c).iter().any(|w| w.contains("Tell me which emails it should handle")));
+    }
+
+    #[test]
+    fn labels_are_matched_as_whole_words_in_a_stable_order() {
+        let mut c = timesheet_ctx("incoming invoices and a questionnaire, plus timesheets");
+        c.labels.push(LabelBrief { key: "hr".into(), name: "HR".into() });
+        c.request = "incoming timesheets, invoices and a questionnaire, hr".into();
+        assert_eq!(labels_named(&c.request, &c), ["invoice", "timesheet"]);
     }
 }

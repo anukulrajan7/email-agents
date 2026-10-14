@@ -17,41 +17,103 @@ const split = (text: string): string[] => [...new Set(text.split(',').map((t) =>
 
 const emptyMatch: SpecMatch = { labels: [], from_domains: [], from_addresses: [], subject_keywords: [], needs_reply: null, priority: null, attachment_types: [] };
 
-const isEmail = (t: SpecTrigger): t is Extract<SpecTrigger, { type: 'email_received' }> => t.type === 'email_received';
+type EmailTrigger = Extract<SpecTrigger, { type: 'email_received' }>;
+type Rule = { base: SpecMatch; text: Record<ListKey, string> };
+
+const isEmail = (t: SpecTrigger): t is EmailTrigger => t.type === 'email_received';
+
+const toRule = (base: SpecMatch): Rule => ({
+  base,
+  text: {
+    labels: base.labels.join(', '),
+    subject_keywords: base.subject_keywords.join(', '),
+    from_domains: base.from_domains.join(', '),
+    attachment_types: base.attachment_types.join(', '),
+  },
+});
+
+const toMatch = (r: Rule): SpecMatch => ({
+  ...r.base,
+  labels: split(r.text.labels),
+  subject_keywords: split(r.text.subject_keywords),
+  from_domains: split(r.text.from_domains),
+  attachment_types: split(r.text.attachment_types),
+});
+
+const isEmptyMatch = (m: SpecMatch) =>
+  !m.labels.length && !m.subject_keywords.length && !m.from_domains.length && !m.from_addresses.length && !m.attachment_types.length && m.needs_reply === null && m.priority === null;
+
+function withRules(triggers: SpecTrigger[], matches: SpecMatch[]): SpecTrigger[] {
+  const out: SpecTrigger[] = [];
+  let next = 0;
+  let lastEmail = -1;
+  for (const t of triggers) {
+    if (!isEmail(t)) out.push(t);
+    else {
+      const match = matches[next];
+      if (match) {
+        next += 1;
+        out.push({ type: 'email_received', match });
+        lastEmail = out.length - 1;
+      }
+    }
+  }
+  const extra: SpecTrigger[] = matches.slice(next).map((match) => ({ type: 'email_received', match }));
+  out.splice(lastEmail === -1 ? out.length : lastEmail + 1, 0, ...extra);
+  return out;
+}
 
 function Editor({ ws, agent, spec, canEdit }: { ws: string; agent: AgentSummary; spec: AgentSpec; canEdit: boolean }) {
   const save = useSaveSpec(ws, agent.id);
   const notify = useToast();
-  const current = spec.triggers.find(isEmail)?.match ?? emptyMatch;
-  const [text, setText] = useState<Record<ListKey, string>>(() => ({
-    labels: current.labels.join(', '),
-    subject_keywords: current.subject_keywords.join(', '),
-    from_domains: current.from_domains.join(', '),
-    attachment_types: current.attachment_types.join(', '),
-  }));
-  const match: SpecMatch = { ...current, labels: split(text.labels), subject_keywords: split(text.subject_keywords), from_domains: split(text.from_domains), attachment_types: split(text.attachment_types) };
-  const dirty = JSON.stringify(match) !== JSON.stringify(current);
+  const original = spec.triggers.filter(isEmail);
+  const [rules, setRules] = useState<Rule[]>(() => (original.length ? original.map((t) => toRule(t.match)) : [toRule(emptyMatch)]));
+  const matches = rules.map(toMatch).filter((m, _, all) => !(original.length === 0 && all.length === 1 && isEmptyMatch(m)));
+  const triggers = withRules(spec.triggers, matches);
+  const dirty = JSON.stringify(triggers) !== JSON.stringify(spec.triggers);
+  const hasEmpty = matches.some(isEmptyMatch);
 
-  const submit = () => {
-    const email: SpecTrigger = { type: 'email_received', match };
-    const at = spec.triggers.findIndex(isEmail);
-    const others = spec.triggers.filter((t) => !isEmail(t));
-    const triggers = at === -1 ? [email, ...others] : [...spec.triggers.slice(0, at).filter((t) => !isEmail(t)), email, ...spec.triggers.slice(at + 1).filter((t) => !isEmail(t))];
-    save.mutate({ ...spec, triggers }, { onSuccess: () => notify('success', 'Saved as a new version') });
-  };
+  const edit = (i: number, key: ListKey, value: string) => setRules(rules.map((r, at) => (at === i ? { ...r, text: { ...r.text, [key]: value } } : r)));
+
+  const submit = () => save.mutate({ ...spec, triggers }, { onSuccess: () => notify('success', 'Saved as a new version') });
 
   return (
     <div className="flex flex-col gap-4">
-      <p className="text-sm text-ink-muted">This agent gets an email when it matches all the filled boxes. Leave a box empty to ignore it. Separate several with commas.</p>
-      {FIELDS.map((f) => (
-        <div key={f.key} className="flex flex-col gap-1">
-          <Label htmlFor={`trigger-${f.key}`}>{f.label}</Label>
-          <Input id={`trigger-${f.key}`} value={text[f.key]} placeholder={f.hint} disabled={!canEdit} onChange={(e) => setText({ ...text, [f.key]: e.target.value })} />
-        </div>
+      <p className="text-sm text-ink-muted">
+        This agent gets an email when it matches all the filled boxes of any one rule. Leave a box empty to ignore it. Separate several with commas.
+      </p>
+      {rules.map((rule, i) => (
+        <fieldset key={i} className="flex flex-col gap-2 rounded-md border border-rule-strong p-3">
+          <div className="flex items-center justify-between">
+            <legend className="text-sm font-medium">Rule {i + 1}</legend>
+            {canEdit && rules.length > 1 && (
+              <Button variant="ghost" size="sm" onClick={() => setRules(rules.filter((_, at) => at !== i))} aria-label={`Remove rule ${i + 1}`}>
+                Remove
+              </Button>
+            )}
+          </div>
+          <div className="grid gap-2 sm:grid-cols-2">
+            {FIELDS.map((f) => (
+              <div key={f.key} className="flex flex-col gap-1">
+                <Label htmlFor={`trigger-${i}-${f.key}`}>{f.label}</Label>
+                <Input id={`trigger-${i}-${f.key}`} value={rule.text[f.key]} placeholder={f.hint} disabled={!canEdit} onChange={(e) => edit(i, f.key, e.target.value)} />
+              </div>
+            ))}
+          </div>
+        </fieldset>
       ))}
+      {canEdit && (
+        <div>
+          <Button variant="secondary" size="sm" onClick={() => setRules([...rules, toRule(emptyMatch)])}>
+            Add rule
+          </Button>
+        </div>
+      )}
+      {hasEmpty && dirty && <p role="alert" className="text-sm text-danger">Fill in at least one box in every rule, or remove the empty rule. An empty rule would catch every email.</p>}
+      <p className="text-sm text-ink-muted">Saving a change makes this helper ask first again until it earns its level back.</p>
       <ErrorNote error={save.error} />
       <div>
-        <Button disabled={!canEdit || !dirty} loading={save.isPending} onClick={submit}>
+        <Button disabled={!canEdit || !dirty || hasEmpty} loading={save.isPending} onClick={submit}>
           Save triggers
         </Button>
       </div>

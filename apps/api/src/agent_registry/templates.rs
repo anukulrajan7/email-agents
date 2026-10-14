@@ -173,7 +173,7 @@ fn resolver() -> AgentSpec {
                 mode: Mode::Agent,
             },
             vec![
-                on_labels(&["question", "bug_report", "refund_request", "complaint"]),
+                on_labels(&["question", "bug_report", "refund_request", "customer_support", "complaint"]),
                 on_keywords(&["escalate", "unacceptable", "legal action"]),
             ],
             vec![],
@@ -255,7 +255,7 @@ fn invoices() -> AgentSpec {
                 goal: "Capture each invoice or payment notice, acknowledge it and hand it to a person",
                 mode: Mode::Workflow,
             },
-            vec![on_labels(&["invoice", "payment", "expense"])],
+            vec![on_labels(&["invoice", "payment", "expense", "billing"])],
             vec![
                 Step::Extract {
                     fields: vec![
@@ -287,7 +287,7 @@ fn scheduling() -> AgentSpec {
                 goal: "Reply to each meeting request, proposing slots only when they are known",
                 mode: Mode::Workflow,
             },
-            vec![on_keywords(&["meeting", "reschedule", "availability"])],
+            vec![on_labels(&["scheduling"]), on_keywords(&["meeting", "reschedule", "availability"])],
             vec![Step::DraftReply { quality: QualityTier::Fast }],
             tools(&["draft_email", "create_task", "update_case", "send_email"]),
             perms(SendMode::Earned, 3),
@@ -541,7 +541,8 @@ mod tests {
     #[test]
     fn every_template_is_valid_and_consistent() {
         for t in TEMPLATES {
-            let pack_labels: Vec<&str> = packs::pack(t.pack).unwrap().labels.iter().map(|l| l.key).collect();
+            let pack_labels: Vec<&str> =
+                packs::pack(t.pack).unwrap().labels.iter().chain(packs::pack("general").unwrap().labels.iter()).map(|l| l.key).collect();
             let spec = t.spec();
             assert!(validate_basic(&spec).is_empty(), "{}: {:?}", t.key, validate_basic(&spec));
             assert_eq!(spec.category, t.category, "{}", t.key);
@@ -551,7 +552,7 @@ mod tests {
             for trigger in &spec.triggers {
                 if let Trigger::EmailReceived { matcher } = trigger {
                     for l in &matcher.labels {
-                        assert!(pack_labels.contains(&l.as_str()), "{}: label {l} is never produced by the {} pack", t.key, t.pack);
+                        assert!(pack_labels.contains(&l.as_str()), "{}: label {l} is produced by neither the {} pack nor the general pack", t.key, t.pack);
                     }
                 }
             }

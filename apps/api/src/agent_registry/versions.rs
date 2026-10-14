@@ -167,7 +167,21 @@ pub fn behaviour_changed(old: &AgentSpec, new: &AgentSpec) -> bool {
 /// Caps the agent at level 1 when its behaviour changed. Returns true when the level was lowered.
 pub async fn cap_after_behaviour_change(conn: &mut SqliteConnection, ws: &str, agent: &AgentRow, old: &AgentSpec, new: &AgentSpec) -> sqlx::Result<bool> {
     if agent.autonomy_level > 1 && behaviour_changed(old, new) {
-        return store::set_autonomy_level(conn, ws, &agent.id, 1).await;
+        let lowered = store::set_autonomy_level(conn, ws, &agent.id, 1).await?;
+        if lowered {
+            crate::evals::gate::record_change(
+                conn,
+                ws,
+                &agent.id,
+                agent.autonomy_level,
+                1,
+                "Behaviour changed: asks first until it earns its level back",
+                json!({"kind": "behaviour_change"}),
+                "system",
+            )
+            .await?;
+        }
+        return Ok(lowered);
     }
     Ok(false)
 }

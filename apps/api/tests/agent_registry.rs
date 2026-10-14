@@ -351,8 +351,22 @@ async fn changing_how_an_agent_behaves_caps_it_at_level_one_until_it_passes_the_
     behaviour["drafting"]["never_do"] = json!(["Offer a discount"]);
     let capped = env.ok("PUT", &format!("/agents/{lead}/spec"), ADMIN, Some(json!({"spec": behaviour}))).await;
     assert_eq!(capped["autonomy"]["earned"], 1);
+    let recorded: (i64, i64, String) =
+        sqlx::query_as("SELECT from_level, to_level, actor FROM autonomy_changes WHERE agent_id = ?1 AND actor = 'system' AND to_level < from_level").bind(&lead).fetch_one(&env.state.db).await.unwrap();
+    assert_eq!(recorded, (2, 1, "system".to_string()), "the demotion is on record");
     let back = env.ok("POST", &format!("/agents/{lead}/versions/1/activate"), ADMIN, Some(json!({}))).await;
     assert_eq!(back["autonomy"]["earned"], 1, "a rollback never raises the level");
+}
+
+#[tokio::test]
+async fn an_email_trigger_with_no_filter_is_refused() {
+    let env = Env::new(Opts::packs(&["general"])).await;
+    let lead = env.agent_id(ADMIN, "general.lead").await;
+    let mut spec = env.ok("GET", &format!("/agents/{lead}"), ADMIN, None).await["spec"].clone();
+    spec["triggers"] = json!([{"type": "email_received", "match": {}}]);
+    let (status, body) = env.req("PUT", &format!("/agents/{lead}/spec"), ADMIN, Some(json!({"spec": spec}))).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(body.to_string().contains("at least one filter"), "{body}");
 }
 
 #[tokio::test]
