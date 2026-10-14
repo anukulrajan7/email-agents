@@ -16,13 +16,22 @@ async function signInWithToken(page: Page, user: Session) {
   await page.addInitScript((token) => localStorage.setItem('auth_token', token), user.token);
 }
 
-async function createWorkspace(page: Page, name: string, packs: string[]) {
+async function toPacksStep(page: Page) {
   await page.goto('/workspaces');
-  await page.getByLabel('Workspace name').fill(name);
+  await page.getByRole('button', { name: 'Continue' }).click();
+  await expect(page.getByRole('heading', { name: 'Here is your team' })).toBeVisible();
+}
+
+async function createWorkspace(page: Page, name: string, packs: string[]) {
+  await toPacksStep(page);
   const business = page.getByRole('checkbox', { name: /^Business inbox/ });
-  if (await business.isChecked()) await business.uncheck();
   for (const pack of packs) await page.getByRole('checkbox', { name: new RegExp(`^${pack}`) }).check();
-  await page.getByRole('button', { name: 'Create' }).click();
+  if (await business.isChecked()) await business.uncheck();
+  await page.getByRole('button', { name: 'Continue' }).click();
+  await page.getByLabel('Workspace name').fill(name);
+  await page.getByRole('button', { name: 'Create workspace' }).click();
+  await expect(page).toHaveURL(/\/w\/[^/]+\/welcome$/);
+  await page.goto(page.url().replace(/\/welcome$/, '/inbox'));
   await expect(page).toHaveURL(/\/w\/[^/]+\/inbox$/);
 }
 
@@ -44,15 +53,19 @@ test('a new person signs up, enters the emailed code and creates a General works
   await page.getByRole('button', { name: 'Verify' }).click();
 
   await expect(page.getByRole('heading', { name: 'Set up your first workspace' })).toBeVisible();
-  const create = page.getByRole('button', { name: 'Create' });
-  await expect(create).toBeDisabled();
-  await page.getByLabel('Workspace name').fill('Nina General');
+  await page.getByRole('button', { name: 'Continue' }).click();
   await expect(page.getByRole('checkbox', { name: /^Business inbox/ })).toBeChecked();
   for (const pack of ['HR & recruiting', 'Customer support', 'Sales', 'Finance', 'Personal']) {
     await expect(page.getByRole('checkbox', { name: new RegExp(`^${pack}`) })).not.toBeChecked();
   }
+  await page.getByRole('button', { name: 'Continue' }).click();
+  const create = page.getByRole('button', { name: 'Create workspace' });
+  await expect(create).toBeDisabled();
+  await page.getByLabel('Workspace name').fill('Nina General');
   await create.click();
 
+  await expect(page).toHaveURL(/\/w\/[^/]+\/welcome$/);
+  await page.goto(page.url().replace(/\/welcome$/, '/inbox'));
   await expect(page).toHaveURL(/\/w\/[^/]+\/inbox$/);
   const nav = sidebar(page);
   await expect(page.getByText('Nina General').first()).toBeVisible();
@@ -118,21 +131,23 @@ test.describe('packs chosen at creation', () => {
 
   test('a workspace needs a name and at least one pack before Create is enabled', async ({ page }) => {
     await signInWithToken(page, user);
-    await page.goto('/workspaces');
-    const create = page.getByRole('button', { name: 'Create' });
-    await page.getByLabel('Workspace name').fill('No pack');
+    await toPacksStep(page);
+    const next = page.getByRole('button', { name: 'Continue' });
     await page.getByRole('checkbox', { name: /^Business inbox/ }).uncheck();
-    await expect(create).toBeDisabled();
+    await expect(next).toBeDisabled();
     await page.getByRole('checkbox', { name: /^Finance/ }).check();
-    await expect(create).toBeEnabled();
-    await page.getByLabel('Workspace name').fill('');
+    await expect(next).toBeEnabled();
+    await next.click();
+    const create = page.getByRole('button', { name: 'Create workspace' });
     await expect(create).toBeDisabled();
+    await page.getByLabel('Workspace name').fill('No pack');
+    await expect(create).toBeEnabled();
   });
 
   test('the picker lists every pack with a plain description and its labels', async ({ page }) => {
     await signInWithToken(page, user);
-    await page.goto('/workspaces');
-    const picker = page.getByRole('group', { name: 'What is this workspace for?' });
+    await toPacksStep(page);
+    const picker = page.locator('form');
     for (const [name, text] of [
       ['Business inbox', 'Things to act on, questions, customers, leads, billing and scheduling.'],
       ['HR & recruiting', 'Timesheets, leave, referrals, client requirements, payroll and candidate matching.'],

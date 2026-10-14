@@ -39,10 +39,11 @@ test('a word that only appears inside an attachment is found too', async ({ page
   await page.getByLabel('Message to Meera').fill('Quillfeather');
   const panel = page.getByRole('dialog', { name: 'Ask Meera' });
   await panel.getByRole('button', { name: 'Send' }).click();
-  await expect(panel.getByRole('link', { name: 'Java Developer requirement at Capgemini' })).toBeVisible({ timeout: 20_000 });
+  await expect(panel.getByRole('link', { name: 'Java Developer requirement at Capgemini' }).first()).toBeVisible({ timeout: 20_000 });
 });
 
 test('the example prompts are clickable', async ({ page, seed }) => {
+  await page.route('**/assistant/history*', (route) => route.fulfill({ json: { items: [], next_before: null } }));
   await page.goto(`/w/${seed.workspaceId}/inbox`);
   await page.getByRole('button', { name: 'Ask Meera' }).click();
   const panel = page.getByRole('dialog', { name: 'Ask Meera' });
