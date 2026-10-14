@@ -14,7 +14,7 @@ test.beforeAll(async () => {
 
 test('an admin creates the forwarding address once and a test email lands in the inbox', async ({ page }) => {
   await page.goto(`/w/${lab}/integrations`);
-  await expect(page.getByText('Forward emails')).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Forward emails' })).toBeVisible();
   await page.getByRole('button', { name: 'Create forwarding address' }).click();
   const address = page.locator('code').filter({ hasText: '@inbound.e2e.test' });
   await expect(address).toBeVisible();

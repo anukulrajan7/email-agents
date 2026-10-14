@@ -260,6 +260,14 @@ async fn every_attachment_becomes_text_that_search_insight_and_the_ui_can_use() 
     assert_eq!((kind.as_deref(), status.as_deref()), (Some("sheet"), Some("done")));
     assert!(text.as_deref().unwrap().contains("| Zanzibar | 1200 |"));
     assert_eq!(rows["receipt.png"].1.as_deref(), Some("done"));
+    let scans: HashMap<String, String> = sqlx::query_as::<_, (String, String)>("SELECT filename, scan_status FROM attachments WHERE message_id = ?1")
+        .bind(&id)
+        .fetch_all(&h.state.db)
+        .await
+        .unwrap()
+        .into_iter()
+        .collect();
+    assert_eq!((scans["budget.xlsx"].as_str(), scans["receipt.png"].as_str(), scans["legacy.doc"].as_str()), ("done", "done", "skipped"));
     assert!(rows["receipt.png"].3.as_deref().unwrap().contains("Total 42 Mumbai Cafe"));
     assert!(rows["voicemail.wav"].3.as_deref().unwrap().contains("Action items:\n- Send the contract"));
     assert_eq!((rows["legacy.doc"].0.as_deref(), rows["legacy.doc"].1.as_deref()), (Some("unsupported"), Some("skipped")));

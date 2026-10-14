@@ -217,7 +217,7 @@ pub struct InsightRow {
 impl From<InsightRow> for Insight {
     fn from(r: InsightRow) -> Self {
         Self {
-            summary: r.summary,
+            summary: crate::attachments::strip_attachment_markup(&r.summary).to_string(),
             asks: serde_json::from_str(&r.asks_json).unwrap_or_default(),
             deadline: r.deadline,
             needs_reply: r.needs_reply,

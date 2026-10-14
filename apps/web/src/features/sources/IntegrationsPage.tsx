@@ -66,6 +66,7 @@ function Ticket({
 }
 
 function ForwardingCard({ ws, source, isAdmin, style }: { ws: string; source: Source | undefined; isAdmin: boolean; style?: CSSProperties }) {
+  const { hasStaffing } = useWorkspace();
   const create = useCreateForwardingSource(ws);
   const test = useSendTestEmailEnsuringSource(ws);
   const notify = useToast();
@@ -74,7 +75,7 @@ function ForwardingCard({ ws, source, isAdmin, style }: { ws: string; source: So
       number="01"
       title="Forward emails"
       style={style}
-      description="Forward HR emails to a private address. Each one is read, labelled and routed; nothing is ever sent from your mailbox."
+      description={`Forward ${hasStaffing ? 'HR ' : ''}emails to a private address. Each one is read, labelled and routed; nothing is ever sent from your mailbox.`}
       chips={
         source && (
           <>
@@ -176,13 +177,14 @@ function ForwardingDetails({ ws, source, isAdmin }: { ws: string; source: Source
 }
 
 function GmailCard({ ws, source, isAdmin, style }: { ws: string; source: Source | undefined; isAdmin: boolean; style?: CSSProperties }) {
+  const { hasStaffing } = useWorkspace();
   const connected = source && source.status !== 'disconnected';
   return (
     <Ticket
       number="02"
       title="Connect Gmail"
       style={style}
-      description="Connect a shared HR Gmail inbox. We bring in the last 14 days (up to 500 messages), then new mail as it arrives. Nothing is sent from the mailbox without your OK."
+      description={`Connect a shared ${hasStaffing ? 'HR ' : ''}Gmail inbox. We bring in the last 14 days (up to 500 messages), then new mail as it arrives. Nothing is sent from the mailbox without your OK.`}
       chips={
         connected ? (
           <>

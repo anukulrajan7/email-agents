@@ -42,18 +42,14 @@ test.describe('inbox list', () => {
     await expect(items.first()).toContainText('Question about pricing');
   });
 
-  // BUG found by this suite: without a model the one-line summary is the raw prompt text, including the
-  // `<attachments> <attachment name=…>` fence, in the list and in the reader (`RulesAnalyst`). Remove `test.fail` once fixed.
-  test.fail('summaries never show internal attachment markup', async ({ page, seed }) => {
+  test('summaries never show internal attachment markup', async ({ page, seed }) => {
     await page.goto(`/w/${seed.workspaceId}/inbox`);
     const row = page.getByRole('link', { name: /September timesheet/ });
     await expect(row).toBeVisible();
     await expect(row).not.toContainText('<attachment', { timeout: 2_000 });
   });
 
-  // BUG found by this suite: the box says "Search subject or body" but the API only matches subject and sender
-  // (apps/api/src/http/messages.rs, `filters`). Remove `test.fail` once the body is searched too.
-  test.fail('finds an email by a word that only appears in its body', async ({ page, seed }) => {
+  test('finds an email by a word that only appears in its body', async ({ page, seed }) => {
     await page.goto(`/w/${seed.workspaceId}/inbox`);
     await page.getByLabel('Search messages').fill('enterprise plan');
     const items = page.getByRole('list', { name: 'Messages in this view' }).getByRole('listitem');

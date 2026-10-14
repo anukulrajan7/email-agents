@@ -46,10 +46,7 @@ test.describe('as an admin', () => {
     await expect(page.getByRole('list', { name: 'Labels' })).toContainText('Timesheet');
   });
 
-  // BUG found by this suite: a General workspace still says "HR" on Integrations ("Forward HR emails", "shared HR
-  // Gmail inbox") and on Automations ("standard guidance for an HR and staffing team"). Remove `test.fail` once the
-  // copy follows the packs.
-  test.fail('a General workspace does not use HR wording on Integrations and Automations', async ({ page, seed }) => {
+  test('a General workspace does not use HR wording on Integrations and Automations', async ({ page, seed }) => {
     await page.goto(`/w/${seed.workspaceId}/integrations`);
     await expect(page.getByText('Connect Gmail')).toBeVisible();
     expect(await page.locator('main').innerText()).not.toMatch(/\bHR\b/);

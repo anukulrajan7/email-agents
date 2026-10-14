@@ -1015,6 +1015,7 @@ pub async fn analyze_message(state: &AppState, payload: &Value) -> Result<ai::In
         None
     };
     insight.needs_reply = ai::judge::settle_needs_reply(insight.needs_reply, requires_reply, has_asks, judge_says);
+    insight.summary = crate::attachments::strip_attachment_markup(&insight.summary).to_string();
     let source = if model_id == "rules-v1" { "rules" } else { "llm" };
     sqlx::query(
         "INSERT INTO message_insights (message_id, summary, asks_json, deadline, needs_reply, missing_json, source, model_id, created_at,

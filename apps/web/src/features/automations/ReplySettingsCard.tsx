@@ -7,7 +7,7 @@ import type { ReplySettings } from './types';
 const MAX_INSTRUCTIONS = 2000;
 const MAX_SIGNATURE = 200;
 
-function ReplySettingsForm({ ws, initial, isAdmin }: { ws: string; initial: ReplySettings; isAdmin: boolean }) {
+function ReplySettingsForm({ ws, initial, isAdmin, hasStaffing }: { ws: string; initial: ReplySettings; isAdmin: boolean; hasStaffing: boolean }) {
   const save = useSaveReplySettings(ws);
   const notify = useToast();
   const [autoReply, setAutoReply] = useState(initial.auto_reply ?? false);
@@ -51,7 +51,7 @@ function ReplySettingsForm({ ws, initial, isAdmin }: { ws: string; initial: Repl
           value={instructions}
           onChange={(e) => setInstructions(e.target.value)}
         />
-        <p className="text-sm text-ink-muted">Leave this empty to use our standard guidance for an HR and staffing team.</p>
+        <p className="text-sm text-ink-muted">Leave this empty to use our standard guidance{hasStaffing ? ' for an HR and staffing team' : ''}.</p>
         {defaultStyle && (
           <details className="text-sm">
             <summary className="cursor-pointer font-semibold text-ink-muted hover:text-ink focus-visible:outline-2 focus-visible:outline-accent">
@@ -73,7 +73,7 @@ function ReplySettingsForm({ ws, initial, isAdmin }: { ws: string; initial: Repl
           id="reply-signature"
           maxLength={MAX_SIGNATURE}
           readOnly={!isAdmin}
-          placeholder="Example: The Acme HR Team"
+          placeholder="Example: The Acme Team"
           value={signature}
           onChange={(e) => setSignature(e.target.value)}
         />
@@ -98,7 +98,7 @@ function ReplySettingsForm({ ws, initial, isAdmin }: { ws: string; initial: Repl
   );
 }
 
-export function ReplySettingsCard({ ws, isAdmin }: { ws: string; isAdmin: boolean }) {
+export function ReplySettingsCard({ ws, isAdmin, hasStaffing = true }: { ws: string; isAdmin: boolean; hasStaffing?: boolean }) {
   const settings = useReplySettings(ws);
   return (
     <Card aria-labelledby="reply-settings-heading" role="region" className="flex flex-col gap-4">
@@ -111,7 +111,7 @@ export function ReplySettingsCard({ ws, isAdmin }: { ws: string; isAdmin: boolea
         </div>
       )}
       <ErrorNote error={settings.error} />
-      {settings.data && <ReplySettingsForm ws={ws} initial={settings.data} isAdmin={isAdmin} />}
+      {settings.data && <ReplySettingsForm ws={ws} initial={settings.data} isAdmin={isAdmin} hasStaffing={hasStaffing} />}
     </Card>
   );
 }

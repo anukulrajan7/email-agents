@@ -276,3 +276,61 @@ async fn opening_an_unread_email_reads_it_immediately() {
     assert!(p >= 0);
     worker::drain(&h.state).await;
 }
+
+#[tokio::test]
+async fn inbox_search_finds_words_that_only_appear_in_the_body_within_the_workspace() {
+    let h = harness().await;
+    let id = h.ingest(1, "a@client.example", "Question about pricing", "Do you have an enterprise plan for 50 seats?", 5).await;
+    h.ingest(2, "b@client.example", "Lunch", "Pizza is here.", 4).await;
+
+    let list = |q: &'static str| {
+        let h = &h;
+        async move { h.call("GET", &h.url(&format!("/messages?q={q}")).await, ADMIN, None).await.1 }
+    };
+    let found = list("enterprise%20plan").await;
+    assert_eq!(found["items"].as_array().unwrap().len(), 1, "{found}");
+    assert_eq!(found["items"][0]["id"], id.as_str());
+    assert_eq!(list("subject%20only%20nothing").await["items"].as_array().unwrap().len(), 0);
+    assert_eq!(list("100%25").await["items"].as_array().unwrap().len(), 0, "LIKE wildcards are escaped");
+
+    let other = "dev:boss@other.test";
+    let (_, ws2) = h.call("POST", "/api/v1/workspaces", other, Some(json!({"name": "Other"}))).await;
+    let ws2 = ws2["id"].as_str().unwrap();
+    let (_, src2) = h.call("POST", &format!("/api/v1/workspaces/{ws2}/sources/forwarding"), other, None).await;
+    let email = NormalizedEmail {
+        source_message_id: "src-other".into(),
+        sender_address: "z@other.example".into(),
+        subject: "Secret".into(),
+        body_text: "enterprise plan details".into(),
+        received_at: db::now_ms(),
+        ..Default::default()
+    };
+    let mut tx = h.state.db.begin().await.unwrap();
+    ingest::persist_message(&mut tx, src2["id"].as_str().unwrap(), ws2, &email, None, json!({})).await.unwrap();
+    tx.commit().await.unwrap();
+    let found = list("enterprise%20plan").await;
+    assert_eq!(found["items"].as_array().unwrap().len(), 1, "another workspace's body never matches: {found}");
+}
+
+#[tokio::test]
+async fn summaries_never_expose_attachment_markup() {
+    let h = harness().await;
+    let fence = "\n\n<attachments>\n<attachment name=\"a.xlsx\" kind=\"sheet\">\nZanzibar\n</attachment>\n</attachments>";
+    let id = h.ingest(1, "a@client.example", "September timesheet", "Please find the timesheet attached.", 5).await;
+    worker::drain(&h.state).await;
+
+    sqlx::query("UPDATE message_insights SET summary = ?2 WHERE message_id = ?1")
+        .bind(&id)
+        .bind(format!("Please find the timesheet attached.{fence}"))
+        .execute(&h.state.db)
+        .await
+        .unwrap();
+    let (_, list) = h.call("GET", &h.url("/messages").await, ADMIN, None).await;
+    assert_eq!(list["items"][0]["summary"], "Please find the timesheet attached.");
+    let (_, detail) = h.call("GET", &h.url(&format!("/messages/{id}")).await, ADMIN, None).await;
+    assert_eq!(detail["insight"]["summary"], "Please find the timesheet attached.");
+
+    use email_ai_api::ai::{Analyst, RulesAnalyst};
+    let (insight, _) = RulesAnalyst.analyze("S", "a@b.c", &format!("Short note.{fence}")).await.unwrap();
+    assert_eq!(insight.summary, "Short note.");
+}

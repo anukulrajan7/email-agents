@@ -166,7 +166,7 @@ export function ProfileForm({
           </div>
           <div className="flex flex-col gap-1">
             <Label htmlFor={`${uid}-signoff`}>Sign-off</Label>
-            <Input id={`${uid}-signoff`} maxLength={MAX_SIGNATURE} placeholder="Priya S., Acme HR" value={signOff} onChange={(e) => setSignOff(e.target.value)} />
+            <Input id={`${uid}-signoff`} maxLength={MAX_SIGNATURE} placeholder="Priya S., Acme" value={signOff} onChange={(e) => setSignOff(e.target.value)} />
           </div>
         </div>
       </fieldset>

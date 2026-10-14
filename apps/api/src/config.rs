@@ -173,7 +173,7 @@ impl Config {
             ai_mock: var("AI_MOCK", "") == "1",
             mail_capture_file: var("MAIL_CAPTURE_FILE", ""),
         };
-        check_mock_allowed(&config.app_env, config.ai_mock, &config.mail_capture_file, &config.public_web_url)?;
+        check_mock_allowed(&config.app_env, config.ai_mock, &config.mail_capture_file, &config.public_web_url, &config.openrouter_api_key)?;
         if config.auth_mode == AuthMode::Oidc
             && (config.oidc_issuer_url.is_empty() || config.oidc_audience.is_empty())
         {
@@ -278,7 +278,13 @@ const MOCK_ENVS: [&str; 5] = ["development", "dev", "local", "test", "e2e"];
 
 /// `AI_MOCK=1` and `MAIL_CAPTURE_FILE` replace real providers with fakes, so they only start in a
 /// non-production `APP_ENV` and never behind an https public URL.
-pub fn check_mock_allowed(app_env: &str, ai_mock: bool, mail_capture_file: &str, public_web_url: &str) -> anyhow::Result<()> {
+pub fn check_mock_allowed(
+    app_env: &str,
+    ai_mock: bool,
+    mail_capture_file: &str,
+    public_web_url: &str,
+    openrouter_api_key: &str,
+) -> anyhow::Result<()> {
     if !ai_mock && mail_capture_file.is_empty() {
         return Ok(());
     }
@@ -287,6 +293,9 @@ pub fn check_mock_allowed(app_env: &str, ai_mock: bool, mail_capture_file: &str,
     }
     if public_web_url.trim().to_lowercase().starts_with("https://") {
         bail!("AI_MOCK / MAIL_CAPTURE_FILE are refused when PUBLIC_WEB_URL is https (that looks like production)");
+    }
+    if ai_mock && !openrouter_api_key.trim().is_empty() {
+        bail!("AI_MOCK is refused when OPENROUTER_API_KEY is set (a real deployment's key must never sit next to the fakes)");
     }
     Ok(())
 }
@@ -313,12 +322,16 @@ mod tests {
 
     #[test]
     fn mock_switches_are_refused_in_production() {
-        assert!(check_mock_allowed("production", false, "", "https://mail.example.com").is_ok());
-        assert!(check_mock_allowed("production", true, "", "http://localhost:5173").is_err());
-        assert!(check_mock_allowed("", true, "", "http://localhost:5173").is_err());
-        assert!(check_mock_allowed("production", false, "/tmp/mail.jsonl", "http://localhost:5173").is_err());
-        assert!(check_mock_allowed("e2e", true, "/tmp/mail.jsonl", "http://localhost:5173").is_ok());
-        assert!(check_mock_allowed("e2e", true, "", "https://mail.example.com").is_err());
+        let dev = "http://localhost:5173";
+        assert!(check_mock_allowed("production", false, "", "https://mail.example.com", "sk-live").is_ok());
+        assert!(check_mock_allowed("production", true, "", dev, "").is_err());
+        assert!(check_mock_allowed("", true, "", dev, "").is_err());
+        assert!(check_mock_allowed("Production", true, "", dev, "").is_err());
+        assert!(check_mock_allowed("production", false, "/tmp/mail.jsonl", dev, "").is_err());
+        assert!(check_mock_allowed("e2e", true, "/tmp/mail.jsonl", dev, "").is_ok());
+        assert!(check_mock_allowed("e2e", true, "", "https://mail.example.com", "").is_err());
+        assert!(check_mock_allowed("e2e", true, "", dev, "sk-live").is_err());
+        assert!(check_mock_allowed("e2e", true, "", dev, "  ").is_ok());
     }
 
     #[test]

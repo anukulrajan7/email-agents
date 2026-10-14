@@ -165,7 +165,7 @@ export function AgentEditor({
           <Input
             id={`${uid}-signature`}
             maxLength={MAX_SIGNATURE}
-            placeholder="Example: The Acme HR Team"
+            placeholder="Example: The Acme Team"
             value={signature}
             onChange={(e) => setSignature(e.target.value)}
           />
