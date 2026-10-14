@@ -127,6 +127,7 @@ pub async fn handle(state: &AppState, job: &Job) -> Result<(), JobError> {
         kind::LEARN_FROM_DRAFT => learn_from_draft(state, &payload).await,
         kind::ANALYZE_MESSAGE => {
             let insight = analyze_message(state, &payload).await?;
+            continue_pipeline(state, job, &payload).await?;
             crate::agents::triggers::after_analysis(state, job, &str_field(&payload, "message_id")?, &insight).await
         }
         kind::CLEAN_STORED_TEXT => super::message_jobs::clean_stored_text(state).await,
@@ -204,6 +205,8 @@ pub async fn on_dead(state: &AppState, job: &Job, error: &str) {
                 Ok(())
             }
             kind::AGENT_STEP => super::agent_jobs::on_dead(state, &payload, error).await,
+            // The pipeline must not stall behind a failed reading: the next stages run and surface the failure themselves.
+            kind::ANALYZE_MESSAGE => continue_pipeline(state, job, &payload).await,
             _ => Ok(()),
         }
     }
@@ -459,14 +462,26 @@ pub async fn persist_classification(
     )
     .await?;
     let trigger = trigger.map(str::to_string).unwrap_or_else(|| format!("{}:{}", out.category, now));
-    enqueue_workflow(&mut tx, &workspace_id, message_id, &trigger).await?;
-    // Understand what the email asks (shown to people, used by the drafter).
-    jobs::enqueue(&mut tx, kind::ANALYZE_MESSAGE, &format!("analyze:{message_id}"), Some(&workspace_id), &json!({ "message_id": message_id }))
+    let analyzed: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM message_insights WHERE message_id = ?1)")
+        .bind(message_id)
+        .fetch_one(&mut *tx)
         .await?;
-    jobs::enqueue(&mut tx, kind::RUN_AUTOMATIONS, &format!("automations:{message_id}"), Some(&workspace_id), &json!({ "message_id": message_id }))
+    if analyzed {
+        // Re-labelled mail already has its insight: the downstream stages can follow right away.
+        enqueue_after_analysis(&mut tx, &workspace_id, message_id, &trigger).await?;
+    } else {
+        // Single flight: only the analysis job reads the email with a model. It enqueues the workflow,
+        // automations and memory learning once its result is stored.
+        jobs::enqueue(
+            &mut tx,
+            kind::ANALYZE_MESSAGE,
+            &format!("analyze:{message_id}"),
+            Some(&workspace_id),
+            &json!({ "message_id": message_id, "trigger": trigger }),
+        )
         .await?;
+    }
     super::knowledge_jobs::enqueue_index_message(&mut tx, &workspace_id, message_id).await?;
-    jobs::enqueue(&mut tx, kind::LEARN_FROM_MESSAGE, &format!("learn:{message_id}"), Some(&workspace_id), &json!({ "message_id": message_id })).await?;
     // Requirement / referral emails also become structured records for matching (staffing pack only).
     if super::matching_jobs::is_extractable(&out.category)
         && crate::packs::has_feature(&mut *tx, &workspace_id, crate::packs::FEATURE_MATCHING).await?
@@ -482,6 +497,33 @@ pub async fn persist_classification(
     }
     tx.commit().await?;
     Ok(Some(needs_review))
+}
+
+/// The stages that read the stored insight, queued only after it exists: workflow, automations, memory learning.
+async fn enqueue_after_analysis(
+    conn: &mut sqlx::SqliteConnection,
+    workspace_id: &str,
+    message_id: &str,
+    trigger: &str,
+) -> sqlx::Result<()> {
+    enqueue_workflow(conn, workspace_id, message_id, trigger).await?;
+    jobs::enqueue(conn, kind::RUN_AUTOMATIONS, &format!("automations:{message_id}"), Some(workspace_id), &json!({ "message_id": message_id }))
+        .await?;
+    jobs::enqueue(conn, kind::LEARN_FROM_MESSAGE, &format!("learn:{message_id}"), Some(workspace_id), &json!({ "message_id": message_id }))
+        .await?;
+    Ok(())
+}
+
+/// After a first analysis (payload carries the classification `trigger`): hand the email to the next stages.
+async fn continue_pipeline(state: &AppState, job: &Job, payload: &Value) -> Result<(), JobError> {
+    let (Some(trigger), Some(ws)) = (payload.get("trigger").and_then(Value::as_str), job.workspace_id.as_deref()) else {
+        return Ok(());
+    };
+    let mut tx = state.db.begin().await?;
+    enqueue_after_analysis(&mut tx, ws, &str_field(payload, "message_id")?, trigger).await?;
+    tx.commit().await?;
+    state.jobs_notify.notify_one();
+    Ok(())
 }
 
 async fn enqueue_workflow(
@@ -992,8 +1034,24 @@ const THREAD_DIGEST_CHARS: usize = 700;
 /// `summary, asks_json, deadline, needs_reply, missing_json, attachments_hash` of a stored insight.
 type StoredInsight = (String, String, Option<String>, bool, String, Option<String>);
 
+/// One analysis at a time per email in this process: a second caller waits, then finds the stored insight.
+static ANALYSIS_LOCKS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>>> =
+    std::sync::OnceLock::new();
+
+async fn lock_analysis(message_id: &str) -> tokio::sync::OwnedMutexGuard<()> {
+    let lock = {
+        let mut map = ANALYSIS_LOCKS.get_or_init(Default::default).lock().expect("analysis locks");
+        if map.len() > 2_048 {
+            map.retain(|_, l| std::sync::Arc::strong_count(l) > 1);
+        }
+        map.entry(message_id.to_string()).or_default().clone()
+    };
+    lock.lock_owned().await
+}
+
 pub async fn analyze_message(state: &AppState, payload: &Value) -> Result<ai::Insight, JobError> {
     let message_id = str_field(payload, "message_id")?;
+    let _one_at_a_time = lock_analysis(&message_id).await;
     // Set when attachment text arrived after the first reading: read the email again with it, once per change.
     let refresh = payload.get("refresh_attachments").and_then(Value::as_bool).unwrap_or(false);
     let items = crate::attachments::load_prompt_items(&state.db, &message_id).await?;
