@@ -221,6 +221,11 @@ pub async fn start_inbox_case(state: &AppState, ws: &str, message_id: &str, crea
         Err(why) => return Ok(Started::NotAllowed(why)),
     };
     let routed = routing::route_message(&state.db, &state.config, ws, message_id).await?;
+    if created_by.is_none()
+        && let Some(why) = timesheet_gate(state, ws, message_id, routed.as_ref()).await?
+    {
+        return Ok(Started::NotAllowed(why));
+    }
     let handler = routed.as_ref().map(|r| (r.handler.row.id.clone(), r.handler.version));
     let title = if m.subject.trim().is_empty() { "(no subject)".to_string() } else { m.subject.clone() };
     let mut conn = state.db.acquire().await?;
@@ -252,6 +257,18 @@ pub async fn start_inbox_case(state: &AppState, ws: &str, message_id: &str, crea
     drop(conn);
     state.jobs_notify.notify_one();
     Ok(Started::Case(created.0, created.1))
+}
+
+/// Automatic cases never answer a timesheet: the timesheet desk records it and asks a person only when the record
+/// needs a look. Anything else that would work the email (Meera as the fallback, an observing agent) stands down.
+async fn timesheet_gate(state: &AppState, ws: &str, message_id: &str, routed: Option<&routing::Routed>) -> sqlx::Result<Option<String>> {
+    use crate::staffing::timesheet_records as ts;
+    if !ts::suppresses_auto_reply(&state.db, ws, message_id).await? {
+        return Ok(None);
+    }
+    let desk = routed.is_some_and(|r| r.handler.row.template_key.as_deref() == Some(templates::TIMESHEETS_KEY));
+    let needs_look = ts::attention(&state.db, ws, message_id).await? == Some(true);
+    Ok((!(desk && needs_look)).then(|| "A timesheet was recorded from this email; no reply is needed.".to_string()))
 }
 
 /// Observing agents run only while they stay cheap: at most `SHADOW_MAX_PER_DAY` per workspace a
@@ -324,6 +341,14 @@ pub async fn after_analysis(state: &AppState, job: &Job, message_id: &str, insig
     }
     let Some(ws) = job.workspace_id.as_deref() else { return Ok(()) };
     routing::route_message(&state.db, &state.config, ws, message_id).await?;
+    if let Some(m) = message_facts(state, ws, message_id).await?
+        && m.category.as_deref() == Some(crate::staffing::timesheet_records::LABEL)
+        && crate::packs::enabled(&state.db, ws, crate::packs::STAFFING).await?
+    {
+        // The desk records the timesheet and nothing is drafted; a record that needs a look gets the workflow's review item.
+        crate::staffing::timesheet_records::record_message(state, ws, message_id).await?;
+        return Ok(());
+    }
     if !insight.needs_reply || !state.planner.enabled() {
         return Ok(());
     }

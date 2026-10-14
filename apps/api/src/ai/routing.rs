@@ -46,6 +46,22 @@ pub fn draft_quality(
     }
 }
 
+/// Which model reads a timesheet. The cheap pass goes first; the stronger one is asked only when the cheap pass
+/// failed its checks (totals that do not add up, no period) or the sheet is too long for the cheap one to hold.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SheetTier {
+    Cheap,
+    Strong,
+}
+
+/// A sheet this long (characters) or this many rows goes straight to the strong tier.
+pub const SHEET_LARGE_CHARS: usize = 14_000;
+pub const SHEET_LARGE_ROWS: usize = 150;
+
+pub fn sheet_tier(chars: usize, rows: usize, cheap_failed: bool) -> SheetTier {
+    if cheap_failed || chars > SHEET_LARGE_CHARS || rows > SHEET_LARGE_ROWS { SheetTier::Strong } else { SheetTier::Cheap }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -107,5 +123,13 @@ mod tests {
     fn explicit_request_is_premium() {
         assert_eq!(draft_quality(Priority::Low, "timesheet", None, Some(DraftQuality::Premium), true, false), DraftQuality::Premium);
         assert_eq!(draft_quality(Priority::Low, "timesheet", None, Some(DraftQuality::Standard), true, false), DraftQuality::Standard);
+    }
+
+    #[test]
+    fn timesheets_go_to_the_strong_model_only_when_needed() {
+        assert_eq!(sheet_tier(2_000, 30, false), SheetTier::Cheap);
+        assert_eq!(sheet_tier(2_000, 30, true), SheetTier::Strong);
+        assert_eq!(sheet_tier(SHEET_LARGE_CHARS + 1, 30, false), SheetTier::Strong);
+        assert_eq!(sheet_tier(2_000, SHEET_LARGE_ROWS + 1, false), SheetTier::Strong);
     }
 }

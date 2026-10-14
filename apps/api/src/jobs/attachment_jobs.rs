@@ -105,6 +105,9 @@ pub async fn extract_attachments(state: &AppState, job: &Job, payload: &Value) -
         store(state, &a.id, outcome).await?;
     }
     tracing::info!(%message_id, attachments = rows.len(), with_text, ai_allowed, "attachments read");
+    if !rows.is_empty() {
+        enqueue_timesheet_record(state, job, &msg.workspace_id, message_id).await?;
+    }
     if with_text == 0 {
         return Ok(());
     }
@@ -131,6 +134,18 @@ pub async fn extract_attachments(state: &AppState, job: &Job, payload: &Value) -
         .await?;
     }
     tx.commit().await?;
+    state.jobs_notify.notify_one();
+    Ok(())
+}
+
+/// A timesheet email's files were just read (or could not be): read the timesheet again with them.
+async fn enqueue_timesheet_record(state: &AppState, job: &Job, workspace_id: &str, message_id: &str) -> Result<(), JobError> {
+    let labelled: Option<String> = sqlx::query_scalar("SELECT category FROM classifications WHERE message_id = ?1").bind(message_id).fetch_optional(&state.db).await?;
+    if labelled.as_deref() != Some(crate::staffing::timesheet_records::LABEL) || !crate::packs::enabled(&state.db, workspace_id, crate::packs::STAFFING).await? {
+        return Ok(());
+    }
+    let mut conn = state.db.acquire().await?;
+    jobs::enqueue(&mut conn, kind::RECORD_TIMESHEET, &format!("timesheet:{message_id}:files:{}", job.id), Some(workspace_id), &json!({ "message_id": message_id })).await?;
     state.jobs_notify.notify_one();
     Ok(())
 }

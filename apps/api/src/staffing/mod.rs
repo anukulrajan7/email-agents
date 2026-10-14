@@ -8,6 +8,8 @@ pub mod metrics;
 pub mod policy;
 pub mod portal;
 pub mod submissions;
+pub mod timesheet_parse;
+pub mod timesheet_records;
 
 use serde_json::{Value, json};
 
@@ -68,6 +70,18 @@ pub async fn schedule(state: &AppState) -> sqlx::Result<()> {
     Ok(())
 }
 
+/// Reads one timesheet email into records (see `timesheet_records`).
+pub async fn record_job(state: &AppState, payload: &Value) -> Result<(), JobError> {
+    let message_id = payload.get("message_id").and_then(Value::as_str).ok_or_else(|| JobError::Permanent("payload missing message_id".into()))?;
+    let ws: Option<String> = sqlx::query_scalar("SELECT workspace_id FROM email_messages WHERE id = ?1").bind(message_id).fetch_optional(&state.db).await?;
+    if let Some(ws) = ws
+        && enabled(&state.db, &ws).await?
+    {
+        timesheet_records::record_message(state, &ws, message_id).await?;
+    }
+    Ok(())
+}
+
 pub async fn scan_job(state: &AppState, payload: &Value) -> Result<(), JobError> {
     let ws = payload
         .get("workspace_id")
@@ -79,6 +93,10 @@ pub async fn scan_job(state: &AppState, payload: &Value) -> Result<(), JobError>
     let now = now_ms();
     let report = submissions::scan_workspace(state, ws, now).await?;
     let updated = submissions::update_outcomes(&state.db, ws, now).await?;
+    let timesheets = timesheet_records::backfill(state, ws, 20).await?;
+    if timesheets > 0 {
+        tracing::info!(workspace_id = %ws, timesheets, "timesheets recorded from earlier mail");
+    }
     if report.created > 0 || updated > 0 {
         tracing::info!(workspace_id = %ws, created = report.created, outcomes = updated, "submissions scanned");
     }

@@ -271,7 +271,7 @@ async fn trusted_labels_and_approved_replies_reach_the_models() {
 async fn backfill_indexes_existing_mail_and_replies_in_bounded_steps() {
     let h = harness().await;
     let (ws, src) = h.workspace(ADMIN).await;
-    let id = h.email(ADMIN, &ws, &src, "September timesheet", "Hours attached.").await;
+    let id = h.email(ADMIN, &ws, &src, "September hours", "Hours attached.").await;
     h.email(ADMIN, &ws, &src, "Leave request", "Friday off please.").await;
     let draft_id: String =
         sqlx::query_scalar("SELECT id FROM drafts WHERE message_id = ?1").bind(&id).fetch_one(&h.state.db).await.unwrap();

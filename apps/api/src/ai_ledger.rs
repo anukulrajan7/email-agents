@@ -391,6 +391,7 @@ pub fn task_label(task: &str) -> &'static str {
         t if t.starts_with("agent_") => "Agents",
         "eval" => "Evals",
         "designer" => "Agent design",
+        "timesheet" => "Timesheets",
         t if t.starts_with("assistant_") => "Assistant",
         _ => "Other",
     }

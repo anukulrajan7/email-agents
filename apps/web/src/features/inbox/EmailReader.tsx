@@ -1,4 +1,5 @@
 import type { MessageDetail } from '../../api/types';
+import { TimesheetChip } from './TimesheetChip';
 import { AttachmentChips } from './AttachmentChips';
 import { EmailBody } from './EmailBody';
 import { EmailHeader } from './EmailHeader';
@@ -11,6 +12,7 @@ export function EmailReader({ ws, message }: { ws: string; message: MessageDetai
       <InsightCard ws={ws} messageId={message.id} insight={message.insight} status={message.processing_status} replied={message.replied ?? false} />
       <EmailBody text={message.body_text} html={message.body_html_safe} />
       <AttachmentChips attachments={message.attachments} />
+      <TimesheetChip ws={ws} records={message.timesheet_records ?? []} />
     </article>
   );
 }

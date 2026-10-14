@@ -59,6 +59,7 @@ pub const OLD_DEFAULT_NAMES: &[(&str, &[&str])] = &[
 
 pub const PERSONAL_KEY: &str = "personal.mailbox";
 pub const REQUIREMENTS_KEY: &str = "hrms.requirements";
+pub const TIMESHEETS_KEY: &str = "hrms.timesheets";
 
 const READ_TOOLS: &[&str] = &["read_email", "read_thread", "recall_memory", "search_mail"];
 
@@ -325,14 +326,19 @@ fn leave() -> AgentSpec {
 }
 
 fn timesheets() -> AgentSpec {
-    hr_desk(
-        ("Rohan", "Timesheet"),
-        "timesheets_desk",
-        "Acknowledges timesheets and chases missing or unclear hours.",
-        "Acknowledge each timesheet and flag anything missing",
+    build(
+        Base {
+            name: "Rohan",
+            key: "timesheets_desk",
+            category: "hrms",
+            description: "Reads each timesheet, pasted or attached, and keeps it as a record for the right person and period. Never replies.",
+            goal: "Record every timesheet for the right person and period, and ask a person to look only when something is unclear",
+            mode: Mode::Workflow,
+        },
         vec![on_labels(&["timesheet"])],
-        SendMode::Earned,
-        2,
+        vec![Step::RecordTimesheet, Step::CreateReview { title: "Check: Timesheet".into() }],
+        tools(&["record_timesheet", "create_task", "update_case"]),
+        Permissions { draft: false, send: SendMode::Never, max_autonomy: 3, daily_send_cap: 0 },
     )
 }
 
@@ -450,9 +456,9 @@ pub fn persona(template_key: &str) -> &'static str {
         "hrms.leave" => "You are Ananya, warm and fair. You treat every leave or HR request as a person's real plan: restate the type and dates, say who will follow up, and ask only for what is missing. \
             Check first: dates, leave type and approver; policy questions get a pointer to the team, not an invented rule. \
             Never: approve, reject or promise leave; state balances, salary, tax or payment dates; give legal or medical advice.",
-        "hrms.timesheets" => "You are Rohan, precise and numbers-first. You confirm receipt with the period and the total hours as written, and chase anything missing or unclear. \
-            Check first: the period, whether it replaces an earlier submission, and gaps or days with unusual hours. \
-            Never: approve or reject hours, mention pay amounts or payment dates, or say an invoice was raised.",
+        "hrms.timesheets" => "You are Rohan, precise and numbers-first. You read each timesheet, pasted or attached, and keep it as a record: who it is for, the period, the hours per day and the total, exactly as written. \
+            Check first: who the sheet is for (the name or ID written in it, not who forwarded it), the period, whether it replaces an earlier one, and days that do not add up to the total. \
+            Never: reply to the sender, approve or reject hours, mention pay amounts or payment dates, or fill in a number the sheet does not state.",
         "hrms.onboarding" => "You are Sneha, welcoming and checklist-driven. You make a new joiner feel expected and tell them exactly what is still needed, one short list at a time. \
             Check first: which documents and steps are already done, so you never ask twice. \
             Never: share another person's documents, promise a start date or equipment, or skip a step on your own.",
@@ -476,7 +482,7 @@ pub const TEMPLATES: &[AgentTemplate] = &[
     template!("finance.invoices", "finance", "finance", "system", "workspace", 1, "Vikram", "🧾", "teal", invoices, 3),
     template!("personal.scheduling", "personal", "personal", "system", "workspace", 3, "Nisha", "📅", "ochre", scheduling, 3),
     template!("hrms.leave", "hrms", "staffing", "system", "workspace", 0, "Ananya", "🌴", "sage", leave),
-    template!("hrms.timesheets", "hrms", "staffing", "system", "workspace", 0, "Rohan", "⏱", "slate", timesheets),
+    template!("hrms.timesheets", "hrms", "staffing", "system", "workspace", 3, "Rohan", "⏱", "slate", timesheets, 4),
     template!("hrms.onboarding", "hrms", "staffing", "system", "workspace", 0, "Sneha", "🧭", "plum", onboarding),
     template!(REQUIREMENTS_KEY, "hrms", "staffing", "system", "workspace", 1, "Arjun", "🧩", "postmark", requirements),
     template!("hrms.payroll", "hrms", "staffing", "system", "workspace", 0, "Aditya", "💼", "teal", payroll),

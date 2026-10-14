@@ -133,6 +133,7 @@ fn step_sends(step: &Step) -> bool {
         | Step::SaveToGmailDrafts
         | Step::Label { .. }
         | Step::StartCase
+        | Step::RecordTimesheet
         | Step::Notify { .. } => false,
     }
 }
@@ -257,6 +258,7 @@ async fn simulate_workflow(state: &AppState, ws: &str, spec: &AgentSpec, message
             WfStep::Notify(to) => ex.step(format!("Would let {} know", if to == "owner" { "the owner" } else { "the team" }), "simulated"),
             WfStep::StartCase => ex.step("Would start a case for this email", "simulated"),
             WfStep::SaveDraft => ex.step("Would save the draft to Gmail Drafts", "simulated"),
+            WfStep::RecordTimesheet => ex.step("Would record the timesheet", "simulated"),
         }
     }
     Ok(ex)

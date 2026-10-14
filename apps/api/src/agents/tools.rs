@@ -186,6 +186,7 @@ static REGISTRY: LazyLock<Registry> = LazyLock::new(|| Registry {
         Box::new(ScheduleCheck),
         Box::new(UpdateCase),
         Box::new(ExtractFields),
+        Box::new(RecordTimesheet),
         Box::new(LabelEmail),
         Box::new(SaveToGmailDrafts),
         Box::new(SendEmail),
@@ -913,6 +914,59 @@ impl Tool for ExtractFields {
     }
 }
 
+struct RecordTimesheet;
+
+#[async_trait]
+impl Tool for RecordTimesheet {
+    fn name(&self) -> &'static str {
+        "record_timesheet"
+    }
+    fn description(&self) -> &'static str {
+        "Read a timesheet from an email (the text, or its attached files) and keep it as a record for the person and period. \
+         A new timesheet for the same period replaces the old one. Nothing is sent."
+    }
+    fn schema(&self) -> Value {
+        object(json!({"message_id": {"type": "string", "description": "The timesheet email"}}), &["message_id"])
+    }
+    fn risk(&self) -> Risk {
+        Risk::Low
+    }
+    async fn run(&self, ctx: &ToolCtx<'_>, args: &Value) -> Result<ToolOutput, ToolError> {
+        let msg = message_in_ws(ctx, str_arg(args, "message_id")?).await?;
+        if msg.direction != "inbound" {
+            return failed("Timesheets can only be read from an email we received.");
+        }
+        if ctx.case.shadow {
+            return Ok(ToolOutput {
+                summary: "Observe mode: would have recorded the timesheet; nothing was done".into(),
+                value: json!({"simulated": true}),
+                ..Default::default()
+            });
+        }
+        let run = crate::staffing::timesheet_records::record_message(ctx.state, ctx.ws(), &msg.id).await?;
+        let clean = !run.records.is_empty() && !run.needs_attention();
+        let summary = match run.records.as_slice() {
+            [] if run.waiting_for_files => "The attached files are still being read; the timesheet is recorded when they are".to_string(),
+            [] => "No timesheet data was found in this email".to_string(),
+            records => records
+                .iter()
+                .map(|r| {
+                    let who = r.person_name.clone().unwrap_or_else(|| "someone not yet matched to a person".into());
+                    let hours = r.total_hours.map_or("no total".to_string(), |h| format!("{h} h"));
+                    format!("Recorded {who}, {} to {}, {hours} ({})", r.period_start, r.period_end, r.status.replace('_', " "))
+                })
+                .collect::<Vec<_>>()
+                .join("; "),
+        };
+        Ok(ToolOutput {
+            summary,
+            value: json!({"records": run.records, "waiting_for_files": run.waiting_for_files}),
+            state: Some(json!({"timesheet_clean": clean})),
+            ..Default::default()
+        })
+    }
+}
+
 struct LabelEmail;
 
 #[async_trait]
@@ -1478,7 +1532,7 @@ mod tests {
         }
         let expected = [
             "search_mail", "read_email", "read_thread", "find_candidates", "find_requirements", "recall_memory", "draft_email", "create_task",
-            "schedule_check", "update_case", "extract_fields", "label_email", "save_to_gmail_drafts", "send_email", "submit_candidate",
+            "schedule_check", "update_case", "extract_fields", "record_timesheet", "label_email", "save_to_gmail_drafts", "send_email", "submit_candidate",
             "propose_automation", "send_message", "notify_owner",
         ];
         assert_eq!(names, expected.into_iter().collect());
@@ -1499,7 +1553,7 @@ mod tests {
         for n in ["search_mail", "read_email", "read_thread", "find_candidates", "recall_memory", "extract_fields"] {
             assert_eq!(risk(n), Risk::Read, "{n}");
         }
-        for n in ["draft_email", "create_task", "schedule_check", "update_case", "label_email", "save_to_gmail_drafts"] {
+        for n in ["draft_email", "create_task", "schedule_check", "update_case", "label_email", "save_to_gmail_drafts", "record_timesheet"] {
             assert_eq!(risk(n), Risk::Low, "{n}");
         }
         assert_eq!((risk("send_email"), risk("submit_candidate")), (Risk::High, Risk::High));

@@ -15,7 +15,7 @@ use crate::{
     auth::AuthUser,
     db::{new_id, now_ms},
     error::{AppError, AppResult},
-    staffing::{self, SUBMISSION_UPDATE_LABEL, portal, submissions},
+    staffing::{self, SUBMISSION_UPDATE_LABEL, portal, submissions, timesheet_records as records},
     team::{access, clock, settings},
 };
 
@@ -26,6 +26,10 @@ pub fn routes() -> Router<AppState> {
         .route("/workspaces/{ws}/staffing/submissions", get(list_submissions))
         .route("/workspaces/{ws}/staffing/submissions/{id}", patch(decide))
         .route("/workspaces/{ws}/staffing/timesheets", get(timesheets))
+        .route("/workspaces/{ws}/staffing/timesheet-grid", get(timesheet_grid))
+        .route("/workspaces/{ws}/staffing/timesheet-records", get(timesheet_records))
+        .route("/workspaces/{ws}/staffing/timesheet-records/{id}", get(timesheet_record))
+        .route("/workspaces/{ws}/staffing/timesheet-records/{id}/link", post(link_timesheet_record))
         .route("/workspaces/{ws}/staffing/portal/hours", post(import_hours))
         .route("/workspaces/{ws}/staffing/portal/submissions", post(import_submissions))
         .route("/workspaces/{ws}/staffing/portal/reconcile", post(reconcile))
@@ -183,12 +187,83 @@ pub async fn timesheets(State(state): State<AppState>, user: AuthUser, Path(ws):
         .filter(|r| a.can_see(&r.person_id))
         .map(|r| {
             json!({ "person_id": r.person_id, "name": r.name, "month": r.month, "status": r.status, "due_at": crate::db::iso(r.due_at),
-                    "timesheet": r.timesheet.map(|t| json!({ "message_id": t.message_id, "subject": t.subject,
+                    "timesheet": r.timesheet.map(|t| json!({ "message_id": t.message_id, "record_id": t.record_id, "subject": t.subject,
                                                              "received_at": crate::db::iso(t.received_at), "hours": t.hours })) })
         })
         .collect();
     let missing = rows.iter().filter(|r| r["status"] == "missing").count();
     Ok(Json(json!({ "month": month, "grace_days": s.timesheet_grace_days, "hr_mailbox_set": s.hr_source_id.is_some(), "items": rows, "missing": missing })))
+}
+
+fn month_or_last(q: Option<String>, now: i64, tz: i64) -> AppResult<String> {
+    match q.filter(|m| !m.is_empty()) {
+        Some(m) if clock::valid_month(&m) => Ok(m),
+        Some(_) => Err(AppError::BadRequest("month must look like 2026-09".into())),
+        None => Ok(clock::month_of(now, tz)),
+    }
+}
+
+/// People by days for a month (default: this month): hours per day, total and status. Replaced records never count.
+pub async fn timesheet_grid(State(state): State<AppState>, user: AuthUser, Path(ws): Path<String>, Query(q): Query<MonthQuery>) -> AppResult<Json<Value>> {
+    let a = gate(&state, &ws, &user).await?;
+    let now = now_ms();
+    let s = settings::load(&state.db, &ws).await?;
+    let month = month_or_last(q.month, now, s.tz_offset_minutes)?;
+    Ok(Json(records::grid(&state.db, &ws, &month, now, &a).await?))
+}
+
+#[derive(Deserialize)]
+pub struct RecordsQuery {
+    person_id: Option<String>,
+    month: Option<String>,
+    status: Option<String>,
+    q: Option<String>,
+}
+
+/// Timesheet records, newest period first. Filters: person_id, month (YYYY-MM), status, q (words in name, ID, client, subject, file).
+pub async fn timesheet_records(State(state): State<AppState>, user: AuthUser, Path(ws): Path<String>, Query(q): Query<RecordsQuery>) -> AppResult<Json<Value>> {
+    let a = gate(&state, &ws, &user).await?;
+    if q.month.as_deref().is_some_and(|m| !m.is_empty() && !clock::valid_month(m)) {
+        return Err(AppError::BadRequest("month must look like 2026-09".into()));
+    }
+    if q.status.as_deref().is_some_and(|s| !s.is_empty() && !["recorded", "replaced", "needs_check"].contains(&s)) {
+        return Err(AppError::BadRequest("status must be recorded, replaced or needs_check".into()));
+    }
+    let blank = |v: Option<String>| v.filter(|v| !v.is_empty());
+    let filter = records::Filter { person_id: blank(q.person_id), month: blank(q.month), status: blank(q.status), q: blank(q.q) };
+    let items = records::list(&state.db, &ws, &filter, &a).await?;
+    Ok(Json(json!({ "items": items })))
+}
+
+/// One record with its daily entries, the identity as written, its issues and the link to the email.
+pub async fn timesheet_record(State(state): State<AppState>, user: AuthUser, Path((ws, id)): Path<(String, String)>) -> AppResult<Json<Value>> {
+    let a = access::resolve(&state.db, &ws, &user).await?;
+    let row = records::get(&state.db, &ws, &id).await?.ok_or(AppError::NotFound)?;
+    if !records::can_see_record(&a, &row) {
+        return Err(AppError::NotFound);
+    }
+    Ok(Json(row.json(true)))
+}
+
+#[derive(Deserialize)]
+pub struct LinkBody {
+    person_id: String,
+}
+
+/// "This sheet is that person." The link is remembered for the employee ID and the name written in the sheet, and
+/// applies to the other unmatched records that carry them.
+pub async fn link_timesheet_record(State(state): State<AppState>, user: AuthUser, Path((ws, id)): Path<(String, String)>, Json(body): Json<LinkBody>) -> AppResult<Json<Value>> {
+    let a = gate(&state, &ws, &user).await?;
+    a.require_owner()?;
+    let known: Option<i64> = sqlx::query_scalar("SELECT 1 FROM people WHERE id = ?1 AND workspace_id = ?2").bind(&body.person_id).bind(&ws).fetch_optional(&state.db).await?;
+    if known.is_none() {
+        return Err(AppError::BadRequest("person_id: unknown person".into()));
+    }
+    if !records::link_person(&state.db, &ws, &id, &body.person_id).await? {
+        return Err(AppError::NotFound);
+    }
+    let row = records::get(&state.db, &ws, &id).await?.ok_or(AppError::NotFound)?;
+    Ok(Json(row.json(true)))
 }
 
 #[derive(Deserialize)]

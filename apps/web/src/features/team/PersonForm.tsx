@@ -12,6 +12,7 @@ export function PersonForm({ ws, person, people, staffing, onClose }: { ws: stri
   const [name, setName] = useState(person?.name ?? '');
   const [emails, setEmails] = useState(person?.emails.join(', ') ?? '');
   const [role, setRole] = useState(person?.role ?? '');
+  const [code, setCode] = useState(person?.employee_code ?? '');
   const [manager, setManager] = useState(person?.manager_id ?? '');
   const [joined, setJoined] = useState(person?.joining_date ?? '');
   const [daily, setDaily] = useState(person?.daily_target?.toString() ?? '');
@@ -28,6 +29,7 @@ export function PersonForm({ ws, person, people, staffing, onClose }: { ws: stri
           name: name.trim(),
           emails: emails.split(/[,;\s]+/).filter(Boolean),
           role: role.trim() || null,
+          employee_code: code.trim() || null,
           manager_id: manager || null,
           joining_date: joined || null,
           daily_target: toNumber(daily),
@@ -52,6 +54,7 @@ export function PersonForm({ ws, person, people, staffing, onClose }: { ws: stri
         {field('Name', <Input id={`${uid}-name`} required value={name} onChange={(e) => setName(e.target.value)} />, 'name')}
         {field('Email addresses (comma separated)', <Input id={`${uid}-emails`} required value={emails} onChange={(e) => setEmails(e.target.value)} />, 'emails')}
         {field('Role', <Input id={`${uid}-role`} value={role} onChange={(e) => setRole(e.target.value)} />, 'role')}
+        {field('Employee ID', <Input id={`${uid}-code`} value={code} onChange={(e) => setCode(e.target.value)} />, 'code')}
         {field(
           'Manager',
           <Select id={`${uid}-manager`} value={manager} onChange={(e) => setManager(e.target.value)}>

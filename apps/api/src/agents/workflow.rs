@@ -36,6 +36,8 @@ pub enum WfStep {
     StartCase,
     /// Keep the draft in the mailbox's Drafts folder (`save_to_gmail_drafts`).
     SaveDraft,
+    /// Read the timesheet into records (`record_timesheet`).
+    RecordTimesheet,
 }
 
 /// The executable steps of a spec. Draft is followed by a send when the spec may send at all;
@@ -60,6 +62,7 @@ pub fn steps_for(spec: &AgentSpec) -> Vec<WfStep> {
             Step::Notify { to } => out.push(WfStep::Notify(to.clone())),
             Step::StartCase => out.push(WfStep::StartCase),
             Step::SaveToGmailDrafts => out.push(WfStep::SaveDraft),
+            Step::RecordTimesheet => out.push(WfStep::RecordTimesheet),
         }
     }
     out
@@ -125,6 +128,11 @@ pub fn decide(spec: &AgentSpec, case: &Case) -> Option<Decision> {
         Some(WfStep::Send) => {
             let draft_id = state.get("last_draft_id").and_then(Value::as_str)?;
             Decision::Call { tool: "send_email".into(), args: json!({"draft_id": draft_id}) }
+        }
+        Some(WfStep::RecordTimesheet) => Decision::Call { tool: "record_timesheet".into(), args: json!({"message_id": message_id}) },
+        // The timesheet desk asks a person only when the record needs a look; a clean record ends the workflow here.
+        Some(WfStep::Task(_)) if state.get("timesheet_clean").and_then(Value::as_bool) == Some(true) => {
+            Decision::Finish { outcome: None, summary: format!("{} recorded the timesheet; nothing needs a look.", spec.name) }
         }
         Some(WfStep::Task(title)) => Decision::Call { tool: "create_task".into(), args: json!({"title": title}) },
         Some(WfStep::Sleep(hours)) => {
@@ -273,5 +281,20 @@ mod tests {
         assert_eq!(at(3, json!({"new_message_id": "m2"})), None, "a reply wakes the planner");
         let no_draft = decide(&spec, &case(json!({POS_KEY: 1})));
         assert_eq!(no_draft, None, "nothing to send without a draft");
+    }
+
+    #[test]
+    fn the_timesheet_desk_records_and_asks_a_person_only_when_the_record_needs_a_look() {
+        let spec = template("hrms.timesheets").unwrap().spec();
+        assert_eq!(steps_for(&spec), [WfStep::RecordTimesheet, WfStep::Task("Check: Timesheet".into())], "no draft, no send");
+        assert!(!spec.has_tool("draft_email") && !spec.has_tool("send_email"));
+        assert!(applies(&spec, &case(json!({}))));
+        let call = |c: &Case| match decide(&spec, c) {
+            Some(Decision::Call { tool, .. }) => tool,
+            other => format!("{other:?}"),
+        };
+        assert_eq!(call(&case(json!({}))), "record_timesheet");
+        assert_eq!(call(&case(json!({"wf_pos": 1, "timesheet_clean": false}))), "create_task");
+        assert!(matches!(decide(&spec, &case(json!({"wf_pos": 1, "timesheet_clean": true}))), Some(Decision::Finish { .. })));
     }
 }

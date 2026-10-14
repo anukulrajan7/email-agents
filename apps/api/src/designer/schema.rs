@@ -48,6 +48,7 @@ fn step() -> Value {
         object(json!({"type": string_enum(&["save_to_gmail_drafts"])})),
         object(json!({"type": string_enum(&["label"]), "value": {"type": "string"}})),
         object(json!({"type": string_enum(&["start_case"])})),
+        object(json!({"type": string_enum(&["record_timesheet"])})),
         object(json!({"type": string_enum(&["notify"]), "to": string_enum(NOTIFY_TARGETS)})),
     ]})
 }
