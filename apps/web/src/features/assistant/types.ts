@@ -1,12 +1,14 @@
 export type Citation = { message_id: string; subject: string; attachment_id?: string; attachment_name?: string };
 
-export type PlanAction = 'draft_reply' | 'start_agent' | 'approve' | 'decline' | 'create_automation' | 'snooze_alert';
+export type PlanAction = 'draft_reply' | 'start_agent' | 'approve' | 'decline' | 'create_automation' | 'snooze_alert' | 'send_message' | 'contact_support' | 'hand_to_desk';
+
+export type PlanPreview = { to: string; address?: string | null; audience: string; outside: boolean; subject: string; body: string; source?: string | null };
 
 export type PlanItem = {
   id: string;
   action: PlanAction;
   summary: string;
-  params: Record<string, unknown>;
+  params: Record<string, unknown> & { preview?: PlanPreview };
 };
 
 export type PageContext = {
@@ -32,12 +34,13 @@ export type HistoryMessage = {
   created_at: string;
   citations: Citation[];
   plan: StoredPlanItem[];
+  links?: (ConfirmLink & { label?: string })[];
 };
 
 export type HistoryPage = { items: HistoryMessage[]; next_before: number | null };
 
 export type ConfirmLink = {
-  kind: 'message' | 'case' | 'approvals' | 'automations' | 'alerts';
+  kind: 'message' | 'case' | 'approvals' | 'automations' | 'alerts' | 'sent' | 'meera' | 'inbox';
   id?: string;
 };
 
@@ -58,4 +61,4 @@ export type PlanState =
 
 export type Turn =
   | { id: string; role: 'user'; text: string; at: string }
-  | { id: string; role: 'assistant'; text: string; at: string; citations: Citation[]; plan: PlanItem[]; overBudget: boolean; failed?: boolean };
+  | { id: string; role: 'assistant'; text: string; at: string; citations: Citation[]; plan: PlanItem[]; overBudget: boolean; failed?: boolean; links?: (ConfirmLink & { label?: string })[] };

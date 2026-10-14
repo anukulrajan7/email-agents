@@ -509,3 +509,78 @@ async fn otp_email_is_retried_and_a_failure_is_surfaced() {
     assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM email_outbox").fetch_one(&state.db).await.unwrap(), 2);
 }
+
+// ---------------------------------------------------------------- leak check inputs
+
+async fn automated_codes(h: &H, body: &str) -> Vec<String> {
+    let d = h.draft(body).await;
+    match replies::send_draft(&h.state, &h.ws, &d, Actor::System).await {
+        Err(AppError::SendBlocked(_, details)) => codes(&details["blocking"]),
+        _ => vec![],
+    }
+}
+
+fn leaks(c: &[String]) -> bool {
+    c.iter().any(|c| c == "possible_leak")
+}
+
+#[tokio::test]
+async fn the_leak_check_knows_what_the_drafter_was_given() {
+    let h = harness(0).await;
+    email_ai_api::reply_settings::save(
+        &h.state.db,
+        &h.ws,
+        &email_ai_api::reply_settings::ReplySettings {
+            auto_reply: false,
+            reply_instructions: String::new(),
+            signature: Some("HR Operations, call +91 80 4567 8901, https://hr.acme.test/help".into()),
+        },
+    )
+    .await
+    .unwrap();
+    sqlx::query("UPDATE email_messages SET recipients_json = ?1, body_text = body_text || ' See https://docs.client.test/file and invoice INV-77.' WHERE id = ?2")
+        .bind(r#"["meena@acme.test"]"#)
+        .bind(&h.msg)
+        .execute(&h.state.db)
+        .await
+        .unwrap();
+
+    let signed = format!("{GOOD}\nCall +91 80 4567 8901 or see https://hr.acme.test/help");
+    assert!(!leaks(&automated_codes(&h, &signed).await), "a signature phone and link are the drafter's own");
+    let cc = format!("{GOOD}\nI have copied meena@acme.test.");
+    assert!(!leaks(&automated_codes(&h, &cc).await), "a colleague in To/Cc is known");
+    let tracked = format!("{GOOD}\nThe file is at https://docs.client.test/file?utm_source=mail#top");
+    assert!(!leaks(&automated_codes(&h, &tracked).await), "query strings and fragments are ignored");
+    let total = format!("{GOOD}\nThe invoice total is 12345678 (₹1,25,00,000) for INV-77.");
+    assert!(!leaks(&automated_codes(&h, &total).await), "short digit runs are amounts, not phone numbers");
+
+    for foreign in [
+        "Her number is +44 20 7946 0958",
+        "Write to cfo@elsewhere.org",
+        "See https://other-tenant.example/secret",
+        "Call 9812345678 for details",
+    ] {
+        let c = automated_codes(&h, &format!("{GOOD}\n{foreign}")).await;
+        assert!(leaks(&c), "{foreign}: {c:?}");
+    }
+}
+
+#[tokio::test]
+async fn a_reviewer_outage_blocking_ten_sends_demotes_nobody() {
+    let h = harness(0).await;
+    let agent: String = sqlx::query_scalar("SELECT id FROM agents WHERE workspace_id = ?1 LIMIT 1").bind(&h.ws).fetch_one(&h.state.db).await.unwrap();
+    sqlx::query("UPDATE agents SET autonomy_level = 2, autonomy_cap = 3 WHERE id = ?1").bind(&agent).execute(&h.state.db).await.unwrap();
+    h.judge.fail(true);
+    for _ in 0..10 {
+        let d = h.draft(GOOD).await;
+        sqlx::query("UPDATE drafts SET agent_id = ?1 WHERE id = ?2").bind(&agent).bind(&d).execute(&h.state.db).await.unwrap();
+        assert!(replies::send_draft(&h.state, &h.ws, &d, Actor::System).await.is_err());
+    }
+    let level: i64 = sqlx::query_scalar("SELECT autonomy_level FROM agents WHERE id = ?1").bind(&agent).fetch_one(&h.state.db).await.unwrap();
+    assert_eq!(level, 2);
+    let (n, high): (i64, i64) = sqlx::query_as("SELECT COUNT(*), COALESCE(SUM(severity = 'high'), 0) FROM ai_incidents WHERE kind = 'send_blocked'")
+        .fetch_one(&h.state.db)
+        .await
+        .unwrap();
+    assert_eq!((n, high), (10, 0));
+}

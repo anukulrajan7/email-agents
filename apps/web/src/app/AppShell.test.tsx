@@ -51,7 +51,7 @@ describe('AppShell navigation', () => {
   it('groups the sidebar into Work, Teach and Settings without admin-only items for members', async () => {
     renderShell('member');
     const nav = await screen.findByRole('navigation', { name: 'Main' });
-    expect(itemsOf(nav, 'Work')).toEqual(['Inbox', 'Agents', 'Your team', 'Results', 'Alerts']);
+    expect(itemsOf(nav, 'Work')).toEqual(['Inbox', 'Agents', 'Your team', 'Results', 'Messages', 'Alerts']);
     expect(itemsOf(nav, 'HRMS')).toEqual(['People', 'Performance', 'Timesheets', 'Portal reconciliation', 'Escalations', 'Matching']);
     expect(itemsOf(nav, 'Teach')).toEqual(['Labels', 'Memory', 'Automations']);
     expect(itemsOf(nav, 'Settings')).toEqual(['Integrations', 'Workflows', 'Reviews']);
@@ -81,7 +81,7 @@ describe('AppShell navigation', () => {
   it('adds Jobs and AI usage to Settings for admins', async () => {
     renderShell('admin');
     const nav = await screen.findByRole('navigation', { name: 'Main' });
-    expect(itemsOf(nav, 'Settings')).toEqual(['Integrations', 'Workflows', 'Packs', 'Reviews', 'Jobs', 'AI usage']);
+    expect(itemsOf(nav, 'Settings')).toEqual(['Integrations', 'Workflows', 'Packs', 'Reviews', 'Jobs', 'AI usage', 'AI health']);
     expect(within(nav).getByRole('link', { name: 'AI usage' })).toHaveAttribute('href', '/w/w1/usage');
   });
 

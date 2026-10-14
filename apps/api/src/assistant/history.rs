@@ -29,9 +29,24 @@ pub async fn append(
     citations: &[Citation],
     plan: &[PlanCard],
 ) -> sqlx::Result<()> {
+    append_with_links(db, ws, user_id, role, text, citations, plan, &json!([])).await
+}
+
+/// Like `append`, with links under the message (the email Meera sent, the in-app message).
+#[allow(clippy::too_many_arguments)]
+pub async fn append_with_links<'e, E: sqlx::SqliteExecutor<'e>>(
+    db: E,
+    ws: &str,
+    user_id: &str,
+    role: &str,
+    text: &str,
+    citations: &[Citation],
+    plan: &[PlanCard],
+    links: &Value,
+) -> sqlx::Result<()> {
     sqlx::query(
-        "INSERT INTO assistant_messages (workspace_id, user_id, role, text, citations_json, plan_json, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        "INSERT INTO assistant_messages (workspace_id, user_id, role, text, citations_json, plan_json, created_at, links_json)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
     )
     .bind(ws)
     .bind(user_id)
@@ -40,6 +55,7 @@ pub async fn append(
     .bind(serde_json::to_string(citations).unwrap_or_else(|_| "[]".into()))
     .bind(serde_json::to_string(plan).unwrap_or_else(|_| "[]".into()))
     .bind(now_ms())
+    .bind(links.to_string())
     .execute(db)
     .await?;
     Ok(())
@@ -91,8 +107,8 @@ pub async fn planner_block(db: &SqlitePool, ws: &str, user_id: &str) -> sqlx::Re
 /// Plan cards carry their current state: `pending`, `done` (confirmed) or `expired`.
 pub async fn page(db: &SqlitePool, ws: &str, user_id: &str, before: Option<i64>, limit: i64) -> sqlx::Result<(Vec<Value>, Option<i64>)> {
     let limit = limit.clamp(1, PAGE_MAX);
-    let mut rows: Vec<(i64, String, String, String, String, i64)> = sqlx::query_as(
-        "SELECT id, role, text, citations_json, plan_json, created_at FROM assistant_messages
+    let mut rows: Vec<(i64, String, String, String, String, i64, String)> = sqlx::query_as(
+        "SELECT id, role, text, citations_json, plan_json, created_at, links_json FROM assistant_messages
          WHERE workspace_id = ?1 AND user_id = ?2 AND (?3 IS NULL OR id < ?3) ORDER BY id DESC LIMIT ?4",
     )
     .bind(ws)
@@ -107,7 +123,7 @@ pub async fn page(db: &SqlitePool, ws: &str, user_id: &str, before: Option<i64>,
     rows.reverse();
     let now = now_ms();
     let mut items = vec![];
-    for (id, role, text, citations_json, plan_json, created_at) in rows {
+    for (id, role, text, citations_json, plan_json, created_at, links_json) in rows {
         let mut cards: Vec<Value> = serde_json::from_str(&plan_json).unwrap_or_default();
         for card in &mut cards {
             let plan_id = card.get("id").and_then(Value::as_str).unwrap_or_default().to_string();
@@ -129,6 +145,7 @@ pub async fn page(db: &SqlitePool, ws: &str, user_id: &str, before: Option<i64>,
             "id": id, "role": role, "text": text, "created_at": iso(created_at),
             "citations": serde_json::from_str::<Value>(&citations_json).unwrap_or_else(|_| json!([])),
             "plan": cards,
+            "links": serde_json::from_str::<Value>(&links_json).unwrap_or_else(|_| json!([])),
         }));
     }
     Ok((items, next_before))

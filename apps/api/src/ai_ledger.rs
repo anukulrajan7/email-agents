@@ -9,7 +9,7 @@ use std::{
 
 use axum::{extract::Request, middleware::Next, response::Response};
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::{Value, json};
 use sqlx::SqlitePool;
 
 use crate::db::{new_id, now_ms};
@@ -30,7 +30,7 @@ const PRICES: &[(&str, f64, f64)] = &[
 ];
 
 /// Tasks that run on their own for new mail (not because a person clicked). Drives cost per email.
-const AUTOMATIC_TASKS: &[&str] =
+pub const AUTOMATIC_TASKS: &[&str] =
     &["classify", "analyze", "understand", "learn", "extract", "embed", "judge", "vision", "audio", "agent_plan", "agent_critic"];
 
 /// Tasks a person asks for (running an eval, designing an agent). Never counted as per-email spend.
@@ -258,7 +258,38 @@ pub async fn mark_invalid(db: &SqlitePool, row_id: &str, error_class: &str, erro
         .await;
     if let Err(e) = result {
         tracing::warn!(error = %e, "failed to mark AI call invalid");
+        return;
     }
+    record_call_incident(db, row_id, error_class).await;
+}
+
+/// A call that came back unusable is an incident (`refusal` or `schema_failure`), attributed to its case's agent.
+async fn record_call_incident(db: &SqlitePool, row_id: &str, error_class: &str) {
+    type CallRow = (Option<String>, String, Option<String>, Option<String>);
+    let row: Result<Option<CallRow>, _> =
+        sqlx::query_as("SELECT workspace_id, task, case_id, message_id FROM ai_calls WHERE id = ?1").bind(row_id).fetch_optional(db).await;
+    let Ok(Some((Some(ws), task, case_id, message_id))) = row else { return };
+    let agent_id: Option<String> = match &case_id {
+        Some(c) => sqlx::query_scalar("SELECT agent_id FROM cases WHERE id = ?1 AND workspace_id = ?2")
+            .bind(c)
+            .bind(&ws)
+            .fetch_optional(db)
+            .await
+            .ok()
+            .flatten()
+            .flatten(),
+        None => None,
+    };
+    let kind = if error_class == "refusal" { crate::incidents::Kind::Refusal } else { crate::incidents::Kind::SchemaFailure };
+    crate::incidents::record(
+        db,
+        crate::incidents::NewIncident::new(&ws, kind, json!({"task": task, "error_class": error_class}))
+            .agent(agent_id.as_deref())
+            .case(case_id.as_deref())
+            .message(message_id.as_deref())
+            .dedupe(format!("call:{row_id}")),
+    )
+    .await;
 }
 
 // ---------------------------------------------------------------- budget

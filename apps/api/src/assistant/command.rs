@@ -10,6 +10,7 @@ use super::{
 };
 use crate::{
     agents::{approvals, case, planner::Decision, sentence},
+    messaging,
     auth::AuthUser,
     automations::{self, Action, AutomationInput},
     db::{iso, new_id, now_ms},
@@ -177,6 +178,42 @@ fn tool_specs(role: Role, last_turn: bool, features: Features) -> Vec<Value> {
             &["alert_id", "hours"],
         ),
         spec(
+            "send_message",
+            "Prepare a card to send a NEW message (not a reply). channel email sends from the person's own mailbox; in_app shows in a workspace member's Post Room. A team is always messaged in the app. \
+             `to` is an email address, a member's name or a team name. Write the whole message yourself in plain sentences. Set ask to true when the person wants the answer brought back (\"ask the support team why order 123 is late\"). \
+             Nothing is sent until the person confirms.",
+            json!({
+                "channel": {"type": "string", "enum": ["email", "in_app"]},
+                "to": {"type": "string"},
+                "subject": {"type": "string"},
+                "body": {"type": "string"},
+                "ask": {"type": "boolean"},
+                "wait_hours": {"type": "integer", "minimum": 1, "maximum": 336, "description": "Hours to wait for an answer before one nudge (default 24)"}
+            }),
+            &["channel", "to", "subject", "body"],
+        ),
+        spec(
+            "contact_support",
+            "Prepare a card to write to a company's or bank's support about an email (a failed card charge, a stuck SIP). Give the email's message_id and write the message to them. \
+             The support address is taken from that email or the person's contacts; never invent one. If the person gave an address, pass it as support_address. The person always confirms the first email.",
+            json!({
+                "message_id": {"type": "string"},
+                "subject": {"type": "string"},
+                "body": {"type": "string"},
+                "company": {"type": "string"},
+                "support_address": {"type": "string"},
+                "wait_hours": {"type": "integer", "minimum": 1, "maximum": 336}
+            }),
+            &["message_id", "subject", "body"],
+        ),
+        spec(
+            "hand_to_desk",
+            "Prepare a card to hand an inbound email to the team desk that owns it, and report back when the case is finished.",
+            json!({"message_id": {"type": "string"}, "note": {"type": "string", "description": "What the person wants the desk to do"}}),
+            &["message_id"],
+        ),
+        spec("list_conversations", "What Meera is handling for the person right now: questions asked, support cases and their status.", json!({}), &[]),
+        spec(
             "list_attachments",
             "Files attached to an email, with kind and whether their text has been read. Defaults to the email the person is viewing.",
             json!({"message_id": {"type": "string"}}),
@@ -278,6 +315,8 @@ pub(super) struct Session<'a> {
     pub(super) viewing_message: Option<String>,
     pub(super) read: Vec<ReadAttachment>,
     pub(super) read_chars: usize,
+    /// What the person typed: the only place an address they "gave" can come from.
+    request: String,
 }
 
 /// What the planner is shown besides the request: the verified page and the recent conversation.
@@ -303,6 +342,7 @@ pub async fn run(state: &AppState, ws: &str, user: &AuthUser, role: Role, text: 
         viewing_message: extras.viewing.message_id.clone(),
         read: vec![],
         read_chars: 0,
+        request: text.to_string(),
     };
     let preface = format!("{}{}", extras.viewing.block, extras.history);
     let today = iso(crate::db::now_ms());
@@ -426,6 +466,10 @@ impl Session<'_> {
             "decline" => self.approval_card(args, false).await,
             "create_automation" => self.create_automation(args).await,
             "snooze_alert" => self.snooze_alert(args).await,
+            "send_message" => self.send_message(args).await,
+            "contact_support" => self.contact_support(args).await,
+            "hand_to_desk" => self.hand_to_desk(args).await,
+            "list_conversations" => self.list_conversations().await,
             "list_attachments" => self.list_attachments(args).await,
             "read_attachment" => self.read_attachment(args).await,
             _ => Err(failed("unknown tool")),
@@ -709,6 +753,120 @@ impl Session<'_> {
         let summary = format!("Create the automation “{}”: {}", sentence(&input.name, 60), steps.join(", then "));
         let params = json!({ "name": input.name.trim(), "enabled": input.enabled, "conditions": input.conditions, "actions": input.actions });
         self.add_plan("create_automation", summary, params).await
+    }
+
+    async fn send_message(&mut self, args: &Value) -> ToolResult {
+        let channel = match text_arg(args, "channel") {
+            Some("email") => "email",
+            Some("in_app") => "in_app",
+            _ => return Err(failed("channel must be email or in_app")),
+        };
+        let to = text_arg(args, "to").ok_or_else(|| failed("to is required"))?;
+        let subject = text_arg(args, "subject").ok_or_else(|| failed("subject is required"))?;
+        let body = text_arg(args, "body").ok_or_else(|| failed("body is required"))?;
+        let body = truncate_chars(body, crate::messaging::inapp::MAX_BODY_CHARS);
+        let target = messaging::recipients::resolve(&self.state.db, self.ws, to).await.map_err(failed)?;
+        let team = matches!(target, messaging::recipients::Target::Team { .. });
+        let channel = if team { "in_app" } else { channel };
+        if channel == "email" {
+            let person = target.people().into_iter().next().ok_or_else(|| failed("there is nobody to send it to"))?;
+            if person.address.is_none() {
+                return Err(failed(format!("I do not have an email address for {}", person.label)));
+            }
+            messaging::email::mailbox_for(self.state, self.ws, Some(&self.user.id)).await.map_err(|e| failed(e.to_string()))?;
+            let report = messaging::email::check(person.address.as_deref().unwrap_or_default(), subject, &body, std::slice::from_ref(&self.user.email));
+            if let Some(first) = report.blocking.first() {
+                return Err(failed(first.message.clone()));
+            }
+        } else if target.people().iter().any(|p| p.user_id.is_none()) {
+            return Err(failed("in-app messages go to workspace members; use channel email for people outside the workspace"));
+        }
+        let ask = args.get("ask").and_then(Value::as_bool) == Some(true);
+        let wait_hours = args.get("wait_hours").and_then(Value::as_i64).filter(|h| (1..=messaging::watch::MAX_NUDGE_HOURS).contains(h)).unwrap_or(messaging::watch::DEFAULT_NUDGE_HOURS);
+        let people = target.people();
+        let outside = people.iter().any(|p| !p.kind.is_internal());
+        let audience = if outside { "outside your workspace: you decide" } else { "inside your workspace" };
+        let how = if channel == "email" { "Email" } else { "Message" };
+        let address = people.first().and_then(|p| p.address.clone()).filter(|_| channel == "email");
+        let summary = format!(
+            "{how} {}{}: “{}”{}",
+            target.label(),
+            address.as_deref().map(|a| format!(" ({a})")).unwrap_or_default(),
+            sentence(subject, 80),
+            if ask { ", then bring back the answer" } else { "" }
+        );
+        let params = json!({
+            "channel": channel, "to": to, "subject": subject, "body": body, "ask": ask, "wait_hours": wait_hours,
+            "pinned": messaging::recipients::pin(&target),
+            "preview": {
+                "to": target.label(), "address": address, "audience": audience, "outside": outside, "subject": subject, "body": body,
+                "source": people.first().map(|p| messaging::recipients::source_words(to, p)),
+            },
+        });
+        self.add_plan("send_message", summary, params).await
+    }
+
+    async fn contact_support(&mut self, args: &Value) -> ToolResult {
+        let id = text_arg(args, "message_id").ok_or_else(|| failed("message_id is required"))?;
+        let subject = text_arg(args, "subject").ok_or_else(|| failed("subject is required"))?;
+        let body = truncate_chars(text_arg(args, "body").ok_or_else(|| failed("body is required"))?, messaging::inapp::MAX_BODY_CHARS);
+        let row = self.mail_by_id(id).await?.ok_or_else(|| failed("no email with that id"))?;
+        let found = messaging::support::find_address(&self.state.db, self.ws, &row.id).await?;
+        let given = text_arg(args, "support_address").map(crate::send_safety::bare_address);
+        let (address, source, company) = match (given, found) {
+            (Some(a), found) => {
+                if !crate::send_safety::valid_address(&a) {
+                    return Err(failed("that is not a valid email address"));
+                }
+                let from_person = self.request.to_lowercase().contains(&a);
+                let from_email = found.as_ref().is_some_and(|f| f.address == a);
+                if !from_person && !from_email {
+                    return Err(failed("I can only write to an address the person gave me or one that is in the email. Ask them which address to use"));
+                }
+                let company = text_arg(args, "company").map(str::to_string).or_else(|| found.map(|f| f.company)).unwrap_or_else(|| a.rsplit('@').next().unwrap_or(&a).to_string());
+                (a, if from_person { "the address you gave me" } else { "written in that email" }, company)
+            }
+            (None, Some(f)) => (f.address, f.source, text_arg(args, "company").map(str::to_string).unwrap_or(f.company)),
+            (None, None) => {
+                return Err(failed("there is no support address in that email or the person's contacts; ask the person for the address, do not guess one"));
+            }
+        };
+        messaging::email::mailbox_for(self.state, self.ws, Some(&self.user.id)).await.map_err(|e| failed(e.to_string()))?;
+        let report = messaging::email::check(&address, subject, &body, std::slice::from_ref(&self.user.email));
+        if let Some(first) = report.blocking.first() {
+            return Err(failed(first.message.clone()));
+        }
+        self.see(&row.id);
+        let wait_hours = args.get("wait_hours").and_then(Value::as_i64).filter(|h| (1..=messaging::watch::MAX_NUDGE_HOURS).contains(h)).unwrap_or(messaging::watch::DEFAULT_NUDGE_HOURS);
+        let summary = format!("Write to {company} support ({address}, {source}): “{}”", sentence(subject, 80));
+        let params = json!({
+            "message_id": row.id, "company": company, "address": address, "address_source": source, "subject": subject, "body": body, "wait_hours": wait_hours,
+            "preview": { "to": format!("{company} support"), "address": address, "audience": "outside your workspace", "outside": true, "subject": subject, "body": body, "source": source },
+        });
+        self.add_plan("contact_support", summary, params).await
+    }
+
+    async fn hand_to_desk(&mut self, args: &Value) -> ToolResult {
+        let id = text_arg(args, "message_id").ok_or_else(|| failed("message_id is required"))?;
+        let row = self.mail_by_id(id).await?.filter(|m| m.direction == "inbound").ok_or_else(|| failed("no inbound email with that id"))?;
+        if let Some(why) = crate::agents::triggers::personal_refusal(self.state, self.ws, &row.id, &self.user.id).await? {
+            return Err(failed(why));
+        }
+        let note = text_arg(args, "note").map(|n| truncate_chars(n, MAX_INSTRUCTION_CHARS)).unwrap_or_default();
+        let summary = format!("Hand “{}” to the team desk and tell you what happens", sentence(&row.subject, 80));
+        self.add_plan("hand_to_desk", summary, json!({ "message_id": row.id, "note": note })).await
+    }
+
+    async fn list_conversations(&mut self) -> ToolResult {
+        let items = messaging::watch::list(self.state, self.ws, &self.user.id).await?;
+        let rows: Vec<Value> = items
+            .iter()
+            .map(|i| json!({
+                "id": i["id"], "kind": i["kind"], "title": datamark(i["title"].as_str().unwrap_or_default(), 20), "with": i["with"],
+                "status": i["status_label"], "answer": i["answer"].as_str().map(|a| datamark(a, 40)),
+            }))
+            .collect();
+        Ok(json!({ "conversations": rows }))
     }
 
     async fn snooze_alert(&mut self, args: &Value) -> ToolResult {

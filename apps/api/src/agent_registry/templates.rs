@@ -126,6 +126,7 @@ fn with_drafting(mut spec: AgentSpec, rules: &[&str], never_do: &[&str]) -> Agen
 fn lead() -> AgentSpec {
     let every_tool = [
         "find_candidates", "draft_email", "create_task", "schedule_check", "update_case", "send_email", "submit_candidate", "propose_automation",
+        "send_message", "notify_owner",
     ];
     build(
         Base {
@@ -398,7 +399,7 @@ fn mailbox() -> AgentSpec {
         },
         vec![Trigger::Manual],
         vec![Step::DraftReply { quality: QualityTier::Balanced }],
-        tools(&["draft_email", "create_task", "schedule_check", "update_case", "send_email"]),
+        tools(&["draft_email", "create_task", "schedule_check", "update_case", "send_email", "send_message", "notify_owner"]),
         perms(SendMode::Earned, 2),
     );
     spec.memory = MemorySpec { scope: MemoryScope::Own, ..MemorySpec::default() };

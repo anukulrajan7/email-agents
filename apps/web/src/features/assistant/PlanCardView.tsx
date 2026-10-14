@@ -1,6 +1,38 @@
 import { Button, TextLink } from '../../components/ui';
 import { ACTION_LABEL, linkTarget } from './labels';
-import type { PlanItem, PlanState } from './types';
+import type { PlanItem, PlanPreview, PlanState } from './types';
+
+function MessagePreview({ preview }: { preview: PlanPreview }) {
+  return (
+    <dl className="flex flex-col gap-1 rounded-xs border border-rule bg-paper px-2 py-1.5 text-[13px]">
+      <div className="flex gap-2">
+        <dt className="kicker shrink-0">To</dt>
+        <dd className="min-w-0 break-words text-ink">
+          {preview.to}
+          {preview.address && <span className="text-ink-muted"> ({preview.address})</span>}
+        </dd>
+      </div>
+      {preview.source && (
+        <div className="flex gap-2">
+          <dt className="kicker shrink-0">Address from</dt>
+          <dd className="text-ink-muted">{preview.source}</dd>
+        </div>
+      )}
+      <div className="flex gap-2">
+        <dt className="kicker shrink-0">Who sees it</dt>
+        <dd className={preview.outside ? 'font-semibold text-ink' : 'text-ink-muted'}>{preview.audience}</dd>
+      </div>
+      <div className="flex gap-2">
+        <dt className="kicker shrink-0">Subject</dt>
+        <dd className="min-w-0 break-words text-ink">{preview.subject}</dd>
+      </div>
+      <div className="mt-1">
+        <dt className="sr-only">Message</dt>
+        <dd className="break-words whitespace-pre-wrap text-ink">{preview.body}</dd>
+      </div>
+    </dl>
+  );
+}
 
 export function PlanCardView({
   ws,
@@ -20,6 +52,7 @@ export function PlanCardView({
     <article aria-label={`${ACTION_LABEL[item.action]}: ${item.summary}`} className="flex flex-col gap-2 rounded-sm border border-rule-strong border-l-[3px] border-l-accent bg-raised px-3 py-2">
       <p className="kicker">{ACTION_LABEL[item.action]}</p>
       <p className="text-sm text-ink">{item.summary}</p>
+      {item.params.preview && <MessagePreview preview={item.params.preview} />}
       {open && (
         <div className="flex gap-2">
           <Button size="sm" loading={state.status === 'confirming'} aria-label={`Confirm: ${item.summary}`} onClick={onConfirm}>

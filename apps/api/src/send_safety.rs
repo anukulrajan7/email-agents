@@ -194,6 +194,7 @@ pub fn mentions_attachment(body: &str) -> bool {
 fn normalize_link(link: &str) -> String {
     let l = link.trim_end_matches(['.', ',', ';', ':', '!', '?', ')']).to_lowercase();
     let l = l.trim_start_matches("https://").trim_start_matches("http://").trim_start_matches("www.");
+    let l = l.split(['?', '#']).next().unwrap_or_default();
     l.trim_end_matches('/').to_string()
 }
 
@@ -206,7 +207,7 @@ fn phones(text: &str) -> Vec<(String, String)> {
             let digits: String = m.chars().filter(char::is_ascii_digit).collect();
             (m, digits)
         })
-        .filter(|(_, d)| (8..=15).contains(&d.len()))
+        .filter(|(raw, d)| (8..=15).contains(&d.len()) && (d.len() >= 10 || raw.starts_with('+')))
         .collect()
 }
 
@@ -350,8 +351,9 @@ async fn gather(state: &AppState, input: &CheckInput<'_>) -> AppResult<(Facts, V
             }
         }
     }
-    let thread: Vec<(String, String)> = sqlx::query_as(
-        "SELECT subject, body_text FROM email_messages WHERE thread_id = ?1 AND workspace_id = ?2 AND suppressed = 0 ORDER BY received_at DESC LIMIT 20",
+    let thread: Vec<(String, String, String, String, Option<String>)> = sqlx::query_as(
+        "SELECT subject, body_text, recipients_json, sender_address, original_sender_address FROM email_messages
+         WHERE thread_id = ?1 AND workspace_id = ?2 AND suppressed = 0 ORDER BY received_at DESC LIMIT 20",
     )
     .bind(&r.thread_id)
     .bind(ws)
@@ -368,12 +370,13 @@ async fn gather(state: &AppState, input: &CheckInput<'_>) -> AppResult<(Facts, V
     .await?;
     let settings = crate::reply_settings::load(&state.db, &state.config, ws).await?;
     let mut known = String::new();
-    for (subject, body) in &thread {
-        known.push_str(subject);
-        known.push('\n');
-        known.push_str(body);
-        known.push('\n');
+    for (subject, body, recipients, sender, original_sender) in &thread {
+        for part in [subject.as_str(), body.as_str(), recipients.as_str(), sender.as_str(), original_sender.as_deref().unwrap_or_default()] {
+            known.push_str(part);
+            known.push('\n');
+        }
     }
+    known.push_str(&drafter_inputs(state, input, &settings).await?);
     let team_notes = notes.join("\n");
     known.push_str(&team_notes);
     known.push('\n');
@@ -419,11 +422,97 @@ fn review_context(r: &ReplyContext, notes: &str, body: &str) -> String {
     )
 }
 
+static ADDRESS_IN_TEXT: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)[a-z0-9._%+-]+@[a-z0-9-]+(?:\.[a-z0-9-]+)+").expect("valid regex"));
+
+/// Email addresses, links and phone numbers in the reply that appear nowhere in what the sender, the
+/// thread or the team's notes gave us: possible data from another contact or another workspace. Pure.
+pub fn foreign_data(body: &str, f: &Facts) -> Vec<String> {
+    let known = f.known_text.to_lowercase();
+    let recipient = bare_address(&f.recipient);
+    let mut out: Vec<String> = ADDRESS_IN_TEXT
+        .find_iter(body)
+        .map(|m| m.as_str().trim_end_matches('.').to_lowercase())
+        .filter(|a| !known.contains(a.as_str()) && *a != recipient && !f.own_addresses.iter().any(|o| o.eq_ignore_ascii_case(a)))
+        .collect();
+    out.extend(unknown_contacts(body, &f.known_text));
+    out
+}
+
+async fn record_leak(state: &AppState, input: &CheckInput<'_>, count: usize) {
+    let agent_id: Option<String> = sqlx::query_scalar("SELECT agent_id FROM drafts WHERE id = ?1 AND workspace_id = ?2")
+        .bind(&input.reply.draft_id)
+        .bind(input.workspace_id)
+        .fetch_optional(&state.db)
+        .await
+        .ok()
+        .flatten()
+        .flatten();
+    crate::incidents::record(
+        &state.db,
+        crate::incidents::NewIncident::new(input.workspace_id, crate::incidents::Kind::LeakBlocked, serde_json::json!({"check": "send_review", "items": count}))
+            .agent(agent_id.as_deref())
+            .message(Some(&input.reply.message_id))
+            .dedupe(format!("leak:{}", input.reply.draft_id)),
+    )
+    .await;
+}
+
+/// Everything the drafter was given that a reply may legitimately repeat: the resolved voice and
+/// signature, sign-off, the memories and learned preferences in the agent's scope, and past reply examples.
+async fn drafter_inputs(state: &AppState, input: &CheckInput<'_>, settings: &crate::reply_settings::ReplySettings) -> AppResult<String> {
+    let (ws, r) = (input.workspace_id, input.reply);
+    let instructions = if settings.reply_instructions.is_empty() {
+        crate::packs::reply_style(&state.db, ws).await?.to_string()
+    } else {
+        settings.reply_instructions.clone()
+    };
+    let (instructions, signature) =
+        crate::agent_profiles::draft_voice(&state.db, &state.config, ws, &r.message_id, instructions, settings.signature.clone()).await?;
+    let mut out = vec![instructions, signature.unwrap_or_default(), crate::packs::default_sign_off(&state.db, ws).await?];
+
+    let draft_agent: Option<String> =
+        sqlx::query_scalar("SELECT agent_id FROM drafts WHERE id = ?1 AND workspace_id = ?2").bind(&r.draft_id).bind(ws).fetch_optional(&state.db).await?.flatten();
+    let agent = {
+        let mut conn = state.db.acquire().await?;
+        crate::learning::scope::resolve(&mut conn, ws, draft_agent.as_deref(), Some(&r.message_id)).await?
+    };
+    let view = agent.agent_id.clone().map(|id| crate::memory::AgentMemory { agent_id: id, scope: agent.memory });
+    let ctx = crate::memory::context_for_agent(&state.db, ws, &r.sender_address, &r.subject, false, view.as_ref()).await?;
+    out.extend(ctx.lines());
+    out.extend(ctx.sender_history);
+    let preferences = crate::learning::retrieve::for_draft(
+        &state.db,
+        state.embedder.as_ref(),
+        ws,
+        agent.agent_id.as_deref(),
+        agent.owner_user_id.as_deref(),
+        &format!("{}\n{}", r.subject, r.original_body),
+    )
+    .await?;
+    out.extend(crate::learning::retrieve::lines(&preferences));
+    for e in crate::knowledge::reply_examples(&state.db, state.embedder.as_ref(), ws, &r.message_id, &r.subject, &r.original_body).await {
+        out.push(e.reply);
+    }
+    Ok(out.join("\n"))
+}
+
 /// Runs every check for one outgoing reply. Never sends anything.
 pub async fn check(state: &AppState, input: &CheckInput<'_>) -> AppResult<SafetyReport> {
     let (facts, extra_warnings, notes) = gather(state, input).await?;
     let mut report = deterministic(&facts, input.body);
     report.warnings.extend(extra_warnings);
+    if input.automated {
+        let foreign = foreign_data(input.body, &facts);
+        if !foreign.is_empty() {
+            report.blocking.push(issue(
+                "possible_leak",
+                "The reply names an email address, link or phone number that is not from this conversation or the team's notes.",
+                "A person should check where it came from.",
+            ));
+            record_leak(state, input, foreign.len()).await;
+        }
+    }
     // Skip the model when the text is unusable anyway (empty, gaps, placeholders).
     let text_broken = report.blocking.iter().any(|i| matches!(i.code, "empty_body" | "too_short" | "open_gaps" | "placeholder"));
     if !text_broken {
@@ -487,6 +576,15 @@ mod tests {
 
     fn codes(issues: &[Issue]) -> Vec<&'static str> {
         issues.iter().map(|i| i.code).collect()
+    }
+
+    #[test]
+    fn foreign_data_flags_addresses_links_and_numbers_from_nowhere() {
+        let f = Facts { recipient: "Ravi <ravi@client.com>".into(), known_text: "Write to ravi@client.com or call +91 98765 43210".into(), ..facts() };
+        assert!(foreign_data("Thanks Ravi, I will write to ravi@client.com. Call +91 98765 43210.", &f).is_empty());
+        assert_eq!(foreign_data("Please also write to cfo@elsewhere.org", &f).len(), 1);
+        assert_eq!(foreign_data("Her number is +44 20 7946 0958", &f).len(), 1);
+        assert_eq!(foreign_data("See https://other-tenant.example/secret", &f).len(), 1);
     }
 
     #[test]

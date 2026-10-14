@@ -1,5 +1,6 @@
 mod agent_profiles_api;
 mod agent_registry_api;
+mod ai_health_api;
 mod ai_usage_api;
 mod agents_api;
 mod alerts_api;
@@ -17,6 +18,7 @@ mod matching_api;
 mod memories;
 mod metrics_api;
 mod messages;
+mod messaging_api;
 mod reply_settings_api;
 mod reviews;
 mod search_api;
@@ -172,10 +174,12 @@ pub fn router(state: AppState) -> Router {
         .merge(agent_profiles_api::routes())
         .merge(agent_registry_api::routes())
         .merge(learning_api::routes())
+        .merge(ai_health_api::routes())
         .merge(metrics_api::routes())
         .merge(evals_api::routes())
         .merge(designer_api::routes())
         .merge(assistant_api::routes())
+        .merge(messaging_api::routes())
         .merge(team_api::routes())
         .merge(staffing_api::routes())
         .fallback(|| async { AppError::NotFound })

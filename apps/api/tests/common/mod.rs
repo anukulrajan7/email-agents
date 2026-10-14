@@ -59,6 +59,7 @@ impl Drafter for BodyDrafter {
 
 pub async fn spawn_gmail(calls: Calls) -> String {
     let (c1, c2, c3, c4) = (calls.clone(), calls.clone(), calls.clone(), calls);
+    let threads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let app = Router::new()
         .route("/proxy/gmail/v1/users/me/profile", get(|| async { Json(json!({"emailAddress": "priya@acme.com"})) }))
         .route("/proxy/gmail/v1/users/me/drafts", post(move |Json(b): Json<Value>| async move {
@@ -75,7 +76,8 @@ pub async fn spawn_gmail(calls: Calls) -> String {
         }))
         .route("/proxy/gmail/v1/users/me/messages/send", post(move |Json(b): Json<Value>| async move {
             c4.lock().unwrap().push(("send_message".into(), b));
-            Json(json!({"id": "gmsg-direct"}))
+            let n = threads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Json(json!({"id": format!("gmsg-direct-{n}"), "threadId": format!("gthread-{n}")}))
         }));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();

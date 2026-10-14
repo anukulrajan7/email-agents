@@ -11,12 +11,14 @@ import { LabelsPage } from '../features/labels/LabelsPage';
 import { MemoryPage } from '../features/memory/MemoryPage';
 import { ContactPage } from '../features/memory/ContactPage';
 import { AlertsPage } from '../features/alerts/AlertsPage';
+import { MessagesPage } from '../features/messaging/MessagesPage';
 import { AgentsPage } from '../features/agents/AgentsPage';
 import { AgentsHubPage } from '../features/agents-hub/AgentsHubPage';
 import { WelcomePage } from '../features/onboarding/WelcomePage';
 import { GuidePage } from '../features/help/GuidePage';
 import { PacksPage } from '../features/packs/PacksPage';
 import { UsagePage } from '../features/usage/UsagePage';
+import { AiHealthPage } from '../features/ai-health/AiHealthPage';
 import { PeoplePage } from '../features/team/PeoplePage';
 import { PerformancePage } from '../features/team/PerformancePage';
 import { EscalationsPage } from '../features/team/EscalationsPage';
@@ -59,6 +61,7 @@ export function AppRoutes() {
           <Route path="labels" element={<LabelsPage />} />
           <Route path="reviews" element={<ReviewsPage />} />
           <Route path="alerts" element={<AlertsPage />} />
+          <Route path="messages" element={<MessagesPage />} />
           <Route path="memory" element={<MemoryPage />} />
           <Route path="memory/contacts/:email" element={<ContactPage />} />
           <Route path="automations" element={<AutomationsPage />} />
@@ -67,6 +70,7 @@ export function AppRoutes() {
           <Route path="integrations" element={<IntegrationsPage />} />
           <Route path="guide" element={<GuidePage />} />
           <Route path="usage" element={<UsagePage />} />
+          <Route path="ai-health" element={<AiHealthPage />} />
           <Route path="jobs" element={<JobsPage />} />
         </Route>
       </Route>

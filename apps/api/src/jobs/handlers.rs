@@ -149,6 +149,10 @@ pub async fn handle(state: &AppState, job: &Job) -> Result<(), JobError> {
         kind::AGENT_STEP => super::agent_jobs::agent_step(state, job, &payload).await,
         kind::AGENT_SCHEDULE_TICK => crate::agents::triggers::schedule_tick_job(state, job).await,
         kind::SEND_DRAFT => crate::replies::send_scheduled(state, &payload).await,
+        kind::SEND_OUTBOUND => crate::messaging::email::run_scheduled(state, &payload).await,
+        kind::WATCH_REPLY => crate::messaging::watch::reply_job(state, &payload).await,
+        kind::WATCH_NUDGE => crate::messaging::watch::nudge_job(state, &payload).await,
+        kind::INAPP_DUE => crate::messaging::inapp::due_job(state, &payload).await,
         kind::STAFFING_SCAN => crate::staffing::scan_job(state, &payload).await,
         kind::RUN_EVAL => super::eval_jobs::run_eval(state, &payload).await,
         kind::ROLLUP_AGENT_METRICS => super::eval_jobs::rollup_agent_metrics(state).await,
@@ -203,6 +207,7 @@ pub async fn on_dead(state: &AppState, job: &Job, error: &str) {
                 crate::replies::give_up_scheduled(state, &payload, error).await?;
                 Ok(())
             }
+            kind::SEND_OUTBOUND => crate::messaging::email::give_up_scheduled(state, &payload, error).await,
             kind::FETCH_FORWARDED_EMAIL => {
                 if let Some(event_id) = payload.get("event_id").and_then(Value::as_str) {
                     sqlx::query("UPDATE inbound_events SET status = 'rejected' WHERE id = ?1")
@@ -1066,6 +1071,13 @@ async fn compose_draft(
         let unsupported = learning::context_pack::check_draft(&pack, &mut out);
         if !unsupported.is_empty() {
             tracing::info!(message_id, claims = unsupported.len(), "draft claims not in the context pack were turned into [NEEDS]");
+            crate::incidents::record(
+                &state.db,
+                crate::incidents::NewIncident::new(&msg.workspace_id, crate::incidents::Kind::UnsupportedClaim, json!({"claims": unsupported.len()}))
+                    .message(Some(message_id))
+                    .dedupe(format!("unsupported:{message_id}")),
+            )
+            .await;
         }
     }
     Ok((out, ctx, quality))

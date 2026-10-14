@@ -190,6 +190,8 @@ static REGISTRY: LazyLock<Registry> = LazyLock::new(|| Registry {
         Box::new(SendEmail),
         Box::new(SubmitCandidate),
         Box::new(ProposeAutomation),
+        Box::new(SendMessage),
+        Box::new(NotifyOwner),
     ],
 });
 
@@ -1211,6 +1213,163 @@ impl Tool for ProposeAutomation {
     }
 }
 
+// ---------------------------------------------------------------- messaging
+
+struct SendMessage;
+
+impl SendMessage {
+    async fn target(ctx: &ToolCtx<'_>, args: &Value) -> Result<crate::messaging::recipients::Target, ToolError> {
+        crate::messaging::recipients::resolve(&ctx.state.db, ctx.ws(), str_arg(args, "to")?).await.map_err(ToolError::Failed)
+    }
+
+    fn channel(args: &Value) -> crate::messaging::dispatch::Channel {
+        if opt_str(args, "channel") == Some("in_app") {
+            crate::messaging::dispatch::Channel::InApp
+        } else {
+            crate::messaging::dispatch::Channel::Email
+        }
+    }
+}
+
+#[async_trait]
+impl Tool for SendMessage {
+    fn name(&self) -> &'static str {
+        "send_message"
+    }
+    fn description(&self) -> &'static str {
+        "Send a NEW message (not a reply) to a person, a team or a contact: channel email goes from the owner's mailbox, in_app shows in a member's Post Room. \
+         Teams are messaged in the app. Set ask to true to wait for the answer and report it back to the owner. \
+         Messages to people inside the workspace may go on their own once this assistant has earned it; anything outside the workspace, \
+         about money, banks or security, with attachments, or after text that tried to instruct you always waits for a person."
+    }
+    fn schema(&self) -> Value {
+        object(
+            json!({
+                "channel": {"type": "string", "enum": ["email", "in_app"]},
+                "to": {"type": "string", "description": "An email address, a member's name, or a team name"},
+                "subject": {"type": "string"},
+                "body": {"type": "string", "description": "The message, in plain sentences"},
+                "ask": {"type": "boolean", "description": "Wait for the answer and report it back"}
+            }),
+            &["channel", "to", "subject", "body"],
+        )
+    }
+    fn risk(&self) -> Risk {
+        Risk::High
+    }
+    async fn preview(&self, ctx: &ToolCtx<'_>, args: &Value) -> Result<Option<Preview>, ToolError> {
+        let target = Self::target(ctx, args).await?;
+        let subject = str_arg(args, "subject")?;
+        let via = if matches!(Self::channel(args), crate::messaging::dispatch::Channel::InApp) || matches!(target, crate::messaging::recipients::Target::Team { .. }) {
+            "in the app"
+        } else {
+            "by email"
+        };
+        Ok(Some(Preview {
+            summary: format!("Send “{}” to {} {via}", sentence(subject, 60), target.label()),
+            to: Some(target.people().iter().map(|p| p.address.clone().unwrap_or_else(|| p.label.clone())).collect::<Vec<_>>().join(", ")),
+            subject: Some(subject.to_string()),
+            body: str_arg(args, "body")?.to_string(),
+            ..Default::default()
+        }))
+    }
+    async fn run(&self, ctx: &ToolCtx<'_>, args: &Value) -> Result<ToolOutput, ToolError> {
+        let target = Self::target(ctx, args).await?;
+        let subject = str_arg(args, "subject")?;
+        let body = str_arg(args, "body")?;
+        if ctx.case.shadow {
+            return Ok(ToolOutput {
+                summary: "Observe mode: would have sent a message; nothing was done".into(),
+                value: json!({"simulated": true}),
+                ..Default::default()
+            });
+        }
+        let approver = match ctx.actor {
+            Actor::User(u) => Some(u),
+            Actor::System => None,
+        };
+        let owner = ctx.case.agent_user_id.as_deref();
+        let ask = args.get("ask").and_then(Value::as_bool) == Some(true);
+        let sent = crate::messaging::dispatch::send(
+            ctx.state,
+            crate::messaging::dispatch::Request {
+                ws: ctx.ws(),
+                owner,
+                agent_id: ctx.case.agent_id.as_deref(),
+                channel: Self::channel(args),
+                target: &target,
+                subject,
+                body,
+                approver,
+                hold_secs: ctx.hold_secs,
+                watch: (ask && owner.is_some())
+                    .then_some(crate::messaging::dispatch::WatchSpec { question: body, nudge_hours: crate::messaging::watch::DEFAULT_NUDGE_HOURS }),
+                support: None,
+                via: "agent",
+            },
+        )
+        .await?;
+        Ok(ToolOutput {
+            summary: sent.summary.clone(),
+            value: json!({"sent": true, "link": sent.link, "send_at_ms": sent.send_at_ms, "watching": sent.watch_id.is_some()}),
+            state: Some(json!({"last_message_to": target.label()})),
+            ..Default::default()
+        })
+    }
+}
+
+struct NotifyOwner;
+
+#[async_trait]
+impl Tool for NotifyOwner {
+    fn name(&self) -> &'static str {
+        "notify_owner"
+    }
+    fn description(&self) -> &'static str {
+        "Tell the person this assistant works for something, in their Post Room notifications (for example \"Support replied\" or \"3 emails need attention\"). \
+         Set email_line to true to also email them a one-line version."
+    }
+    fn schema(&self) -> Value {
+        object(
+            json!({
+                "subject": {"type": "string", "description": "A short headline"},
+                "body": {"type": "string", "description": "One or two plain sentences"},
+                "email_line": {"type": "boolean"}
+            }),
+            &["subject"],
+        )
+    }
+    fn risk(&self) -> Risk {
+        Risk::Low
+    }
+    async fn run(&self, ctx: &ToolCtx<'_>, args: &Value) -> Result<ToolOutput, ToolError> {
+        let subject = str_arg(args, "subject")?;
+        if ctx.case.shadow {
+            return Ok(ToolOutput {
+                summary: "Observe mode: would have notified the owner; nothing was done".into(),
+                value: json!({"simulated": true}),
+                ..Default::default()
+            });
+        }
+        let Some(owner) = ctx.case.agent_user_id.as_deref() else {
+            return failed("This case has no owner to notify.");
+        };
+        let link = ctx.case.message_id.as_deref().map_or(json!({"kind": "meera"}), |m| json!({"kind": "message", "id": m}));
+        let id = crate::messaging::inapp::notify_owner(
+            ctx.state,
+            ctx.ws(),
+            owner,
+            ctx.case.agent_id.as_deref(),
+            subject,
+            opt_str(args, "body").unwrap_or_default(),
+            link,
+            args.get("email_line").and_then(Value::as_bool) == Some(true),
+        )
+        .await?;
+        Ok(ToolOutput { summary: format!("Told the owner: {}", sentence(subject, 80)), value: json!({"notified": true, "notice_id": id}), ..Default::default() })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
@@ -1252,7 +1411,7 @@ mod tests {
         let expected = [
             "search_mail", "read_email", "read_thread", "find_candidates", "recall_memory", "draft_email", "create_task",
             "schedule_check", "update_case", "extract_fields", "label_email", "save_to_gmail_drafts", "send_email", "submit_candidate",
-            "propose_automation",
+            "propose_automation", "send_message", "notify_owner",
         ];
         assert_eq!(names, expected.into_iter().collect());
         let specs = reg.specs();

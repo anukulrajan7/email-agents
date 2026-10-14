@@ -52,9 +52,9 @@ impl Scope {
 pub fn scope_of_tool(tool: &str) -> Scope {
     match tool {
         "draft_email" => Scope::Draft,
-        "send_email" | "submit_candidate" => Scope::Send,
+        "send_email" | "submit_candidate" | "send_message" => Scope::Send,
         "save_to_gmail_drafts" => Scope::Draft,
-        "create_task" | "update_case" | "label_email" => Scope::Label,
+        "create_task" | "update_case" | "label_email" | "notify_owner" => Scope::Label,
         "schedule_check" | "propose_automation" => Scope::Schedule,
         _ => Scope::ReadMail,
     }

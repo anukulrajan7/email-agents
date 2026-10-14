@@ -228,6 +228,15 @@ pub async fn run_step(state: &AppState, ws: &str, case_id: &str, turn: i64) -> R
             Err(AiError::Permanent(e)) => {
                 // The same request fails the same way: stop now instead of retrying it.
                 tracing::warn!(case_id = %case.id, error = %e, "planner refused the request");
+                crate::incidents::record(
+                    &state.db,
+                    crate::incidents::NewIncident::new(&case.workspace_id, crate::incidents::Kind::Refusal, json!({"source": "planner"}))
+                        .agent(case.agent_id.as_deref())
+                        .case(Some(&case.id))
+                        .message(case.message_id.as_deref())
+                        .dedupe(format!("refusal:{}", case.id)),
+                )
+                .await;
                 let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
                 case::fail(&mut tx, &case, &format!("The AI model couldn't take this request ({e})")).await?;
                 tx.commit().await?;
@@ -272,7 +281,7 @@ fn permission_block(agent: &AgentContext, tool: &str) -> Option<String> {
         "draft_email" | "save_to_gmail_drafts" if !agent.agent.permissions.draft => {
             Some(format!("Writing drafts is switched off for {name}; create a task for a person instead."))
         }
-        "send_email" | "submit_candidate" if agent.agent.permissions.send == "never" => {
+        "send_email" | "submit_candidate" | "send_message" if agent.agent.permissions.send == "never" => {
             Some(format!("Sending is switched off for {name}; create a task for a person instead."))
         }
         _ => None,
@@ -393,7 +402,12 @@ async fn evaluate(
     let mut auto_sent = false;
     if tool.risk() == Risk::High {
         let preview = preview.unwrap_or_default();
-        if tool.name() != "send_email" || !autonomy::may_send_on_its_own(state, case, agent, case_agent, &preview).await? {
+        let on_its_own = match tool.name() {
+            "send_email" => autonomy::may_send_on_its_own(state, case, agent, case_agent, &preview).await?,
+            "send_message" => crate::messaging::rules::may_send_on_its_own(state, case, agent, case_agent, &args).await?,
+            _ => false,
+        };
+        if !on_its_own {
             return Ok(TurnResult::Approval { tool: tool_name, input: args, preview });
         }
         // A fixed workflow only asks the critic when a send would go out without a person.
@@ -628,6 +642,7 @@ async fn commit(state: &AppState, case: &Case, turn: i64, usage: &Usage, result:
                 .bind(&case.workspace_id)
                 .execute(&mut *tx)
                 .await?;
+            crate::messaging::watch::on_case_ended(&mut tx, &case.workspace_id, &case.id).await?;
             audit::record(
                 &mut tx,
                 Entry {
