@@ -52,7 +52,7 @@ impl Who {
             .await?
             .into_iter()
             .map(|a| {
-                let badge = if a.kind == "lead" { agent.clone() } else { json!({"name": a.name, "avatar": a.avatar, "color": a.color}) };
+                let badge = if a.kind == "lead" || a.is_personal() { agent.clone() } else { json!({"name": a.name, "avatar": a.avatar, "color": a.color}) };
                 (a.id, badge)
             })
             .collect();
@@ -220,7 +220,7 @@ async fn create_case(
         triggers::Started::NotFound => return Err(AppError::NotFound),
         triggers::Started::NotAllowed(why) => return Err(AppError::Conflict(why)),
     };
-    let c = case::get_in(&state.db, &ws, &case_id).await?.ok_or(AppError::NotFound)?;
+    let c = visible_case(&state, &ws, &user.id, &case_id).await?;
     Ok(Json(Who::load(&state, &ws).await?.case(&c)))
 }
 
@@ -250,6 +250,9 @@ async fn cancel_case(State(state): State<AppState>, user: AuthUser, Path((ws, id
     .bind(&c.id)
     .execute(&mut *tx)
     .await?;
+    if let (Some(agent_id), Some(message_id)) = (c.agent_id.as_deref(), c.message_id.as_deref()) {
+        crate::agent_registry::store::release_held_sends(&mut tx, &ws, Some(agent_id), Some(message_id)).await?;
+    }
     case::insert_step(&mut tx, &c, NewStep::note(c.step_count, "Cancelled by a person", "ok")).await?;
     audit::record(
         &mut tx,

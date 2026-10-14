@@ -13,9 +13,7 @@ use crate::{
     agent_profiles::AgentContext,
     agent_registry::runtime::CaseAgent,
     audit::{self, Actor, Entry},
-    db::now_ms,
     http::AppState,
-    jobs::{self, kind},
     replies,
 };
 
@@ -197,6 +195,20 @@ pub async fn may_send_on_its_own(state: &AppState, case: &Case, ctx: &AgentConte
         tracing::info!(case_id = %case.id, "daily routine-send cap reached; asking a person");
         return Ok(false);
     }
+    let machine_written: bool = match preview.draft_id.as_deref() {
+        Some(id) => sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM drafts WHERE id = ?1 AND workspace_id = ?2 AND status = 'suggested' AND origin_key IS NOT NULL)",
+        )
+        .bind(id)
+        .bind(&case.workspace_id)
+        .fetch_one(&state.db)
+        .await?,
+        None => false,
+    };
+    if !machine_written {
+        tracing::info!(case_id = %case.id, "a reply a person wrote or edited never goes out on its own");
+        return Ok(false);
+    }
     let Some(to) = preview.to.as_deref().map(str::to_lowercase) else { return Ok(false) };
     let original_sender: Option<String> = sqlx::query_scalar(
         "SELECT lower(sender_address) FROM email_messages
@@ -251,45 +263,11 @@ pub async fn may_send_on_its_own(state: &AppState, case: &Case, ctx: &AgentConte
     }
 }
 
-/// Holds an automatic send for `AGENT_AUTO_SEND_DELAY_SECS` so a person can stop it ("Going out
-/// soon"). The send was just scheduled by `replies::send_draft`; this pushes its `send_at` back and
-/// schedules the job for the new time (the earlier job sees a different `send_at` and does nothing).
-/// Returns the new send time, or `None` when no delay applies or the send already started.
-pub async fn hold_auto_send(state: &AppState, ws: &str, draft_id: &str) -> sqlx::Result<Option<i64>> {
-    let delay = state.config.agent_auto_send_delay_secs;
-    if delay <= 0 {
-        return Ok(None);
-    }
-    let send_at = now_ms() + delay * 1_000;
-    let mut tx = state.db.begin().await?;
-    let moved = sqlx::query(
-        "UPDATE drafts SET send_at = ?1, updated_at = ?2
-         WHERE id = ?3 AND workspace_id = ?4 AND status != 'sent' AND send_at IS NOT NULL AND send_at < ?1 AND send_attempt_id IS NULL",
-    )
-    .bind(send_at)
-    .bind(now_ms())
-    .bind(draft_id)
-    .bind(ws)
-    .execute(&mut *tx)
-    .await?
-    .rows_affected()
-        == 1;
-    if !moved {
-        tx.rollback().await?;
-        return Ok(None);
-    }
-    jobs::enqueue_at(
-        &mut tx,
-        kind::SEND_DRAFT,
-        &format!("send_draft:{draft_id}:{send_at}"),
-        Some(ws),
-        &json!({ "workspace_id": ws, "draft_id": draft_id, "send_at": send_at }),
-        jobs::PROVIDER_MAX_ATTEMPTS,
-        send_at,
-    )
-    .await?;
+/// Notes in the audit trail that an automatic send was held until `send_at` so a person can stop it.
+pub async fn record_hold(state: &AppState, ws: &str, draft_id: &str, send_at: i64, delay_secs: i64) -> sqlx::Result<()> {
+    let mut conn = state.db.acquire().await?;
     audit::record(
-        &mut tx,
+        &mut conn,
         Entry {
             workspace_id: ws,
             actor: Actor::System,
@@ -297,12 +275,55 @@ pub async fn hold_auto_send(state: &AppState, ws: &str, draft_id: &str) -> sqlx:
             entity_type: "draft",
             entity_id: draft_id,
             message_id: None,
-            metadata: json!({ "send_at": send_at, "delay_secs": delay }),
+            metadata: json!({ "send_at": send_at, "delay_secs": delay_secs }),
         },
     )
-    .await?;
-    tx.commit().await?;
-    Ok(Some(send_at))
+    .await
+}
+
+/// Why a held automatic send must not go out any more, if it must: the agent that wrote it was
+/// paused or archived, its effective level fell below 2, or the workspace no longer lets routine
+/// replies go. The send then waits for a person. Drafts that no agent wrote are not checked.
+pub async fn automated_send_stopped(state: &AppState, ws: &str, draft_id: &str) -> sqlx::Result<Option<&'static str>> {
+    let agent_id: Option<String> = sqlx::query_scalar("SELECT agent_id FROM drafts WHERE id = ?1 AND workspace_id = ?2")
+        .bind(draft_id)
+        .bind(ws)
+        .fetch_optional(&state.db)
+        .await?
+        .flatten();
+    let Some(agent_id) = agent_id else { return Ok(None) };
+    let Some(row) = crate::agent_registry::store::get_in(&state.db, ws, &agent_id).await? else { return Ok(Some("the agent no longer exists")) };
+    if row.status != "active" {
+        return Ok(Some("the agent is not active"));
+    }
+    let (spec, _) = crate::agent_registry::versions::active_spec_in(&state.db, &row).await?;
+    let mailbox_owner: Option<String> = sqlx::query_scalar(
+        "SELECT s.connected_by_user_id FROM drafts d JOIN email_messages m ON m.id = d.message_id
+         JOIN email_sources s ON s.id = m.source_id WHERE d.id = ?1",
+    )
+    .bind(draft_id)
+    .fetch_optional(&state.db)
+    .await?
+    .flatten();
+    let routine_ok = match mailbox_owner {
+        Some(owner) => crate::agent_profiles::user_profile(&state.db, ws, &owner).await?.is_some_and(|p| p.routine_ok()),
+        None => false,
+    };
+    let level = effective_level(LevelInputs {
+        earned: row.autonomy_level,
+        cap: row.autonomy_cap,
+        spec_max: i64::from(spec.permissions.max_autonomy),
+        env_max: state.config.agent_max_autonomy,
+        profile_asks_first: !routine_ok,
+        active: true,
+    });
+    if level.level < 2 {
+        return Ok(Some("the agent's level no longer allows sending on its own"));
+    }
+    if crate::agent_profiles::agent(&state.db, &state.config, ws).await?.permissions.send != "auto" {
+        return Ok(Some("the workspace no longer lets routine replies go"));
+    }
+    Ok(None)
 }
 
 #[cfg(test)]

@@ -164,7 +164,7 @@ pub fn parse_tool_message(message: &Value) -> Decision {
 }
 
 /// The planner only emits a tool call or `finish`, so its answers are short.
-pub const PLANNER_MAX_TOKENS: u32 = 300;
+pub const PLANNER_MAX_TOKENS: u32 = 700;
 
 /// Which model plans this turn: a configured tier model first (already the agent's tier raised by
 /// `premium`), else the premium planner model for premium turns, else the default planner model.
@@ -381,7 +381,7 @@ mod tests {
         assert_eq!(pick_model(&req, "flash", "pro"), "tier-model", "a configured tier model wins");
         req.model = Some(String::new());
         assert_eq!(pick_model(&req, "flash", "pro"), "pro");
-        assert_eq!(PLANNER_MAX_TOKENS, 300);
+        assert_eq!(PLANNER_MAX_TOKENS, 700);
     }
 
     #[test]

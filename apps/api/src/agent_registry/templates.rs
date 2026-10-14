@@ -127,12 +127,12 @@ fn inbox() -> AgentSpec {
             name: "Inbox Assistant",
             key: "inbox_assistant",
             category: "general",
-            description: "Drafts replies to mail that waits for an answer and reminds you when nobody replied.",
+            description: "Drafts replies to mail that waits for an answer.",
             goal: "Draft a reply to each email that needs one and follow up if the conversation goes quiet",
             mode: Mode::Workflow,
         },
         vec![Trigger::EmailReceived { matcher: TriggerMatch { needs_reply: Some(true), ..Default::default() } }],
-        vec![Step::DraftReply { quality: QualityTier::Balanced }, Step::RemindIfNoReply { hours: 48 }],
+        vec![Step::DraftReply { quality: QualityTier::Balanced }],
         tools(&["draft_email", "create_task", "schedule_check", "update_case", "send_email"]),
         perms(SendMode::Earned, 2),
     )
@@ -375,7 +375,7 @@ fn mailbox() -> AgentSpec {
             mode: Mode::Workflow,
         },
         vec![Trigger::Manual],
-        vec![Step::DraftReply { quality: QualityTier::Balanced }, Step::RemindIfNoReply { hours: 48 }],
+        vec![Step::DraftReply { quality: QualityTier::Balanced }],
         tools(&["draft_email", "create_task", "schedule_check", "update_case", "send_email"]),
         perms(SendMode::Earned, 2),
     );

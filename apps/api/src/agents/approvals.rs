@@ -107,10 +107,24 @@ pub async fn pending_count(db: &SqlitePool, ws: &str, viewer: &str) -> sqlx::Res
 
 /// Fingerprint of exactly what the person approved: recipient, subject and the final text.
 fn approved_hash(approval: &ApprovalRow, edited: Option<&str>) -> String {
+    fingerprint(approval.to_address.as_deref(), approval.subject.as_deref(), edited.unwrap_or(&approval.body))
+}
+
+fn fingerprint(to: Option<&str>, subject: Option<&str>, body: &str) -> String {
     use sha2::{Digest, Sha256};
-    let body = edited.unwrap_or(&approval.body);
-    let material = format!("{}\n{}\n{}", approval.to_address.as_deref().unwrap_or(""), approval.subject.as_deref().unwrap_or(""), body.trim());
+    let material = format!("{}\n{}\n{}", to.unwrap_or(""), subject.unwrap_or(""), body.trim());
     Sha256::digest(material.as_bytes()).iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Does the reply that is about to go out still match what the person approved?
+async fn matches_approval(state: &AppState, ws: &str, approval: &ApprovalRow, approved: &str) -> sqlx::Result<bool> {
+    let Some(draft_id) = approval.draft_id.as_deref() else { return Ok(true) };
+    let body: Option<String> = sqlx::query_scalar("SELECT body_text FROM drafts WHERE id = ?1 AND workspace_id = ?2")
+        .bind(draft_id)
+        .bind(ws)
+        .fetch_optional(&state.db)
+        .await?;
+    Ok(body.is_none_or(|b| fingerprint(approval.to_address.as_deref(), approval.subject.as_deref(), &b) == approved))
 }
 
 pub struct Decision<'a> {
@@ -187,8 +201,15 @@ pub async fn decide(state: &AppState, ws: &str, approval_id: &str, user_id: &str
     let step = if d.approve {
         let tool = tools::registry().get(tools::tool_for_approval(&approval.action)).ok_or_else(|| AppError::Internal(anyhow::anyhow!("unknown approval action")))?;
         let args: Value = serde_json::from_str(&approval.input_json).unwrap_or_else(|_| json!({}));
-        let ctx = ToolCtx { state, case: &case, turn: case.step_count, actor: Actor::User(user_id) };
-        match tool.run(&ctx, &args).await {
+        let ctx = ToolCtx { state, case: &case, turn: case.step_count, actor: Actor::User(user_id), hold_secs: 0 };
+        let approved = approved_hash(&approval, edited.as_deref());
+        let unchanged = approval.action != "send_email" || matches_approval(state, ws, &approval, &approved).await?;
+        let ran = if unchanged {
+            tool.run(&ctx, &args).await
+        } else {
+            Err(ToolError::Failed("the reply changed after it was approved; it needs to be approved again".into()))
+        };
+        match ran {
             Ok(out) => (format!("Approved by a person. {}", out.summary), out.value, "ok", out.state),
             Err(ToolError::Failed(m)) => {
                 (format!("Approved, but it could not be sent: {m}"), json!({"error": m}), "error", None)

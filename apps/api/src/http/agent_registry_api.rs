@@ -326,6 +326,9 @@ async fn update(
         }
         store::set_autonomy_cap(&mut tx, &ws, &id, cap).await?;
     }
+    if body.status.as_deref().is_some_and(|s| s != "active") || body.autonomy_cap.is_some_and(|c| c < 2) {
+        store::release_held_sends(&mut tx, &ws, Some(&id), None).await?;
+    }
     audit_change(
         &mut tx,
         &ws,
@@ -601,6 +604,9 @@ async fn pause_all(State(state): State<AppState>, user: AuthUser, Path(ws): Path
     .execute(&mut *tx)
     .await?
     .rows_affected();
+    if body.paused {
+        store::release_held_sends(&mut tx, &ws, None, None).await?;
+    }
     audit::record(
         &mut tx,
         Entry {

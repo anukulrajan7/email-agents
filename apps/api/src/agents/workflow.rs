@@ -190,7 +190,7 @@ mod tests {
         for key in [INBOX_KEY, PERSONAL_KEY] {
             let spec = template(key).unwrap().spec();
             assert_eq!(spec.mode, Mode::Workflow, "{key}");
-            assert_eq!(steps_for(&spec), [WfStep::Draft, WfStep::Send, WfStep::Sleep(48), WfStep::Nudge], "{key}");
+            assert_eq!(steps_for(&spec), [WfStep::Draft, WfStep::Send], "{key}");
             assert!(applies(&spec, &case(json!({}))));
         }
         let lead = template("general.lead").unwrap().spec();
@@ -199,7 +199,9 @@ mod tests {
 
     #[test]
     fn steps_run_in_order_then_finish() {
-        let spec = template(INBOX_KEY).unwrap().spec();
+        let mut spec = template(INBOX_KEY).unwrap().spec();
+        assert_eq!(steps_for(&spec), [WfStep::Draft, WfStep::Send], "the reminder is off until the owner turns it on");
+        spec.steps.push(Step::RemindIfNoReply { hours: 48 });
         let at = |pos: u64, extra: Value| {
             let mut state = json!({POS_KEY: pos, "last_draft_id": "d1"});
             state.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());

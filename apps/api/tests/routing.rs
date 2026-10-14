@@ -93,9 +93,9 @@ async fn an_observing_agent_runs_a_shadow_case_beside_the_real_one_and_writes_no
         tool("create_task", json!({"title": "Check the parcel"})),
         finish(None, "Done."),
     ];
-    let env = Env::new(Opts::packs(&["general", "support"]).planner(ScriptedPlanner::new().script("shadow", script))).await;
+    let env = Env::new(Opts::packs(&["general", "support"]).planner(ScriptedPlanner::new().script("shadow", script).script("inbox", vec![tool("draft_email", json!({"message_id": "$message_id"})), finish(None, "Drafted.")]))).await;
     let resolver = env.agent_id(ADMIN, "support.resolver").await;
-    let inbox = env.agent_id(ADMIN, "general.inbox").await;
+    let inbox = env.agent_id(ADMIN, "general.lead").await;
     let msg = env.receive(&env.shared_src, "m1", "t1", CLIENT, "Where is my parcel?", "Hello, where is my parcel?", "question").await;
 
     let routed = env.route(&msg).await;
@@ -109,9 +109,9 @@ async fn an_observing_agent_runs_a_shadow_case_beside_the_real_one_and_writes_no
     assert_eq!((shadow_agent.as_deref(), shadow_flag), (Some(resolver.as_str()), true));
     assert_eq!(cases[0].1.as_deref(), Some(inbox.as_str()));
 
-    // The real case is the Inbox Assistant's fixed workflow: a draft that waits for a person.
+    // The real case is Meera's, the lead's: she drafts while the desk only observes.
     let real = env.case(ADMIN, &real_case).await;
-    assert_eq!((real["status"].as_str(), real["shadow"].as_bool()), (Some("waiting_approval"), Some(false)), "{real}");
+    assert_eq!((real["status"].as_str(), real["shadow"].as_bool(), real["agent"]["name"].as_str()), (Some("done"), Some(false), Some("Meera")), "{real}");
     // The observing case ran the planner, but nothing it did left a mark.
     let shadow = env.case(ADMIN, &shadow_id).await;
     assert_eq!(shadow["shadow"], true);

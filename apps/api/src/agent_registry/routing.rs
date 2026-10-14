@@ -203,7 +203,15 @@ pub fn route(f: &MessageFacts, hints: &Hints, agents: &[RoutingAgent]) -> Option
     chain.extend(lead.map(|a| (a, Source::Fallback)));
 
     let (primary, source) = *chain.first()?;
-    let handler = chain.iter().map(|(a, _)| *a).find(|a| a.level >= 1).or(lead).unwrap_or(primary);
+    let observing = primary.level == 0;
+    let handler = if observing {
+        lead.filter(|l| l.level >= 1)
+            .or_else(|| chain.iter().map(|(a, _)| *a).find(|a| a.level >= 1 && !a.row.is_personal()))
+            .or(lead)
+            .unwrap_or(primary)
+    } else {
+        primary
+    };
     Some(Route { agent_id: primary.row.id.clone(), source, shadow: primary.level == 0, handler_id: handler.row.id.clone() })
 }
 
@@ -506,7 +514,7 @@ mod tests {
         agents.iter_mut().find(|a| a.row.id == "resolver").unwrap().level = 0;
         let r = route(&facts("question"), &Hints::default(), &agents).unwrap();
         assert_eq!((r.agent_id.as_str(), r.shadow, r.source), ("resolver", true, Source::Label));
-        assert_eq!(r.handler_id, "inbox", "the next candidate at level 1 or more handles it");
+        assert_eq!(r.handler_id, "lead", "Meera, the lead, works the mail meanwhile");
         let r = route(&facts("general"), &Hints::default(), &agents).unwrap();
         assert!(!r.shadow);
         assert_eq!(r.agent_id, r.handler_id);

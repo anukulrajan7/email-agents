@@ -77,6 +77,8 @@ pub struct ToolCtx<'a> {
     pub turn: i64,
     /// Who the action is done for: the system, or the person who approved it.
     pub actor: Actor<'a>,
+    /// An automatic send is held this many seconds (0 for a send a person approved).
+    pub hold_secs: i64,
 }
 
 impl ToolCtx<'_> {
@@ -563,14 +565,18 @@ impl Tool for DraftEmail {
             return failed("Replies can only go to this case's conversation.");
         }
         let instructions = opt_str(args, "instructions");
-        // Without new instructions, reuse an unsent reply already suggested for this email.
+        // Without new instructions, reuse an unsent reply the system or an agent suggested for this
+        // email. A reply a person wrote or edited is never reused or claimed by an agent.
         let reused: Option<(String, String)> = match instructions {
             Some(_) => None,
             None if ctx.case.shadow => None,
             None => sqlx::query_as(
-                "SELECT id, body_text FROM drafts WHERE message_id = ?1 AND status != 'sent' ORDER BY created_at DESC, id DESC LIMIT 1",
+                "SELECT id, body_text FROM drafts
+                 WHERE message_id = ?1 AND workspace_id = ?2 AND status = 'suggested' AND origin_key IS NOT NULL AND send_at IS NULL
+                 ORDER BY created_at DESC, id DESC LIMIT 1",
             )
             .bind(&msg.id)
+            .bind(ctx.ws())
             .fetch_optional(&ctx.state.db)
             .await?,
         };
@@ -607,7 +613,7 @@ impl Tool for DraftEmail {
             }
         };
         if let Some(agent_id) = &ctx.case.agent_id {
-            sqlx::query("UPDATE drafts SET agent_id = ?1 WHERE id = ?2 AND workspace_id = ?3 AND agent_id IS NULL")
+            sqlx::query("UPDATE drafts SET agent_id = ?1 WHERE id = ?2 AND workspace_id = ?3 AND agent_id IS NULL AND status = 'suggested' AND origin_key IS NOT NULL")
                 .bind(agent_id)
                 .bind(&draft_id)
                 .bind(ctx.ws())
@@ -818,10 +824,10 @@ impl Tool for SendEmail {
     async fn run(&self, ctx: &ToolCtx<'_>, args: &Value) -> Result<ToolOutput, ToolError> {
         let preview = draft_preview(ctx, str_arg(args, "draft_id")?).await?;
         let draft_id = preview.draft_id.clone().unwrap_or_default();
-        let scheduled = replies::send_draft(ctx.state, ctx.ws(), &draft_id, ctx.actor).await?;
+        let scheduled = replies::send_draft_held(ctx.state, ctx.ws(), &draft_id, ctx.actor, ctx.hold_secs).await?;
         Ok(ToolOutput {
             summary: format!("Reply to {} is sending (can be undone for a few seconds)", preview.to.unwrap_or_default()),
-            value: json!({"scheduled": true, "draft_id": draft_id, "send_at": scheduled.send_at}),
+            value: json!({"scheduled": true, "draft_id": draft_id, "send_at": scheduled.send_at, "send_at_ms": scheduled.send_at_ms}),
             state: Some(json!({"last_sent_draft_id": draft_id})),
             ..Default::default()
         })
@@ -889,7 +895,7 @@ impl Tool for SubmitCandidate {
             return failed("Only matched candidates of this requirement can be submitted.");
         }
         let draft_id = preview.draft_id.clone().unwrap_or_default();
-        let scheduled = replies::send_draft(ctx.state, ctx.ws(), &draft_id, ctx.actor).await?;
+        let scheduled = replies::send_draft_held(ctx.state, ctx.ws(), &draft_id, ctx.actor, ctx.hold_secs).await?;
         let ids: Vec<String> = preview.candidates.iter().map(|p| p.id.clone()).collect();
         let decided_by = match ctx.actor {
             Actor::User(u) => Some(u),

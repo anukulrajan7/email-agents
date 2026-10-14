@@ -71,8 +71,9 @@ pub async fn load(db: &SqlitePool, config: &Config, case: &Case, owner: Option<&
     Ok(CaseAgent { row, spec, version, level })
 }
 
-fn playbook(spec: &AgentSpec, team_notes: &str) -> String {
-    let mut out = format!("Your role: {}. {}\nYour goal: {}\n", spec.name, spec.description.trim(), spec.goal.trim());
+fn playbook(spec: &AgentSpec, persona: &str, personal: bool) -> String {
+    let role = if personal { "the mailbox owner's own assistant" } else { spec.name.as_str() };
+    let mut out = format!("Your role: {role}. {}\nYour goal: {}\n", spec.description.trim(), spec.goal.trim());
     if spec.mode == Mode::Workflow && !spec.steps.is_empty() {
         out.push_str("Work through these steps in order, skipping any that do not apply:\n");
         for (i, s) in spec.steps.iter().enumerate() {
@@ -87,10 +88,13 @@ fn playbook(spec: &AgentSpec, team_notes: &str) -> String {
         out.push_str("Never:\n");
         spec.drafting.never_do.iter().for_each(|r| out.push_str(&format!("- {r}\n")));
     }
-    if !team_notes.trim().is_empty() {
-        out.push_str(&format!("\nTeam notes shared by every agent of this workspace:\n{}", team_notes.trim()));
+    if personal {
+        out.push_str("\nYou are working in the mailbox owner's own mail. Write in their voice and follow their profile.\n");
     }
-    out
+    if persona.trim().is_empty() {
+        return out;
+    }
+    format!("{}\n\n{out}", persona.trim())
 }
 
 /// The workspace agent as this agent: its own name, look, rules and permissions, inside the
@@ -111,11 +115,14 @@ pub fn adapt(mut ctx: AgentContext, agent: &CaseAgent) -> AgentContext {
         "balanced" => ws.quality.clone(),
         tier => tier.to_string(),
     };
+    let personal = agent.row.is_personal();
+    let (name, avatar, color) =
+        if personal { (ws.name.clone(), ws.avatar.clone(), ws.color.clone()) } else { (agent.row.name.clone(), agent.row.avatar.clone(), agent.row.color.clone()) };
     ctx.agent = WorkspaceAgent {
-        name: agent.row.name.clone(),
-        avatar: agent.row.avatar.clone(),
-        color: agent.row.color.clone(),
-        persona: playbook(&agent.spec, &ws.persona),
+        name,
+        avatar,
+        color,
+        persona: playbook(&agent.spec, &ws.persona, personal),
         permissions: agent_profiles::Permissions { draft: ws.permissions.draft && agent.spec.permissions.draft, send: send.into() },
         quality,
         enabled: ws.enabled,

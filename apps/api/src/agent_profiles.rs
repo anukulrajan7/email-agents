@@ -214,8 +214,17 @@ pub async fn agent(db: &SqlitePool, config: &Config, ws: &str) -> sqlx::Result<W
     find().await?.ok_or(sqlx::Error::RowNotFound)
 }
 
+async fn agent_row_send(conn: &mut sqlx::SqliteConnection, ws: &str) -> sqlx::Result<String> {
+    let json: Option<String> = sqlx::query_scalar("SELECT permissions_json FROM workspace_agents WHERE workspace_id = ?1").bind(ws).fetch_optional(conn).await?;
+    Ok(json
+        .and_then(|j| serde_json::from_str::<serde_json::Value>(&j).ok())
+        .and_then(|v| v.get("send").and_then(|s| s.as_str().map(str::to_string)))
+        .unwrap_or_else(|| "ask".into()))
+}
+
 pub async fn save_agent(db: &SqlitePool, ws: &str, f: &AgentFields, user_id: &str) -> sqlx::Result<()> {
     let mut tx = db.begin().await?;
+    let previous_send = agent_row_send(&mut tx, ws).await?;
     sqlx::query(
         "UPDATE workspace_agents SET name = ?1, avatar = ?2, color = ?3, persona = ?4, signature = ?5, tasks_json = ?6,
                 permissions_json = ?7, quality = ?8, enabled = ?9, updated_by = ?10, updated_at = ?11
@@ -239,7 +248,7 @@ pub async fn save_agent(db: &SqlitePool, ws: &str, f: &AgentFields, user_id: &st
     if let Some(lead) = crate::agent_registry::store::lead(&mut *tx, ws).await? {
         crate::agent_registry::store::set_identity(&mut tx, ws, &lead.id, &f.name, &f.avatar, &f.color).await?;
     }
-    crate::agent_registry::store::sync_default_agents_from_settings(&mut tx, ws, &f.permissions.send).await?;
+    crate::agent_registry::store::sync_default_agents_from_settings(&mut tx, ws, &previous_send, &f.permissions.send).await?;
     tx.commit().await
 }
 

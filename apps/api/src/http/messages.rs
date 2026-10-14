@@ -414,6 +414,14 @@ pub async fn detail(
     .bind(&id)
     .fetch_all(&state.db)
     .await?;
+    let mut visible_audit = Vec::with_capacity(audit_rows.len());
+    for row in audit_rows {
+        let agent = crate::agent_registry::store::entity_agent(&state.db, &ws, &row.entity_type, &row.entity_id).await?;
+        if crate::agent_registry::store::can_see(&state.db, &ws, agent.as_deref(), &user.id).await? {
+            visible_audit.push(row);
+        }
+    }
+    let audit_rows = visible_audit;
 
     let draft = match draft {
         Some(row) => Some(draft_with_memories(&state.db, row).await?),

@@ -297,6 +297,14 @@ async fn send_reply(
     if replies::has_open_gaps(&body) || !matches!(unanswered.trim(), "" | "[]") {
         return Ok(skipped(K, "draft has unanswered questions ([NEEDS: ...])"));
     }
+    let thread_id: Option<String> = sqlx::query_scalar("SELECT thread_id FROM email_messages WHERE id = ?1 AND workspace_id = ?2")
+        .bind(&ctx.id)
+        .bind(workspace_id)
+        .fetch_optional(&state.db)
+        .await?;
+    if let Some(why) = crate::agents::injection::scan_conversation(&state.db, workspace_id, thread_id.as_deref(), Some(&ctx.id)).await? {
+        return Ok(skipped(K, format!("not sent on its own: {why}")));
+    }
     let domain = sender_domain(&ctx.sender_address);
     if !allowed_domains.iter().any(|d| d.trim().to_lowercase() == domain) {
         return Ok(skipped(K, "sender's domain is not in allowed_domains"));

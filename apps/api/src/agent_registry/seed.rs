@@ -123,6 +123,15 @@ pub async fn pause_for_packs_off(conn: &mut SqliteConnection, ws: &str, keys: &[
         .bind(t.key)
         .execute(&mut *conn)
         .await?;
+        sqlx::query(
+            "UPDATE drafts SET send_at = NULL
+             WHERE workspace_id = ?1 AND send_at IS NOT NULL AND send_attempt_id IS NULL AND send_requested_by IS NULL AND status != 'sent'
+               AND agent_id IN (SELECT id FROM agents WHERE workspace_id = ?1 AND template_key = ?2)",
+        )
+        .bind(ws)
+        .bind(t.key)
+        .execute(&mut *conn)
+        .await?;
     }
     Ok(())
 }
@@ -187,19 +196,24 @@ async fn incomplete(conn: &mut SqliteConnection, ws: &str) -> sqlx::Result<bool>
         "SELECT (NOT EXISTS (SELECT 1 FROM agents WHERE workspace_id = ?1 AND kind = 'lead'))
              + EXISTS (SELECT 1 FROM agents WHERE workspace_id = ?1 AND active_version IS NULL)
              + EXISTS (SELECT 1 FROM memberships m WHERE m.workspace_id = ?1 AND NOT EXISTS
-                         (SELECT 1 FROM agents a WHERE a.workspace_id = ?1 AND a.scope = 'personal' AND a.owner_user_id = m.user_id))
-             + EXISTS (SELECT 1 FROM agents WHERE workspace_id = ?1 AND tuned = 0 AND template_key IS NOT NULL AND COALESCE(template_version, 0) < ?2)",
+                         (SELECT 1 FROM agents a WHERE a.workspace_id = ?1 AND a.scope = 'personal' AND a.owner_user_id = m.user_id))",
     )
     .bind(ws)
-    .bind(templates::TEMPLATES.iter().map(|t| i64::from(t.version)).max().unwrap_or(1))
     .fetch_one(&mut *conn)
     .await?;
     if gaps > 0 {
         return Ok(true);
     }
-    let have: Vec<String> = sqlx::query_scalar("SELECT template_key FROM agents WHERE workspace_id = ?1 AND template_key IS NOT NULL").bind(ws).fetch_all(&mut *conn).await?;
+    let have: Vec<(String, Option<i64>, bool)> =
+        sqlx::query_as("SELECT template_key, template_version, tuned FROM agents WHERE workspace_id = ?1 AND template_key IS NOT NULL")
+            .bind(ws)
+            .fetch_all(&mut *conn)
+            .await?;
+    let outdated = have.iter().any(|(key, version, tuned)| {
+        !tuned && templates::template(key).is_some_and(|t| version.unwrap_or(0) < i64::from(t.version))
+    });
     let enabled = packs::enabled_keys(&mut *conn, ws).await?;
-    Ok(templates::for_packs(&enabled).any(|t| !have.iter().any(|h| h == t.key)))
+    Ok(outdated || templates::for_packs(&enabled).any(|t| !have.iter().any(|(h, _, _)| h == t.key)))
 }
 
 /// Seeds the workspace only if something is missing (cheap and read-only when complete).

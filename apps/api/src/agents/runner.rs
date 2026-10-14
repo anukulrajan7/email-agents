@@ -371,7 +371,7 @@ async fn evaluate(
         let out = ToolOutput { summary, value: json!({"simulated": true, "tool": tool_name}), ..Default::default() };
         return Ok(TurnResult::Ran { tool: tool_name, input: args, out, auto_sent: false });
     }
-    let ctx = ToolCtx { state, case, turn, actor: Actor::System };
+    let mut ctx = ToolCtx { state, case, turn, actor: Actor::System, hold_secs: 0 };
     let mut preview = None;
     if tool.risk() != Risk::Read {
         if tool.risk() == Risk::High {
@@ -401,16 +401,17 @@ async fn evaluate(
             return Ok(TurnResult::Approval { tool: tool_name, input: args, preview });
         }
         auto_sent = true;
+        ctx.hold_secs = state.config.agent_auto_send_delay_secs;
     }
     Ok(match tool.run(&ctx, &args).await {
         Ok(mut out) => {
             if auto_sent {
                 out.summary = format!("Sent automatically (your profile allows routine replies). {}", out.summary);
                 out.value["sent_without_approval"] = json!(true);
-                if let Some(draft_id) = out.value.get("draft_id").and_then(Value::as_str)
-                    && let Some(at) = autonomy::hold_auto_send(state, &case.workspace_id, draft_id).await?
+                if ctx.hold_secs > 0
+                    && let (Some(draft_id), Some(at)) = (out.value.get("draft_id").and_then(Value::as_str), out.value.get("send_at_ms").and_then(Value::as_i64))
                 {
-                    out.value["send_at"] = json!(crate::db::iso(at));
+                    autonomy::record_hold(state, &case.workspace_id, draft_id, at, ctx.hold_secs).await?;
                     out.value["held_until"] = json!(crate::db::iso(at));
                     out.summary = format!("{} Held until {} so you can stop it.", out.summary, crate::db::iso(at));
                 }

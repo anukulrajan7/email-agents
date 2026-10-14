@@ -10,6 +10,6 @@ pub mod templates;
 pub mod versions;
 
 /// Observing agents may start at most this many shadow cases per workspace per UTC day.
-pub const SHADOW_MAX_PER_DAY: i64 = 200;
+pub const SHADOW_MAX_PER_DAY: i64 = 50;
 /// A shadow case takes at most this many planner turns.
 pub const SHADOW_MAX_STEPS: i64 = 4;

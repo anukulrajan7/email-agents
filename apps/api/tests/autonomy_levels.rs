@@ -25,10 +25,20 @@ fn reply_script() -> Vec<Scripted> {
     ]
 }
 
+/// Levels are earned, not granted by a workspace switch; these tests start from agents that earned level 2.
+async fn earn_level_two(env: &Env) {
+    sqlx::query("UPDATE agents SET autonomy_level = 2, autonomy_cap = 2 WHERE workspace_id = ?1 AND (kind = 'lead' OR scope = 'personal')")
+        .bind(&env.ws)
+        .execute(&env.state.db)
+        .await
+        .unwrap();
+}
+
 /// A workspace where the lead may send routine replies, Priya agreed, and Ravi is a known contact.
 async fn auto_env(script: Vec<Scripted>, delay_secs: i64) -> Env {
     let env = Env::new(Opts::packs(&["general"]).planner(ScriptedPlanner::new().script("inbox", script)).config(move |c| c.agent_auto_send_delay_secs = delay_secs)).await;
     env.ok("PUT", "/agent", ADMIN, Some(json!({"permissions": {"send": "auto"}}))).await;
+    earn_level_two(&env).await;
     env.ok("PUT", "/me/agent-profile", OPERATOR, Some(json!({"display_name": "Priya", "approvals": {"send_email": "routine_ok"}}))).await;
     known_contact(&env).await;
     env
@@ -61,8 +71,10 @@ async fn the_effective_level_is_the_lowest_limit_and_names_it() {
     let mine = env.personal_id(OPERATOR).await;
     let level = |v: &Value| (v["autonomy"]["earned"].as_i64().unwrap(), v["autonomy"]["cap"].as_i64().unwrap(), v["autonomy"]["effective"].as_i64().unwrap(), v["autonomy"]["limited_by"].as_str().unwrap().to_string());
     assert_eq!(level(&env.ok("GET", &format!("/agents/{mine}"), OPERATOR, None).await), (1, 1, 1, "earned".to_string()));
-    // The workspace lets routine replies go: the lead and every personal agent move to level 2 ...
+    // The workspace lets routine replies go: nothing is raised by that switch alone ...
     env.ok("PUT", "/agent", ADMIN, Some(json!({"permissions": {"send": "auto"}}))).await;
+    assert_eq!(level(&env.ok("GET", &format!("/agents/{mine}"), OPERATOR, None).await), (1, 1, 1, "earned".to_string()));
+    earn_level_two(&env).await;
     // ... but Priya's own profile still asks first.
     assert_eq!(level(&env.ok("GET", &format!("/agents/{mine}"), OPERATOR, None).await), (2, 2, 1, "profile".to_string()));
     env.ok("PUT", "/me/agent-profile", OPERATOR, Some(json!({"display_name": "Priya", "approvals": {"send_email": "routine_ok"}}))).await;
@@ -312,6 +324,10 @@ async fn routine_mail_runs_as_a_fixed_workflow_without_the_planner() {
     let env = Env::new(Opts::packs(&["general"]).planner(ScriptedPlanner::new().script("inbox", vec![finish(None, "Handled by a person.")]))).await;
     let msg = env.receive(&env.shared_src, "m1", "t1", CLIENT, "Status update", "Hi team, the interview went well. Will update you.", "general").await;
     let inbox = env.agent_id(ADMIN, "general.inbox").await;
+    let mut spec = env.ok("GET", &format!("/agents/{inbox}"), ADMIN, None).await["spec"].clone();
+    assert!(spec["steps"].as_array().unwrap().iter().all(|s| s["type"] != "remind_if_no_reply"), "the 48-hour reminder is off by default");
+    spec["steps"].as_array_mut().unwrap().push(json!({"type": "remind_if_no_reply", "hours": 48}));
+    env.ok("PUT", &format!("/agents/{inbox}/spec"), ADMIN, Some(json!({"spec": spec}))).await;
     let case_id = env.start(&msg).await;
     let case = env.case(ADMIN, &case_id).await;
     assert_eq!(case["agent"]["name"], "Inbox Assistant");
@@ -367,8 +383,12 @@ async fn mail_that_is_not_routine_goes_to_the_planner() {
     for (why, msg) in cases {
         let id = env.start(&msg).await;
         let case = env.case(ADMIN, &id).await;
-        assert_eq!(case["state"]["wf"], "planner", "{why}: {case}");
-        assert!(case["state"]["wf_why"].is_string(), "{why}");
+        if why == "it is a complaint" {
+            assert_eq!(case["agent"]["name"], "Meera", "a label desk that only observes leaves the mail to the lead: {case}");
+        } else {
+            assert_eq!(case["state"]["wf"], "planner", "{why}: {case}");
+            assert!(case["state"]["wf_why"].is_string(), "{why}");
+        }
         assert_eq!(case["status"], "done", "{why}");
     }
     assert_eq!(env.planner.prompts().len(), 6, "one planner call for each of the five, plus the observing Escalations desk on the complaint");
@@ -443,4 +463,213 @@ async fn case_lookups_never_cross_workspaces() {
     runner::run_step(&env.state, &other_ws, &case_id, 99).await.unwrap();
     runner::run_step(&env.state, &other_ws, &case_id, 4).await.unwrap();
     assert_eq!(env.case(ADMIN, &case_id).await["steps"].as_array().unwrap().len(), before);
+}
+
+async fn held_env() -> (Env, String, String) {
+    let env = auto_env([reply_script(), reply_script()].concat(), 600).await;
+    let msg = env.receive(&env.op_src, "m1", "t1", CLIENT, "Status update", "Hi Priya, the interview went well. Will update you.", "general").await;
+    to_lead(&env, &msg).await;
+    let case_id = env.start(&msg).await;
+    let draft: String = sqlx::query_scalar("SELECT id FROM drafts WHERE workspace_id = ?1 AND message_id = ?2 AND send_at IS NOT NULL")
+        .bind(&env.ws)
+        .bind(&msg)
+        .fetch_one(&env.state.db)
+        .await
+        .expect("the reply is held");
+    (env, case_id, draft)
+}
+
+async fn send_at(env: &Env, draft: &str) -> Option<i64> {
+    sqlx::query_scalar("SELECT send_at FROM drafts WHERE id = ?1").bind(draft).fetch_one(&env.state.db).await.unwrap()
+}
+
+async fn make_due(env: &Env, draft: &str) {
+    let due = db::now_ms();
+    sqlx::query("UPDATE drafts SET send_at = ?1 WHERE id = ?2").bind(due).bind(draft).execute(&env.state.db).await.unwrap();
+    let mut conn = env.state.db.acquire().await.unwrap();
+    jobs::enqueue_at(&mut conn, kind::SEND_DRAFT, &format!("send_draft:{draft}:{due}"), Some(&env.ws), &json!({"workspace_id": env.ws, "draft_id": draft, "send_at": due}), 3, due).await.unwrap();
+    drop(conn);
+    worker::drain(&env.state).await;
+}
+
+#[tokio::test]
+async fn the_hold_is_part_of_the_same_claim_so_nothing_is_sent_early() {
+    let (env, _, draft) = held_env().await;
+    let wait = send_at(&env, &draft).await.unwrap() - db::now_ms();
+    assert!((590_000..=605_000).contains(&wait), "scheduled once, ten minutes ahead: {wait}");
+    let job_times: Vec<i64> = sqlx::query_scalar("SELECT run_at FROM jobs WHERE kind = 'send_draft' AND payload_json LIKE ?1")
+        .bind(format!("%{draft}%"))
+        .fetch_all(&env.state.db)
+        .await
+        .unwrap();
+    assert_eq!(job_times.len(), 1, "one send job, no early one: {job_times:?}");
+    assert!(job_times[0] > db::now_ms() + 590_000);
+    worker::drain(&env.state).await;
+    assert!(env.sends().is_empty(), "undo window is 0 seconds, the hold still applies");
+}
+
+#[tokio::test]
+async fn pausing_capping_or_switching_off_stops_held_sends() {
+    for how in ["pause_all", "cap_lowered", "workspace_asks_first"] {
+        let (env, _, draft) = held_env().await;
+        let lead = env.agent_id(ADMIN, "general.lead").await;
+        match how {
+            "pause_all" => drop(env.ok("POST", "/agents/pause-all", ADMIN, Some(json!({"paused": true}))).await),
+            "cap_lowered" => drop(env.ok("PATCH", &format!("/agents/{lead}"), ADMIN, Some(json!({"autonomy_cap": 1}))).await),
+            _ => drop(env.ok("PUT", "/agent", ADMIN, Some(json!({"permissions": {"send": "ask"}}))).await),
+        }
+        assert_eq!(send_at(&env, &draft).await, None, "{how}: the held send is released");
+        make_due(&env, &draft).await;
+        assert!(env.sends().is_empty(), "{how}: nothing goes out");
+    }
+}
+
+#[tokio::test]
+async fn cancelling_the_case_and_switching_a_pack_off_release_held_sends() {
+    let (env, case_id, draft) = held_env().await;
+    sqlx::query("UPDATE cases SET status = 'running' WHERE id = ?1").bind(&case_id).execute(&env.state.db).await.unwrap();
+    env.ok("POST", &format!("/cases/{case_id}/cancel"), ADMIN, None).await;
+    assert_eq!(send_at(&env, &draft).await, None, "cancelled case");
+
+    let (env, _, draft) = held_env().await;
+    let inbox = env.agent_id(ADMIN, "general.inbox").await;
+    sqlx::query("UPDATE drafts SET agent_id = ?1 WHERE id = ?2").bind(&inbox).bind(&draft).execute(&env.state.db).await.unwrap();
+    let mut conn = env.state.db.acquire().await.unwrap();
+    email_ai_api::agent_registry::seed::pause_for_packs_off(&mut conn, &env.ws, &["general"]).await.unwrap();
+    drop(conn);
+    assert_eq!(send_at(&env, &draft).await, None, "pack switched off");
+}
+
+#[tokio::test]
+async fn a_due_automatic_send_is_rechecked_against_the_agent_and_the_workspace() {
+    for how in ["agent_paused", "level_dropped", "workspace_asks_first"] {
+        let (env, _, draft) = held_env().await;
+        let lead = env.agent_id(ADMIN, "general.lead").await;
+        match how {
+            "agent_paused" => sqlx::query("UPDATE agents SET status = 'paused' WHERE id = ?1").bind(&lead),
+            "level_dropped" => sqlx::query("UPDATE agents SET autonomy_level = 1 WHERE id = ?1").bind(&lead),
+            _ => sqlx::query("UPDATE workspace_agents SET permissions_json = json_set(permissions_json, '$.send', 'ask') WHERE workspace_id = ?1 AND ?1 != ?2").bind(&env.ws).bind(&lead),
+        }
+        .execute(&env.state.db)
+        .await
+        .unwrap();
+        make_due(&env, &draft).await;
+        assert!(env.sends().is_empty(), "{how}: the due send is skipped");
+        assert_eq!(send_at(&env, &draft).await, None, "{how}: it waits for a person");
+    }
+}
+
+#[tokio::test]
+async fn a_members_own_draft_is_never_sent_or_claimed_by_an_agent() {
+    let human = "drf_human";
+    let script = vec![
+        tool("draft_email", json!({"message_id": "$message_id"})),
+        tool("send_email", json!({"draft_id": "drf_human"})),
+        finish(None, "Done."),
+    ];
+    let env = auto_env(script, 0).await;
+    let msg = env.receive(&env.op_src, "m1", "t1", CLIENT, "Status update", "Hi Priya, the interview went well. Will update you.", "general").await;
+    sqlx::query("INSERT INTO drafts (id, workspace_id, message_id, body_text, status, created_at, updated_at) VALUES (?1, ?2, ?3, 'Hello Ravi,\n\nMy own words.\n\nPriya', 'edited', ?4, ?4)")
+        .bind(human)
+        .bind(&env.ws)
+        .bind(&msg)
+        .bind(db::now_ms())
+        .execute(&env.state.db)
+        .await
+        .unwrap();
+    to_lead(&env, &msg).await;
+    let case = env.case(ADMIN, &env.start(&msg).await).await;
+    let (agent, status, at): (Option<String>, String, Option<i64>) = sqlx::query_as("SELECT agent_id, status, send_at FROM drafts WHERE id = ?1").bind(human).fetch_one(&env.state.db).await.unwrap();
+    assert_eq!((agent, status.as_str(), at), (None, "edited", None), "untouched: {case}");
+    assert!(env.sends().is_empty(), "a person's draft never goes out on its own: {case}");
+    assert_eq!(case["status"], "waiting_approval", "{case}");
+    let drafted = step(&case, "draft_email");
+    assert_ne!(drafted["output"]["draft_id"], human, "the agent wrote its own reply");
+}
+
+#[tokio::test]
+async fn a_reply_changed_after_approval_needs_approving_again() {
+    let env = auto_env(reply_script(), 0).await;
+    let lead = env.agent_id(ADMIN, "general.lead").await;
+    env.ok("PATCH", &format!("/agents/{lead}"), ADMIN, Some(json!({"autonomy_cap": 1}))).await;
+    let msg = env.receive(&env.op_src, "m1", "t1", CLIENT, "Status update", "Hi Priya, the interview went well.", "general").await;
+    to_lead(&env, &msg).await;
+    let case = env.case(ADMIN, &env.start(&msg).await).await;
+    assert_eq!(case["status"], "waiting_approval", "{case}");
+    sqlx::query("UPDATE drafts SET body_text = 'Hello Ravi,\n\nA different text.\n\nPriya' WHERE workspace_id = ?1 AND message_id = ?2")
+        .bind(&env.ws)
+        .bind(&msg)
+        .execute(&env.state.db)
+        .await
+        .unwrap();
+    let approval = env.ok("GET", "/approvals?status=pending", ADMIN, None).await["items"][0]["id"].as_str().unwrap().to_string();
+    env.ok("POST", &format!("/approvals/{approval}"), ADMIN, Some(json!({"decision": "approve"}))).await;
+    worker::drain(&env.state).await;
+    assert!(env.sends().is_empty(), "the changed text was not what the person approved");
+}
+
+#[tokio::test]
+async fn the_personal_agent_presents_as_meera_and_observing_cases_stay_cheap() {
+    let env = Env::new(Opts::packs(&["general"]).planner(ScriptedPlanner::new().script("inbox", vec![finish(None, "Done.")]))).await;
+    env.ok("PUT", "/me/agent-profile", OPERATOR, Some(json!({"display_name": "Priya", "approvals": {"send_email": "always_ask"}}))).await;
+    let msg = env.receive(&env.op_src, "m1", "t1", CLIENT, "Status update", "Hi Priya, the interview went well. Will update you.", "general").await;
+    let routed = env.route(&msg).await;
+    let mine = env.personal_id(OPERATOR).await;
+    assert_eq!(routed.route.agent_id, mine, "mail in a member's own mailbox goes to their personal agent");
+    let case = env.case(OPERATOR, &env.start(&msg).await).await;
+    assert_eq!(case["agent"]["name"], "Meera", "{case}");
+    let approvals = env.ok("GET", "/approvals", OPERATOR, None).await.to_string();
+    assert!(!approvals.contains("My assistant"));
+    for seen in env.drafter.seen.lock().unwrap().iter() {
+        assert!(!seen.reply_instructions.contains("My assistant"), "{}", seen.reply_instructions);
+    }
+    assert_eq!(email_ai_api::agent_registry::SHADOW_MAX_PER_DAY, 50);
+}
+
+#[tokio::test]
+async fn shadow_cases_stop_once_half_the_daily_ai_budget_is_used() {
+    let script = vec![finish(None, "Observed.")];
+    let env = Env::new(Opts::packs(&["general", "support"]).planner(ScriptedPlanner::new().script("shadow", script))).await;
+    sqlx::query("INSERT INTO ai_calls (id, workspace_id, task, model, cost_usd, created_at) VALUES ('ai1', ?1, 'plan', 'm', 1.2, ?2)")
+        .bind(&env.ws)
+        .bind(db::now_ms())
+        .execute(&env.state.db)
+        .await
+        .unwrap();
+    let msg = env.receive(&env.shared_src, "m1", "t1", CLIENT, "Where is my parcel?", "Hello, where is my parcel?", "question").await;
+    env.start(&msg).await;
+    let cases = env.cases_of(&msg).await;
+    assert_eq!(cases.len(), 1, "no observing case beside the real one: {cases:?}");
+}
+
+#[tokio::test]
+async fn another_members_personal_work_stays_out_of_the_timeline_and_case_creation() {
+    let env = Env::new(Opts::packs(&["general"]).planner(ScriptedPlanner::new().script("inbox", vec![finish(None, "Done.")]))).await;
+    let msg = env.receive(&env.op_src, "m1", "t1", CLIENT, "Status update", "Hi Priya, the interview went well. Will update you.", "general").await;
+    let mine = env.personal_id(OPERATOR).await;
+    assert_eq!(env.route(&msg).await.route.agent_id, mine);
+    let (s, body) = env.req("POST", "/cases", ADMIN, Some(json!({"kind": "inbox", "message_id": msg}))).await;
+    assert_eq!(s, StatusCode::NOT_FOUND, "an admin is not shown a case of Priya's personal agent: {body}");
+    worker::drain(&env.state).await;
+    let case_id: String = sqlx::query_scalar("SELECT id FROM cases WHERE workspace_id = ?1 AND message_id = ?2").bind(&env.ws).bind(&msg).fetch_one(&env.state.db).await.unwrap();
+    let rows_for = |token: &'static str| {
+        let env = &env;
+        let (msg, case_id) = (msg.clone(), case_id.clone());
+        async move {
+            let detail = env.ok("GET", &format!("/messages/{msg}"), token, None).await;
+            detail["audit"].as_array().unwrap().iter().filter(|a| a["entity_id"] == case_id.as_str()).count()
+        }
+    };
+    assert_eq!(rows_for(ADMIN).await, 0, "the owner's personal case is not in an admin's timeline");
+    assert!(rows_for(OPERATOR).await > 0, "the owner sees it");
+}
+
+#[tokio::test]
+async fn an_outdated_untuned_template_agent_is_brought_up_to_date() {
+    let env = Env::new(Opts::packs(&["general"])).await;
+    let inbox = env.agent_id(ADMIN, "general.inbox").await;
+    sqlx::query("UPDATE agents SET template_version = 0, tuned = 0 WHERE id = ?1").bind(&inbox).execute(&env.state.db).await.unwrap();
+    email_ai_api::agent_registry::seed::ensure_workspace(&env.state.db, &env.ws).await.unwrap();
+    let version: Option<i64> = sqlx::query_scalar("SELECT template_version FROM agents WHERE id = ?1").bind(&inbox).fetch_one(&env.state.db).await.unwrap();
+    assert!(version.unwrap_or(0) >= 1);
 }

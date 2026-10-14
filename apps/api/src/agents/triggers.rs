@@ -145,10 +145,11 @@ pub async fn after_requirement_matched(state: &AppState, ws: &str, requirement_i
     }
     // A client's reply in the conversation can be read as a "new" requirement: one case per conversation.
     let thread_taken: bool = sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM cases WHERE thread_id = ?1 AND kind = 'requirement' AND shadow = 0 AND requirement_id IS NOT ?2)",
+        "SELECT EXISTS (SELECT 1 FROM cases WHERE workspace_id = ?3 AND thread_id = ?1 AND kind = 'requirement' AND shadow = 0 AND requirement_id IS NOT ?2)",
     )
     .bind(&r.thread_id)
     .bind(requirement_id)
+    .bind(ws)
     .fetch_one(&state.db)
     .await?;
     if thread_taken {
@@ -224,6 +225,13 @@ pub async fn start_inbox_case(state: &AppState, ws: &str, message_id: &str, crea
     Ok(Started::Case(created.0, created.1))
 }
 
+/// Observing agents run only while they stay cheap: at most `SHADOW_MAX_PER_DAY` per workspace a
+/// day, and none once half of the workspace's daily AI budget is used.
+async fn shadow_allowed(state: &AppState, ws: &str) -> sqlx::Result<bool> {
+    Ok(shadow_cases_today(state, ws).await? < SHADOW_MAX_PER_DAY
+        && crate::ai_ledger::within_budget(&state.db, state.config.ai_daily_budget_usd * 0.5, ws).await)
+}
+
 async fn shadow_cases_today(state: &AppState, ws: &str) -> sqlx::Result<i64> {
     const DAY_MS: i64 = 86_400_000;
     sqlx::query_scalar("SELECT COUNT(*) FROM cases WHERE workspace_id = ?1 AND shadow = 1 AND created_at >= ?2")
@@ -242,7 +250,7 @@ async fn start_shadow_case(
     message_id: &str,
     owner: Option<&str>,
 ) -> sqlx::Result<()> {
-    if shadow_cases_today(state, ws).await? >= SHADOW_MAX_PER_DAY {
+    if !shadow_allowed(state, ws).await? {
         return Ok(());
     }
     case::create(
@@ -270,9 +278,10 @@ async fn start_shadow_case(
     Ok(())
 }
 
-async fn thread_has_open_case(state: &AppState, thread_id: &str) -> sqlx::Result<bool> {
-    sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM cases WHERE thread_id = ?1 AND shadow = 0 AND status NOT IN ('done', 'failed', 'cancelled'))")
+async fn thread_has_open_case(state: &AppState, ws: &str, thread_id: &str) -> sqlx::Result<bool> {
+    sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM cases WHERE workspace_id = ?2 AND thread_id = ?1 AND shadow = 0 AND status NOT IN ('done', 'failed', 'cancelled'))")
         .bind(thread_id)
+        .bind(ws)
         .fetch_one(&state.db)
         .await
 }
@@ -291,7 +300,7 @@ pub async fn after_analysis(state: &AppState, job: &Job, message_id: &str, insig
     }
     let Some(m) = message_facts(state, ws, message_id).await? else { return Ok(()) };
     let label_ok = m.category.as_deref().is_some_and(|c| c != OTHER_LABEL && c != REQUIREMENT_LABEL);
-    if m.direction != "inbound" || !label_ok || !is_recent(state, m.received_at) || thread_has_open_case(state, &m.thread_id).await? {
+    if m.direction != "inbound" || !label_ok || !is_recent(state, m.received_at) || thread_has_open_case(state, ws, &m.thread_id).await? {
         return Ok(());
     }
     if !crate::reply_settings::load(&state.db, &state.config, ws).await?.auto_reply {
@@ -401,7 +410,7 @@ pub async fn run_schedule_tick(state: &AppState, ws: &str, now: i64) -> sqlx::Re
         .fetch_one(&state.db)
         .await?;
         let shadow = agent.level == 0;
-        if open || (shadow && shadow_cases_today(state, ws).await? >= SHADOW_MAX_PER_DAY) {
+        if open || (shadow && !shadow_allowed(state, ws).await?) {
             continue;
         }
         let mut conn = state.db.acquire().await?;

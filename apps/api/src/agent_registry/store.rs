@@ -124,6 +124,22 @@ pub fn hide_foreign_personal(table: &str, viewer: &str) -> String {
     )
 }
 
+/// The agent behind an audited case, approval or draft, if it has one.
+pub async fn entity_agent<'e>(db: impl SqliteExecutor<'e>, ws: &str, entity_type: &str, entity_id: &str) -> sqlx::Result<Option<String>> {
+    let table = match entity_type {
+        "case" => "cases",
+        "agent_approval" => "agent_approvals",
+        "draft" => "drafts",
+        _ => return Ok(None),
+    };
+    Ok(sqlx::query_scalar::<_, Option<String>>(&format!("SELECT agent_id FROM {table} WHERE id = ?1 AND workspace_id = ?2"))
+        .bind(entity_id)
+        .bind(ws)
+        .fetch_optional(db)
+        .await?
+        .flatten())
+}
+
 /// May this member see work done by this agent (a case, an approval, a draft)?
 pub async fn can_see<'e>(db: impl SqliteExecutor<'e>, ws: &str, agent_id: Option<&str>, user_id: &str) -> sqlx::Result<bool> {
     let Some(agent_id) = agent_id else { return Ok(true) };
@@ -236,16 +252,39 @@ pub async fn set_identity(conn: &mut SqliteConnection, ws: &str, agent_id: &str,
     Ok(())
 }
 
+/// Stops automatic sends that are still held (not yet being sent, not requested by a person):
+/// those of one agent, or of every agent when `agent_id` is `None`, optionally only for one email.
+/// The held reply stays a draft and waits for a person.
+pub async fn release_held_sends(conn: &mut SqliteConnection, ws: &str, agent_id: Option<&str>, message_id: Option<&str>) -> sqlx::Result<u64> {
+    Ok(sqlx::query(
+        "UPDATE drafts SET send_at = NULL, updated_at = ?4
+         WHERE workspace_id = ?1 AND agent_id IS NOT NULL AND (?2 IS NULL OR agent_id = ?2) AND (?3 IS NULL OR message_id = ?3)
+           AND send_at IS NOT NULL AND send_attempt_id IS NULL AND send_requested_by IS NULL AND status != 'sent'",
+    )
+    .bind(ws)
+    .bind(agent_id)
+    .bind(message_id)
+    .bind(now_ms())
+    .execute(conn)
+    .await?
+    .rows_affected())
+}
+
 /// The workspace's "let routine replies go" switch (Meera's permissions) moves the default agents
-/// (the lead and the personal agents) with it: `auto` lifts them to level 2, anything else caps them at 1.
-pub async fn sync_default_agents_from_settings(conn: &mut SqliteConnection, ws: &str, send: &str) -> sqlx::Result<()> {
-    let sql = if send == "auto" {
-        "UPDATE agents SET autonomy_level = MAX(autonomy_level, 2), autonomy_cap = MAX(autonomy_cap, 2), updated_at = ?2
-         WHERE workspace_id = ?1 AND (kind = 'lead' OR scope = 'personal')"
-    } else {
+/// (the lead and the personal agents) when it CHANGES: anything but `auto` caps them at level 1.
+/// Turning it on raises nothing: levels are earned and caps are granted by an admin.
+pub async fn sync_default_agents_from_settings(conn: &mut SqliteConnection, ws: &str, previous_send: &str, send: &str) -> sqlx::Result<()> {
+    if previous_send == send || send == "auto" {
+        return Ok(());
+    }
+    sqlx::query(
         "UPDATE agents SET autonomy_level = MIN(autonomy_level, 1), updated_at = ?2
-         WHERE workspace_id = ?1 AND (kind = 'lead' OR scope = 'personal') AND autonomy_level > 1"
-    };
-    sqlx::query(sql).bind(ws).bind(now_ms()).execute(conn).await?;
+         WHERE workspace_id = ?1 AND (kind = 'lead' OR scope = 'personal') AND autonomy_level > 1",
+    )
+    .bind(ws)
+    .bind(now_ms())
+    .execute(&mut *conn)
+    .await?;
+    release_held_sends(conn, ws, None, None).await?;
     Ok(())
 }

@@ -106,8 +106,8 @@ INSERT INTO agents (id, workspace_id, key, kind, scope, owner_user_id, category,
 SELECT 'agt_' || lower(hex(randomblob(16))), w.id, 'lead', 'lead', 'workspace', NULL, 'general', 'general.lead', 1,
        COALESCE(wa.name, 'Meera'), COALESCE(wa.avatar, '🌼'), COALESCE(wa.color, 'ochre'),
        'Routes mail, answers what no desk owns and keeps the team''s voice.', 'active', NULL, 0,
-       CASE WHEN json_extract(wa.permissions_json, '$.send') = 'auto' THEN 2 ELSE 1 END,
-       CASE WHEN json_extract(wa.permissions_json, '$.send') = 'auto' THEN 2 ELSE 1 END,
+       CASE WHEN CASE WHEN json_valid(wa.permissions_json) THEN json_extract(wa.permissions_json, '$.send') END = 'auto' THEN 2 ELSE 1 END,
+       CASE WHEN CASE WHEN json_valid(wa.permissions_json) THEN json_extract(wa.permissions_json, '$.send') END = 'auto' THEN 2 ELSE 1 END,
        CAST(strftime('%s', 'now') AS INTEGER) * 1000, CAST(strftime('%s', 'now') AS INTEGER) * 1000
 FROM workspaces w LEFT JOIN workspace_agents wa ON wa.workspace_id = w.id;
 
@@ -117,8 +117,8 @@ INSERT INTO agents (id, workspace_id, key, kind, scope, owner_user_id, category,
 SELECT 'agt_' || lower(hex(randomblob(16))), m.workspace_id, 'me_' || m.user_id, 'system', 'personal', m.user_id, 'personal',
        'personal.mailbox', 1, 'My assistant', '🙋', 'sage',
        'Works on your own mailbox, in your voice, using your profile and preferences.', 'active', NULL, 0,
-       CASE WHEN json_extract(wa.permissions_json, '$.send') = 'auto' THEN 2 ELSE 1 END,
-       CASE WHEN json_extract(wa.permissions_json, '$.send') = 'auto' THEN 2 ELSE 1 END,
+       CASE WHEN CASE WHEN json_valid(wa.permissions_json) THEN json_extract(wa.permissions_json, '$.send') END = 'auto' THEN 2 ELSE 1 END,
+       CASE WHEN CASE WHEN json_valid(wa.permissions_json) THEN json_extract(wa.permissions_json, '$.send') END = 'auto' THEN 2 ELSE 1 END,
        m.user_id, CAST(strftime('%s', 'now') AS INTEGER) * 1000, CAST(strftime('%s', 'now') AS INTEGER) * 1000
 FROM memberships m LEFT JOIN workspace_agents wa ON wa.workspace_id = m.workspace_id;
 
@@ -126,5 +126,5 @@ UPDATE cases SET agent_id = (SELECT a.id FROM agents a WHERE a.workspace_id = ca
 UPDATE automations SET agent_id = (SELECT a.id FROM agents a WHERE a.workspace_id = automations.workspace_id AND a.kind = 'lead');
 INSERT INTO automation_versions (automation_id, version, definition_json, created_by, created_at)
 SELECT id, 1, json_object('name', name, 'enabled', enabled, 'trigger', "trigger",
-                          'conditions', json(conditions_json), 'actions', json(actions_json)), NULL, created_at
+                          'conditions', CASE WHEN json_valid(conditions_json) THEN json(conditions_json) ELSE json('[]') END, 'actions', CASE WHEN json_valid(actions_json) THEN json(actions_json) ELSE json('[]') END), NULL, created_at
 FROM automations;

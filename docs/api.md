@@ -850,7 +850,7 @@ that wakes the case, or a step that failed or was stopped (`state.wf = "planner"
 
 **Planner context and models.** The planner sees understanding fields and short fenced excerpts with words joined by `^`
 (never raw bodies; `read_email {excerpt: true}` asks for a longer one), only its agent's tools, and a prompt ordered for
-caching (case header, steps, latest details, facts, then the turn and budget line). `max_tokens` is 300. One tier rule:
+caching (case header, steps, latest details, facts, then the turn and budget line). `max_tokens` is 700. One tier rule:
 the agent's quality tier is the floor and a premium case or draft can only raise it to `best`.
 
 Environment: `AGENT_MAX_AUTONOMY` (0 to 3, default 3), `AGENT_AUTO_SEND_DELAY_SECS` (default 600), `AGENT_AUTO_SEND_DAILY_CAP`.
