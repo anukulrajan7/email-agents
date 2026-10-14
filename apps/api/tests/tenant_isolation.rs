@@ -99,6 +99,10 @@ fn table_for(segment: &str) -> Option<&'static str> {
         "sessions" => "designer_sessions",
         "submissions" => "submissions",
         "ai-incidents" => "ai_incidents",
+        "teams" => "teams",
+        "conversations" => "watches",
+        "support-tickets" => "support_tickets",
+        "in-app" | "sent" => "in_app_messages",
         _ => return None,
     })
 }
@@ -147,11 +151,17 @@ async fn fixture(env: &Env) -> Fixture {
     if have == 0 {
         seed_row(env, "cases", "id", "cas_a", &[("title", "'A-CONFIDENTIAL-SENTINEL case'")]).await;
     }
+    let admin: String = sqlx::query_scalar("SELECT id FROM users WHERE email = 'admin@acme.test'").fetch_one(&env.state.db).await.unwrap();
+    let quoted = format!("'{admin}'");
+    seed_row(env, "teams", "id", "team_a", &[("name", "'A-CONFIDENTIAL-SENTINEL team'")]).await;
+    seed_row(env, "watches", "id", "wch_a", &[("user_id", &quoted), ("kind", "'ask'"), ("channel", "'email'"), ("status", "'waiting'")]).await;
+    seed_row(env, "support_tickets", "id", "tkt_a", &[("user_id", &quoted), ("watch_id", "'wch_a'"), ("status", "'open'")]).await;
+    seed_row(env, "in_app_messages", "id", "imsg_a", &[("recipient_user_id", &quoted), ("sender_user_id", &quoted), ("kind", "'message'"), ("subject", "'A-CONFIDENTIAL-SENTINEL'")]).await;
     email_ai_api::incidents::record(&env.state.db, email_ai_api::incidents::NewIncident::new(&env.ws, email_ai_api::incidents::Kind::Refusal, json!({"source": "test"}))).await;
 
     let mut ids = HashMap::new();
     let mut empty = vec![];
-    for table in ["email_messages", "drafts", "labels", "email_sources", "memories", "workflows", "review_items", "alerts", "jobs", "agents", "eval_runs", "agent_preferences", "requirements", "matches", "automations", "people", "cases", "agent_approvals", "designer_sessions", "submissions", "ai_incidents"] {
+    for table in ["email_messages", "drafts", "labels", "email_sources", "memories", "workflows", "review_items", "alerts", "jobs", "agents", "eval_runs", "agent_preferences", "requirements", "matches", "automations", "people", "cases", "agent_approvals", "designer_sessions", "submissions", "ai_incidents", "teams", "watches", "support_tickets", "in_app_messages"] {
         let id: Option<String> = sqlx::query_scalar(&format!("SELECT id FROM {table} WHERE workspace_id = ?1 ORDER BY id LIMIT 1")).bind(&env.ws).fetch_optional(&env.state.db).await.unwrap();
         match id {
             Some(id) => {
@@ -277,6 +287,9 @@ fn body_for(method: &str, template: &str, fx: &Fixture) -> Option<Value> {
         (_, "/packs") => json!({"packs": ["general"]}),
         (_, "/alert-settings") => json!({"enabled": true, "recipients": [], "escalate_to": [], "unanswered_hours": 4, "escalate_after_hours": 24, "daily_digest": false, "digest_hour": 9}),
         (_, "/automations") => json!({"name": "Rule", "kind": "auto_reply"}),
+        (_, "/in-app/{id}/reply") => json!({"body": "hi"}),
+        (_, "/support-tickets/{id}/status") => json!({"status": "open"}),
+        (_, "/teams") | (_, "/teams/{id}") => json!({"name": "Zed team", "member_ids": []}),
         (_, "/reply-settings") => json!({"auto_reply": false}),
         (_, "/team/settings") => json!({"tz_offset_minutes": 0, "below_target_hour": 9, "weekly_check_hour": 9}),
         (_, "/agent/preview") => json!({"message_id": id("email_messages")}),

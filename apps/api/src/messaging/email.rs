@@ -70,7 +70,8 @@ pub async fn mailbox_for(state: &AppState, ws: &str, owner: Option<&str>) -> App
 
 /// The mailbox an email was stored against, if it is still connected and can send. Never any other mailbox.
 pub async fn mailbox_by_source(state: &AppState, ws: &str, source_id: &str) -> AppResult<Mailbox> {
-    let row: Option<(Option<String>, Option<String>, Option<String>, String)> = sqlx::query_as(
+    type SourceRow = (Option<String>, Option<String>, Option<String>, String);
+    let row: Option<SourceRow> = sqlx::query_as(
         "SELECT external_connection_id, provider_config_key, mailbox_address, capabilities_json FROM email_sources
          WHERE id = ?1 AND workspace_id = ?2 AND kind = 'nango_gmail' AND status = 'connected'",
     )
