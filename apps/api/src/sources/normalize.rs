@@ -117,6 +117,16 @@ mod tests {
     }
 
     #[test]
+    fn drops_remote_stylesheets_and_fonts() {
+        let dirty = r#"<html><head><link href="https://fonts.googleapis.com/css2?family=Inter" rel="stylesheet">
+<style type="text/css">@import url('https://fonts.googleapis.com/css2?family=Roboto'); p{color:red}</style></head>
+<body><p style="font-family:Inter">Hi</p></body></html>"#;
+        let clean = safe_email_html(dirty);
+        assert!(!clean.contains("fonts.googleapis") && !clean.contains("<link") && !clean.contains("@import"), "{clean}");
+        assert!(clean.contains("Hi"));
+    }
+
+    #[test]
     fn parses_display_names() {
         assert_eq!(display_name("\"Jane Doe\" <jane@acme.com>").as_deref(), Some("Jane Doe"));
         assert_eq!(display_name("jane@acme.com"), None);

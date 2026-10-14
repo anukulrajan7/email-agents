@@ -1,0 +1,249 @@
+name: daily-selftest
+
+on:
+  schedule:
+    - cron: "30 3 * * *"
+  workflow_dispatch:
+    inputs:
+      simulate_failure:
+        description: Make the smoke job fail on purpose to test the failure email
+        type: boolean
+        default: false
+      send_summary:
+        description: Send the "all green" summary email even if it is not Monday
+        type: boolean
+        default: false
+
+concurrency:
+  group: daily-selftest
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  APP_DIR: /docker/email-agents
+  CARGO_TERM_COLOR: never
+  OWNER_EMAIL: anukulraj2004@gmail.com
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/api
+      - name: Clippy
+        id: clippy
+        run: |
+          echo "=== cargo clippy ===" | tee -a selftest.log
+          cargo clippy --manifest-path apps/api/Cargo.toml --all-targets -- -D warnings 2>&1 | tee -a selftest.log
+      - name: Tests
+        id: test
+        run: |
+          echo "=== cargo test ===" | tee -a selftest.log
+          cargo test --manifest-path apps/api/Cargo.toml 2>&1 | tee -a selftest.log
+      - name: Build failure report
+        if: failure()
+        env:
+          FAILED_STEP: ${{ steps.clippy.outcome == 'failure' && 'cargo clippy' || steps.test.outcome == 'failure' && 'cargo test' || 'setup (checkout, toolchain or cache)' }}
+        run: .github/scripts/selftest-report.sh rust "$FAILED_STEP" selftest.log report-rust.txt
+      - name: Upload failure report
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: selftest-report-rust
+          path: report-rust.txt
+
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 12.5.1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: apps/web/pnpm-lock.yaml
+      - name: Install
+        id: install
+        working-directory: apps/web
+        run: pnpm install --frozen-lockfile 2>&1 | tee -a "$GITHUB_WORKSPACE/selftest.log"
+      - name: Typecheck
+        id: typecheck
+        working-directory: apps/web
+        run: |
+          echo "=== pnpm typecheck ===" | tee -a "$GITHUB_WORKSPACE/selftest.log"
+          pnpm typecheck 2>&1 | tee -a "$GITHUB_WORKSPACE/selftest.log"
+      - name: Tests
+        id: test
+        working-directory: apps/web
+        run: |
+          echo "=== pnpm test ===" | tee -a "$GITHUB_WORKSPACE/selftest.log"
+          pnpm test --run 2>&1 | tee -a "$GITHUB_WORKSPACE/selftest.log"
+      - name: Build
+        id: build
+        working-directory: apps/web
+        run: |
+          echo "=== pnpm build ===" | tee -a "$GITHUB_WORKSPACE/selftest.log"
+          pnpm build 2>&1 | tee -a "$GITHUB_WORKSPACE/selftest.log"
+      - name: Build failure report
+        if: failure()
+        env:
+          FAILED_STEP: ${{ steps.install.outcome == 'failure' && 'pnpm install' || steps.typecheck.outcome == 'failure' && 'pnpm typecheck' || steps.test.outcome == 'failure' && 'pnpm test' || steps.build.outcome == 'failure' && 'pnpm build' || 'setup (checkout, pnpm or node)' }}
+        run: .github/scripts/selftest-report.sh web "$FAILED_STEP" selftest.log report-web.txt
+      - name: Upload failure report
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: selftest-report-web
+          path: report-web.txt
+
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure SSH
+        id: ssh
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "${{ secrets.VPS_SSH_KEY }}" > ~/.ssh/id_ed25519
+          printf '%s\n' "${{ secrets.VPS_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/id_ed25519 ~/.ssh/known_hosts
+      - name: Container is running
+        id: running
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+        run: |
+          echo "=== app container ===" | tee -a selftest.log
+          # shellcheck disable=SC2029
+          ssh "root@$VPS_HOST" "cd $APP_DIR && docker compose ps --status running --services" 2>&1 | tee -a selftest.log
+          grep -qx app selftest.log
+      - name: Readiness on the VPS
+        id: ready
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+        run: |
+          echo "=== GET http://127.0.0.1:18090/health/ready (on the VPS) ===" | tee -a selftest.log
+          ssh "root@$VPS_HOST" "curl -fsS --max-time 15 http://127.0.0.1:18090/health/ready" 2>&1 | tee -a selftest.log
+      - name: Readiness through the public URL
+        id: public
+        run: |
+          echo "=== GET https://mail.anukulraj.tech/health/ready ===" | tee -a selftest.log
+          curl -fsS --max-time 20 --retry 2 --retry-delay 5 https://mail.anukulraj.tech/health/ready 2>&1 | tee -a selftest.log
+      - name: OpenRouter tool-calling probe
+        id: models
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+        run: |
+          echo "=== selftest (one tool-calling request per configured model) ===" | tee -a selftest.log
+          # shellcheck disable=SC2029
+          ssh "root@$VPS_HOST" "cd $APP_DIR && docker compose exec -T app selftest" 2>&1 | tee -a selftest.log
+      - name: Simulated failure
+        id: simulated
+        if: inputs.simulate_failure
+        run: |
+          echo "=== simulated failure ===" | tee -a selftest.log
+          echo "simulate_failure was ticked on this manual run" | tee -a selftest.log
+          exit 1
+      - name: Build failure report
+        if: failure()
+        env:
+          FAILED_STEP: ${{ steps.running.outcome == 'failure' && 'app container is not running' || steps.ready.outcome == 'failure' && 'readiness on the VPS' || steps.public.outcome == 'failure' && 'readiness through the public URL' || steps.models.outcome == 'failure' && 'OpenRouter tool-calling probe' || steps.simulated.outcome == 'failure' && 'simulated failure' || 'setup (checkout or SSH)' }}
+        run: .github/scripts/selftest-report.sh smoke "$FAILED_STEP" selftest.log report-smoke.txt
+      - name: Upload failure report
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: selftest-report-smoke
+          path: report-smoke.txt
+
+  notify-failure:
+    needs: [rust, web, smoke]
+    if: failure()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download failure reports
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: selftest-report-*
+          path: reports
+          merge-multiple: true
+      - name: Compose email
+        env:
+          RUST: ${{ needs.rust.result }}
+          WEB: ${{ needs.web.result }}
+          SMOKE: ${{ needs.smoke.result }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          failed=""
+          [ "$RUST" != success ] && failed="$failed, rust ($RUST)"
+          [ "$WEB" != success ] && failed="$failed, web ($WEB)"
+          [ "$SMOKE" != success ] && failed="$failed, smoke ($SMOKE)"
+          failed=${failed#, }
+          echo "SUBJECT=[Post Room] daily self-test FAILED – $failed" >> "$GITHUB_ENV"
+          {
+            echo "The daily Post Room self-test failed."
+            echo
+            echo "Failed jobs: $failed"
+            echo "Run: $RUN_URL"
+            echo "Commit: ${GITHUB_SHA}"
+            echo
+            if ls reports/*.txt >/dev/null 2>&1; then
+              for f in reports/*.txt; do cat "$f"; echo; done
+            else
+              echo "No log reports were captured (a job may have been cancelled). Open the run link above."
+            fi
+          } > email-body.txt
+      - name: Send email
+        uses: dawidd6/action-send-mail@67ce3558d613188179559c61d3565140cf389968 # v22
+        with:
+          server_address: smtp.hostinger.com
+          server_port: 465
+          secure: true
+          username: ${{ secrets.SMTP_USERNAME }}
+          password: ${{ secrets.SMTP_PASSWORD }}
+          from: Post Room <${{ secrets.SMTP_USERNAME }}>
+          to: ${{ env.OWNER_EMAIL }}
+          subject: ${{ env.SUBJECT }}
+          body: file://email-body.txt
+          priority: high
+
+  weekly-green:
+    needs: [rust, web, smoke]
+    if: success() && (github.event_name == 'schedule' || inputs.send_summary)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Is it time for the summary
+        id: day
+        run: |
+          if [ "${{ inputs.send_summary }}" = "true" ] || [ "$(date -u +%u)" = "1" ]; then
+            echo "send=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Send all-green summary
+        if: steps.day.outputs.send == 'true'
+        uses: dawidd6/action-send-mail@67ce3558d613188179559c61d3565140cf389968 # v22
+        with:
+          server_address: smtp.hostinger.com
+          server_port: 465
+          secure: true
+          username: ${{ secrets.SMTP_USERNAME }}
+          password: ${{ secrets.SMTP_PASSWORD }}
+          from: Post Room <${{ secrets.SMTP_USERNAME }}>
+          to: ${{ env.OWNER_EMAIL }}
+          subject: "[Post Room] weekly self-test: all green"
+          body: |
+            The daily self-test passed: Rust clippy and tests, web typecheck, tests and build, production readiness, and a tool-calling request to every configured model.
+
+            Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}

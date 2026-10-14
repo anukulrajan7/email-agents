@@ -752,7 +752,7 @@ fails open); needs-reply tie-break when the analyst and classifier disagree. Age
 ## Agents: registry, system agents, routing, autonomy (WP-B)
 
 Many agents per workspace. Contract types live in `src/agent_registry/spec.rs` (`AgentSpec`, `validate_basic`);
-migration `0033_agent_registry.sql` adds `agents`, `agent_versions`, `automation_versions`, `message_routes` and the
+migration `0034_agent_registry.sql` adds `agents`, `agent_versions`, `automation_versions`, `message_routes` and the
 `agent_id` columns on cases, approvals, automations and drafts. Nothing existing is rebuilt.
 
 **Kinds and scopes.** `kind` is `lead` (one per workspace, Meera: routes and is the fallback), `system` (seeded from the

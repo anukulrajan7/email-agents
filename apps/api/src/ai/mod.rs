@@ -12,6 +12,7 @@ pub mod openrouter;
 pub mod policy;
 pub mod router;
 pub mod routing;
+pub mod selftest;
 
 use async_trait::async_trait;
 

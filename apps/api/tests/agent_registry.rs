@@ -79,7 +79,7 @@ async fn the_migration_backfills_lead_personal_agents_and_the_hrms_roster() {
     let dir = tempfile::tempdir().unwrap();
     let pool = db::connect(&format!("sqlite://{}", dir.path().join("t.db").display())).await.unwrap();
     let mut before = sqlx::migrate!("./migrations");
-    before.migrations = before.migrations.iter().filter(|m| m.version < 33).cloned().collect::<Vec<_>>().into();
+    before.migrations = before.migrations.iter().filter(|m| m.version < 34).cloned().collect::<Vec<_>>().into();
     before.run(&pool).await.unwrap();
     for (ws, send) in [("ws_auto", "auto"), ("ws_ask", "ask")] {
         sqlx::query("INSERT INTO workspaces (id, name, created_at) VALUES (?1, 'Old', 1)").bind(ws).execute(&pool).await.unwrap();
