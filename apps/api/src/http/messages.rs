@@ -91,10 +91,13 @@ macro_rules! replied_sql {
     };
 }
 
+/// Search looks this far into each body, which keeps a scan of a big mailbox bounded.
+const BODY_SEARCH_CHARS: usize = 20_000;
+
 const SUMMARY_MAX_CHARS: usize = 140;
 
 fn short_summary(s: String) -> String {
-    let s = s.trim();
+    let s = crate::attachments::strip_attachment_markup(&s).trim();
     if s.chars().count() <= SUMMARY_MAX_CHARS {
         return s.to_string();
     }
@@ -177,7 +180,8 @@ pub async fn list(
         "WHERE m.workspace_id = ?1 AND m.suppressed = 0
            AND (?2 IS NULL OR c.category = ?2)
            AND (?3 IS NULL OR m.subject LIKE ?3 ESCAPE '\\' OR m.sender_address LIKE ?3 ESCAPE '\\'
-                OR m.original_sender_address LIKE ?3 ESCAPE '\\')
+                OR m.original_sender_address LIKE ?3 ESCAPE '\\'
+                OR substr(m.body_text, 1, {BODY_SEARCH_CHARS}) LIKE ?3 ESCAPE '\\')
            AND (?4 = 'all' OR m.direction = ?4){reply_clause}"
     );
     let (rows, next_cursor): (Vec<SummaryRow>, Option<String>) = if by_importance {
@@ -252,7 +256,7 @@ pub async fn list(
             attachment_count: r.attachment_count,
             direction: r.direction,
             needs_reply: r.needs_reply,
-            summary: r.insight_summary.map(short_summary),
+            summary: r.insight_summary.map(short_summary).filter(|s| !s.is_empty()),
             replied: r.replied,
         })
         .collect();

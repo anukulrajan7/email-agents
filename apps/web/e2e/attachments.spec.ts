@@ -52,9 +52,7 @@ test('a word that exists only inside an attachment finds the email in search', a
   expect(sheet.body.items[0]?.message_id).toBe(seed.messages.timesheet);
 });
 
-// BUG found by this suite: no attachment scanner exists, so every file says "Scan pending" forever
-// (`attachments.scan_status` is never moved off its default). Remove `test.fail` once the chip stops saying so.
-test.fail('a read attachment does not claim a scan is still pending', async ({ page, seed }) => {
+test('a read attachment does not claim a scan is still pending', async ({ page, seed }) => {
   await openMessage(page, seed, 'timesheet');
   await expect(chip(page, 'timesheet-september.xlsx')).not.toContainText('Scan pending', { timeout: 2_000 });
 });

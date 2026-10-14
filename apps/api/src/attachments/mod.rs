@@ -186,6 +186,11 @@ pub fn preview(meta: &Value, text: &str) -> Option<String> {
     (!flat.is_empty()).then(|| truncate_chars(&flat, PREVIEW_CHARS))
 }
 
+/// Drops the internal `<attachments>` fence (and anything after it) from text that is shown to people.
+pub fn strip_attachment_markup(text: &str) -> &str {
+    text.find("<attachments>").map_or(text, |i| &text[..i]).trim_end()
+}
+
 /// Text of attachments for an AI step, fenced as untrusted: `<attachments>` with one tagged block each,
 /// angle brackets neutralised so file content cannot close the fence.
 pub fn prompt_block(items: &[(String, String, String)]) -> String {
@@ -224,6 +229,15 @@ pub async fn load_prompt_items(db: &SqlitePool, message_id: &str) -> sqlx::Resul
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn markup_is_stripped_from_shown_text() {
+        let block = prompt_block(&[("a.xlsx".into(), "sheet".into(), "Zanzibar".into())]);
+        let raw = format!("Please see attached.{block}");
+        assert_eq!(strip_attachment_markup(&raw), "Please see attached.");
+        assert_eq!(strip_attachment_markup("plain"), "plain");
+        assert_eq!(strip_attachment_markup(&block), "");
+    }
+
     use super::*;
 
     #[test]

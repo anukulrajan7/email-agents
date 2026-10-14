@@ -150,7 +150,7 @@ impl Analyst for RulesAnalyst {
             .take(5)
             .map(str::to_string)
             .collect();
-        let first: String = body.split_whitespace().take(40).collect::<Vec<_>>().join(" ");
+        let first: String = crate::attachments::strip_attachment_markup(body).split_whitespace().take(40).collect::<Vec<_>>().join(" ");
         Ok((
             Insight {
                 summary: if first.is_empty() { subject.to_string() } else { first },

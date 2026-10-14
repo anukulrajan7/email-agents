@@ -1311,7 +1311,7 @@ pub async fn analyze_message(state: &AppState, payload: &Value) -> Result<ai::In
             Err(e) => tracing::warn!(error = %e, %message_id, "understanding v2 failed: falling back to the analyst"),
         }
     }
-    let (insight, model_id, understanding) = match understood {
+    let (mut insight, model_id, understanding) = match understood {
         // One call decided needs_reply, so no tie-break judge.
         Some((u, model_id)) => (u.insight(), model_id, Some(u)),
         None => {
@@ -1340,6 +1340,7 @@ pub async fn analyze_message(state: &AppState, payload: &Value) -> Result<ai::In
             (insight, model_id, None)
         }
     };
+    insight.summary = crate::attachments::strip_attachment_markup(&insight.summary).to_string();
     let mut conn = state.db.acquire().await?;
     store_insight(&mut conn, &message_id, &insight, &model_id, attachments_hash.as_deref(), understanding.as_ref(), refresh).await?;
     Ok(insight)

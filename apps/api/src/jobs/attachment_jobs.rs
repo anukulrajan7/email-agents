@@ -227,7 +227,7 @@ async fn store(state: &AppState, id: &str, outcome: Outcome) -> Result<(), JobEr
         }
     };
     sqlx::query(
-        "UPDATE attachments SET extract_kind = ?2, extract_status = ?3, extract_error = ?4, extract_meta_json = ?5,
+        "UPDATE attachments SET extract_kind = ?2, extract_status = ?3, scan_status = ?3, extract_error = ?4, extract_meta_json = ?5,
            text_content = CASE WHEN ?6 IS NOT NULL THEN ?6 ELSE text_content END,
            text_status = CASE WHEN ?6 IS NOT NULL THEN 'extracted'
                               WHEN ?7 IS NOT NULL AND text_status = 'pending' THEN ?7 ELSE text_status END

@@ -131,7 +131,7 @@ function Chip({ a }: { a: Attachment }) {
           </span>
           <span className="block truncate text-xs text-ink-muted">
             {formatBytes(a.size_bytes)}
-            {a.scan_status !== 'clean' && ` · Scan ${a.scan_status}`}
+            {(a.scan_status === 'pending' || a.scan_status === 'failed') && ` · Scan ${a.scan_status}`}
           </span>
         </span>
       </div>

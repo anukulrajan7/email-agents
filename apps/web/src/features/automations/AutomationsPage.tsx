@@ -12,7 +12,7 @@ import { useAutomations, useCreateAutomation, useDeleteAutomation, useUpdateAuto
 import type { Automation } from './types';
 
 export function AutomationsPage() {
-  const { ws, isAdmin } = useWorkspace();
+  const { ws, isAdmin, hasStaffing } = useWorkspace();
   const automations = useAutomations(ws);
   const labels = useLabels(ws, { includeArchived: true });
   const create = useCreateAutomation(ws);
@@ -85,7 +85,7 @@ export function AutomationsPage() {
         description="Rules that run on every new email once it has been read, for example drafting a reply or reminding you when an important thread goes quiet."
         actions={isAdmin ? <Button onClick={() => setEditing('new')}>New automation</Button> : undefined}
       />
-      <ReplySettingsCard ws={ws} isAdmin={isAdmin} />
+      <ReplySettingsCard ws={ws} isAdmin={isAdmin} hasStaffing={hasStaffing} />
       {automations.isLoading && <SkeletonList rows={2} label="Loading automations" />}
       <ErrorNote error={automations.error ?? update.error} />
       {empty && gallery}
