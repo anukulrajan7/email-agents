@@ -49,6 +49,7 @@ mod tests {
             sender: "a@b.co".into(),
             body_text: "b".into(),
             memory_notes: vec![],
+            writer_preferences: vec![],
             sender_history: None,
             insight: None,
             examples: vec![],

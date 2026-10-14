@@ -8,6 +8,7 @@ use serde_json::json;
 use sqlx::{SqliteConnection, SqlitePool};
 
 use crate::{
+    agent_registry::spec::MemoryScope,
     audit::{self, Actor, Entry},
     db::{iso, new_id, now_ms},
 };
@@ -95,9 +96,38 @@ pub async fn get_contact(pool: &SqlitePool, workspace_id: &str, email: &str) -> 
     .await
 }
 
+/// Which memories an agent may read: its own (`agent_id = this`), the shared team's (`agent_id IS NULL`), or both.
+/// Contact facts are always readable when shared; another agent's own memories are never readable.
+#[derive(Debug, Clone)]
+pub struct AgentMemory {
+    pub agent_id: String,
+    pub scope: MemoryScope,
+}
+
+impl AgentMemory {
+    /// SQL for workspace-wide notes; `p` is the placeholder the agent id is bound to (always referenced, so it can always be bound).
+    fn workspace_filter(view: Option<&AgentMemory>, p: &str) -> String {
+        match view.map(|v| v.scope) {
+            Some(MemoryScope::Own) => format!("agent_id = {p}"),
+            Some(MemoryScope::OwnShared) => format!("(agent_id IS NULL OR agent_id = {p})"),
+            Some(MemoryScope::Shared) | None => format!("(agent_id IS NULL AND {p} IS {p})"),
+        }
+    }
+
+    /// SQL for contact notes: shared ones always, plus this agent's own.
+    fn contact_filter(view: Option<&AgentMemory>, p: &str) -> String {
+        match view.map(|v| v.scope) {
+            Some(MemoryScope::Own | MemoryScope::OwnShared) => format!("(agent_id IS NULL OR agent_id = {p})"),
+            Some(MemoryScope::Shared) | None => format!("(agent_id IS NULL AND {p} IS {p})"),
+        }
+    }
+}
+
 /// Everything the agent may use for one message.
 #[derive(Debug, Clone, Default)]
 pub struct MemoryContext {
+    /// Learned style preferences that went into the prompt (their use is counted when the draft is stored).
+    pub preference_ids: Vec<String>,
     /// (memory_id, rendered line) in priority order: contact → search hits → workspace.
     pub notes: Vec<(String, String)>,
     /// One line of learned history about the sender, e.g. "12 emails since Mar 2026; usually timesheet (8)".
@@ -119,6 +149,7 @@ struct NoteRow {
     kind: String,
     scope: String,
     content: String,
+    origin: String,
 }
 
 /// FTS5 query from free text: up to 6 distinct word tokens, each quoted (so user/email
@@ -153,13 +184,25 @@ pub async fn search_ids(pool: &SqlitePool, workspace_id: &str, text: &str, limit
 }
 
 pub async fn context_for(pool: &SqlitePool, workspace_id: &str, sender: &str, topic: &str) -> sqlx::Result<MemoryContext> {
-    context_with(pool, workspace_id, sender, topic, true).await
+    context_with(pool, workspace_id, sender, topic, true, None).await
+}
+
+/// Like `context_for`, for one agent: its memory scope decides whether its own and/or the shared memories are used.
+pub async fn context_for_agent(
+    pool: &SqlitePool,
+    workspace_id: &str,
+    sender: &str,
+    topic: &str,
+    automated: bool,
+    view: Option<&AgentMemory>,
+) -> sqlx::Result<MemoryContext> {
+    context_with(pool, workspace_id, sender, topic, !automated, view).await
 }
 
 /// For drafts nobody asked for (workflows, automations, auto-send): workspace-wide notes only if
 /// a person wrote them, so an auto-learned fact can't steer replies to everyone.
 pub async fn context_for_automation(pool: &SqlitePool, workspace_id: &str, sender: &str, topic: &str) -> sqlx::Result<MemoryContext> {
-    context_with(pool, workspace_id, sender, topic, false).await
+    context_with(pool, workspace_id, sender, topic, false, None).await
 }
 
 async fn context_with(
@@ -168,16 +211,20 @@ async fn context_with(
     sender: &str,
     topic: &str,
     auto_workspace_notes: bool,
+    view: Option<&AgentMemory>,
 ) -> sqlx::Result<MemoryContext> {
     let workspace_origin = if auto_workspace_notes { "" } else { " AND origin = 'manual'" };
+    let agent_id = view.map(|v| v.agent_id.as_str());
     let contact_notes: Vec<NoteRow> = sqlx::query_as(&format!(
-        "SELECT id, kind, scope, content FROM memories
-         WHERE workspace_id = ?1 AND {USABLE} AND scope = 'contact' AND contact_email = ?2
-         ORDER BY pinned DESC, (origin = 'manual') DESC, confidence DESC, updated_at DESC LIMIT ?3"
+        "SELECT id, kind, scope, content, origin FROM memories
+         WHERE workspace_id = ?1 AND {USABLE} AND scope = 'contact' AND contact_email = ?2 AND {}
+         ORDER BY pinned DESC, (origin = 'manual') DESC, confidence DESC, updated_at DESC LIMIT ?3",
+        AgentMemory::contact_filter(view, "?4")
     ))
     .bind(workspace_id)
     .bind(sender)
     .bind(MAX_CONTACT_MEMORIES)
+    .bind(agent_id)
     .fetch_all(pool)
     .await?;
     let hit_ids = search_ids(pool, workspace_id, topic, MAX_SEARCH_HITS).await?;
@@ -185,20 +232,24 @@ async fn context_with(
         vec![]
     } else {
         sqlx::query_as(&format!(
-            "SELECT id, kind, scope, content FROM memories
-             WHERE id IN (SELECT value FROM json_each(?1)) AND scope = 'workspace' AND {USABLE}{workspace_origin}"
+            "SELECT id, kind, scope, content, origin FROM memories
+             WHERE id IN (SELECT value FROM json_each(?1)) AND scope = 'workspace' AND {USABLE}{workspace_origin} AND {}",
+            AgentMemory::workspace_filter(view, "?2")
         ))
         .bind(json!(hit_ids).to_string())
+        .bind(agent_id)
         .fetch_all(pool)
         .await?
     };
     let workspace_notes: Vec<NoteRow> = sqlx::query_as(&format!(
-        "SELECT id, kind, scope, content FROM memories
-         WHERE workspace_id = ?1 AND {USABLE} AND scope = 'workspace'{workspace_origin}
-         ORDER BY pinned DESC, (origin = 'manual') DESC, confidence DESC, updated_at DESC LIMIT ?2"
+        "SELECT id, kind, scope, content, origin FROM memories
+         WHERE workspace_id = ?1 AND {USABLE} AND scope = 'workspace'{workspace_origin} AND {}
+         ORDER BY pinned DESC, (origin = 'manual') DESC, confidence DESC, updated_at DESC LIMIT ?2",
+        AgentMemory::workspace_filter(view, "?3")
     ))
     .bind(workspace_id)
     .bind(MAX_WORKSPACE_MEMORIES)
+    .bind(agent_id)
     .fetch_all(pool)
     .await?;
 
@@ -210,7 +261,8 @@ async fn context_with(
             continue;
         }
         let about = if n.scope == "contact" { "about this sender" } else { "team" };
-        let line = format!("[{} · {about}] {}", n.kind, n.content);
+        let provenance = if n.origin == "auto" { " · learned" } else { "" };
+        let line = format!("[{} · {about}{provenance}] {}", n.kind, n.content);
         if line.len() > budget {
             break;
         }

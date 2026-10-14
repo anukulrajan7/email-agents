@@ -445,7 +445,7 @@ pub async fn detail(
         Some(c) => Some(memory::contact_json(&state.db, &ws, c).await?),
         None => None,
     };
-    let contact_memories = super::memories::contact_memories(&state, &ws, &m.sender_address).await?;
+    let contact_memories = super::memories::contact_memories(&state, &ws, &user.id, &m.sender_address).await?;
 
     let capabilities: Capabilities =
         serde_json::from_str(&m.capabilities_json).unwrap_or_else(|_| crate::sources::capabilities(&m.source_kind));
@@ -579,6 +579,7 @@ pub async fn approve_classification(
         },
     )
     .await?;
+    crate::learning::hooks::label_decision(&mut tx, &ws, &user.id, &id, Some(&row.category), &row.category).await?;
     tx.commit().await?;
     Ok(Json(row.into()))
 }
@@ -778,16 +779,9 @@ pub async fn update_draft(
         },
     )
     .await?;
-    // Learn from the operator's final version (only when they approve, and only if it changed).
+    // The operator approved this text: record how far they moved it and learn from it (the job skips tiny edits).
     if row.status == "approved" {
-        jobs::enqueue(
-            &mut tx,
-            kind::LEARN_FROM_DRAFT,
-            &format!("learn:{}:{}", row.id, row.updated_at),
-            Some(&ws),
-            &json!({ "draft_id": row.id }),
-        )
-        .await?;
+        crate::learning::hooks::draft_finalised(&mut tx, &ws, &user.id, &row.id, crate::learning::hooks::Via::Inbox).await?;
         jobs::knowledge_jobs::enqueue_index_reply(&mut tx, &ws, &row.id, &row.updated_at.to_string()).await?;
     }
     tx.commit().await?;

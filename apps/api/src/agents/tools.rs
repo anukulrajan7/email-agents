@@ -517,11 +517,13 @@ impl Tool for RecallMemory {
     }
     async fn run(&self, ctx: &ToolCtx<'_>, args: &Value) -> Result<ToolOutput, ToolError> {
         let about = str_arg(args, "about")?.to_lowercase();
-        let mem = if about.contains('@') {
-            memory::context_for(&ctx.state.db, ctx.ws(), &about, "").await?
-        } else {
-            memory::context_for(&ctx.state.db, ctx.ws(), "", &about).await?
+        let agent = {
+            let mut conn = ctx.state.db.acquire().await?;
+            crate::learning::scope::resolve(&mut conn, ctx.ws(), ctx.case.agent_id.as_deref(), None).await?
         };
+        let view = agent.agent_id.clone().map(|agent_id| memory::AgentMemory { agent_id, scope: agent.memory });
+        let (sender, topic) = if about.contains('@') { (about.as_str(), "") } else { ("", about.as_str()) };
+        let mem = memory::context_for_agent(&ctx.state.db, ctx.ws(), sender, topic, false, view.as_ref()).await?;
         let notes = mem.lines();
         Ok(ToolOutput {
             summary: format!("Recalled {} note{} about {}", notes.len(), plural(notes.len()), sentence(&about, 60)),
@@ -607,7 +609,7 @@ impl Tool for DraftEmail {
                     });
                 }
                 let origin = format!("agent:{}:{}", ctx.case.id, ctx.turn);
-                crate::agent_profiles::with_draft_style(style, handlers::create_agent_draft(ctx.state, &msg.id, instructions, quality, &origin))
+                crate::agent_profiles::with_draft_style(style, handlers::create_agent_draft(ctx.state, &msg.id, instructions, quality, &origin, ctx.case.agent_id.as_deref()))
                     .await?
                     .ok_or_else(|| ToolError::Failed("The writer judged that this email needs no reply.".into()))?
             }

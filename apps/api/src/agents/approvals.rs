@@ -14,6 +14,11 @@ use crate::{
     db::{iso, now_ms},
     error::{AppError, AppResult},
     http::AppState,
+    learning::{
+        edit_distance,
+        hooks::{self, Via},
+        signals::{self, Kind, Signal},
+    },
 };
 
 pub const MAX_EDITED_BODY_CHARS: usize = 10_000;
@@ -195,6 +200,37 @@ pub async fn decide(state: &AppState, ws: &str, approval_id: &str, user_id: &str
         },
     )
     .await?;
+    if d.approve {
+        match &approval.draft_id {
+            Some(draft_id) => {
+                let via = Via::Approval { approval_id, case_id: &case.id, agent_id: approval.agent_id.as_deref() };
+                hooks::draft_finalised(&mut tx, ws, user_id, draft_id, via).await?;
+            }
+            None => {
+                let distance = edited.as_deref().map(|e| edit_distance::normalised(&approval.body, e));
+                let kind = if distance.is_some_and(|x| x >= edit_distance::TINY_EDIT) { Kind::ApprovalEdited } else { Kind::ApprovalApproved };
+                let signal = Signal::new(ws, kind)
+                    .agent(approval.agent_id.as_deref())
+                    .actor(user_id)
+                    .message(case.message_id.as_deref())
+                    .case(&case.id)
+                    .approval(approval_id)
+                    .distance(distance);
+                signals::record(&mut tx, signal).await?;
+            }
+        }
+    } else {
+        let declined = hooks::Declined {
+            ws,
+            user_id,
+            approval_id,
+            case_id: &case.id,
+            agent_id: approval.agent_id.as_deref(),
+            message_id: case.message_id.as_deref(),
+            note: note.as_deref(),
+        };
+        hooks::approval_declined(&mut tx, declined).await?;
+    }
     tx.commit().await?;
 
     // Apply outside any transaction (the send is a network call); its own guards still hold.

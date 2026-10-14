@@ -1,13 +1,21 @@
-//! Memory learning jobs: `learn_from_message` (after classification) and `learn_from_reply`
-//! (when a draft is approved or sent).
+//! Learning jobs: `learn_from_message` (after classification) and `learn_from_signal` (a person finalised a
+//! reply, or declined an agent's request with a note). One model call per finalised reply returns both style
+//! lessons (stored as preferences) and durable facts (stored as memories).
 
-use serde_json::{Value, json};
+use serde_json::Value;
 
-use super::{handlers::JobError, kind};
+use super::handlers::JobError;
 use crate::{
-    ai::memory_extractor::{LearnDirection, MemoryExtractInput},
+    ai::{
+        LearnInput, LearnOutput, LearnTask,
+        memory_extractor::{LearnDirection, MemoryExtractInput},
+    },
     config::UnderstandMode,
     http::AppState,
+    learning::{
+        edit_distance::{self, TINY_EDIT},
+        guard, hooks, preferences::{self, Outcome, Target}, retrieve, scope,
+    },
     memory_learning::{self, AUTO_MEMORY_CAP},
 };
 
@@ -134,34 +142,43 @@ pub async fn learn_from_message(state: &AppState, payload: &Value) -> Result<(),
     Ok(())
 }
 
+/// Queues learning for an approved or sent draft (once per distinct final text).
+pub async fn enqueue_reply_learning(pool: &sqlx::SqlitePool, draft_id: &str) -> sqlx::Result<()> {
+    let row: Option<(String, String)> =
+        sqlx::query_as("SELECT workspace_id, body_text FROM drafts WHERE id = ?1").bind(draft_id).fetch_optional(pool).await?;
+    let Some((ws, body)) = row else { return Ok(()) };
+    let mut conn = pool.acquire().await?;
+    hooks::enqueue_learning(&mut conn, &ws, draft_id, &body).await
+}
+
+/// Dispatches by what taught us: a finalised reply (default, and the payload of older queued jobs) or a decline note.
+pub async fn learn_from_signal(state: &AppState, payload: &Value) -> Result<(), JobError> {
+    match payload.get("kind").and_then(Value::as_str) {
+        Some("decline_note") => learn_from_note(state, payload).await,
+        _ => learn_from_reply(state, payload).await,
+    }
+}
+
 #[derive(sqlx::FromRow)]
 struct ReplyRow {
     workspace_id: String,
     message_id: String,
+    agent_id: Option<String>,
+    original: Option<String>,
     reply: String,
     status: String,
+    edit_distance: Option<f64>,
     subject: String,
     sender: String,
-    original: String,
+    email: String,
     category: Option<String>,
-}
-
-/// Enqueues `learn_from_reply` for an approved or sent draft (deduped per draft).
-pub async fn enqueue_reply_learning(pool: &sqlx::SqlitePool, draft_id: &str) -> sqlx::Result<()> {
-    let ws: Option<String> =
-        sqlx::query_scalar("SELECT workspace_id FROM drafts WHERE id = ?1").bind(draft_id).fetch_optional(pool).await?;
-    let Some(ws) = ws else { return Ok(()) };
-    let mut conn = pool.acquire().await?;
-    super::enqueue(&mut conn, kind::LEARN_FROM_REPLY, &format!("learn-reply:{draft_id}"), Some(&ws), &json!({ "draft_id": draft_id }))
-        .await?;
-    Ok(())
 }
 
 pub async fn learn_from_reply(state: &AppState, payload: &Value) -> Result<(), JobError> {
     let draft_id = str_field(payload, "draft_id")?;
     let row: Option<ReplyRow> = sqlx::query_as(
-        "SELECT d.workspace_id, d.message_id, d.body_text AS reply, d.status, m.subject, m.sender_address AS sender,
-                m.body_text AS original, c.category
+        "SELECT d.workspace_id, d.message_id, d.agent_id, d.original_body_text AS original, d.body_text AS reply, d.status, d.edit_distance,
+                m.subject, m.sender_address AS sender, m.body_text AS email, c.category
          FROM drafts d
          JOIN email_messages m ON m.id = d.message_id
          LEFT JOIN classifications c ON c.message_id = m.id
@@ -170,27 +187,120 @@ pub async fn learn_from_reply(state: &AppState, payload: &Value) -> Result<(), J
     .bind(&draft_id)
     .fetch_optional(&state.db)
     .await?;
-    let Some(ReplyRow { workspace_id, message_id, reply, status, subject, sender, original, category }) = row else {
-        return Ok(());
-    };
-    if !matches!(status.as_str(), "approved" | "sent") || reply.trim().chars().count() < MIN_TEXT_CHARS {
+    let Some(r) = row else { return Ok(()) };
+    if r.status == "suggested" || r.reply.trim().chars().count() < MIN_TEXT_CHARS {
         return Ok(());
     }
-    let context = crate::ai::body::model_body(&subject, &original);
-    let input = MemoryExtractInput {
-        direction: LearnDirection::Reply,
-        subject,
-        counterpart: Some(sender),
-        counterpart_name: None,
-        label: category,
-        text: reply,
-        context: Some(context),
+    let agent = {
+        let mut conn = state.db.acquire().await?;
+        scope::resolve(&mut conn, &r.workspace_id, r.agent_id.as_deref(), Some(&r.message_id)).await?
     };
-    let facts = state.memory_extractor.extract(&input).await?;
-    let learned = memory_learning::sanitize(LearnDirection::Reply, input.counterpart.as_deref(), facts);
-    let report =
-        memory_learning::store(&state.db, &workspace_id, &message_id, &draft_id, LearnDirection::Reply, learned, AUTO_MEMORY_CAP)
-            .await?;
-    tracing::info!(%draft_id, created = report.created, merged = report.merged, "learned from reply");
+    if !agent.learn_from_edits {
+        return Ok(());
+    }
+    let suggested = r.original.clone().unwrap_or_else(|| r.reply.clone());
+    let distance = r.edit_distance.unwrap_or_else(|| edit_distance::normalised(&suggested, &r.reply));
+    if distance < TINY_EDIT && !edit_distance::adds_specifics(&suggested, &r.reply, &r.email) {
+        tracing::debug!(%draft_id, "reply taught nothing new: skipped");
+        return Ok(());
+    }
+    if !crate::ai_ledger::within_budget(&state.db, state.config.ai_daily_budget_usd, &r.workspace_id).await {
+        tracing::debug!(%draft_id, "AI budget reached: learning skipped");
+        return Ok(());
+    }
+    let input = LearnInput {
+        task: LearnTask::ApprovedReply { suggested, approved: r.reply.clone() },
+        subject: r.subject.clone(),
+        counterpart: Some(r.sender.clone()),
+        label: r.category.clone(),
+        email: crate::ai::body::model_body(&r.subject, &r.email),
+    };
+    let output = match &state.learner {
+        Some(learner) => learner.learn(&input).await?,
+        None => LearnOutput {
+            style: vec![],
+            facts: state
+                .memory_extractor
+                .extract(&MemoryExtractInput {
+                    direction: LearnDirection::Reply,
+                    subject: r.subject.clone(),
+                    counterpart: Some(r.sender.clone()),
+                    counterpart_name: None,
+                    label: r.category.clone(),
+                    text: r.reply.clone(),
+                    context: Some(crate::ai::body::model_body(&r.subject, &r.email)),
+                })
+                .await?,
+        },
+    };
+    let (suggested_prefs, facts_stored) = apply(state, &r, &agent, output, &draft_id).await?;
+    tracing::info!(%draft_id, edit_distance = distance, suggested_prefs, facts_stored, "learned from reply");
+    Ok(())
+}
+
+/// Stores one learner output: style lessons as suggested preferences, facts as memories. Code filters both.
+async fn apply(state: &AppState, r: &ReplyRow, agent: &scope::AgentScope, output: LearnOutput, draft_id: &str) -> Result<(usize, usize), JobError> {
+    let target = Target { ws: &r.workspace_id, agent_id: agent.agent_id.as_deref(), user_id: agent.owner_user_id.as_deref() };
+    let mut created = Vec::new();
+    let mut touched = 0;
+    let mut conn = state.db.acquire().await?;
+    for (n, lesson) in output.style.iter().enumerate() {
+        let evidence = if n == 0 { draft_id.to_string() } else { format!("{draft_id}#{}", n + 1) };
+        match preferences::suggest(&mut conn, &target, &lesson.category, &lesson.content, "edit", &evidence).await? {
+            Outcome::Created(id) => {
+                touched += 1;
+                created.push((id, lesson.content.clone()));
+            }
+            Outcome::Merged(_) => touched += 1,
+            Outcome::Tombstoned | Outcome::Rejected(_) => {}
+        }
+    }
+    for (id, content) in created {
+        if let Some(blob) = retrieve::embed_one(state.embedder.as_ref(), &content).await {
+            preferences::set_embedding(&mut conn, &id, &blob).await?;
+        }
+    }
+    drop(conn);
+    let facts = output
+        .facts
+        .into_iter()
+        .filter(|f| !matches!(f.category.as_str(), "preference" | "style") && guard::fact_ok(&f.content))
+        .collect();
+    let learned = memory_learning::sanitize(LearnDirection::Reply, Some(&r.sender), facts);
+    let stored = learned.len();
+    memory_learning::store_for(&state.db, &r.workspace_id, agent.fact_agent_id(), &r.message_id, draft_id, LearnDirection::Reply, learned, AUTO_MEMORY_CAP)
+        .await?;
+    Ok((touched, stored))
+}
+
+/// A decline note becomes `process` preferences: suggested only, never active until a person accepts them.
+async fn learn_from_note(state: &AppState, payload: &Value) -> Result<(), JobError> {
+    let signal_id = str_field(payload, "signal_id")?;
+    type NoteRow = (String, Option<String>, Option<String>, Option<String>);
+    let row: Option<NoteRow> = sqlx::query_as(
+        "SELECT workspace_id, agent_id, note, approval_id FROM feedback_events WHERE id = ?1 AND kind = 'approval_declined'",
+    )
+    .bind(&signal_id)
+    .fetch_optional(&state.db)
+    .await?;
+    let Some((ws, agent_id, Some(note), approval_id)) = row else { return Ok(()) };
+    let Some(learner) = state.learner.clone() else { return Ok(()) };
+    if !crate::ai_ledger::within_budget(&state.db, state.config.ai_daily_budget_usd, &ws).await {
+        return Ok(());
+    }
+    let proposed: String = match &approval_id {
+        Some(a) => sqlx::query_scalar("SELECT summary FROM agent_approvals WHERE id = ?1").bind(a).fetch_optional(&state.db).await?.unwrap_or_default(),
+        None => String::new(),
+    };
+    let output = learner
+        .learn(&LearnInput { task: LearnTask::DeclineNote { proposed, note }, subject: String::new(), counterpart: None, label: None, email: String::new() })
+        .await?;
+    let target = Target { ws: &ws, agent_id: agent_id.as_deref(), user_id: None };
+    let mut conn = state.db.acquire().await?;
+    let evidence = approval_id.unwrap_or(signal_id);
+    for (n, lesson) in output.style.iter().enumerate() {
+        let evidence = if n == 0 { evidence.clone() } else { format!("{evidence}#{}", n + 1) };
+        preferences::suggest(&mut conn, &target, guard::PROCESS, &lesson.content, "decline_note", &evidence).await?;
+    }
     Ok(())
 }

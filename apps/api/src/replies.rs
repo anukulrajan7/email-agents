@@ -568,6 +568,14 @@ pub async fn undo_send(
 ) -> AppResult<Json<Value>> {
     require_role(&state.db, &ws, &user, Role::Operator).await?;
     crate::team::scope::require_draft(&state.db, &ws, &user, &id).await?;
+    // Read before the update clears it: an agent's own send (nobody asked for it) that a person stops is a learning signal.
+    let sender: Option<(String, Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT message_id, agent_id, send_requested_by FROM drafts WHERE id = ?1 AND workspace_id = ?2 AND send_at IS NOT NULL",
+    )
+    .bind(&id)
+    .bind(&ws)
+    .fetch_optional(&state.db)
+    .await?;
     let mut tx = state.db.begin().await?;
     let undone = sqlx::query(
         "UPDATE drafts SET send_at = NULL, send_requested_by = NULL, updated_at = ?1
@@ -608,6 +616,9 @@ pub async fn undo_send(
         },
     )
     .await?;
+    if let Some((_, Some(agent_id), None)) = &sender {
+        crate::learning::hooks::auto_send_stopped(&mut tx, &ws, &user.id, &id, &message_id, Some(agent_id)).await?;
+    }
     tx.commit().await?;
     Ok(Json(json!({ "status": "cancelled", "draft_id": id })))
 }
