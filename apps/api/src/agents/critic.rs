@@ -125,7 +125,7 @@ fn verdict_tool() -> Value {
     }}])
 }
 
-/// Reads the forced `verdict` call. Anything unusable blocks (fail safe).
+/// Reads the `verdict` call. Anything unusable, including no call at all, blocks (fail safe).
 pub fn parse_verdict(message: &Value) -> (bool, String) {
     let args = message
         .pointer("/tool_calls/0/function/arguments")
@@ -168,7 +168,9 @@ impl Critic for OpenRouterCritic {
         );
         let reply = self
             .client
-            .chat_tools(&self.model, CRITIC_PROMPT, user, verdict_tool(), json!({"type": "function", "function": {"name": "verdict"}}), 150)
+            // "auto", not a forced tool: Qwen's providers refuse a forced tool_choice under
+            // `require_parameters` (OpenRouter 404). No verdict call still blocks (fail safe).
+            .chat_tools(&self.model, CRITIC_PROMPT, user, verdict_tool(), json!("auto"), 150)
             .await?;
         let (ok, reason) = parse_verdict(&reply.message);
         Ok(Verdict { ok, reason, usage: Usage::from_chat(&reply.usage, &reply.model_id) })
