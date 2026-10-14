@@ -125,6 +125,12 @@ pub struct Config {
     pub app_base_url: String,
     /// Replies are sent this many seconds after "Send" so people can undo (0 = next worker run).
     pub send_undo_seconds: i64,
+    /// `production` unless set. `AI_MOCK` and `MAIL_CAPTURE_FILE` are refused in production.
+    pub app_env: String,
+    /// Browser E2E only: scripted assistant, stub image reader, no model calls at all.
+    pub ai_mock: bool,
+    /// Browser E2E only: outgoing mail (verification codes, alerts) is appended here as JSON lines.
+    pub mail_capture_file: String,
 }
 
 fn var(name: &str, default: &str) -> String {
@@ -206,7 +212,11 @@ impl Config {
                 .context("AI_GLOBAL_DAILY_BUDGET_USD")?,
             app_base_url: var("APP_BASE_URL", "https://mail.anukulraj.tech"),
             send_undo_seconds: var("SEND_UNDO_SECONDS", "30").parse::<i64>().context("SEND_UNDO_SECONDS")?.clamp(0, 600),
+            app_env: var("APP_ENV", "production").to_lowercase(),
+            ai_mock: var("AI_MOCK", "") == "1",
+            mail_capture_file: var("MAIL_CAPTURE_FILE", ""),
         };
+        check_mock_allowed(&config.app_env, config.ai_mock, &config.mail_capture_file, &config.public_web_url)?;
         if config.auth_mode == AuthMode::Oidc
             && (config.oidc_issuer_url.is_empty() || config.oidc_audience.is_empty())
         {
@@ -283,6 +293,9 @@ impl Config {
             smtp_from: String::new(),
             app_base_url: "https://mail.anukulraj.tech".into(),
             send_undo_seconds: 0,
+            app_env: "test".into(),
+            ai_mock: false,
+            mail_capture_file: String::new(),
         }
     }
 }
@@ -306,6 +319,24 @@ pub fn check_dev_auth(allow_dev_auth: bool, public_web_url: &str, bind_addr: &st
     let loopback = bind_addr.parse::<std::net::SocketAddr>().map(|a| a.ip().is_loopback()).unwrap_or(false);
     if !loopback {
         bail!("AUTH_MODE=dev accepts any email as a login; it may only bind to a loopback address");
+    }
+    Ok(())
+}
+
+/// Environments where the E2E-only switches may be on. Anything else (including unset = production) refuses.
+const MOCK_ENVS: [&str; 5] = ["development", "dev", "local", "test", "e2e"];
+
+/// `AI_MOCK=1` and `MAIL_CAPTURE_FILE` replace real providers with fakes, so they only start in a
+/// non-production `APP_ENV` and never behind an https public URL.
+pub fn check_mock_allowed(app_env: &str, ai_mock: bool, mail_capture_file: &str, public_web_url: &str) -> anyhow::Result<()> {
+    if !ai_mock && mail_capture_file.is_empty() {
+        return Ok(());
+    }
+    if !MOCK_ENVS.contains(&app_env) {
+        bail!("AI_MOCK / MAIL_CAPTURE_FILE are test switches; they need APP_ENV to be one of {MOCK_ENVS:?} (got '{app_env}')");
+    }
+    if public_web_url.trim().to_lowercase().starts_with("https://") {
+        bail!("AI_MOCK / MAIL_CAPTURE_FILE are refused when PUBLIC_WEB_URL is https (that looks like production)");
     }
     Ok(())
 }
@@ -336,6 +367,16 @@ mod tests {
         assert_eq!(UnderstandMode::parse("Shadow"), Some(UnderstandMode::Shadow));
         assert_eq!(UnderstandMode::parse("true"), Some(UnderstandMode::On));
         assert_eq!(UnderstandMode::parse("maybe"), None);
+    }
+
+    #[test]
+    fn mock_switches_are_refused_in_production() {
+        assert!(check_mock_allowed("production", false, "", "https://mail.example.com").is_ok());
+        assert!(check_mock_allowed("production", true, "", "http://localhost:5173").is_err());
+        assert!(check_mock_allowed("", true, "", "http://localhost:5173").is_err());
+        assert!(check_mock_allowed("production", false, "/tmp/mail.jsonl", "http://localhost:5173").is_err());
+        assert!(check_mock_allowed("e2e", true, "/tmp/mail.jsonl", "http://localhost:5173").is_ok());
+        assert!(check_mock_allowed("e2e", true, "", "https://mail.example.com").is_err());
     }
 
     #[test]

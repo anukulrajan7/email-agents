@@ -64,6 +64,15 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
         .user_agent("email-ai-api/0.1")
         .build()?;
 
+    // `AI_MOCK=1` (E2E, never in production): no provider is contacted whatever keys are set.
+    let (openrouter_key, typesafe_key) = if config.ai_mock {
+        tracing::warn!("AI_MOCK=1: all AI providers are replaced by offline fakes");
+        (String::new(), String::new())
+    } else {
+        (config.openrouter_api_key.clone(), config.typesafe_api_key.clone())
+    };
+    let config = Config { openrouter_api_key: openrouter_key, typesafe_api_key: typesafe_key, ..config };
+
     let openrouter = (!config.openrouter_api_key.is_empty())
         .then(|| OpenRouterClient::new(http.clone(), &config.openrouter_api_url, &config.openrouter_api_key).with_ledger(db.clone()));
 
@@ -113,8 +122,11 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
         _ => None,
     };
 
-    // Verification emails are on only when SMTP is fully configured.
-    let mailer: Option<Arc<dyn mailer::Mailer>> = if config.smtp_host.is_empty() || config.smtp_username.is_empty() {
+    // Verification emails are on only when SMTP is fully configured (or E2E mail capture is on).
+    let mailer: Option<Arc<dyn mailer::Mailer>> = if !config.mail_capture_file.is_empty() {
+        tracing::warn!(file = %config.mail_capture_file, "MAIL_CAPTURE_FILE: outgoing mail is written to a file, not sent");
+        Some(Arc::new(mailer::FileMailer::new(&config.mail_capture_file)))
+    } else if config.smtp_host.is_empty() || config.smtp_username.is_empty() {
         tracing::warn!("SMTP not configured: email verification disabled");
         None
     } else {
@@ -263,6 +275,13 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
         }
         _ => None,
     };
+
+    let (mut assistant_planner, mut vision, mut judge) = (assistant_planner, vision, judge);
+    if config.ai_mock {
+        assistant_planner = Arc::new(ai::mock::MockCommandPlanner);
+        vision = Some(Arc::new(attachments::vision::StubVision::new(ai::mock::mock_image_reading())));
+        judge = Arc::new(ai::mock::mock_judge());
+    }
 
     Ok(AppState {
         assistant_planner,

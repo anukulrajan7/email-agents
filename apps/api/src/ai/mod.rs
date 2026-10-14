@@ -9,6 +9,7 @@ pub mod jev;
 pub mod judge;
 pub mod label_suggest;
 pub mod memory_extractor;
+pub mod mock;
 pub mod openrouter;
 pub mod policy;
 pub mod router;

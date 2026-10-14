@@ -68,6 +68,28 @@ impl Mailer for MemoryMailer {
     }
 }
 
+/// Browser E2E only (`MAIL_CAPTURE_FILE`): appends each message as one JSON line instead of sending it.
+pub struct FileMailer {
+    path: std::path::PathBuf,
+}
+
+impl FileMailer {
+    pub fn new(path: &str) -> Self {
+        Self { path: path.into() }
+    }
+}
+
+#[async_trait]
+impl Mailer for FileMailer {
+    async fn send(&self, to: &str, subject: &str, text: &str, _html: &str) -> anyhow::Result<()> {
+        use std::io::Write;
+        let line = serde_json::json!({ "to": to, "subject": subject, "text": text, "at": now_ms() });
+        let mut file = std::fs::OpenOptions::new().create(true).append(true).open(&self.path).context("opening MAIL_CAPTURE_FILE")?;
+        writeln!(file, "{line}").context("writing MAIL_CAPTURE_FILE")?;
+        Ok(())
+    }
+}
+
 pub mod kind {
     pub const OTP: &str = "otp";
     pub const ALERT: &str = "alert";
