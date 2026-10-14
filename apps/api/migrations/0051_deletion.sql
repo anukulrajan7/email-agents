@@ -18,3 +18,14 @@ ALTER TABLE email_sources ADD COLUMN purge_total INTEGER;
 ALTER TABLE email_sources ADD COLUMN purge_done INTEGER;
 ALTER TABLE email_sources ADD COLUMN purge_counts_json TEXT;
 ALTER TABLE email_sources ADD COLUMN purged_at INTEGER;
+ALTER TABLE email_sources ADD COLUMN purge_started_at INTEGER;
+ALTER TABLE email_sources ADD COLUMN purge_error TEXT;
+
+-- Deleting an email names it from tables without a foreign key; these keep that lookup off a full scan.
+CREATE INDEX idx_ai_calls_message ON ai_calls(message_id) WHERE message_id IS NOT NULL;
+CREATE INDEX idx_ai_incidents_message ON ai_incidents(message_id) WHERE message_id IS NOT NULL;
+CREATE INDEX idx_feedback_message ON feedback_events(message_id) WHERE message_id IS NOT NULL;
+CREATE INDEX idx_submissions_outcome_message ON submissions(outcome_message_id) WHERE outcome_message_id IS NOT NULL;
+CREATE INDEX idx_watches_answer_message ON watches(answer_message_id) WHERE answer_message_id IS NOT NULL;
+CREATE INDEX idx_tickets_source_message ON support_tickets(source_message_id) WHERE source_message_id IS NOT NULL;
+CREATE INDEX idx_deleted_messages_at ON deleted_messages(deleted_at);

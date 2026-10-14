@@ -264,7 +264,7 @@ fn body_for(method: &str, template: &str, fx: &Fixture) -> Option<Value> {
         (_, "/reviews/{id}") => json!({"status": "done"}),
         (_, "/workflows/{id}") => json!({"enabled": true}),
         (_, "/messages/{id}/classification") => json!({"category": "other"}),
-        (_, "/messages/delete") => json!({"ids": ["msg_not_in_this_fixture"]}),
+        (_, "/messages/delete") | (_, "/messages/delete-preview") => json!({"ids": ["msg_not_in_this_fixture"]}),
         (_, "/cases") => json!({"kind": "inbox", "message_id": id("email_messages")}),
         (_, "/approvals/{id}") => json!({"decision": "approve"}),
         (_, "/agents/pause-all") => json!({"paused": true}),

@@ -33,6 +33,9 @@ function wrap(children: React.ReactNode) {
   );
 }
 
+type Call = [string, RequestInit];
+const deletes = (m: ReturnType<typeof vi.fn>) => (m.mock.calls as unknown as Call[]).filter((c) => !c[0].endsWith('/delete-preview'));
+
 describe('deleting mail', () => {
   afterEach(() => {
     vi.unstubAllGlobals();
@@ -79,8 +82,8 @@ describe('deleting mail', () => {
     await userEvent.click(within(dialog).getByRole('checkbox', { name: 'Also delete the rest of this conversation' }));
     await userEvent.click(within(dialog).getByRole('button', { name: 'Delete' }));
 
-    await waitFor(() => expect(fetchMock).toHaveBeenCalled());
-    const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    await waitFor(() => expect(deletes(fetchMock)).toHaveLength(1));
+    const [url, init] = deletes(fetchMock)[0]!;
     expect(url).toBe('/api/v1/workspaces/w1/messages/m9/thread');
     expect(init.method).toBe('DELETE');
     expect(await screen.findByText(/3 emails deleted from Post Room/)).toBeInTheDocument();
@@ -94,13 +97,20 @@ describe('deleting mail', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Delete' }));
     await userEvent.click(screen.getByRole('button', { name: 'Cancel' }));
     expect(screen.queryByRole('dialog')).toBeNull();
-    expect(fetchMock).not.toHaveBeenCalled();
+    expect(deletes(fetchMock)).toHaveLength(0);
 
     await userEvent.click(screen.getByRole('button', { name: 'Delete' }));
     await userEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Delete' }));
-    await waitFor(() => expect(fetchMock).toHaveBeenCalled());
-    const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    await waitFor(() => expect(deletes(fetchMock)).toHaveLength(1));
+    const [url, init] = deletes(fetchMock)[0]!;
     expect(url).toBe('/api/v1/workspaces/w1/messages/delete');
     expect(JSON.parse(String(init.body))).toEqual({ ids: ['m9'] });
+  });
+
+  it('warns when a scheduled reply will be cancelled', async () => {
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(ok({ emails: 1, scheduled_replies: 1 }))));
+    render(wrap(<DeleteEmailButton ws="w1" messageId="m9" />));
+    await userEvent.click(screen.getByRole('button', { name: 'Delete' }));
+    expect(await screen.findByText('1 scheduled reply will be cancelled.')).toBeInTheDocument();
   });
 });

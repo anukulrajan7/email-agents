@@ -67,3 +67,29 @@ pub async fn delete_thread(
     let removed = deletion::delete_emails(&state.db, &ws, &ids, Opts { actor: Actor::User(&user.id), tombstone: true, audit: true }).await?;
     Ok(Json(json!({ "deleted": removed.emails, "removed": removed })))
 }
+
+#[derive(Deserialize)]
+pub struct PreviewBody {
+    ids: Vec<String>,
+    #[serde(default)]
+    whole_thread: bool,
+}
+
+/// What the delete confirm should warn about: replies a person scheduled for these emails are cancelled.
+pub async fn preview(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Path(ws): Path<String>,
+    Json(body): Json<PreviewBody>,
+) -> AppResult<Json<Value>> {
+    if body.ids.is_empty() || body.ids.len() > MAX_SELECTION {
+        return Err(AppError::BadRequest(format!("choose between 1 and {MAX_SELECTION} emails")));
+    }
+    deletion::authorize(&state.db, &ws, &user, &body.ids).await?;
+    let mut ids = body.ids;
+    if body.whole_thread && let Some(first) = ids.first().cloned() {
+        ids = deletion::thread_of(&state.db, &ws, &first).await?;
+    }
+    let scheduled = deletion::scheduled_replies(&state.db, &ws, &ids).await?;
+    Ok(Json(json!({ "emails": ids.len(), "scheduled_replies": scheduled })))
+}

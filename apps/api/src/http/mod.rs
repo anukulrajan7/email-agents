@@ -136,6 +136,7 @@ pub fn router(state: AppState) -> Router {
         .route("/workspaces/{ws}/messages", get(messages::list))
         .route("/workspaces/{ws}/messages/{id}", get(messages::detail).delete(delete_api::delete_one))
         .route("/workspaces/{ws}/messages/delete", post(delete_api::delete_many))
+        .route("/workspaces/{ws}/messages/delete-preview", post(delete_api::preview))
         .route("/workspaces/{ws}/messages/{id}/thread", delete(delete_api::delete_thread))
         .route("/workspaces/{ws}/messages/{id}/classification", patch(messages::override_classification))
         .route("/workspaces/{ws}/messages/{id}/classification/approve", post(messages::approve_classification))

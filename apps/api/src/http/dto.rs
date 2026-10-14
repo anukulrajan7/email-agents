@@ -58,10 +58,11 @@ pub struct Source {
 
 #[derive(Serialize)]
 pub struct SourcePurge {
-    /// `running` or `done`.
+    /// `running`, `done` or `failed` (see `error`).
     pub status: String,
     pub total: i64,
     pub done: i64,
+    pub error: Option<String>,
 }
 
 #[derive(FromRow)]
@@ -77,6 +78,7 @@ pub struct SourceRow {
     pub purge_status: Option<String>,
     pub purge_total: Option<i64>,
     pub purge_done: Option<i64>,
+    pub purge_error: Option<String>,
 }
 
 impl From<SourceRow> for Source {
@@ -96,6 +98,7 @@ impl From<SourceRow> for Source {
                 status,
                 total: r.purge_total.unwrap_or(0),
                 done: r.purge_done.unwrap_or(0),
+                error: r.purge_error,
             }),
         }
     }

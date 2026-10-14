@@ -398,7 +398,7 @@ async fn disconnect_preview_counts_are_exact() {
     }
     let (s, body) = env.req("GET", "/sources/src_priya/purge-preview", OPERATOR, None).await;
     assert_eq!(s, StatusCode::OK);
-    assert_eq!(body, json!({ "emails": 12, "attachments": 8, "drafts": 4, "summaries": 7 }));
+    assert_eq!(body, json!({ "emails": 12, "attachments": 8, "drafts": 4, "summaries": 7, "scheduled_replies": 0, "open_tickets": 0 }));
 }
 
 #[tokio::test]
@@ -430,7 +430,8 @@ async fn purging_a_mailbox_deletes_only_its_data_resumes_after_a_cut_off_and_is_
     {
         let first: Vec<String> = sqlx::query_scalar("SELECT id FROM email_messages WHERE source_id = 'src_priya' ORDER BY id LIMIT 25").fetch_all(&env.state.db).await.unwrap();
         let mut tx = env.state.db.begin_with("BEGIN IMMEDIATE").await.unwrap();
-        deletion::delete_batch(&mut tx, &ws, &first, DelOpts { actor: Actor::System, tombstone: false, audit: false }).await.unwrap();
+        let prep = deletion::prepare(&env.state.db, &ws, &first).await.unwrap();
+        deletion::delete_batch(&mut tx, &ws, &first, DelOpts { actor: Actor::System, tombstone: false, audit: false }, &prep).await.unwrap();
         tx.commit().await.unwrap();
     }
     assert_eq!(n(&env, "SELECT COUNT(*) FROM email_messages WHERE source_id = 'src_priya' AND ?1 != ''", &ws).await, 35);
@@ -475,7 +476,7 @@ async fn purging_a_mailbox_deletes_only_its_data_resumes_after_a_cut_off_and_is_
     assert_eq!(n(&env, "SELECT COUNT(*) FROM audit_events WHERE action = 'message.deleted' AND ?1 != ''", &ws).await, 0, "one source.purged row, not one per email");
     let listed = env.ok("GET", "/sources", ADMIN, None).await;
     let row = listed["items"].as_array().unwrap().iter().find(|s| s["id"] == "src_priya").unwrap();
-    assert_eq!(row["purge"], json!({ "status": "done", "total": 60, "done": 60 }));
+    assert_eq!(row["purge"], json!({ "status": "done", "total": 60, "done": 60, "error": null }));
 
     // Idempotent: running the job again, or asking again, changes nothing and writes nothing.
     deletion::purge_source_job(&env.state, &json!({ "source_id": "src_priya", "requested_by": env.op_id })).await.unwrap();
@@ -494,4 +495,182 @@ async fn disconnect_without_the_purge_flag_keeps_the_mail() {
     assert_eq!((s, body["status"].as_str(), body["purge"].is_null()), (StatusCode::OK, Some("disconnected"), true));
     worker::drain(&env.state).await;
     assert_eq!(n(&env, "SELECT COUNT(*) FROM email_messages WHERE source_id = 'src_priya' AND ?1 != ''", &env.ws).await, 3);
+}
+
+// ---------------------------------------------------------------- review fixes
+
+async fn start_purge_via_api(env: &Env, src: &str) {
+    let (s, body) = env.req("POST", &format!("/sources/{src}/disconnect"), ADMIN, Some(json!({ "purge": true }))).await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+}
+
+async fn mid_send(env: &Env, msg: &str, id: &str) {
+    exec(env, "INSERT INTO drafts (id, workspace_id, message_id, body_text, status, send_attempt_id, send_started_at, created_at, updated_at) VALUES (?1, ?2, ?3, 'Hi', 'approved', 'att', 1, 1, 1)", &[id, &env.ws, msg]).await;
+}
+
+#[tokio::test]
+async fn a_purge_skips_mid_send_emails_waits_for_them_and_gives_up_without_staying_running() {
+    let env = Env::new(Opts::packs(&["general"])).await;
+    let ids = mailbox_with_mail(&env, &env.op_src, 6).await;
+    mid_send(&env, &ids[2], "drf_busy1").await;
+    start_purge_via_api(&env, "src_priya").await;
+    worker::drain(&env.state).await;
+
+    assert_eq!(n(&env, "SELECT COUNT(*) FROM email_messages WHERE source_id = 'src_priya' AND ?1 != ''", &env.ws).await, 1, "everything else was deleted");
+    let status: String = sqlx::query_scalar("SELECT purge_status FROM email_sources WHERE id = 'src_priya'").fetch_one(&env.state.db).await.unwrap();
+    assert_eq!(status, "running");
+    let waiting: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM jobs WHERE kind = 'purge_source' AND status = 'pending' AND run_at > ?1").bind(db::now_ms()).fetch_one(&env.state.db).await.unwrap();
+    assert_eq!(waiting, 1, "a delayed retry is queued, not a busy loop");
+
+    // The send ends; the retry finishes the purge.
+    exec(&env, "UPDATE drafts SET send_attempt_id = NULL WHERE id = 'drf_busy1' AND ?1 != ''", &[&env.ws]).await;
+    exec(&env, "UPDATE jobs SET run_at = 0 WHERE kind = 'purge_source' AND status = 'pending' AND ?1 != ''", &[&env.ws]).await;
+    worker::drain(&env.state).await;
+    let status: String = sqlx::query_scalar("SELECT purge_status FROM email_sources WHERE id = 'src_priya'").fetch_one(&env.state.db).await.unwrap();
+    assert_eq!(status, "done");
+    assert_eq!(n(&env, "SELECT COUNT(*) FROM email_messages WHERE source_id = 'src_priya' AND ?1 != ''", &env.ws).await, 0);
+}
+
+#[tokio::test]
+async fn a_purge_that_cannot_finish_fails_loudly_and_unblocks_the_mailbox() {
+    let env = Env::new(Opts::packs(&["general"])).await;
+    let ids = mailbox_with_mail(&env, &env.op_src, 3).await;
+    mid_send(&env, &ids[0], "drf_stuck").await;
+    start_purge_via_api(&env, "src_priya").await;
+    exec(&env, "UPDATE email_sources SET purge_started_at = ?1 WHERE id = 'src_priya'", &[&(db::now_ms() - 31 * 60_000).to_string()]).await;
+    worker::drain(&env.state).await;
+
+    let (status, error): (String, Option<String>) = sqlx::query_as("SELECT purge_status, purge_error FROM email_sources WHERE id = 'src_priya'").fetch_one(&env.state.db).await.unwrap();
+    assert_eq!(status, "failed");
+    assert!(error.unwrap().contains("Disconnect again"));
+    assert!(put_email(&env, &env.op_src, mail("after", CLIENT, "After"), "ta").await.is_some(), "new mail is no longer blocked");
+    let listed = env.ok("GET", "/sources", ADMIN, None).await;
+    let row = listed["items"].as_array().unwrap().iter().find(|s| s["id"] == "src_priya").unwrap();
+    assert_eq!(row["purge"]["status"], "failed");
+
+    // Starting again works once the send is over.
+    exec(&env, "UPDATE drafts SET send_attempt_id = NULL WHERE id = 'drf_stuck' AND ?1 != ''", &[&env.ws]).await;
+    start_purge_via_api(&env, "src_priya").await;
+    worker::drain(&env.state).await;
+    assert_eq!(n(&env, "SELECT COUNT(*) FROM email_messages WHERE source_id = 'src_priya' AND ?1 != ''", &env.ws).await, 0);
+}
+
+#[tokio::test]
+async fn finishing_a_purge_waits_for_a_send_in_flight_and_closes_the_approvals_of_deleted_sends() {
+    let env = Env::new(Opts::packs(&["general"])).await;
+    mailbox_with_mail(&env, &env.op_src, 2).await;
+    exec(&env, "INSERT INTO outbound_emails (id, workspace_id, source_id, to_address, subject, body_text, recipient_kind, authored_by, status, send_attempt_id, created_at, updated_at)
+                VALUES ('out_1', ?1, 'src_priya', 'x@y.test', 'S', 'secret body', 'external', 'agent', 'scheduled', 'att', 1, 1)", &[&env.ws]).await;
+    exec(&env, "INSERT INTO cases (id, workspace_id, kind, title, goal, status, max_steps, budget_usd, created_at, updated_at) VALUES ('cas_o', ?1, 'inbox', 't', 'g', 'waiting_approval', 5, 1.0, 1, 1)", &[&env.ws]).await;
+    exec(&env, "INSERT INTO agent_approvals (id, workspace_id, case_id, action, summary, body, input_json, status, created_at) VALUES ('apr_o', ?1, 'cas_o', 'send_message', 's', 'secret body', '{\"outbound_id\":\"out_1\"}', 'pending', 1)", &[&env.ws]).await;
+    start_purge_via_api(&env, "src_priya").await;
+    worker::drain(&env.state).await;
+    assert_eq!(n(&env, "SELECT COUNT(*) FROM outbound_emails WHERE id = 'out_1' AND ?1 != ''", &env.ws).await, 1, "a send in flight is not deleted under it");
+    assert_eq!(n(&env, "SELECT COUNT(*) FROM email_sources WHERE purge_status = 'running' AND ?1 != ''", &env.ws).await, 1);
+
+    exec(&env, "UPDATE outbound_emails SET send_attempt_id = NULL WHERE id = 'out_1' AND ?1 != ''", &[&env.ws]).await;
+    exec(&env, "UPDATE jobs SET run_at = 0 WHERE kind = 'purge_source' AND status = 'pending' AND ?1 != ''", &[&env.ws]).await;
+    worker::drain(&env.state).await;
+    assert_eq!(n(&env, "SELECT COUNT(*) FROM outbound_emails WHERE ?1 != ''", &env.ws).await, 0);
+    let (status, body, input): (String, String, String) = sqlx::query_as("SELECT status, body, input_json FROM agent_approvals WHERE id = 'apr_o'").fetch_one(&env.state.db).await.unwrap();
+    assert_eq!((status.as_str(), body.as_str(), input.as_str()), ("declined", "", "{}"));
+}
+
+#[tokio::test]
+async fn a_purged_forwarding_address_can_be_set_up_again_with_a_new_alias() {
+    let env = Env::new(Opts::packs(&["general"])).await;
+    let first = env.ok("POST", "/sources/forwarding", ADMIN, None).await;
+    let (id, alias) = (first["id"].as_str().unwrap().to_string(), first["inbound_address"].as_str().unwrap().to_string());
+    put(&env, &id, "g-fwd", "t-fwd", CLIENT, "Forwarded").await;
+    start_purge_via_api(&env, &id).await;
+    worker::drain(&env.state).await;
+    let again = env.ok("POST", "/sources/forwarding", ADMIN, None).await;
+    assert_eq!((again["id"].as_str(), again["status"].as_str(), again["purge"].is_null()), (Some(id.as_str()), Some("pending"), true));
+    let new_alias = again["inbound_address"].as_str().unwrap();
+    assert!(!new_alias.is_empty() && new_alias != alias);
+}
+
+#[tokio::test]
+async fn a_two_thousand_email_purge_never_holds_the_write_lock_long() {
+    let env = Env::new(Opts::packs(&["general"])).await;
+    {
+        let mut tx = env.state.db.begin_with("BEGIN IMMEDIATE").await.unwrap();
+        for i in 0..2000 {
+            let e = mail(&format!("bulk-{i}"), &format!("s{}@client.com", i % 40), &format!("Bulk {i}"));
+            ingest::persist_message(&mut tx, &env.op_src, &env.ws, &e, Some(&format!("bt{}", i / 3)), json!({})).await.unwrap();
+        }
+        tx.commit().await.unwrap();
+    }
+    let some: Vec<String> = sqlx::query_scalar("SELECT id FROM email_messages WHERE source_id = 'src_priya' ORDER BY id LIMIT 60").fetch_all(&env.state.db).await.unwrap();
+    for (i, id) in some.iter().enumerate() {
+        seed_derived(&env, id, &format!("b{i}")).await;
+    }
+    start_purge_via_api(&env, "src_priya").await;
+    let run = deletion::purge_run(&env.state, &env.ws, "src_priya", None, std::time::Duration::from_secs(300), std::time::Duration::ZERO).await.unwrap();
+    assert_eq!((run.outcome, run.batches), (deletion::PurgeOutcome::Done, 80));
+    assert!(run.max_lock < std::time::Duration::from_millis(200), "a batch held the write lock for {:?}", run.max_lock);
+    assert_eq!(n(&env, "SELECT COUNT(*) FROM email_messages WHERE source_id = 'src_priya' AND ?1 != ''", &env.ws).await, 0);
+}
+
+#[tokio::test]
+async fn a_bulk_delete_with_one_busy_email_deletes_nothing() {
+    let env = Env::new(Opts::packs(&["general"])).await;
+    let ids = mailbox_with_mail(&env, &env.shared_src, 30).await;
+    mid_send(&env, &ids[29], "drf_last").await;
+    let (s, _) = env.req("POST", "/messages/delete", ADMIN, Some(json!({ "ids": ids }))).await;
+    assert_eq!(s, StatusCode::CONFLICT);
+    assert_eq!(n(&env, "SELECT COUNT(*) FROM email_messages WHERE workspace_id = ?1", &env.ws).await, 30, "the first batch was not deleted either");
+}
+
+#[tokio::test]
+async fn accepted_preferences_keep_working_when_their_evidence_is_deleted() {
+    let env = Env::new(Opts::packs(&["general"])).await;
+    let msg = put(&env, &env.shared_src, "g-pref", "t-pref", CLIENT, "Pref").await;
+    let seeds = seed_derived(&env, &msg, "p").await;
+    let evidence = json!([seeds.draft]).to_string();
+    exec(&env, "INSERT INTO agent_preferences (id, workspace_id, category, content, status, source, dedupe_key, evidence_count, evidence_json, created_at, updated_at)
+                VALUES ('prf_active', ?1, 'tone', 'accepted', 'active', 'edit', 'k', 1, ?2, 1, 1)", &[&env.ws, &evidence]).await;
+    assert_eq!(env.req("DELETE", &format!("/messages/{msg}"), ADMIN, None).await.0, StatusCode::OK);
+    let (status, ev): (String, String) = sqlx::query_as("SELECT status, evidence_json FROM agent_preferences WHERE id = 'prf_active'").fetch_one(&env.state.db).await.unwrap();
+    assert_eq!((status.as_str(), ev.as_str()), ("active", "[]"));
+    assert_eq!(n(&env, "SELECT COUNT(*) FROM agent_preferences WHERE id = 'prf_only_p' AND ?1 != ''", &env.ws).await, 0, "a never-approved suggestion goes");
+}
+
+#[tokio::test]
+async fn the_confirms_warn_about_scheduled_replies_and_open_tickets() {
+    let env = Env::new(Opts::packs(&["general"])).await;
+    let a = put(&env, &env.op_src, "g-s1", "t-s1", CLIENT, "Scheduled").await;
+    let b = put(&env, &env.op_src, "g-s2", "t-s1", CLIENT, "Same thread").await;
+    exec(&env, "INSERT INTO drafts (id, workspace_id, message_id, body_text, status, send_at, send_requested_by, created_at, updated_at) VALUES ('drf_sched', ?1, ?2, 'Hi', 'approved', 99999999999999, ?3, 1, 1)", &[&env.ws, &b, &env.op_id]).await;
+    exec(&env, "INSERT INTO watches (id, workspace_id, user_id, kind, title, channel, counterpart, status, source_id, last_update_at, created_at) VALUES ('wch_t', ?1, ?2, 'ticket', 't', 'email', 'x', 'waiting', 'src_priya', 1, 1)", &[&env.ws, &env.op_id]).await;
+    exec(&env, "INSERT INTO support_tickets (id, workspace_id, user_id, watch_id, company, support_address, address_source, subject, status, last_update_at, created_at) VALUES ('tkt_t', ?1, ?2, 'wch_t', 'C', 'c@c.test', 'x', 's', 'open', 1, 1)", &[&env.ws, &env.op_id]).await;
+
+    let (s, one) = env.req("POST", "/messages/delete-preview", OPERATOR, Some(json!({ "ids": [a] }))).await;
+    assert_eq!((s, one["scheduled_replies"].as_i64()), (StatusCode::OK, Some(0)));
+    let (_, thread) = env.req("POST", "/messages/delete-preview", OPERATOR, Some(json!({ "ids": [a], "whole_thread": true }))).await;
+    assert_eq!((thread["emails"].as_i64(), thread["scheduled_replies"].as_i64()), (Some(2), Some(1)));
+    let (_, src) = env.req("GET", "/sources/src_priya/purge-preview", OPERATOR, None).await;
+    assert_eq!((src["scheduled_replies"].as_i64(), src["open_tickets"].as_i64()), (Some(1), Some(1)));
+    assert_eq!(env.req("POST", "/messages/delete-preview", OUTSIDER, Some(json!({ "ids": [a] }))).await.0, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn reconnecting_a_mailbox_that_is_still_being_purged_is_refused() {
+    let env = Env::new(Opts::packs(&["general"])).await;
+    mailbox_with_mail(&env, &env.op_src, 2).await;
+    start_purge_via_api(&env, "src_priya").await;
+    let integration = env.state.config.nango_gmail_integration.clone();
+    let (s, body) = env.req("POST", "/sources/nango-connections", ADMIN, Some(json!({ "connection_id": "conn_src_priya", "provider_config_key": integration }))).await;
+    assert_eq!(s, StatusCode::CONFLICT, "{body}");
+    assert!(body["error"]["message"].as_str().unwrap().contains("Deleting the old data"));
+}
+
+#[tokio::test]
+async fn old_tombstones_are_pruned_and_recent_ones_kept() {
+    let env = Env::new(Opts::packs(&["general"])).await;
+    for (id, age_days) in [("old", 200), ("new", 10)] {
+        exec(&env, "INSERT INTO deleted_messages (workspace_id, source_id, provider_message_id, deleted_at) VALUES (?1, 'src_shared', ?2, ?3)", &[&env.ws, id, &(db::now_ms() - age_days * 86_400_000).to_string()]).await;
+    }
+    assert_eq!(deletion::prune_tombstones(&env.state.db).await.unwrap(), 1);
+    assert_eq!(n(&env, "SELECT COUNT(*) FROM deleted_messages WHERE provider_message_id = 'new' AND ?1 != ''", &env.ws).await, 1);
 }

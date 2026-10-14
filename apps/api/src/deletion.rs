@@ -35,6 +35,14 @@ pub const BATCH: usize = 25;
 pub const MAX_SELECTION: usize = 200;
 /// One purge job run stops after this long and queues its own continuation (a job lease is two minutes).
 const RUN_BUDGET: Duration = Duration::from_secs(45);
+/// Pause between batches, so syncs and requests get the write lock in between.
+const BATCH_PAUSE: Duration = Duration::from_millis(50);
+/// A purge that only has mid-send replies left is retried this often...
+const BUSY_RETRY_MS: i64 = 30_000;
+/// ...and gives up (status `failed`, mail unblocked) after this long.
+const GIVE_UP_MS: i64 = 30 * 60_000;
+/// Tombstones only need to outlive the sync windows that could bring the email back.
+const TOMBSTONE_TTL_MS: i64 = 180 * 86_400_000;
 
 const DELETED_SUBJECT: &str = "Deleted email";
 const CASE_NOTE: &str = "The email was deleted from Post Room";
@@ -121,7 +129,7 @@ async fn column(conn: &mut SqliteConnection, sql: &str, ws: &str, ids: &str) -> 
 }
 
 /// Deletes the emails (of this workspace) and everything derived from them. Ids that no longer exist are skipped.
-pub async fn delete_batch(conn: &mut SqliteConnection, ws: &str, ids: &[String], opts: Opts<'_>) -> Result<Removed, DeleteError> {
+pub async fn delete_batch(conn: &mut SqliteConnection, ws: &str, ids: &[String], opts: Opts<'_>, prep: &Prepared) -> Result<Removed, DeleteError> {
     let ids_arg = ids_json(ids);
     let doomed: Vec<Doomed> = sqlx::query_as(
         "SELECT id, source_id, thread_id, sender_address FROM email_messages
@@ -177,29 +185,9 @@ pub async fn delete_batch(conn: &mut SqliteConnection, ws: &str, ids: &[String],
         .await?;
     }
 
-    // What taught the agents something: this email, its drafts, the approvals and feedback it produced.
-    let approval_ids = column(
-        conn,
-        "SELECT a.id FROM agent_approvals a LEFT JOIN cases c ON c.id = a.case_id
-         WHERE a.workspace_id = ?1 AND c.message_id IN (SELECT value FROM json_each(?2))",
-        ws,
-        &ids_arg,
-    )
-    .await?;
-    let feedback_ids: Vec<String> = sqlx::query_scalar(
-        "SELECT id FROM feedback_events WHERE workspace_id = ?1
-           AND (message_id IN (SELECT value FROM json_each(?2)) OR draft_id IN (SELECT value FROM json_each(?3)))",
-    )
-    .bind(ws)
-    .bind(&ids_arg)
-    .bind(&drafts_arg)
-    .fetch_all(&mut *conn)
-    .await?;
-    let refs: HashSet<String> =
-        ids.iter().chain(&draft_ids).chain(&approval_ids).chain(&feedback_ids).cloned().collect();
-
     removed.cases_cancelled = detach_cases(conn, ws, &ids, &ids_arg).await?;
-    forget_learning(conn, ws, &ids, &refs).await?;
+    forget_learning(conn, ws, &ids, &prep.refs).await?;
+    apply_preferences(conn, &prep.prefs).await?;
     sqlx::query(
         "DELETE FROM feedback_events WHERE workspace_id = ?1
            AND (message_id IN (SELECT value FROM json_each(?2)) OR draft_id IN (SELECT value FROM json_each(?3)))",
@@ -224,8 +212,8 @@ pub async fn delete_batch(conn: &mut SqliteConnection, ws: &str, ids: &[String],
     .await?
     .rows_affected() as i64;
 
-    clear_references(conn, ws, &ids_arg, &drafts_arg).await?;
-    redact_citations(conn, ws, &ids, &ids_arg).await?;
+    clear_references(conn, ws, &ids_arg, prep).await?;
+    apply_citations(conn, &prep.citations).await?;
 
     sqlx::query("DELETE FROM email_messages WHERE workspace_id = ?1 AND id IN (SELECT value FROM json_each(?2))")
         .bind(ws)
@@ -334,7 +322,7 @@ fn base_ref(evidence: &str) -> &str {
     evidence.split('#').next().unwrap_or(evidence)
 }
 
-/// Memories and preferences taught only by these emails go; ones also confirmed by other evidence lose just this source.
+/// Memories taught only by these emails go; ones also confirmed elsewhere (or typed by a person) lose just this source.
 async fn forget_learning(conn: &mut SqliteConnection, ws: &str, ids: &[String], refs: &HashSet<String>) -> sqlx::Result<()> {
     let refs_arg = json!(refs.iter().collect::<Vec<_>>()).to_string();
     let ids_arg = ids_json(ids);
@@ -368,77 +356,109 @@ async fn forget_learning(conn: &mut SqliteConnection, ws: &str, ids: &[String], 
                 .await?;
         }
     }
-
-    let prefs: Vec<(String, String, String)> = sqlx::query_as(
-        "SELECT id, evidence_json, source FROM agent_preferences WHERE workspace_id = ?1 AND evidence_json != '[]'",
-    )
-    .bind(ws)
-    .fetch_all(&mut *conn)
-    .await?;
-    for (id, evidence_json, source) in prefs {
-        let evidence: Vec<String> = serde_json::from_str(&evidence_json).unwrap_or_default();
-        let kept: Vec<String> = evidence.iter().filter(|e| !refs.contains(base_ref(e))).cloned().collect();
-        if kept.len() == evidence.len() {
-            continue;
-        }
-        if kept.is_empty() && source != "manual" {
-            sqlx::query("DELETE FROM agent_preferences WHERE id = ?1").bind(&id).execute(&mut *conn).await?;
-        } else {
-            sqlx::query("UPDATE agent_preferences SET evidence_json = ?1, evidence_count = ?2 WHERE id = ?3")
-                .bind(Value::from(kept.clone()).to_string())
-                .bind(i64::try_from(kept.len()).unwrap_or(i64::MAX).max(1))
-                .bind(&id)
-                .execute(&mut *conn)
-                .await?;
-        }
-    }
     Ok(())
 }
 
 /// Rows that name an email without a foreign key: blank the link (or the copied content), drop queued work.
-async fn clear_references(conn: &mut SqliteConnection, ws: &str, ids_arg: &str, drafts_arg: &str) -> sqlx::Result<()> {
+async fn clear_references(conn: &mut SqliteConnection, ws: &str, ids_arg: &str, prep: &Prepared) -> sqlx::Result<()> {
     for sql in [
         "UPDATE ai_calls SET message_id = NULL WHERE workspace_id = ?1 AND message_id IN (SELECT value FROM json_each(?2))",
         "UPDATE ai_incidents SET message_id = NULL, details_json = '{}' WHERE workspace_id = ?1 AND message_id IN (SELECT value FROM json_each(?2))",
         "UPDATE watches SET answer_message_id = NULL, answer_text = NULL WHERE workspace_id = ?1 AND answer_message_id IN (SELECT value FROM json_each(?2))",
         "UPDATE support_tickets SET source_message_id = NULL WHERE workspace_id = ?1 AND source_message_id IN (SELECT value FROM json_each(?2))",
         "UPDATE submissions SET outcome_message_id = NULL WHERE workspace_id = ?1 AND outcome_message_id IN (SELECT value FROM json_each(?2))",
-        "DELETE FROM assistant_plans WHERE workspace_id = ?1 AND used_at IS NULL
-           AND EXISTS (SELECT 1 FROM json_each(?2) j WHERE instr(params_json, j.value) > 0)",
         "UPDATE inbound_events SET payload_json = '{}'
          WHERE id IN (SELECT json_extract(metadata_json, '$.event_id') FROM audit_events
                       WHERE workspace_id = ?1 AND action = 'message.received' AND message_id IN (SELECT value FROM json_each(?2)))",
     ] {
         sqlx::query(sql).bind(ws).bind(ids_arg).execute(&mut *conn).await?;
     }
-    sqlx::query(
-        "DELETE FROM jobs WHERE workspace_id = ?1 AND status != 'running'
+    sqlx::query("DELETE FROM jobs WHERE status != 'running' AND id IN (SELECT value FROM json_each(?1))")
+        .bind(ids_json(&prep.jobs))
+        .execute(&mut *conn)
+        .await?;
+    sqlx::query("DELETE FROM assistant_plans WHERE used_at IS NULL AND id IN (SELECT value FROM json_each(?1))")
+        .bind(ids_json(&prep.plans))
+        .execute(&mut *conn)
+        .await?;
+    Ok(())
+}
+
+/// Everything the deletion needs to read from tables that can be big (jobs, assistant history, preferences).
+/// Computed before the write lock is taken and applied by id inside it; a row that changed in between is skipped.
+#[derive(Default)]
+pub struct Prepared {
+    /// What taught the agents something: the emails, their drafts, the approvals and feedback they produced.
+    refs: HashSet<String>,
+    jobs: Vec<String>,
+    plans: Vec<String>,
+    citations: Vec<(i64, String, String)>,
+    prefs: Vec<PrefChange>,
+}
+
+enum PrefChange {
+    Delete { id: String, old: String },
+    Keep { id: String, old: String, kept: Vec<String> },
+}
+
+pub async fn prepare(db: &SqlitePool, ws: &str, ids: &[String]) -> sqlx::Result<Prepared> {
+    let ids_arg = ids_json(ids);
+    let mut conn = db.acquire().await?;
+    let conn = &mut *conn;
+    let draft_ids = column(conn, "SELECT id FROM drafts WHERE workspace_id = ?1 AND message_id IN (SELECT value FROM json_each(?2))", ws, &ids_arg).await?;
+    let drafts_arg = ids_json(&draft_ids);
+    let approval_ids = column(
+        conn,
+        "SELECT a.id FROM agent_approvals a JOIN cases c ON c.id = a.case_id
+         WHERE a.workspace_id = ?1 AND c.message_id IN (SELECT value FROM json_each(?2))",
+        ws,
+        &ids_arg,
+    )
+    .await?;
+    let feedback_ids: Vec<String> = sqlx::query_scalar(
+        "SELECT id FROM feedback_events WHERE workspace_id = ?1
+           AND (message_id IN (SELECT value FROM json_each(?2)) OR draft_id IN (SELECT value FROM json_each(?3)))",
+    )
+    .bind(ws)
+    .bind(&ids_arg)
+    .bind(&drafts_arg)
+    .fetch_all(&mut *conn)
+    .await?;
+    let refs: HashSet<String> = ids.iter().chain(&draft_ids).chain(&approval_ids).chain(&feedback_ids).cloned().collect();
+
+    let jobs: Vec<String> = sqlx::query_scalar(
+        "SELECT id FROM jobs WHERE workspace_id = ?1 AND status != 'running'
            AND (json_extract(payload_json, '$.message_id') IN (SELECT value FROM json_each(?2))
                 OR json_extract(payload_json, '$.draft_id') IN (SELECT value FROM json_each(?3)))",
     )
     .bind(ws)
-    .bind(ids_arg)
-    .bind(drafts_arg)
-    .execute(&mut *conn)
+    .bind(&ids_arg)
+    .bind(&drafts_arg)
+    .fetch_all(&mut *conn)
     .await?;
-    Ok(())
-}
+    let plans: Vec<String> = sqlx::query_scalar(
+        "SELECT id FROM assistant_plans WHERE workspace_id = ?1 AND used_at IS NULL
+           AND EXISTS (SELECT 1 FROM json_each(?2) j WHERE instr(params_json, j.value) > 0)",
+    )
+    .bind(ws)
+    .bind(&ids_arg)
+    .fetch_all(&mut *conn)
+    .await?;
 
-/// Assistant answers that cited a deleted email keep the sentence but show "Deleted email".
-async fn redact_citations(conn: &mut SqliteConnection, ws: &str, ids: &[String], ids_arg: &str) -> sqlx::Result<()> {
     let rows: Vec<(i64, String)> = sqlx::query_as(
         "SELECT id, citations_json FROM assistant_messages
          WHERE workspace_id = ?1 AND citations_json != '[]'
            AND EXISTS (SELECT 1 FROM json_each(?2) j WHERE instr(citations_json, j.value) > 0)",
     )
     .bind(ws)
-    .bind(ids_arg)
+    .bind(&ids_arg)
     .fetch_all(&mut *conn)
     .await?;
+    let mut citations = vec![];
     for (id, raw) in rows {
-        let mut citations: Vec<Value> = serde_json::from_str(&raw).unwrap_or_default();
+        let mut list: Vec<Value> = serde_json::from_str(&raw).unwrap_or_default();
         let mut changed = false;
-        for c in &mut citations {
+        for c in &mut list {
             let cited = c.get("message_id").and_then(Value::as_str).is_some_and(|m| ids.iter().any(|i| i == m));
             if cited && let Some(o) = c.as_object_mut() {
                 o.insert("subject".into(), json!(DELETED_SUBJECT));
@@ -449,12 +469,65 @@ async fn redact_citations(conn: &mut SqliteConnection, ws: &str, ids: &[String],
             }
         }
         if changed {
-            sqlx::query("UPDATE assistant_messages SET citations_json = ?1 WHERE id = ?2")
-                .bind(Value::Array(citations).to_string())
-                .bind(id)
-                .execute(&mut *conn)
-                .await?;
+            citations.push((id, raw, Value::Array(list).to_string()));
         }
+    }
+
+    let stored: Vec<(String, String, String, String)> = sqlx::query_as(
+        "SELECT id, evidence_json, source, status FROM agent_preferences WHERE workspace_id = ?1 AND evidence_json != '[]'",
+    )
+    .bind(ws)
+    .fetch_all(&mut *conn)
+    .await?;
+    let mut prefs = vec![];
+    for (id, old, source, status) in stored {
+        let evidence: Vec<String> = serde_json::from_str(&old).unwrap_or_default();
+        let kept: Vec<String> = evidence.iter().filter(|e| !refs.contains(base_ref(e))).cloned().collect();
+        if kept.len() == evidence.len() {
+            continue;
+        }
+        // Only a suggestion nobody approved disappears with its only evidence; an accepted one keeps working.
+        if kept.is_empty() && source != "manual" && status == "suggested" {
+            prefs.push(PrefChange::Delete { id, old });
+        } else {
+            prefs.push(PrefChange::Keep { id, old, kept });
+        }
+    }
+    Ok(Prepared { refs, jobs, plans, citations, prefs })
+}
+
+async fn apply_preferences(conn: &mut SqliteConnection, prefs: &[PrefChange]) -> sqlx::Result<()> {
+    for p in prefs {
+        match p {
+            PrefChange::Delete { id, old } => {
+                sqlx::query("DELETE FROM agent_preferences WHERE id = ?1 AND evidence_json = ?2 AND status = 'suggested'")
+                    .bind(id)
+                    .bind(old)
+                    .execute(&mut *conn)
+                    .await?;
+            }
+            PrefChange::Keep { id, old, kept } => {
+                sqlx::query("UPDATE agent_preferences SET evidence_json = ?1, evidence_count = ?2 WHERE id = ?3 AND evidence_json = ?4")
+                    .bind(Value::from(kept.clone()).to_string())
+                    .bind(i64::try_from(kept.len()).unwrap_or(i64::MAX).max(1))
+                    .bind(id)
+                    .bind(old)
+                    .execute(&mut *conn)
+                    .await?;
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn apply_citations(conn: &mut SqliteConnection, citations: &[(i64, String, String)]) -> sqlx::Result<()> {
+    for (id, old, new) in citations {
+        sqlx::query("UPDATE assistant_messages SET citations_json = ?1 WHERE id = ?2 AND citations_json = ?3")
+            .bind(new)
+            .bind(id)
+            .bind(old)
+            .execute(&mut *conn)
+            .await?;
     }
     Ok(())
 }
@@ -490,7 +563,7 @@ async fn refresh_contact(conn: &mut SqliteConnection, ws: &str, email: &str) -> 
 pub async fn is_blocked(conn: &mut SqliteConnection, source_id: &str, provider_message_id: &str) -> sqlx::Result<bool> {
     let hit: Option<i64> = sqlx::query_scalar(
         "SELECT 1 WHERE EXISTS (SELECT 1 FROM deleted_messages WHERE source_id = ?1 AND provider_message_id = ?2)
-            OR EXISTS (SELECT 1 FROM email_sources WHERE id = ?1 AND purge_status IS NOT NULL)",
+            OR EXISTS (SELECT 1 FROM email_sources WHERE id = ?1 AND purge_status = 'running')",
     )
     .bind(source_id)
     .bind(provider_message_id)
@@ -542,15 +615,49 @@ pub async fn thread_of(db: &SqlitePool, ws: &str, message_id: &str) -> AppResult
     if ids.is_empty() { Err(AppError::NotFound) } else { Ok(ids) }
 }
 
-/// Deletes in short transactions of `BATCH` emails each. Idempotent: a retry skips what is already gone.
+/// Emails of this list with a reply being sent at this moment.
+pub async fn busy_ids(db: &SqlitePool, ws: &str, ids: &[String]) -> sqlx::Result<Vec<String>> {
+    sqlx::query_scalar(
+        "SELECT DISTINCT d.message_id FROM drafts d WHERE d.workspace_id = ?1 AND d.message_id IN (SELECT value FROM json_each(?2))
+           AND d.status != 'sent' AND d.send_attempt_id IS NOT NULL",
+    )
+    .bind(ws)
+    .bind(ids_json(ids))
+    .fetch_all(db)
+    .await
+}
+
+/// Replies a person scheduled for these emails; deleting the emails cancels them.
+pub async fn scheduled_replies(db: &SqlitePool, ws: &str, ids: &[String]) -> sqlx::Result<i64> {
+    sqlx::query_scalar(
+        "SELECT COUNT(*) FROM drafts WHERE workspace_id = ?1 AND message_id IN (SELECT value FROM json_each(?2))
+           AND status != 'sent' AND send_at IS NOT NULL AND send_requested_by IS NOT NULL",
+    )
+    .bind(ws)
+    .bind(ids_json(ids))
+    .fetch_one(db)
+    .await
+}
+
+/// Deletes in short transactions of `BATCH` emails each. All-or-nothing about busy replies: if any email has a
+/// reply being sent right now, nothing is deleted. Idempotent: a retry skips what is already gone.
 pub async fn delete_emails(db: &SqlitePool, ws: &str, ids: &[String], opts: Opts<'_>) -> Result<Removed, DeleteError> {
+    if !busy_ids(db, ws, ids).await?.is_empty() {
+        return Err(DeleteError::Busy);
+    }
     let mut total = Removed::default();
     for chunk in ids.chunks(BATCH) {
+        let prep = prepare(db, ws, chunk).await?;
         let mut tx = db.begin_with("BEGIN IMMEDIATE").await?;
-        total.add(delete_batch(&mut tx, ws, chunk, opts).await?);
+        total.add(delete_batch(&mut tx, ws, chunk, opts, &prep).await?);
         tx.commit().await?;
     }
     Ok(total)
+}
+
+/// Removes tombstones old enough that no sync window can bring the email back.
+pub async fn prune_tombstones(db: &SqlitePool) -> sqlx::Result<u64> {
+    Ok(sqlx::query("DELETE FROM deleted_messages WHERE deleted_at < ?1").bind(now_ms() - TOMBSTONE_TTL_MS).execute(db).await?.rows_affected())
 }
 
 // ---------------------------------------------------------------- disconnecting a mailbox
@@ -572,6 +679,20 @@ pub async fn source_counts(db: &SqlitePool, ws: &str, source_id: &str) -> sqlx::
     Ok(Removed { emails, attachments, drafts, summaries, chunks, cases_cancelled: 0 })
 }
 
+/// `(scheduled replies a person set up, support tickets still open or waiting)` that disconnecting a mailbox ends.
+pub async fn source_loose_ends(db: &SqlitePool, ws: &str, source_id: &str) -> sqlx::Result<(i64, i64)> {
+    sqlx::query_as(
+        "SELECT (SELECT COUNT(*) FROM drafts d JOIN email_messages m ON m.id = d.message_id
+                 WHERE m.workspace_id = ?1 AND m.source_id = ?2 AND d.status != 'sent' AND d.send_at IS NOT NULL AND d.send_requested_by IS NOT NULL),
+                (SELECT COUNT(*) FROM support_tickets t JOIN watches w ON w.id = t.watch_id
+                 WHERE w.workspace_id = ?1 AND w.source_id = ?2 AND t.status IN ('open', 'waiting'))",
+    )
+    .bind(ws)
+    .bind(source_id)
+    .fetch_one(db)
+    .await
+}
+
 /// Marks the source as being purged and queues the background job. Runs inside the caller's transaction
 /// (the same one that disconnects the mailbox). Safe to call again: a purge already running keeps its
 /// original totals.
@@ -579,12 +700,13 @@ pub async fn start_purge(conn: &mut SqliteConnection, ws: &str, source_id: &str,
     let started = sqlx::query(
         "UPDATE email_sources SET purge_status = 'running', purge_done = 0,
                 purge_total = (SELECT COUNT(*) FROM email_messages WHERE source_id = ?1),
-                purge_counts_json = ?3
-         WHERE id = ?1 AND workspace_id = ?2 AND purge_status IS NULL",
+                purge_counts_json = ?3, purge_started_at = ?4, purge_error = NULL
+         WHERE id = ?1 AND workspace_id = ?2 AND (purge_status IS NULL OR purge_status = 'failed')",
     )
     .bind(source_id)
     .bind(ws)
     .bind(counts_in_tx(conn, ws, source_id).await?)
+    .bind(now_ms())
     .execute(&mut *conn)
     .await?
     .rows_affected()
@@ -599,7 +721,7 @@ pub async fn start_purge(conn: &mut SqliteConnection, ws: &str, source_id: &str,
     jobs::enqueue_with_attempts(
         conn,
         kind::PURGE_SOURCE,
-        &format!("purge_source:{source_id}:{}", now_ms() / 60_000),
+        &if started { format!("purge_source:{source_id}:start:{}", now_ms()) } else { format!("purge_source:{source_id}:{}", now_ms() / 60_000) },
         Some(ws),
         &json!({ "source_id": source_id, "requested_by": requested_by }),
         jobs::PROVIDER_MAX_ATTEMPTS,
@@ -622,8 +744,76 @@ async fn counts_in_tx(conn: &mut SqliteConnection, ws: &str, source_id: &str) ->
     Ok(json!({ "emails": emails, "attachments": attachments, "drafts": drafts, "summaries": summaries }).to_string())
 }
 
-/// Background purge: deletes the mailbox's emails batch by batch, then its source-scoped rows. Resumable: a
-/// run that is cut off (or hits its time budget) is continued by the next run from whatever is left.
+#[derive(Debug, PartialEq, Eq)]
+pub enum PurgeOutcome {
+    /// Everything is deleted and the source is cleaned up.
+    Done,
+    /// The time budget ran out with work left.
+    MoreToDo,
+    /// Only emails or sends that are mid-send are left; try again shortly.
+    Waiting,
+}
+
+#[derive(Debug)]
+pub struct PurgeRun {
+    pub outcome: PurgeOutcome,
+    pub batches: usize,
+    /// The longest a batch held the write lock.
+    pub max_lock: Duration,
+}
+
+/// Deletes the mailbox's emails batch by batch (reads first, then one short write transaction per batch),
+/// then its source-scoped rows. Emails with a reply being sent right now are left for a later run.
+pub async fn purge_run(state: &AppState, ws: &str, source_id: &str, requested_by: Option<&str>, budget: Duration, pause: Duration) -> Result<PurgeRun, JobError> {
+    let started = Instant::now();
+    let opts = Opts { actor: Actor::System, tombstone: false, audit: false };
+    let mut run = PurgeRun { outcome: PurgeOutcome::Done, batches: 0, max_lock: Duration::ZERO };
+    loop {
+        let ids: Vec<String> = sqlx::query_scalar(
+            "SELECT m.id FROM email_messages m WHERE m.source_id = ?1
+               AND NOT EXISTS (SELECT 1 FROM drafts d WHERE d.message_id = m.id AND d.status != 'sent' AND d.send_attempt_id IS NOT NULL)
+             ORDER BY m.id LIMIT ?2",
+        )
+        .bind(source_id)
+        .bind(BATCH as i64)
+        .fetch_all(&state.db)
+        .await?;
+        if ids.is_empty() {
+            break;
+        }
+        let prep = prepare(&state.db, ws, &ids).await?;
+        let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
+        let locked = Instant::now();
+        match delete_batch(&mut tx, ws, &ids, opts, &prep).await {
+            Ok(_) => {}
+            Err(DeleteError::Busy) => continue,
+            Err(DeleteError::Db(e)) => return Err(e.into()),
+        }
+        sqlx::query(
+            "UPDATE email_sources SET purge_done = MAX(0, COALESCE(purge_total, 0) - (SELECT COUNT(*) FROM email_messages WHERE source_id = ?1))
+             WHERE id = ?1",
+        )
+        .bind(source_id)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        run.max_lock = run.max_lock.max(locked.elapsed());
+        run.batches += 1;
+        if started.elapsed() >= budget {
+            run.outcome = PurgeOutcome::MoreToDo;
+            return Ok(run);
+        }
+        tokio::time::sleep(pause).await;
+    }
+    let left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM email_messages WHERE source_id = ?1").bind(source_id).fetch_one(&state.db).await?;
+    if left > 0 || !finish_purge(state, ws, source_id, requested_by).await? {
+        run.outcome = PurgeOutcome::Waiting;
+    }
+    Ok(run)
+}
+
+/// The `purge_source` job. Resumable: a run that is cut off, runs out of budget or finds only busy sends is
+/// continued by a new run. It never stays `running` for good: after `GIVE_UP_MS` it marks the purge failed.
 pub async fn purge_source_job(state: &AppState, payload: &Value) -> Result<(), JobError> {
     let source_id = payload
         .get("source_id")
@@ -631,55 +821,52 @@ pub async fn purge_source_job(state: &AppState, payload: &Value) -> Result<(), J
         .ok_or_else(|| JobError::Permanent("payload missing source_id".into()))?
         .to_string();
     let requested_by = payload.get("requested_by").and_then(Value::as_str).map(str::to_string);
-    let row: Option<(String, Option<String>)> =
-        sqlx::query_as("SELECT workspace_id, purge_status FROM email_sources WHERE id = ?1").bind(&source_id).fetch_optional(&state.db).await?;
-    let Some((ws, Some(status))) = row else { return Ok(()) };
+    let row: Option<(String, Option<String>, Option<i64>)> =
+        sqlx::query_as("SELECT workspace_id, purge_status, purge_started_at FROM email_sources WHERE id = ?1").bind(&source_id).fetch_optional(&state.db).await?;
+    let Some((ws, Some(status), started_at)) = row else { return Ok(()) };
     if status != "running" {
         return Ok(());
     }
-    let started = Instant::now();
-    let opts = Opts { actor: Actor::System, tombstone: false, audit: false };
-    loop {
-        let ids: Vec<String> = sqlx::query_scalar("SELECT id FROM email_messages WHERE source_id = ?1 ORDER BY id LIMIT ?2")
-            .bind(&source_id)
-            .bind(BATCH as i64)
-            .fetch_all(&state.db)
-            .await?;
-        if ids.is_empty() {
-            break;
+    let run = purge_run(state, &ws, &source_id, requested_by.as_deref(), RUN_BUDGET, BATCH_PAUSE).await?;
+    let next_at = match run.outcome {
+        PurgeOutcome::Done => return Ok(()),
+        PurgeOutcome::MoreToDo => now_ms(),
+        PurgeOutcome::Waiting => {
+            if now_ms() - started_at.unwrap_or_else(now_ms) > GIVE_UP_MS {
+                purge_failed(&state.db, &source_id, "Some replies were still being sent, so the deletion could not finish. Disconnect again to retry.").await?;
+                return Ok(());
+            }
+            now_ms() + BUSY_RETRY_MS
         }
-        let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
-        delete_batch(&mut tx, &ws, &ids, opts).await?;
-        sqlx::query(
-            "UPDATE email_sources SET purge_done = MAX(0, COALESCE(purge_total, 0) - (SELECT COUNT(*) FROM email_messages WHERE source_id = ?1))
-             WHERE id = ?1",
-        )
-        .bind(&source_id)
-        .execute(&mut *tx)
+    };
+    let mut conn = state.db.acquire().await?;
+    jobs::enqueue_at(
+        &mut conn,
+        kind::PURGE_SOURCE,
+        &format!("purge_source:{source_id}:next:{next_at}"),
+        Some(&ws),
+        payload,
+        jobs::PROVIDER_MAX_ATTEMPTS,
+        next_at,
+    )
+    .await?;
+    state.jobs_notify.notify_one();
+    Ok(())
+}
+
+/// Stops a purge for good: the source is no longer blocked for mail, and the person can start it again.
+pub async fn purge_failed(db: &SqlitePool, source_id: &str, message: &str) -> sqlx::Result<()> {
+    sqlx::query("UPDATE email_sources SET purge_status = 'failed', purge_error = ?2 WHERE id = ?1 AND purge_status = 'running'")
+        .bind(source_id)
+        .bind(message)
+        .execute(db)
         .await?;
-        tx.commit().await?;
-        if started.elapsed() >= RUN_BUDGET {
-            let mut conn = state.db.acquire().await?;
-            jobs::enqueue_with_attempts(
-                &mut conn,
-                kind::PURGE_SOURCE,
-                &format!("purge_source:{source_id}:cont:{}", now_ms()),
-                Some(&ws),
-                payload,
-                jobs::PROVIDER_MAX_ATTEMPTS,
-            )
-            .await?;
-            state.jobs_notify.notify_one();
-            return Ok(());
-        }
-        tokio::task::yield_now().await;
-    }
-    finish_purge(state, &ws, &source_id, requested_by.as_deref()).await?;
     Ok(())
 }
 
 /// Removes what only existed because of the mailbox and records the result. One short transaction.
-async fn finish_purge(state: &AppState, ws: &str, source_id: &str, requested_by: Option<&str>) -> sqlx::Result<()> {
+/// `false` = not yet: a send from this mailbox is in flight.
+async fn finish_purge(state: &AppState, ws: &str, source_id: &str, requested_by: Option<&str>) -> sqlx::Result<bool> {
     let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     let counts: Option<String> = sqlx::query_scalar(
         "SELECT purge_counts_json FROM email_sources WHERE id = ?1 AND workspace_id = ?2 AND purge_status = 'running'",
@@ -689,11 +876,44 @@ async fn finish_purge(state: &AppState, ws: &str, source_id: &str, requested_by:
     .fetch_optional(&mut *tx)
     .await?
     .flatten();
-    let Some(counts) = counts else { return Ok(()) };
+    let Some(counts) = counts else { return Ok(true) };
     let remaining: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM email_messages WHERE source_id = ?1").bind(source_id).fetch_one(&mut *tx).await?;
     if remaining > 0 {
-        return Ok(());
+        return Ok(false);
+    }
+    let sending: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM outbound_emails WHERE workspace_id = ?1 AND source_id = ?2 AND status != 'sent' AND send_attempt_id IS NOT NULL",
+    )
+    .bind(ws)
+    .bind(source_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    if sending > 0 {
+        return Ok(false);
+    }
+    let outbound: Vec<String> = sqlx::query_scalar("SELECT id FROM outbound_emails WHERE workspace_id = ?1 AND source_id = ?2")
+        .bind(ws)
+        .bind(source_id)
+        .fetch_all(&mut *tx)
+        .await?;
+    for id in &outbound {
+        sqlx::query(
+            "UPDATE agent_approvals SET status = CASE WHEN status = 'pending' THEN 'declined' ELSE status END,
+                    decided_at = CASE WHEN status = 'pending' THEN ?3 ELSE decided_at END,
+                    note = CASE WHEN status = 'pending' THEN ?4 ELSE note END, body = '', input_json = '{}'
+             WHERE workspace_id = ?1 AND instr(input_json, ?2) > 0",
+        )
+        .bind(ws)
+        .bind(id)
+        .bind(now_ms())
+        .bind(CASE_NOTE)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query("DELETE FROM jobs WHERE status != 'running' AND instr(payload_json, ?1) > 0")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
     }
     sqlx::query("DELETE FROM email_threads WHERE source_id = ?1").bind(source_id).execute(&mut *tx).await?;
     sqlx::query("DELETE FROM support_tickets WHERE watch_id IN (SELECT id FROM watches WHERE workspace_id = ?1 AND source_id = ?2)")
@@ -741,7 +961,7 @@ async fn finish_purge(state: &AppState, ws: &str, source_id: &str, requested_by:
     )
     .await?;
     tx.commit().await?;
-    Ok(())
+    Ok(true)
 }
 
 /// May this user disconnect (and purge) this mailbox? Admins any; a member their own personal mailbox.

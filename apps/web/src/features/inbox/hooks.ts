@@ -1,6 +1,6 @@
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '../../api/client';
-import type { Category, Classification, ClassificationPatch, DeleteResult, MessageDetail, MessageSummary, Paged } from '../../api/types';
+import type { Category, Classification, ClassificationPatch, DeletePreview, DeleteResult, MessageDetail, MessageSummary, Paged } from '../../api/types';
 
 const PAGE_SIZE = 25;
 export const messagesKey = (ws: string) => ['ws', ws, 'messages'] as const;
@@ -92,3 +92,18 @@ export function useDeleteMessages(ws: string) {
 }
 
 export const DELETE_NOTE = 'Your Gmail copy stays.';
+
+/** Asked while the delete confirm is open, so it can warn about replies a person scheduled. */
+export function useDeletePreview(ws: string, ids: string[], wholeThread: boolean, enabled: boolean) {
+  return useQuery({
+    queryKey: ['ws', ws, 'delete-preview', ids, wholeThread],
+    queryFn: () => api<DeletePreview>(`/workspaces/${ws}/messages/delete-preview`, { method: 'POST', body: { ids, whole_thread: wholeThread } }),
+    enabled: enabled && ids.length > 0,
+    gcTime: 0,
+  });
+}
+
+export function scheduledWarning(count: number | undefined): string | undefined {
+  if (!count) return undefined;
+  return `${count} scheduled ${count === 1 ? 'reply' : 'replies'} will be cancelled.`;
+}

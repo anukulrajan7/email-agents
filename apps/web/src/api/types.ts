@@ -103,11 +103,14 @@ export type Source = {
   last_error: string | null;
   created_at: string;
   /** Set once the mailbox was disconnected with its mail deleted; `done` when nothing is left to delete. */
-  purge?: { status: 'running' | 'done'; total: number; done: number } | null;
+  purge?: { status: 'running' | 'done' | 'failed'; total: number; done: number; error?: string | null } | null;
 };
 
 /** What disconnecting a mailbox will permanently delete from Post Room. */
-export type PurgePreview = { emails: number; attachments: number; drafts: number; summaries: number };
+export type PurgePreview = { emails: number; attachments: number; drafts: number; summaries: number; scheduled_replies: number; open_tickets: number };
+
+/** What a delete will cancel besides the emails themselves. */
+export type DeletePreview = { emails: number; scheduled_replies: number };
 
 export type DeleteResult = { deleted: number };
 

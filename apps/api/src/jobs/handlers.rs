@@ -167,6 +167,11 @@ pub async fn on_dead(state: &AppState, job: &Job, error: &str) {
     let payload = job.payload();
     let result: Result<(), JobError> = async {
         match job.kind.as_str() {
+            kind::PURGE_SOURCE => {
+                let source_id = str_field(&payload, "source_id")?;
+                crate::deletion::purge_failed(&state.db, &source_id, "The deletion stopped after repeated errors. Disconnect again to retry.").await?;
+                Ok(())
+            }
             kind::CLASSIFY_EMAIL => {
                 // Route to `other` + needs_review so a human sees it.
                 let message_id = str_field(&payload, "message_id")?;
@@ -1465,6 +1470,7 @@ async fn purge_expired_events(state: &AppState) -> Result<(), JobError> {
         .await?
         .rows_affected();
     sqlx::query("DELETE FROM judge_cache WHERE created_at < ?1").bind(cutoff).execute(&state.db).await?;
+    crate::deletion::prune_tombstones(&state.db).await?;
     sqlx::query("DELETE FROM email_outbox WHERE created_at < ?1").bind(cutoff).execute(&state.db).await?;
     let rate_events = crate::security::purge_rate_events(&state.db).await?;
     tracing::info!(purged_payloads = purged, deleted_jobs = jobs, rate_events, "retention purge");

@@ -8,7 +8,7 @@ import { LabelStamp } from '../labels/LabelStamp';
 import { useLabels } from '../labels/hooks';
 import type { MessageSummary } from '../../api/types';
 import { parseAddress } from './emailText';
-import { DELETE_NOTE, useDeleteMessages, useMessages, type MessageSort, type ReplyFilter } from './hooks';
+import { DELETE_NOTE, scheduledWarning, useDeleteMessages, useDeletePreview, useMessages, type MessageSort, type ReplyFilter } from './hooks';
 import { deletedToast } from './DeleteEmail';
 
 const SORT_KEY = 'inbox.sort';
@@ -137,6 +137,9 @@ export function MessageList({ ws }: { ws: string }) {
   const [selected, setSelected] = useState<ReadonlySet<string>>(new Set());
   const [confirming, setConfirming] = useState(false);
   const del = useDeleteMessages(ws);
+  const selectedIds = [...selected];
+  const preview = useDeletePreview(ws, selectedIds, false, confirming);
+  const warning = scheduledWarning(preview.data?.scheduled_replies);
   const notify = useToast();
   const toggle = (id: string) =>
     setSelected((prev) => {
@@ -262,6 +265,11 @@ export function MessageList({ ws }: { ws: string }) {
             )
           }
         >
+          {warning && (
+            <p role="alert" className="mb-2 font-semibold text-danger">
+              {warning}
+            </p>
+          )}
           {DELETE_NOTE} The {selected.size === 1 ? 'email, its' : `${selected.size} emails, their`} attachments, summaries and drafts are removed from Post Room, and they will not come back when Gmail syncs. This can&apos;t be undone.
         </ConfirmDialog>
       )}
