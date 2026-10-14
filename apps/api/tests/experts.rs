@@ -416,3 +416,71 @@ async fn a_permissions_only_template_upgrade_does_not_drop_an_earned_level_unrec
 fn privileged_spec_fn() -> email_ai_api::agent_registry::spec::AgentSpec {
     privileged_spec()
 }
+
+async fn raw_workspace(send: &str, updated_by: Option<&str>) -> Env {
+    let env = Env::new(Opts::packs(&["general", "support", "finance", "personal"])).await;
+    env.ok("GET", "/agent", ADMIN, None).await;
+    let admin_id = env.admin_id.clone();
+    sqlx::query("UPDATE workspace_agents SET permissions_json = json_set(permissions_json, '$.send', ?2), updated_by = ?3 WHERE workspace_id = ?1")
+        .bind(&env.ws)
+        .bind(send)
+        .bind(updated_by.map(|_| admin_id))
+        .execute(&env.state.db)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE agents SET autonomy_level = 1, autonomy_cap = 1 WHERE workspace_id = ?1").bind(&env.ws).execute(&env.state.db).await.unwrap();
+    sqlx::query("UPDATE agents SET autonomy_level = 0 WHERE workspace_id = ?1 AND template_key = 'personal.scheduling'").bind(&env.ws).execute(&env.state.db).await.unwrap();
+    env
+}
+
+async fn levels(env: &Env) -> std::collections::BTreeMap<String, i64> {
+    let rows: Vec<(String, i64)> = sqlx::query_as("SELECT COALESCE(template_key, kind), autonomy_level FROM agents WHERE workspace_id = ?1 AND scope = 'workspace'").bind(&env.ws).fetch_all(&env.state.db).await.unwrap();
+    rows.into_iter().collect()
+}
+
+#[tokio::test]
+async fn a_workspace_whose_admin_chose_auto_raises_untuned_meera_the_lead_and_experts() {
+    let env = raw_workspace("auto", Some("admin")).await;
+    let mut conn = env.state.db.acquire().await.unwrap();
+    seed::seed_workspace(&mut conn, &env.ws).await.unwrap();
+    seed::seed_workspace(&mut conn, &env.ws).await.unwrap();
+    drop(conn);
+    let l = levels(&env).await;
+    assert_eq!((l["general.lead"], l["support.resolver"], l["personal.scheduling"]), (3, 3, 3), "{l:?}");
+    assert_eq!(l["finance.invoices"], 1, "Vikram stays at 1");
+    let mine: Vec<i64> = sqlx::query_scalar("SELECT autonomy_level FROM agents WHERE workspace_id = ?1 AND scope = 'personal'").bind(&env.ws).fetch_all(&env.state.db).await.unwrap();
+    assert!(mine.iter().all(|l| *l == 3), "{mine:?}");
+    let records: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM autonomy_changes WHERE workspace_id = ?1 AND reason = 'Automatic by default'").bind(&env.ws).fetch_one(&env.state.db).await.unwrap();
+    assert_eq!(records, 2 + 3, "every raise is recorded once: two personal agents, the lead and two experts");
+    assert_eq!(env.ok("GET", "/agent", ADMIN, None).await["agent"]["permissions"]["send"], "auto");
+}
+
+#[tokio::test]
+async fn a_workspace_whose_admin_chose_ask_raises_nothing() {
+    let env = raw_workspace("ask", Some("admin")).await;
+    let mut conn = env.state.db.acquire().await.unwrap();
+    seed::seed_workspace(&mut conn, &env.ws).await.unwrap();
+    drop(conn);
+    let l = levels(&env).await;
+    assert_eq!((l["general.lead"], l["support.resolver"], l["personal.scheduling"]), (1, 1, 0), "{l:?}");
+}
+
+#[tokio::test]
+async fn a_user_capped_paused_or_demoted_agent_is_not_raised_until_eligible() {
+    let env = raw_workspace("auto", Some("admin")).await;
+    let resolver = env.agent_id(ADMIN, "support.resolver").await;
+    let scheduling = env.agent_id(ADMIN, "personal.scheduling").await;
+    sqlx::query("UPDATE agents SET autonomy_level = 1, autonomy_cap = 1 WHERE workspace_id = ?1").bind(&env.ws).execute(&env.state.db).await.unwrap();
+    let mut conn = env.state.db.acquire().await.unwrap();
+    email_ai_api::evals::gate::record_limit_change(&mut conn, &env.ws, &resolver, 3, 1, &env.admin_id).await.unwrap();
+    drop(conn);
+    sqlx::query("UPDATE agents SET status = 'paused', paused_reason = 'user' WHERE id = ?1").bind(&scheduling).execute(&env.state.db).await.unwrap();
+    let mut conn = env.state.db.acquire().await.unwrap();
+    seed::seed_workspace(&mut conn, &env.ws).await.unwrap();
+    drop(conn);
+    let l = levels(&env).await;
+    assert_eq!((l["support.resolver"], l["personal.scheduling"], l["general.lead"]), (1, 1, 3), "capped and paused agents stay put: {l:?}");
+    env.ok("PATCH", &format!("/agents/{scheduling}"), ADMIN, Some(json!({"status": "active"}))).await;
+    env.ok("GET", "/agents", ADMIN, None).await;
+    assert_eq!(levels(&env).await["personal.scheduling"], 3, "raised once it is switched on again");
+}
