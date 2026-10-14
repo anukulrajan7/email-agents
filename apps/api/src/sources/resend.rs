@@ -98,6 +98,9 @@ pub struct ReceivedEmail {
     pub created_at: Option<String>,
     #[serde(default)]
     pub attachments: Vec<ReceivedAttachment>,
+    /// Message headers: an object of name → value, or a list of `{name, value}`.
+    #[serde(default)]
+    pub headers: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -161,6 +164,11 @@ impl ReceivedEmail {
                 .collect(),
             // Forwarded mail arrives complete.
             preview_only: false,
+            bulk_signals: self
+                .headers
+                .as_ref()
+                .map(|h| crate::bulk::header_signals(&crate::bulk::header_lookup(h), &[]))
+                .unwrap_or_default(),
         }
     }
 }

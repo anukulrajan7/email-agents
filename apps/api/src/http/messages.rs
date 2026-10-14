@@ -649,6 +649,12 @@ pub async fn understand_now(
 ) -> AppResult<Json<Value>> {
     require_role(&state.db, &ws, &user, Role::Operator).await?;
     ensure_message(&state, &ws, &id).await?;
+    // Mail filed by the bulk rules gets the full treatment once a person opens it.
+    if crate::bulk::release_for_person(&state.db, &id).await? {
+        let key = format!("classify:{id}:{TAXONOMY_VERSION}:open:{}", new_id("req"));
+        let mut conn = state.db.acquire().await?;
+        jobs::enqueue(&mut conn, kind::CLASSIFY_EMAIL, &key, Some(&ws), &json!({ "message_id": id, "full": true })).await?;
+    }
     let insight = handlers::analyze_message(&state, &json!({ "message_id": id })).await.map_err(|e| {
         tracing::warn!(message_id = %id, error = %e, "on-demand analysis failed");
         AppError::AiUnavailable

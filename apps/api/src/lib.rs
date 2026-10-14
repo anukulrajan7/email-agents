@@ -9,6 +9,7 @@ pub mod automations;
 pub mod attachments;
 pub mod auth;
 pub mod backup;
+pub mod bulk;
 pub mod config;
 pub mod db;
 pub mod domain;

@@ -96,8 +96,8 @@ pub async fn persist_message(
         "INSERT INTO email_messages
            (id, workspace_id, source_id, thread_id, source_message_id, rfc_message_id, sender_address,
             original_sender_address, recipients_json, subject, body_text, body_html, received_at, created_at, processing_status,
-            content_complete, sender_name, cc_json, direction)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?18, ?15, ?16, ?17, ?19)",
+            content_complete, sender_name, cc_json, direction, bulk_signals)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?18, ?15, ?16, ?17, ?19, ?20)",
     )
     .bind(&message_id)
     .bind(workspace_id)
@@ -118,6 +118,7 @@ pub async fn persist_message(
     .bind(json!(email.cc).to_string())
     .bind(if outbound { "processed" } else { "normalized" })
     .bind(if outbound { "outbound" } else { "inbound" })
+    .bind(json!(email.bulk_signals).to_string())
     .execute(&mut *conn)
     .await?;
 
@@ -191,6 +192,7 @@ pub async fn refresh_content(
     let updated: Option<(String, String, String)> = sqlx::query_as(
         "UPDATE email_messages SET body_text = ?1, body_html = COALESCE(?2, body_html), content_complete = 1, text_clean_v = 1,
                 sender_name = COALESCE(?5, sender_name), cc_json = ?6,
+                bulk_signals = CASE WHEN ?8 != '[]' THEN ?8 ELSE bulk_signals END,
                 direction = CASE WHEN ?7 THEN 'outbound' ELSE direction END,
                 processing_status = CASE WHEN ?7 THEN 'processed' ELSE processing_status END
          WHERE source_id = ?3 AND source_message_id = ?4 AND content_complete = 0
@@ -203,6 +205,7 @@ pub async fn refresh_content(
     .bind(&email.sender_name)
     .bind(json!(email.cc).to_string())
     .bind(outbound)
+    .bind(json!(email.bulk_signals).to_string())
     .fetch_optional(&mut *conn)
     .await?;
     let Some((message_id, workspace_id, direction)) = updated else { return Ok(None) };

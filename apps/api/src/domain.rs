@@ -143,6 +143,8 @@ pub struct NormalizedEmail {
     pub attachments: Vec<AttachmentMeta>,
     /// True when only a provider preview (snippet) is known, not the full body.
     pub preview_only: bool,
+    /// Header evidence of bulk or automated mail (`bulk::header_signals`).
+    pub bulk_signals: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default)]

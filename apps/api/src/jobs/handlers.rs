@@ -330,6 +330,12 @@ async fn classify_email(state: &AppState, job: &Job, payload: &Value) -> Result<
         return Ok(());
     }
 
+    // Bulk and automated mail is filed by rules: no model call. A person's request (reprocess, opening the email) skips this.
+    let full_treatment = job.dedupe_key.contains(":reprocess:") || payload.get("full").and_then(Value::as_bool) == Some(true);
+    if !full_treatment && let Some(signals) = crate::bulk::should_file(&state.db, &msg.workspace_id, &message_id).await? {
+        return file_as_bulk(state, job, &msg, &message_id, &signals).await;
+    }
+
     let attachment_names: Vec<String> = sqlx::query_scalar("SELECT filename FROM attachments WHERE message_id = ?1")
         .bind(&message_id)
         .fetch_all(&state.db)
@@ -363,6 +369,28 @@ async fn classify_email(state: &AppState, job: &Job, payload: &Value) -> Result<
     Ok(())
 }
 
+/// Files bulk mail with the rules label and an empty, no-reply insight. Nothing else runs on it except
+/// indexing for search.
+async fn file_as_bulk(state: &AppState, job: &Job, msg: &MessageForAi, message_id: &str, signals: &[String]) -> Result<(), JobError> {
+    let active = labels::active(&state.db, &msg.workspace_id).await?;
+    let category = labels::coerce(&active, "newsletters");
+    let out = ClassifyOutput {
+        category,
+        priority: Priority::Low,
+        requires_reply: false,
+        confidence: Some(0.99),
+        source: ClassificationSource::Fallback,
+        model_id: Some(crate::bulk::MODEL_ID.into()),
+        model_version: None,
+    };
+    let written = persist_classification_with(state, message_id, &out, Actor::System, Some(&job.id), WriteMode::Upsert, true).await?;
+    if written.is_some() {
+        tracing::info!(%message_id, ?signals, "filed as bulk mail by rules: no model call");
+    }
+    state.jobs_notify.notify_one();
+    Ok(())
+}
+
 /// Stores a classification (model, fallback or manual) and enqueues the workflow stage.
 /// `trigger` makes the workflow job key unique per classification event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -381,6 +409,19 @@ pub async fn persist_classification(
     actor: Actor<'_>,
     trigger: Option<&str>,
     mode: WriteMode,
+) -> Result<Option<bool>, JobError> {
+    persist_classification_with(state, message_id, out, actor, trigger, mode, false).await
+}
+
+/// `bulk`: filed by rules. The insight is written here (nothing needs a model) and only indexing is queued.
+async fn persist_classification_with(
+    state: &AppState,
+    message_id: &str,
+    out: &ClassifyOutput,
+    actor: Actor<'_>,
+    trigger: Option<&str>,
+    mode: WriteMode,
+    bulk: bool,
 ) -> Result<Option<bool>, JobError> {
     let needs_review = policy::needs_review(out);
     let now = now_ms();
@@ -461,6 +502,29 @@ pub async fn persist_classification(
         },
     )
     .await?;
+    if bulk {
+        let summary = {
+            let subject: String = sqlx::query_scalar("SELECT subject FROM email_messages WHERE id = ?1").bind(message_id).fetch_one(&mut *tx).await?;
+            crate::sources::normalize::truncate_chars(subject.trim(), 200)
+        };
+        sqlx::query(
+            "INSERT OR IGNORE INTO message_insights (message_id, summary, asks_json, deadline, needs_reply, missing_json, source, model_id, created_at)
+             VALUES (?1, ?2, '[]', NULL, 0, '[]', 'rules', ?3, ?4)",
+        )
+        .bind(message_id)
+        .bind(summary)
+        .bind(crate::bulk::MODEL_ID)
+        .bind(now)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query("UPDATE email_messages SET processing_status = 'processed' WHERE id = ?1 AND processing_status = 'classified'")
+            .bind(message_id)
+            .execute(&mut *tx)
+            .await?;
+        super::knowledge_jobs::enqueue_index_message(&mut tx, &workspace_id, message_id).await?;
+        tx.commit().await?;
+        return Ok(Some(needs_review));
+    }
     let trigger = trigger.map(str::to_string).unwrap_or_else(|| format!("{}:{}", out.category, now));
     let analyzed: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM message_insights WHERE message_id = ?1)")
         .bind(message_id)
