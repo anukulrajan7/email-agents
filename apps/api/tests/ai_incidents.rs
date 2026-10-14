@@ -113,7 +113,7 @@ async fn the_health_report_is_admin_only_and_lists_open_incidents_until_resolved
     assert_eq!(report["open_total"], 1);
     assert_eq!(report["open"][0]["id"], id.as_str());
     assert_eq!(report["open"][0]["label"], "AI declined a request");
-    assert_eq!(report["open"][0]["agent_name"].as_str().is_some(), true);
+    assert!(report["open"][0]["agent_name"].as_str().is_some());
     assert_eq!(report["by_day"].as_array().unwrap().len(), 7);
     let refusal = report["by_kind"].as_array().unwrap().iter().find(|k| k["kind"] == "refusal").unwrap();
     assert_eq!((refusal["total"].as_i64(), refusal["open"].as_i64()), (Some(1), Some(1)));

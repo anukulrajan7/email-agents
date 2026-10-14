@@ -428,7 +428,7 @@ mod tests {
         assert_eq!(latency_spike(&slow, &base), Some((5_000.0, 1_000.0)));
         assert_eq!(latency_spike(&slow[..5], &base), None);
         assert_eq!(latency_spike(&slow, &base[..10]), None);
-        assert_eq!(latency_spike(&vec![1_500.0; 25], &base), None);
-        assert_eq!(latency_spike(&vec![2_500.0; 25], &vec![2_000.0; 60]), None);
+        assert_eq!(latency_spike(&[1_500.0; 25], &base), None);
+        assert_eq!(latency_spike(&[2_500.0; 25], &[2_000.0; 60]), None);
     }
 }

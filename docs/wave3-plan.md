@@ -1,18 +1,20 @@
 # Wave 3 plan (from the CTO / AI-engineering review, 14 Oct 2026)
 
+Status refreshed 15 Oct 2026: the original table below was written at b82254e; the **Now** column is current. See `status-2026-10-15.md`.
+
 ## Shrikant's requirements: honest status at commit b82254e (before wave 2 merges)
 
-| R | Verdict | Note |
+| R | Verdict then | Now (15 Oct) |
 |---|---|---|
-| R1 leave + referral | Working | Referral review path not asserted in tests |
-| R2 alerts | Missing → wave 2 (agent F) | Needs reply detection (mail direction, agent A) |
-| R3 performance | Missing | Needs sent-mail direction + submissions (M6) |
-| R4 billable/non-billable | Missing | People directory (M5) |
-| R5 portal reconciliation | Missing | CSV import (M7) |
-| R6 read all mail + attachments | Partial | Attachments read only for 2 labels, PDF/DOCX/TXT, ≤5 files; no XLSX |
-| R7 team members' mail | Partial | Admin-only connect; no per-person mapping or mailbox filter |
-| R8 ask questions | Missing | Knowledge store lands in wave 2 (agent C); Ask agent in M8 |
-| R9 referral ↔ requirement | Working (v1) | LLM/attachment extraction untested; no daily digest |
+| R1 leave + referral | Working | Working |
+| R2 alerts | Missing | Working: rules, escalation, digest |
+| R3 performance | Missing | Working: submissions, targets, corner widget |
+| R4 billable/non-billable | Missing | Working: directory and suppressed-mail policy |
+| R5 portal reconciliation | Missing | Working: CSV import, mismatch alerts |
+| R6 read all mail + attachments | Partial | Attachments read for all mail: Excel, CSV, PPT, Word, PDF, images, audio. Backfill still bounded; old mail understood when opened |
+| R7 team members' mail | Partial | Mapping and mailbox filter live; still admin-only connect (members connecting own Gmail is after v1) |
+| R8 ask questions | Missing | Partial: Ask Meera with sources, open-email context, sheets; HR counts not wired |
+| R9 referral ↔ requirement | Working (v1) | Working: semantic match and daily digest; LLM rerank after v1 |
 
 ## Fixed during wave 2 (pushed to running agents)
 - Mail direction: SENT mail is stored as `outbound`, never classified/drafted; `thread_has_reply_after` helper (A).

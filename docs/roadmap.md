@@ -1,6 +1,6 @@
 # Roadmap: every requirement, one plan
 
-Status: 14 Oct 2026 · combines `plan-staffing-agent.md` (what to build) and `plan-ai-automation.md` (how the AI works)
+Status: 15 Oct 2026 (see `status-2026-10-15.md` and `features.md`) · combines `plan-staffing-agent.md` (what to build) and `plan-ai-automation.md` (how the AI works)
 
 Decisions locked: each person connects their own Gmail · portal data by CSV export · quality = interview rate ·
 first demo = referral ↔ requirement matching · embeddings via API (`baai/bge-m3` through OpenRouter, no-retention
@@ -13,14 +13,14 @@ routing) · ~100-email golden set labelled by the team · humans send; drafts au
 | R1 | Leave + referral handling | Workflows on labels | – | ✅ Live |
 | R6 | Read all emails **and attachments** | Gmail backfill + PDF/DOCX text | – | ✅ Live (bodies, CV/JD text) |
 | R9 | Referral profiles ↔ client requirements | Extraction + skill taxonomy + explainable score + **vector recall** + daily digest → LLM rerank | M1 → M4 | ✅ Semantic matching + digest built (M4) · LLM rerank next |
-| – | Labels that learn the team's meaning | **RAG few-shot** from confirmed labels; Qwen → Kimi escalation | M0 → M2 | Fix ready · RAG in M2 |
+| – | Labels that learn the team's meaning | **RAG few-shot** from confirmed labels; Qwen → Kimi escalation | M0 → M2 | ✅ Live (corrections feed few-shot; knowledge store) |
 | – | Replies in the team's style, saved to Gmail | **RAG** over sent/approved replies; auto-save drafts | M3 | ✅ manual save/send live |
-| R2 | **Alerts:** important email missed; trigger events | **Rules engine** (not RAG) + LLM "needs reply?" judgement | M5 | Planned |
-| R4 | Billable vs non-billable staff | People directory (type, client, manager, targets) | M5 | Planned |
-| R5 | Match email vs portal data; alerts per level | CSV import → exact joins → **mismatch alerts** up the chain | M7 | Planned |
-| R3 | **Performance:** day/week, target vs achieved, corner widget | Submissions extracted from sent mail (**RAG links** submission → requirement/candidate) → metric views | M6 | Planned |
-| R8 | Ask questions about all data; quality since joining | **Ask agent:** RAG (what/why, with sources) + SQL tools (exact counts) | M8 | Planned |
-| R7 | Read team members' mail | Each person connects Gmail; mailbox → person mapping | M5 | Connect works · mapping in M5 |
+| R2 | **Alerts:** important email missed; trigger events | **Rules engine** (not RAG) + LLM "needs reply?" judgement | M5 | ✅ Live (owner → manager → HR escalation) |
+| R4 | Billable vs non-billable staff | People directory (type, client, manager, targets) | M5 | ✅ Live (suppressed mail policy) |
+| R5 | Match email vs portal data; alerts per level | CSV import → exact joins → **mismatch alerts** up the chain | M7 | ✅ Live |
+| R3 | **Performance:** day/week, target vs achieved, corner widget | Submissions extracted from sent mail (**RAG links** submission → requirement/candidate) → metric views | M6 | ✅ Live |
+| R8 | Ask questions about all data; quality since joining | **Ask agent:** RAG (what/why, with sources) + SQL tools (exact counts) | M8 | Partial: Ask Meera is live with sources; exact HR counts not wired to it yet |
+| R7 | Read team members' mail | Each person connects Gmail; mailbox → person mapping | M5 | Mapping and scoped inbox live · members connecting their own Gmail is after v1 |
 
 ## 2. Alerts: what fires, who gets it, how it escalates
 
@@ -60,12 +60,12 @@ Escalation levels come from the people directory (`manager_id` chain).
 |---|---|---|
 | **M0** (ready) | Confident labels auto-approved; Qwen → Kimi escalation; sanitized HTML email display (links, images) | Review queue holds only unsure emails; emails look like Gmail |
 | **M1** ✅ | Matching v1 (extraction + explainable score + shortlist) | Done |
-| **M2** | Knowledge store (chunks + bge-m3 embeddings in SQLite + hybrid search) · RAG labelling · golden set (~100) + accuracy page | "Labels improved from X% → Y% on our own emails" |
-| **M3** | RAG drafting + auto-save workflow drafts to Gmail | Drafts waiting in Gmail, in the team's voice |
+| **M2** ✅ | Knowledge store (chunks + bge-m3 embeddings in SQLite + hybrid search) · RAG labelling · golden set (~100) + accuracy page | "Labels improved from X% → Y% on our own emails" |
+| **M3** ✅ | RAG drafting + auto-save workflow drafts to Gmail | Drafts waiting in Gmail, in the team's voice |
 | **M4** ✅ | Semantic matching (skill taxonomy, vector recall, semantic-fit score) + daily match digest · LLM rerank hook left open | Synonym matches found; morning email |
-| **M5** | People directory · rules engine · **alerts** (missed email, approval pending, timesheet missing) + escalation + Alerts inbox | Unanswered Capgemini email escalates to the manager |
-| **M6** | Submissions + outcomes → **performance** dashboard + corner widget | Recruiter sees today vs target; manager sees the team |
-| **M7** | Portal CSV import → reconciliation → **mismatch alerts** by level | Hours mismatch flagged to employee, then manager |
-| **M8** | **Ask agent** (RAG + metric tools, cited answers) | "How many submissions did Priya do since joining, and what % got interviews?" |
+| **M5** ✅ | People directory · rules engine · **alerts** (missed email, approval pending, timesheet missing) + escalation + Alerts inbox | Unanswered Capgemini email escalates to the manager |
+| **M6** ✅ | Submissions + outcomes → **performance** dashboard + corner widget | Recruiter sees today vs target; manager sees the team |
+| **M7** ✅ | Portal CSV import → reconciliation → **mismatch alerts** by level | Hours mismatch flagged to employee, then manager |
+| **M8** (partial) | **Ask agent** (RAG + metric tools, cited answers) | "How many submissions did Priya do since joining, and what % got interviews?" |
 
 Effort guide: M0–M4 are mostly in the existing stack. M5–M6 add the people/rules/metrics model. M7–M8 build on all of it.

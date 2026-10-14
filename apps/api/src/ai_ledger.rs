@@ -265,7 +265,8 @@ pub async fn mark_invalid(db: &SqlitePool, row_id: &str, error_class: &str, erro
 
 /// A call that came back unusable is an incident (`refusal` or `schema_failure`), attributed to its case's agent.
 async fn record_call_incident(db: &SqlitePool, row_id: &str, error_class: &str) {
-    let row: Result<Option<(Option<String>, String, Option<String>, Option<String>)>, _> =
+    type CallRow = (Option<String>, String, Option<String>, Option<String>);
+    let row: Result<Option<CallRow>, _> =
         sqlx::query_as("SELECT workspace_id, task, case_id, message_id FROM ai_calls WHERE id = ?1").bind(row_id).fetch_optional(db).await;
     let Ok(Some((Some(ws), task, case_id, message_id))) = row else { return };
     let agent_id: Option<String> = match &case_id {
