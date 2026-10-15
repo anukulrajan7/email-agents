@@ -1,7 +1,7 @@
 //! The owner's seven requirements (R1-R7 in docs/shrikant-verification.md), each run end to end through the
 //! HTTP API and the real job pipeline with a seeded company: people from a CSV, mail, attachments, portal CSVs.
 
-mod staffing_common;
+use crate::staffing_common;
 
 use axum::http::StatusCode;
 use email_ai_api::{alerts, db::now_ms, jobs::worker, staffing::metrics as hrms};

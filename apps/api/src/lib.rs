@@ -71,6 +71,9 @@ use crate::{
 /// Wires adapters from config. Missing model keys fall back to the deterministic
 /// rules classifier / template drafter, which are labelled as such everywhere.
 pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
+    if config.db_from_template {
+        db::seed_from_template(&config.database_url)?;
+    }
     let db = db::connect(&config.database_url).await?;
     let http = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(5))

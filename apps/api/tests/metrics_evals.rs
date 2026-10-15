@@ -1,6 +1,6 @@
 //! Metrics scorecards, in-product eval runs and the autonomy checklist.
 
-mod common;
+use crate::common;
 
 use axum::http::StatusCode;
 use common::*;

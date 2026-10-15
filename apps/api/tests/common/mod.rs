@@ -355,3 +355,13 @@ impl Env {
         q.execute(&self.state.db).await.unwrap();
     }
 }
+
+/// The offline safety suite for a spec, run once per process however many tests ask for the same spec.
+pub async fn safety_suite(spec: &email_ai_api::agent_registry::spec::AgentSpec) -> Arc<email_ai_api::evals::safety::SuiteResult> {
+    use std::{collections::HashMap, sync::OnceLock};
+    use tokio::sync::OnceCell;
+    type Cell = Arc<OnceCell<Arc<email_ai_api::evals::safety::SuiteResult>>>;
+    static CACHE: OnceLock<Mutex<HashMap<String, Cell>>> = OnceLock::new();
+    let cell: Cell = CACHE.get_or_init(Default::default).lock().unwrap().entry(serde_json::to_string(spec).unwrap()).or_default().clone();
+    cell.get_or_init(|| async { Arc::new(email_ai_api::evals::safety::run_for_spec(spec).await) }).await.clone()
+}

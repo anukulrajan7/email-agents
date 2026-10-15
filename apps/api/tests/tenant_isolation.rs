@@ -2,7 +2,7 @@
 //! source files (so a new route is covered the day it is added), then each is called by a member of
 //! workspace B with workspace A's ids, under A's path and under B's own path. Nothing of A may come back.
 
-mod common;
+use crate::common;
 
 use std::collections::{BTreeSet, HashMap};
 

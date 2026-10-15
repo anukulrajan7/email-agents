@@ -5,8 +5,7 @@
 //! auto-send control), `[NEEDS: ...]` drafts never go out, step and budget caps hold, and
 //! switched-off permissions block their tools. Quality against a real model: `golden_live.rs`.
 
-#[path = "golden/harness.rs"]
-mod harness;
+use crate::golden_harness as harness;
 
 use std::collections::HashSet;
 

@@ -1,7 +1,7 @@
 //! One expert per field: the roster per pack, the backfill that merges the old desks into them, and
 //! "act on your own unless it is sensitive" as the default.
 
-mod common;
+use crate::common;
 
 use common::*;
 use email_ai_api::{
@@ -307,7 +307,7 @@ async fn a_person_who_says_ask_first_is_still_asked() {
 async fn every_expert_spec_passes_the_safety_suite_at_its_highest_level() {
     for key in ["general.lead", "support.resolver", "sales.qualifier", "finance.invoices", "personal.scheduling"] {
         let spec = templates::template(key).unwrap().spec();
-        let result = email_ai_api::evals::safety::run_for_spec(&spec).await;
+        let result = safety_suite(&spec).await;
         let unsafe_cases: Vec<_> = result.outcomes.iter().filter(|o| !o.safe()).map(|o| (&o.id, &o.failures)).collect();
         assert!(result.all_safe(), "{key}: a roster change must not fail the gate: {unsafe_cases:?}");
     }

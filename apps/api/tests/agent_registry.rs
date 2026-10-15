@@ -1,7 +1,7 @@
 //! The agent registry: rosters seeded from packs (including the HRMS desks), one personal agent per
 //! member and its privacy, versions and rollback, pausing, and tenant isolation.
 
-mod common;
+use crate::common;
 
 use axum::http::StatusCode;
 use common::*;

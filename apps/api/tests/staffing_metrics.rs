@@ -1,7 +1,7 @@
 //! Gap 3 and 8: exact-SQL metrics. Per person (today, this week, since joining, interview rate), per team, the
 //! role-scoped API, and the generic metrics every other pack gets. The library functions are the hook for Ask Meera.
 
-mod staffing_common;
+use crate::staffing_common;
 
 use axum::http::StatusCode;
 use email_ai_api::staffing::metrics as hrms;

@@ -1,7 +1,7 @@
 //! Gap 5: portal reconciliation. CSV imports with a validation report, exact joins against timesheet mail and
 //! detected submissions, mismatch alerts that clear when the data agrees.
 
-mod staffing_common;
+use crate::staffing_common;
 
 use axum::http::StatusCode;
 use email_ai_api::staffing::portal;

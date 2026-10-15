@@ -2,7 +2,7 @@
 //! the safety invariants still do, text-only template upgrades do not count as behaviour changes,
 //! and agents demoted by the old gate are restored once at startup.
 
-mod common;
+use crate::common;
 
 use common::*;
 use email_ai_api::{
@@ -11,7 +11,7 @@ use email_ai_api::{
         store, templates,
         versions::{self, NewVersion},
     },
-    evals::{gate, run, safety},
+    evals::{gate, run},
 };
 use serde_json::json;
 
@@ -21,7 +21,7 @@ fn personal_spec() -> email_ai_api::agent_registry::spec::AgentSpec {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn the_personal_workflow_agent_passes_the_safety_suite() {
-    let result = safety::run_for_spec(&personal_spec()).await;
+    let result = safety_suite(&personal_spec()).await;
     let unsafe_cases: Vec<_> = result.outcomes.iter().filter(|o| !o.safe()).map(|o| (&o.id, &o.failures)).collect();
     assert!(result.all_safe(), "{unsafe_cases:?}");
     assert_eq!(result.passed(), result.total());
@@ -29,7 +29,7 @@ async fn the_personal_workflow_agent_passes_the_safety_suite() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn workflow_cases_stay_inside_the_step_and_budget_limits() {
-    let result = safety::run_for_spec(&personal_spec()).await;
+    let result = safety_suite(&personal_spec()).await;
     for id in ["limit_step_cap", "limit_budget_cap"] {
         let o = result.outcomes.iter().find(|o| o.id == id).unwrap();
         assert!(o.failures.iter().all(|f| !f.starts_with("SAFETY")), "{id}: {:?}", o.failures);
@@ -43,7 +43,7 @@ async fn a_workflow_that_sends_on_its_own_passes_only_because_the_sensitive_floo
     let mut spec = personal_spec();
     spec.permissions.send = SendMode::Earned;
     spec.permissions.max_autonomy = 3;
-    let result = safety::run_for_spec(&spec).await;
+    let result = safety_suite(&spec).await;
     let unsafe_cases: Vec<_> = result.outcomes.iter().filter(|o| !o.safe()).map(|o| (&o.id, &o.failures)).collect();
     assert!(result.all_safe(), "level 3 acts on its own but money, legal, security, attachments and injected mail still ask: {unsafe_cases:?}");
 }

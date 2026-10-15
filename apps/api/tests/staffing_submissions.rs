@@ -2,7 +2,7 @@
 //! candidate and requirement (confident links automatically, ambiguous ones wait for a person); client replies
 //! move the outcome; false positives are never counted.
 
-mod staffing_common;
+use crate::staffing_common;
 
 use axum::http::StatusCode;
 use email_ai_api::staffing::submissions::{self, Outcome};

@@ -2,7 +2,7 @@
 //! requirement from a known client arrives, under the same standing rules as an agent's own send. Weekly cap,
 //! daily cap, STOP (also at send time), confidential clients and the enrolment rules are all checked here.
 
-mod common;
+use crate::common;
 
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use common::*;
