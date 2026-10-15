@@ -11,7 +11,11 @@ use email_ai_api::{
     domain::Label,
 };
 use serde::Deserialize;
+use harness::{label_accuracy, label_accuracy_md, label_set, load_scenarios, write_scorecard};
 use serde_json::Value;
+
+#[path = "golden/harness.rs"]
+mod harness;
 
 #[derive(Deserialize)]
 struct Files {
@@ -129,4 +133,45 @@ fn verification_drops_what_the_email_never_said() {
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// The labelled set is the golden scenarios that name a label (the same emails the agents are graded on).
+/// Without a model this scores the keyword baseline (`RulesUnderstander`); `golden_live` scores the real reader.
+#[tokio::test]
+async fn labelled_emails_have_valid_labels_and_the_keyword_baseline_is_recorded() {
+    use email_ai_api::ai::understand::Understander;
+    let mut pairs: Vec<(String, String)> = Vec::new();
+    let mut problems = Vec::new();
+    for s in load_scenarios().iter().filter(|s| s.label.is_some()) {
+        let want = s.label.clone().unwrap_or_default();
+        let labels = label_set(s);
+        if !labels.iter().any(|l| l.key == want) {
+            problems.push(format!("{}: label {want} is not in {}'s taxonomy", s.id, s.agent()));
+            continue;
+        }
+        let mail = s.emails.last().unwrap();
+        let input = UnderstandInput {
+            subject: mail.subject.clone(),
+            sender: mail.from.clone(),
+            received_at_ms: 1_791_900_000_000,
+            new_part: model_body(&mail.subject, &mail.body),
+            attachments_block: String::new(),
+            attachment_names: vec![],
+            labels,
+            examples: vec![],
+            sender_history: None,
+            thread_digest: None,
+        };
+        let (u, _) = email_ai_api::ai::understand::RulesUnderstander.understand(&input).await.unwrap();
+        pairs.push((want, u.label));
+    }
+    assert!(problems.is_empty(), "{}", problems.join("\n"));
+    assert!(pairs.len() >= 50, "{} labelled emails", pairs.len());
+    let by = label_accuracy(&pairs);
+    let table = label_accuracy_md(&by);
+    println!("\nLabel accuracy, keyword baseline (rules-v1)\n{table}");
+    write_scorecard(
+        "labelling, keyword baseline",
+        &format!("The offline keyword classifier on the golden emails that name a label. The real reader is scored live (`golden_live`).\n\n{table}"),
+    );
 }
