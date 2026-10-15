@@ -1,3 +1,4 @@
+pub mod understanding;
 pub mod mail;
 pub mod platform;
 pub mod agent_profiles;
@@ -30,7 +31,7 @@ pub use mail::ingest;
 pub mod jobs;
 pub mod knowledge;
 pub mod learning;
-pub mod labels;
+pub use understanding::labels;
 pub use platform::mailer;
 pub mod matching;
 pub mod messaging;
