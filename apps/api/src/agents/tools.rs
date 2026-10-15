@@ -946,6 +946,7 @@ impl Tool for RecordTimesheet {
         let run = crate::staffing::timesheet_records::record_message(ctx.state, ctx.ws(), &msg.id).await?;
         let clean = !run.records.is_empty() && !run.needs_attention();
         let summary = match run.records.as_slice() {
+            [] if run.deferred => "The timesheet could not be read just now; it is tried again later".to_string(),
             [] if run.waiting_for_files => "The attached files are still being read; the timesheet is recorded when they are".to_string(),
             [] => "No timesheet data was found in this email".to_string(),
             records => records

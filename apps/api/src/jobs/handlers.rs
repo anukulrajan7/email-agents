@@ -364,7 +364,12 @@ async fn classify_email(state: &AppState, job: &Job, payload: &Value) -> Result<
         .bind(&message_id)
         .fetch_all(&state.db)
         .await?;
-    if crate::staffing::timesheet_records::looks_like_timesheet(&msg.subject, &attachment_names)
+    let automated_signals: String =
+        sqlx::query_scalar("SELECT bulk_signals FROM email_messages WHERE id = ?1").bind(&message_id).fetch_optional(&state.db).await?.unwrap_or_default();
+    let automated = crate::memory_learning::is_automated_sender(&crate::staffing::policy::address_of(&msg.sender_address))
+        || serde_json::from_str::<Vec<String>>(&automated_signals).is_ok_and(|s| !s.is_empty());
+    if !automated
+        && crate::staffing::timesheet_records::looks_like_timesheet(&msg.subject, &attachment_names)
         && labels::is_active(&state.db, &msg.workspace_id, crate::staffing::timesheet_records::LABEL).await?
     {
         let out = ClassifyOutput {
@@ -789,7 +794,11 @@ async fn execute_workflow(state: &AppState, payload: &Value) -> Result<(), JobEr
     if category == crate::staffing::timesheet_records::LABEL && crate::packs::enabled(&state.db, &workspace_id, crate::packs::STAFFING).await? {
         // A timesheet that was recorded cleanly needs no review item; one that needs a look gets the usual one below.
         let run = crate::staffing::timesheet_records::record_message(state, &workspace_id, &message_id).await?;
-        if !run.needs_attention() {
+        if run.deferred {
+            return Err(JobError::Retry("the timesheet could not be read by the model yet".into()));
+        }
+        let nothing_recorded = run.records.is_empty() && !run.waiting_for_files;
+        if !nothing_recorded && !run.needs_attention() {
             return mark_processed_if_classified(state, &message_id).await;
         }
     }

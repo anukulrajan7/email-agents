@@ -52,10 +52,10 @@ export function useReconcile(ws: string) {
   });
 }
 
-export function useTimesheetGrid(ws: string, month: string) {
+export function useTimesheetGrid(ws: string, month: string | undefined) {
   return useQuery({
     queryKey: [...hrmsKey(ws), 'timesheet-grid', month],
-    queryFn: () => api<TimesheetGrid>(`/workspaces/${ws}/staffing/timesheet-grid`, { query: { month } }),
+    queryFn: () => api<TimesheetGrid>(`/workspaces/${ws}/staffing/timesheet-grid`, { query: month ? { month } : {} }),
   });
 }
 

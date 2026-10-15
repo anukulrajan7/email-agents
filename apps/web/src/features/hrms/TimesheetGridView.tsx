@@ -3,7 +3,7 @@ import { Badge, Button, EmptyState, Input, SegmentedControl, Select, SkeletonLis
 import { ErrorNote } from '../../components/ErrorNote';
 import { cn } from '../../lib/cn';
 import { useTimesheetGrid } from './hooks';
-import { cellLabel, currentMonth, gridCsv, shortDate, statusText, weeksOf } from './timesheetFormat';
+import { cellLabel, gridCsv, shortDate, statusText, weeksOf } from './timesheetFormat';
 import type { GridRow, GridStatus } from './types';
 
 const TONE: Record<GridStatus, Tone> = { recorded: 'success', needs_check: 'warning', missing: 'danger', pending: 'neutral' };
@@ -19,13 +19,14 @@ function download(name: string, text: string) {
 
 /** People by days, like a spreadsheet: hours per day, a total and a status. Click a row to see its records. */
 export function TimesheetGridView({ ws, onOpen }: { ws: string; onOpen: (row: GridRow) => void }) {
-  const [month, setMonth] = useState(currentMonth());
+  const [picked, setPicked] = useState('');
   const [scope, setScope] = useState<'month' | 'week'>('month');
   const [week, setWeek] = useState(0);
   const [client, setClient] = useState('');
   const [q, setQ] = useState('');
-  const grid = useTimesheetGrid(ws, month);
+  const grid = useTimesheetGrid(ws, picked || undefined);
   const data = grid.data;
+  const month = picked || data?.month || '';
 
   const weeks = useMemo(() => weeksOf(data?.days ?? []), [data]);
   const shownWeek = Math.min(week, Math.max(weeks.length - 1, 0));
@@ -39,7 +40,7 @@ export function TimesheetGridView({ ws, onOpen }: { ws: string; onOpen: (row: Gr
   return (
     <div className="flex flex-col gap-3">
       <div className="flex flex-wrap items-end gap-3">
-        <Input aria-label="Month" type="month" className="w-44" value={month} onChange={(e) => e.target.value && setMonth(e.target.value)} />
+        <Input aria-label="Month" type="month" className="w-44" value={month} onChange={(e) => e.target.value && setPicked(e.target.value)} />
         <SegmentedControl
           label="Show"
           value={scope}
@@ -104,8 +105,8 @@ export function TimesheetGridView({ ws, onOpen }: { ws: string; onOpen: (row: Gr
               </tr>
             </thead>
             <tbody>
-              {rows.map((r) => {
-                const key = `${r.person_id ?? 'x'}-${r.name}`;
+              {rows.map((r, i) => {
+                const key = `${r.person_id ?? r.record_ids[0] ?? 'x'}-${i}`;
                 const open = () => r.record_ids.length > 0 && onOpen(r);
                 return (
                   <tr key={key}>

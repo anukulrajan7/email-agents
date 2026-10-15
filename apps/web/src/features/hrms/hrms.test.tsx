@@ -5,7 +5,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { PortalPage } from './PortalPage';
 import { TimesheetsPage } from './TimesheetsPage';
-import { gridCsv } from './timesheetFormat';
+import { currentMonth, gridCsv } from './timesheetFormat';
 import type { TimesheetGrid } from './types';
 
 type Handler = (init?: RequestInit) => unknown;
@@ -155,6 +155,35 @@ describe('TimesheetsPage', () => {
     expect(lines[0]).toBe('Person,Employee ID,Client,2026-09-04,2026-09-05,2026-09-07,2026-09-08,Total hours,Status');
     expect(lines[1]).toBe('Ravi Kumar,E1024,Acme,8,4.5,8,,20.5,Recorded');
     expect(lines[3]).toBe('Asha Rao,E3,Acme,,,,,0,Missing');
+  });
+
+  it('keeps formula-looking cells from running in a spreadsheet', () => {
+    const rows = [{ person_id: null, name: '=HYPERLINK("http://x")', employee_code: '+1', client: '@Acme', cells: {}, total: 0, status: 'missing' as const, record_ids: [] }];
+    const line = gridCsv(grid.days, rows, (r) => r.total).split('\n')[1] ?? '';
+    expect(line.startsWith(`"'=HYPERLINK(""http://x"")",'+1,'@Acme,`)).toBe(true);
+    expect(gridCsv([], [{ ...rows[0]!, name: '-2+3', employee_code: '\tx', client: null }], () => 0).split('\n')[1]).toBe("'-2+3,'\tx,,0,Missing");
+  });
+
+  it('names the current month in local time, not UTC', () => {
+    expect(currentMonth(new Date(2026, 8, 30, 23, 59))).toBe('2026-09');
+    expect(currentMonth(new Date(2026, 0, 1, 0, 1))).toBe('2026-01');
+  });
+
+  it('asks the server for its month, and two unmatched sheets with one name do not share a key', async () => {
+    const twin = { person_id: null, name: 'Unknown', employee_code: null, client: null, cells: {}, total: 0, status: 'needs_check' as const };
+    const fetchMock = mockApi({
+      '/team/access': access('operator'),
+      '/team/settings': settings,
+      '/staffing/timesheet-grid': { ...grid, rows: [{ ...twin, record_ids: ['a'] }, { ...twin, record_ids: ['b'] }] },
+    });
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    renderAt('/w/w1/timesheets', '/w/:ws/timesheets', <TimesheetsPage />);
+    expect(await screen.findAllByText('Unknown')).toHaveLength(2);
+    const gridCall = fetchMock.mock.calls.map(([url]) => String(url)).find((u) => u.includes('/timesheet-grid')) ?? '';
+    expect(gridCall).not.toContain('month=');
+    expect(screen.getByLabelText('Month')).toHaveValue('2026-09');
+    expect(errors.mock.calls.some((c) => String(c[0]).includes('same key'))).toBe(false);
+    errors.mockRestore();
   });
 
   it('lets the super admin name the HR mailbox', async () => {

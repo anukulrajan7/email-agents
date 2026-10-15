@@ -77,6 +77,9 @@ impl From<sqlx::Error> for AppError {
     fn from(e: sqlx::Error) -> Self {
         match e {
             sqlx::Error::RowNotFound => AppError::NotFound,
+            sqlx::Error::Database(d) if d.is_unique_violation() && d.message().contains("employee_code") => {
+                AppError::Conflict("that employee ID already belongs to someone else".into())
+            }
             other => AppError::Internal(other.into()),
         }
     }

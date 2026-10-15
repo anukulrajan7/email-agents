@@ -2,7 +2,9 @@ import type { GridDay, GridRow } from './types';
 
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
-export const currentMonth = () => new Date().toISOString().slice(0, 7);
+export function currentMonth(now = new Date()): string {
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+}
 
 const parts = (date: string) => ({ y: date.slice(0, 4), m: Number(date.slice(5, 7)), d: Number(date.slice(8, 10)) });
 
@@ -36,7 +38,13 @@ export function weeksOf(days: GridDay[]): GridDay[][] {
 
 const STATUS_TEXT = { recorded: 'Recorded', needs_check: 'Needs check', missing: 'Missing', pending: 'Not due yet' } as const;
 
-const quote = (v: string) => (/[",\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v);
+/** A cell that starts like a formula is read as text by Excel and Sheets. */
+const safe = (v: string) => (/^[=+\-@\t\r]/.test(v) ? `'${v}` : v);
+
+const quote = (v: string) => {
+  const s = safe(v);
+  return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+};
 
 /** The grid as CSV: one line per person, the shown days, total and status. */
 export function gridCsv(days: GridDay[], rows: GridRow[], total: (row: GridRow) => number): string {
