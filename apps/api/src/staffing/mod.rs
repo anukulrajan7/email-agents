@@ -76,8 +76,9 @@ pub async fn record_job(state: &AppState, payload: &Value) -> Result<(), JobErro
     let ws: Option<String> = sqlx::query_scalar("SELECT workspace_id FROM email_messages WHERE id = ?1").bind(message_id).fetch_optional(&state.db).await?;
     if let Some(ws) = ws
         && enabled(&state.db, &ws).await?
+        && timesheet_records::record_message(state, &ws, message_id).await?.deferred
     {
-        timesheet_records::record_message(state, &ws, message_id).await?;
+        return Err(JobError::Retry("the timesheet could not be read by the model yet".into()));
     }
     Ok(())
 }

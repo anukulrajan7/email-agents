@@ -140,9 +140,12 @@ async fn days_that_do_not_add_up_need_a_check_and_a_missing_period_uses_the_emai
     assert_eq!((r.period_start.as_str(), r.period_end.as_str()), ("2026-09-01", "2026-09-30"), "two days into October is still September's timesheet");
     assert!(r.issues.iter().any(|i| i["code"] == "period_assumed"));
 
-    let id = f.timesheet("ravi@client.test", "Timesheet", "Hi, no numbers in this one", OCT2 + 2 * DAY, "t3").await;
+    let id = f.timesheet("ravi@client.test", "Timesheet", "Hi, call me on 555 about it", OCT2 + 2 * DAY, "t3").await;
     let r = &f.record(&id).await.records[0];
     assert_eq!((r.total_hours, r.status.as_str()), (None, "needs_check"), "nothing is invented");
+
+    let id = f.timesheet("ravi@client.test", "Timesheet", "Hi, no numbers in this one", OCT2 + 3 * DAY, "t4").await;
+    assert!(f.record(&id).await.records.is_empty(), "no figures and no file: nothing to record");
 }
 
 #[tokio::test]
@@ -279,6 +282,7 @@ struct Scripted {
     calls: Mutex<Vec<&'static str>>,
     cheap: Option<Sheet>,
     strong: Option<Sheet>,
+    retryable: bool,
 }
 
 #[async_trait]
@@ -289,6 +293,9 @@ impl TimesheetReader for Scripted {
 
     async fn read(&self, tier: SheetTier, _subject: &str, _text: &str, _year: i64) -> Result<ModelSheet, AiError> {
         self.calls.lock().unwrap().push(if tier == SheetTier::Cheap { "cheap" } else { "strong" });
+        if self.retryable {
+            return Err(AiError::Retryable("503".into()));
+        }
         let sheet = if tier == SheetTier::Cheap { &self.cheap } else { &self.strong };
         sheet.clone().map(|sheet| ModelSheet { sheet, cost_usd: 0.001 }).ok_or(AiError::Permanent("nothing".into()))
     }
@@ -307,7 +314,7 @@ fn model_sheet(total: f64, days: &[(&str, f64)]) -> Sheet {
 async fn a_model_reads_only_what_the_rules_could_not_and_the_strong_one_only_when_the_cheap_one_fails() {
     let mut f = fixture().await;
     let messy = "Ravi Kumar worked on 1st Sept eight hrs, 2nd Sept 8 hrs. That is 16 in all.";
-    let reader = Arc::new(Scripted { calls: Mutex::new(vec![]), cheap: Some(model_sheet(16.0, &[("2026-09-01", 8.0), ("2026-09-02", 8.0)])), strong: None });
+    let reader = Arc::new(Scripted { calls: Mutex::new(vec![]), cheap: Some(model_sheet(16.0, &[("2026-09-01", 8.0), ("2026-09-02", 8.0)])), strong: None, retryable: false });
     f.h.state.timesheet_reader = reader.clone();
     let id = f.timesheet("ravi@client.test", "Timesheet", messy, OCT2, "m1").await;
     let r = &f.record(&id).await.records[0];
@@ -324,6 +331,7 @@ async fn a_model_reads_only_what_the_rules_could_not_and_the_strong_one_only_whe
         calls: Mutex::new(vec![]),
         cheap: Some(model_sheet(20.0, &[("2026-09-01", 8.0), ("2026-09-02", 8.0)])),
         strong: Some(model_sheet(16.0, &[("2026-09-01", 8.0), ("2026-09-02", 8.0)])),
+        retryable: false,
     });
     f.h.state.timesheet_reader = reader.clone();
     let id = f.timesheet("ravi@client.test", "Timesheet again", "Ravi Kumar: 1 Sep 8 hrs; 2 Sep 8 hrs; summary 16 or maybe 20", OCT2 + 2 * DAY, "m3").await;
@@ -342,9 +350,15 @@ async fn the_desk_never_drafts_a_reply_for_a_timesheet_but_a_person_still_can() 
     let drafts: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM drafts WHERE message_id = ?1").bind(&id).fetch_one(&f.h.state.db).await.unwrap();
     assert_eq!(drafts, 0);
     assert!(records::suppresses_auto_reply(&f.h.state.db, &f.ws, &id).await.unwrap());
-    // Labelled but not yet read still counts as the desk's.
+    // Labelled but nothing real recorded (yet, or ever): normal replies.
     let other = f.timesheet("ravi@client.test", "Timesheet", "x", OCT2 + 1, "t2").await;
-    assert!(records::suppresses_auto_reply(&f.h.state.db, &f.ws, &other).await.unwrap());
+    assert!(!records::suppresses_auto_reply(&f.h.state.db, &f.ws, &other).await.unwrap());
+    let empty = f.timesheet("ravi@client.test", "Timesheet", "call me on 555", OCT2 + 3, "t4").await;
+    assert_eq!(f.record(&empty).await.records.len(), 1);
+    assert!(!records::suppresses_auto_reply(&f.h.state.db, &f.ws, &empty).await.unwrap(), "a record with no hours never silences replies");
+    // A person relabels the mail: replies are normal again.
+    f.h.classify(&id, "leave").await;
+    assert!(!records::suppresses_auto_reply(&f.h.state.db, &f.ws, &id).await.unwrap());
     let plain = f.h.ingest(&f.ws, &f.src, email("x@client.test", &["hr@acme.test"], "Lunch", "hi", OCT2 + 2), "t3").await.unwrap();
     assert!(!records::suppresses_auto_reply(&f.h.state.db, &f.ws, &plain).await.unwrap());
 }
@@ -367,7 +381,7 @@ async fn mail_that_says_timesheet_gets_the_label_by_rule_unless_a_person_chose_a
     let jobs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM jobs WHERE kind = 'record_timesheet' AND payload_json LIKE ?1").bind(format!("%{by_subject}%")).fetch_one(&f.h.state.db).await.unwrap();
     assert_eq!(jobs, 1, "labelling queues the reading");
     let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM timesheet_records WHERE message_id = ?1").bind(&by_subject).fetch_one(&f.h.state.db).await.unwrap();
-    assert_eq!(n, 1, "and the job ran: a mail with no hours is recorded as one to check");
+    assert_eq!(n, 0, "and the job ran: words alone, with no figure and no file, hold nothing to record");
 }
 
 #[tokio::test]
@@ -421,4 +435,216 @@ async fn employee_ids_are_unique_editable_and_imported_from_csv() {
     assert_eq!((body["created"].as_i64(), body["updated"].as_i64()), (Some(1), Some(1)));
     let code: String = sqlx::query_scalar("SELECT employee_code FROM people WHERE id = ?1").bind(&f.ravi).fetch_one(&f.h.state.db).await.unwrap();
     assert_eq!(code, "RK-2");
+}
+
+async fn with_reader(f: &mut Fixture, cheap: Option<Sheet>, retryable: bool) -> Arc<Scripted> {
+    let reader = Arc::new(Scripted { calls: Mutex::new(vec![]), cheap, strong: None, retryable });
+    f.h.state.timesheet_reader = reader.clone();
+    reader
+}
+
+fn acme(client: &str, from_day: u32, to_day: u32, extra: &str) -> String {
+    let rows: String = (from_day..=to_day).map(|d| format!("| 2026-09-{d:02} | Portal | 8 |\n")).collect();
+    format!("Employee ID: E1024\nClient: {client}\n{extra}\n| Date | Project | Hours |\n| --- | --- | --- |\n{rows}| Total | | {} |\n", (to_day - from_day + 1) * 8)
+}
+
+async fn states(f: &Fixture) -> Vec<(String, String)> {
+    sqlx::query_as("SELECT client, status FROM timesheet_records ORDER BY created_at, rowid").fetch_all(&f.h.state.db).await.unwrap()
+}
+
+#[tokio::test]
+async fn two_clients_in_one_month_are_both_kept() {
+    let f = fixture().await;
+    let a = f.timesheet("ravi@client.test", "September timesheet", &acme("Acme", 1, 3, "Month: September 2026"), OCT2, "a").await;
+    let b = f.timesheet("ravi@client.test", "September timesheet", &acme("Globex", 1, 3, "Month: September 2026"), OCT2 + DAY, "b").await;
+    f.record(&a).await;
+    let second = f.record(&b).await;
+    assert_eq!(states(&f).await, [("Acme".to_string(), "recorded".to_string()), ("Globex".to_string(), "recorded".to_string())]);
+    assert!(!second.records[0].issues.iter().any(|i| i["code"] == "possible_duplicate"), "different clients are not duplicates");
+}
+
+#[tokio::test]
+async fn a_weekly_sheet_after_a_monthly_one_replaces_nothing_and_is_flagged() {
+    let f = fixture().await;
+    let month = f.timesheet("ravi@client.test", "September timesheet", &acme("Acme", 1, 3, "Month: September 2026"), OCT2, "a").await;
+    f.record(&month).await;
+    let week = f.timesheet("ravi@client.test", "Week 2", &acme("Acme", 7, 8, "Period: 2026-09-07 to 2026-09-13"), OCT2 + DAY, "b").await;
+    let r = &f.record(&week).await.records[0];
+    assert_eq!(states(&f).await.iter().filter(|s| s.1 == "recorded").count(), 2);
+    assert_eq!(r.period_start, "2026-09-07");
+    assert!(r.issues.iter().any(|i| i["code"] == "possible_duplicate"));
+}
+
+#[tokio::test]
+async fn an_assumed_period_never_replaces_and_two_files_of_one_email_keep_each_other() {
+    let f = fixture().await;
+    let a = f.timesheet("ravi@client.test", "September timesheet", &acme("Acme", 1, 3, "Month: September 2026"), OCT2, "a").await;
+    f.record(&a).await;
+    let loose = f.timesheet("ravi@client.test", "Timesheet", "Employee ID: E1024\nClient: Acme\nTotal hours: 160", OCT2 + DAY, "b").await;
+    let r = &f.record(&loose).await.records[0];
+    assert!(r.issues.iter().any(|i| i["code"] == "period_assumed"));
+    assert_eq!(states(&f).await.iter().filter(|s| s.1 == "recorded").count(), 2, "an assumed period replaces nothing");
+
+    let two = f.h.ingest(&f.ws, &f.src, with_files(email("ravi@client.test", &["hr@acme.test"], "Timesheets", "attached", OCT2 + 2 * DAY), &["timesheet-a.xlsx", "timesheet-b.xlsx"]), "c").await.unwrap();
+    f.h.classify(&two, "timesheet").await;
+    put_file_text(&f.h, &two, &acme("Initech", 1, 3, "Month: September 2026")).await;
+    let run = f.record(&two).await;
+    assert_eq!(run.records.len(), 2);
+    assert!(run.records.iter().all(|r| r.status != "replaced"));
+    let replaced: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM timesheet_records WHERE status = 'replaced'").fetch_one(&f.h.state.db).await.unwrap();
+    assert_eq!(replaced, 0);
+}
+
+#[tokio::test]
+async fn mail_about_timesheets_is_not_forced_to_the_label() {
+    let f = fixture().await;
+    let label = |id: String| {
+        let db = f.h.state.db.clone();
+        async move { sqlx::query_scalar::<_, String>("SELECT category FROM classifications WHERE message_id = ?1").bind(id).fetch_optional(&db).await.unwrap() }
+    };
+    let mut talk = vec![];
+    for (i, subject) in ["Question about my timesheet", "Timesheet policy for Q4", "Re: timesheet not approved", "Reminder: submit your timesheet"].iter().enumerate() {
+        talk.push(f.h.ingest(&f.ws, &f.src, email("someone@client.test", &["hr@acme.test"], subject, "hello", OCT2 + i as i64), &format!("q{i}")).await.unwrap());
+    }
+    let robot = f.h.ingest(&f.ws, &f.src, email("no-reply@tool.test", &["hr@acme.test"], "September timesheet due", "hello", OCT2 + 9), "robot").await.unwrap();
+    let real = f.h.ingest(&f.ws, &f.src, email("ravi@client.test", &["hr@acme.test"], "September timesheet - Priya", SEP_TABLE, OCT2 + 10), "real").await.unwrap();
+    let file = f.h.ingest(&f.ws, &f.src, with_files(email("ravi@client.test", &["hr@acme.test"], "Hello", "hi", OCT2 + 11), &["timesheet_sep.xlsx"]), "file").await.unwrap();
+    worker::drain(&f.h.state).await;
+    for id in talk.into_iter().chain([robot]) {
+        let (category, source): (String, String) = sqlx::query_as("SELECT category, source FROM classifications WHERE message_id = ?1").bind(&id).fetch_one(&f.h.state.db).await.unwrap();
+        assert!(!(category == "timesheet" && source == "fallback" && sqlx::query_scalar::<_, String>("SELECT model_id FROM classifications WHERE message_id = ?1").bind(&id).fetch_one(&f.h.state.db).await.unwrap() == records::MODEL_ID), "{id}");
+    }
+    assert_eq!(label(real.clone()).await.as_deref(), Some("timesheet"));
+    assert_eq!(label(file).await.as_deref(), Some("timesheet"));
+    let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM timesheet_records WHERE message_id = ?1").bind(&real).fetch_one(&f.h.state.db).await.unwrap();
+    assert_eq!(n, 1, "the pasted table is recorded");
+}
+
+#[tokio::test]
+async fn a_failing_model_records_nothing_and_the_backfill_stops_after_three_tries() {
+    let mut f = fixture().await;
+    let reader = with_reader(&mut f, None, true).await;
+    let id = f.timesheet("ravi@client.test", "Timesheet", "Ravi Kumar worked on 1st Sept eight hrs, 2nd Sept 8 hrs. That is 16 in all.", OCT2, "m1").await;
+    let run = f.record(&id).await;
+    assert!(run.deferred && run.records.is_empty());
+    assert_eq!(f.rows().await.len(), 0, "a retryable error leaves nothing behind");
+    for _ in 0..5 {
+        records::backfill(&f.h.state, &f.ws, 20).await.unwrap();
+    }
+    assert_eq!(reader.calls.lock().unwrap().len(), 1 + 3, "one direct read, then three scans; the fourth is not tried");
+    let reader = with_reader(&mut f, Some(model_sheet(16.0, &[("2026-09-01", 8.0), ("2026-09-02", 8.0)])), false).await;
+    let run = f.record(&id).await;
+    assert_eq!((run.records.len(), run.records[0].total_hours), (1, Some(16.0)));
+    assert_eq!(reader.calls.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn model_numbers_must_be_in_the_text_and_model_days_are_checked_by_a_person() {
+    let mut f = fixture().await;
+    let text = "Ravi Kumar: 1 Sep 8 hrs; 2 Sep 8 hrs; call 99";
+    let mut made_up = model_sheet(16.0, &[("2026-09-01", 8.0), ("2026-09-02", 8.0), ("2026-09-03", 8.0)]);
+    made_up.total = None;
+    made_up.period = Some(("2026-08-01".into(), "2026-08-31".into()));
+    with_reader(&mut f, Some(made_up), false).await;
+    let id = f.timesheet("ravi@client.test", "Timesheet", text, OCT2, "m1").await;
+    let r = &f.record(&id).await.records[0];
+    let codes: Vec<&str> = r.issues.iter().map(|i| i["code"].as_str().unwrap()).collect();
+    assert!(codes.contains(&"model_days_dropped") && codes.contains(&"model_read"), "{codes:?}");
+    assert_eq!((r.status.as_str(), r.total_hours), ("needs_check", Some(16.0)));
+    assert_eq!(r.period_start, "2026-09-01", "August was never written in the text");
+    let entries: String = sqlx::query_scalar("SELECT entries_json FROM timesheet_records").fetch_one(&f.h.state.db).await.unwrap();
+    assert!(!entries.contains("2026-09-03"));
+}
+
+#[tokio::test]
+async fn only_a_record_with_hours_that_covers_half_the_month_counts_as_submitted() {
+    let f = fixture().await;
+    let empty = f.timesheet("ravi@client.test", "September timesheet", "call me on 555", OCT2, "a").await;
+    f.record(&empty).await;
+    assert!(policy::timesheet_mail(&f.h.state.db, &f.ws, &f.ravi, "2026-09").await.unwrap().is_none(), "no hours, not submitted");
+    let week = f.timesheet("ravi@client.test", "Week 2", &acme("Acme", 7, 8, "Period: 2026-09-07 to 2026-09-13"), OCT2 + DAY, "b").await;
+    f.record(&week).await;
+    assert!(policy::timesheet_mail(&f.h.state.db, &f.ws, &f.ravi, "2026-09").await.unwrap().is_none(), "one week is not the month");
+    let month = f.timesheet("ravi@client.test", "September timesheet", &acme("Acme", 1, 3, "Month: September 2026"), OCT2 + 2 * DAY, "c").await;
+    f.record(&month).await;
+    assert!(policy::timesheet_mail(&f.h.state.db, &f.ws, &f.ravi, "2026-09").await.unwrap().is_some());
+}
+
+#[tokio::test]
+async fn an_id_nobody_has_stays_unmatched_and_quoted_tables_are_not_recorded_again() {
+    let f = fixture().await;
+    let id = f.timesheet("ravi@client.test", "Timesheet Sept", "Employee ID: E9999\nTotal hours: 150", OCT2, "a").await;
+    let r = &f.record(&id).await.records[0];
+    assert!(r.person_id.is_none() && r.issues.iter().any(|i| i["message"] == "Who is this? (ID E9999)"), "not the sender");
+
+    let reply = f.timesheet("ravi@client.test", "Re: September timesheet", &format!("Thanks, looks fine.\n\nOn Mon, 5 Oct 2026 at 10:00, Ravi <ravi@client.test> wrote:\n> {}", SEP_TABLE.replace('\n', "\n> ")), OCT2 + DAY, "b").await;
+    assert!(f.record(&reply).await.records.is_empty(), "a reply quoting a table is not a new sheet");
+
+    let fwd = f.timesheet("priya@acme.test", "Fwd: September timesheet", &format!("FYI\n\n---------- Forwarded message ---------\nFrom: Ravi\n\n{SEP_TABLE}"), OCT2 + 2 * DAY, "c").await;
+    let r = &f.record(&fwd).await.records[0];
+    assert_eq!((r.person_id.as_deref(), r.total_hours), (Some(f.ravi.as_str()), Some(23.5)));
+}
+
+#[tokio::test]
+async fn the_grid_names_the_linked_person_and_counts_undated_hours_in_one_month_and_lists_are_filtered_in_sql() {
+    let f = fixture().await;
+    let id = f.timesheet("ravi@client.test", "Timesheet", "Employee ID: E1024\nPeriod: 2026-08-25 to 2026-09-05\nTotal hours: 40", OCT2, "a").await;
+    f.record(&id).await;
+    sqlx::query("UPDATE people SET active = 0 WHERE id = ?1").bind(&f.ravi).execute(&f.h.state.db).await.unwrap();
+    sqlx::query("UPDATE timesheet_records SET person_name = 'R. Kumar written'").execute(&f.h.state.db).await.unwrap();
+    let aug = f.h.get(OWNER, &format!("{}/staffing/timesheet-grid?month=2026-08", api(&f.ws))).await.1;
+    let sep = f.h.get(OWNER, &format!("{}/staffing/timesheet-grid?month=2026-09", api(&f.ws))).await.1;
+    let total = |g: &serde_json::Value| g["rows"].as_array().unwrap().iter().map(|r| r["total"].as_f64().unwrap()).sum::<f64>();
+    assert_eq!((total(&aug), total(&sep)), (40.0, 0.0), "undated hours count once, where the sheet starts");
+    assert!(aug["rows"].as_array().unwrap().iter().any(|r| r["name"] == "Ravi Kumar"), "the person's name, not the one written on the sheet");
+
+    let (s, body) = f.h.get(OWNER, &format!("{}/staffing/timesheet-records?month=2026-08", api(&f.ws))).await;
+    assert_eq!((s, body["items"].as_array().unwrap().len()), (StatusCode::OK, 1));
+}
+
+#[tokio::test]
+async fn forgetting_a_sender_erases_their_records_and_links_but_other_senders_stay() {
+    let f = fixture().await;
+    let a = f.timesheet("ravi@client.test", "September timesheet", SEP_TABLE, OCT2, "a").await;
+    f.record(&a).await;
+    sqlx::query("INSERT INTO timesheet_aliases (workspace_id, kind, value, person_id, created_at) VALUES (?1, 'code', 'e1024', ?2, 1)").bind(&f.ws).bind(&f.ravi).execute(&f.h.state.db).await.unwrap();
+    let b = f.timesheet("priya@acme.test", "Timesheet", "Employee ID: E2000\nTotal hours: 100", OCT2 + 1, "b").await;
+    f.record(&b).await;
+    let mut conn = f.h.state.db.acquire().await.unwrap();
+    assert_eq!(records::erase_sender(&mut conn, &f.ws, "Ravi <ravi@client.test>").await.unwrap(), 1);
+    drop(conn);
+    assert_eq!(f.rows().await.len(), 1);
+    let aliases: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM timesheet_aliases").fetch_one(&f.h.state.db).await.unwrap();
+    assert_eq!(aliases, 0);
+}
+
+#[tokio::test]
+async fn a_taken_employee_id_is_a_conflict_not_a_server_error() {
+    let f = fixture().await;
+    let clash = sqlx::query("UPDATE people SET employee_code = 'e2000' WHERE id = ?1").bind(&f.ravi).execute(&f.h.state.db).await.unwrap_err();
+    let e = email_ai_api::error::AppError::from(clash);
+    assert!(matches!(e, email_ai_api::error::AppError::Conflict(_)), "{e:?}");
+}
+
+#[tokio::test]
+async fn a_restricted_viewer_finds_their_records_even_behind_500_others() {
+    let f = fixture().await;
+    let id = f.timesheet("ravi@client.test", "September timesheet", SEP_TABLE, OCT2, "a").await;
+    f.record(&id).await;
+    sqlx::query(
+        "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 520)
+         INSERT INTO timesheet_records (id, workspace_id, person_id, source_key, source, period_start, period_end, status, created_at, updated_at)
+         SELECT 'bulk' || i, ?1, NULL, 'bulk' || i, 'pasted', '2027-01-01', '2027-01-31', 'recorded', 1, 1 FROM n",
+    )
+    .bind(&f.ws)
+    .execute(&f.h.state.db)
+    .await
+    .unwrap();
+    let (s, _) = f.h.call("POST", &format!("{}/members", api(&f.ws)), OWNER, Some(json!({"email": "ravi@client.test", "role": "operator"}))).await;
+    assert!(s.is_success(), "{s}");
+    let (s, body) = f.h.get("dev:ravi@client.test", &format!("{}/staffing/timesheet-records", api(&f.ws))).await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    let items = body["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1, "{body}");
+    assert_eq!(items[0]["person_id"], f.ravi.as_str());
 }

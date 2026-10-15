@@ -190,6 +190,8 @@ struct RecordedSheet {
     email_received_at: Option<i64>,
     total_hours: Option<f64>,
     created_at: i64,
+    period_start: String,
+    period_end: String,
 }
 
 /// The newest `timesheet` mail from this person that is for `month` (see `period_of`), with hours read from the
@@ -198,19 +200,25 @@ pub async fn timesheet_mail(db: &SqlitePool, workspace_id: &str, person_id: &str
     let s = settings::load(db, workspace_id).await?;
     let Some((start, end)) = clock::month_bounds(month, s.tz_offset_minutes) else { return Ok(None) };
     if let Some((first, last)) = super::timesheet_parse::month_dates(month) {
-        // A recorded timesheet counts as submitted, even when its email is gone.
-        let recorded: Option<RecordedSheet> = sqlx::query_as(
-            "SELECT id, message_id, email_subject, email_received_at, total_hours, created_at FROM timesheet_records
-             WHERE workspace_id = ?1 AND person_id = ?2 AND status != 'replaced' AND period_start <= ?4 AND period_end >= ?3
-             ORDER BY COALESCE(email_received_at, created_at) DESC LIMIT 1",
+        // A recorded timesheet counts as submitted, even when its email is gone. Only one with hours counts, and only
+        // when it covers at least half of the month: an empty record or a single week is not the month's timesheet.
+        let recorded: Vec<RecordedSheet> = sqlx::query_as(
+            "SELECT id, message_id, email_subject, email_received_at, total_hours, created_at, period_start, period_end FROM timesheet_records
+             WHERE workspace_id = ?1 AND person_id = ?2 AND status != 'replaced' AND total_hours IS NOT NULL AND period_start <= ?4 AND period_end >= ?3
+             ORDER BY COALESCE(email_received_at, created_at) DESC LIMIT 50",
         )
         .bind(workspace_id)
         .bind(person_id)
-        .bind(first)
-        .bind(last)
-        .fetch_optional(db)
+        .bind(&first)
+        .bind(&last)
+        .fetch_all(db)
         .await?;
-        if let Some(r) = recorded {
+        let (m0, m1) = (clock::parse_date(&first).unwrap_or(0), clock::parse_date(&last).unwrap_or(0));
+        let covered = |r: &RecordedSheet| {
+            let (a, b) = (clock::parse_date(&r.period_start).unwrap_or(0).max(m0), clock::parse_date(&r.period_end).unwrap_or(0).min(m1));
+            (b - a + 1) * 2 > m1 - m0
+        };
+        if let Some(r) = recorded.into_iter().find(covered) {
             return Ok(Some(Timesheet {
                 message_id: r.message_id.unwrap_or_default(),
                 record_id: Some(r.id),
@@ -225,6 +233,7 @@ pub async fn timesheet_mail(db: &SqlitePool, workspace_id: &str, person_id: &str
          FROM email_messages m JOIN classifications c ON c.message_id = m.id
          WHERE m.workspace_id = ?1 AND m.direction = 'inbound' AND m.suppressed = 0 AND c.category = 'timesheet'
            AND m.received_at >= ?3 AND m.received_at < ?4
+           AND NOT EXISTS (SELECT 1 FROM timesheet_records r WHERE r.message_id = m.id)
            AND (lower(m.sender_address) IN (SELECT email FROM person_emails WHERE person_id = ?2)
                 OR lower(COALESCE(m.original_sender_address, '')) IN (SELECT email FROM person_emails WHERE person_id = ?2))
          ORDER BY m.received_at DESC LIMIT 30",

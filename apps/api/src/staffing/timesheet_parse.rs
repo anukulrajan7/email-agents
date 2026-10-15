@@ -112,6 +112,37 @@ pub fn parse_date_loose(raw: &str, hint_year: i64) -> Option<String> {
     None
 }
 
+static DATE_ANY: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?i)^(?:\d{4}-\d{1,2}-\d{1,2}|\d{1,2}[/.\-]\d{1,2}[/.\-](?:\d{4}|\d{2})|\d{1,2}(?:st|nd|rd|th)?[\s\-]+[A-Za-z]{3,9}\.?(?:,?[\s\-]+(?:\d{4}|\d{2}))?|[A-Za-z]{3,9}\.?\s+\d{1,2}(?:st|nd|rd|th)?(?:,?\s+\d{4})?)",
+    )
+    .expect("static regex")
+});
+
+/// Every date a line of text writes, in any of the usual forms, as `YYYY-MM-DD`. A trailing one or two digit number
+/// that could be a two-digit year or the hours next to the date ("01 Sep 16") is read both ways.
+pub fn dates_in(line: &str, hint_year: i64) -> Vec<String> {
+    let mut out = vec![];
+    let mut prev_alnum = false;
+    for (i, c) in line.char_indices() {
+        let boundary = !prev_alnum;
+        prev_alnum = c.is_alphanumeric();
+        if !boundary || !prev_alnum {
+            continue;
+        }
+        let Some(m) = DATE_ANY.find(&line[i..]) else { continue };
+        let raw = m.as_str();
+        out.extend(parse_date_loose(raw, hint_year));
+        if let Some((head, tail)) = raw.rsplit_once(char::is_whitespace)
+            && tail.len() <= 2
+            && tail.chars().all(|c| c.is_ascii_digit())
+        {
+            out.extend(parse_date_loose(head, hint_year));
+        }
+    }
+    out
+}
+
 static HOURS_PLAIN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(\d{1,4}(?:\.\d+)?)$").expect("static regex"));
 static HOURS_CLOCK: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(\d{1,3}):([0-5]\d)(?::[0-5]\d)?$").expect("static regex"));
 static HOURS_UNIT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)^(\d{1,4}(?:\.\d+)?)\s*(?:h|hr|hrs|hours?)$").expect("static regex"));
@@ -339,7 +370,7 @@ pub fn weekday(date: &str) -> Option<i64> {
 }
 
 /// A month named with a "month / period / timesheet / for" cue on the same line, or anywhere in `subject`.
-fn month_named(text: &str, subject: &str, hint_year: i64) -> Option<(String, String)> {
+pub fn month_named(text: &str, subject: &str, hint_year: i64) -> Option<(String, String)> {
     let from = |s: &str| -> Option<(String, String)> {
         let c = MONTH_YEAR.captures(s)?;
         let m = month_number(&c[1])?;
@@ -544,6 +575,7 @@ pub fn names_agree(a: &str, b: &str) -> bool {
 /// Who a timesheet is for. What the sheet says about the employee wins over who sent the mail, so a manager or the
 /// HR mailbox forwarding a sheet never becomes its owner: the sender counts only when it agrees with the name written.
 pub fn match_person(people: &[Candidate], aliases: &Aliases, id: &Identity, sender: &str, original_sender: Option<&str>) -> Match {
+    let by_email = |addr: &str| people.iter().find(|p| p.emails.iter().any(|e| e.eq_ignore_ascii_case(addr)));
     if let Some(code) = id.code.as_deref().map(str::to_lowercase) {
         if let Some(p) = people.iter().find(|p| p.code.as_deref().is_some_and(|c| c.eq_ignore_ascii_case(&code))) {
             return Match::found(&p.id, "code", 0.99);
@@ -551,8 +583,12 @@ pub fn match_person(people: &[Candidate], aliases: &Aliases, id: &Identity, send
         if let Some(p) = aliases.codes.get(&code).and_then(|pid| people.iter().find(|p| &p.id == pid)) {
             return Match::found(&p.id, "alias", 0.95);
         }
+        // An ID is written but nobody has it: the sender or forwarder is not that person, so a person is asked.
+        return match id.email.as_deref().and_then(by_email) {
+            Some(p) if p.code.is_none() => Match::found(&p.id, "email", 0.95),
+            _ => Match::none(false),
+        };
     }
-    let by_email = |addr: &str| people.iter().find(|p| p.emails.iter().any(|e| e.eq_ignore_ascii_case(addr)));
     if let Some(p) = id.email.as_deref().and_then(by_email) {
         return Match::found(&p.id, "email", 0.95);
     }
@@ -606,6 +642,29 @@ mod tests {
         assert_eq!(parse_date_loose("Thu, 3 Sep", 2026).as_deref(), Some("2026-09-03"));
         assert_eq!(parse_date_loose("31 Feb 2026", 2026), None);
         assert_eq!(parse_date_loose("hello", 2026), None);
+    }
+
+    #[test]
+    fn every_date_a_line_writes_is_found() {
+        let has = |line: &str, d: &str| dates_in(line, 2026).iter().any(|x| x == d);
+        assert!(has("| 2026-09-03 | 8 |", "2026-09-03"));
+        assert!(has("03/09/2026 8", "2026-09-03"));
+        assert!(has("Thu 3 Sep 8", "2026-09-03"));
+        assert!(has("3rd Sept 2026: 8h", "2026-09-03"));
+        assert!(has("Sep 3, 2026 8", "2026-09-03"));
+        assert!(has("01 Sep 16", "2026-09-01"), "16 may be the hours, not the year");
+        assert!(!has("Total 16", "2026-09-16"));
+        assert!(dates_in("no dates here 8", 2026).is_empty());
+    }
+
+    #[test]
+    fn a_stated_id_nobody_has_is_never_the_sender() {
+        let ravi = Candidate { id: "p1".into(), name: "Ravi Kumar".into(), code: Some("E1".into()), emails: vec!["ravi@x.test".into()] };
+        let id = Identity { code: Some("E9".into()), ..Default::default() };
+        let m = match_person(std::slice::from_ref(&ravi), &Aliases::default(), &id, "ravi@x.test", Some("ravi@x.test"));
+        assert_eq!(m.person_id, None);
+        let m = match_person(&[ravi], &Aliases::default(), &Identity::default(), "ravi@x.test", None);
+        assert_eq!(m.person_id.as_deref(), Some("p1"));
     }
 
     #[test]

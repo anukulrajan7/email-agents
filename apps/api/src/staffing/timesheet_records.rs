@@ -1,7 +1,8 @@
 //! Timesheets kept as records. Mail labelled `timesheet` is read (the body, and each attachment's text) into
 //! `timesheet_records`: who it is for, the period, the hours per day and a total, plus the issues found. A new
-//! record for the same person and an overlapping period replaces the old one (`replaced`, linked), so the data
-//! stays current without duplicates. Reading the same email again changes nothing.
+//! record replaces an old one (`replaced`, linked) only when it is plainly the corrected version: the same person,
+//! the same client, a stated period that covers the old one, from another email. Anything else that overlaps is kept
+//! and flagged `possible_duplicate`. Reading the same email again changes nothing.
 //!
 //! Records outlive their email: `message_id` and `attachment_id` become NULL when the email goes (deleted, or its
 //! mailbox disconnected), and the record keeps the sender, subject, date and file name it came from.
@@ -20,7 +21,10 @@ use super::{
     timesheet_parse::{self as parse, Aliases, Candidate, Entry, Sheet},
 };
 use crate::{
-    ai::routing::{SheetTier, sheet_tier},
+    ai::{
+        AiError,
+        routing::{SheetTier, sheet_tier},
+    },
     db::{iso, new_id, now_ms},
     http::AppState,
     packs,
@@ -36,9 +40,18 @@ const NOTE: &str = "note";
 static NAME_CUE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)time[\s_\-]?sheets?|time[\s_\-]?cards?|hours?[\s_\-]?(?:report|log)").expect("static regex"));
 
-/// The plain-rule label: a subject or attachment name that says timesheet / time sheet / timecard / hours report.
+const QUESTION_WORDS: [&str; 9] = ["question", "policy", "reminder", "approv", "submit your", "please submit", "overdue", "deadline", "?"];
+
+/// Mail that talks about timesheets rather than carrying one: a reply, a question, a policy or a reminder.
+fn talks_about_timesheets(subject: &str) -> bool {
+    let lower = subject.trim().to_lowercase();
+    lower.starts_with("re:") || lower.starts_with("re :") || QUESTION_WORDS.iter().any(|w| lower.contains(w))
+}
+
+/// The plain-rule label: an attachment named timesheet / time sheet / timecard / hours report, or a subject that says
+/// so and is not a reply or a question about timesheets (those are left to the model classifier).
 pub fn looks_like_timesheet(subject: &str, filenames: &[String]) -> bool {
-    NAME_CUE.is_match(subject) || filenames.iter().any(|f| NAME_CUE.is_match(f))
+    filenames.iter().any(|f| NAME_CUE.is_match(f)) || (NAME_CUE.is_match(subject) && !talks_about_timesheets(subject))
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -83,6 +96,9 @@ pub struct Run {
     pub records: Vec<Saved>,
     /// Attachments are still being read; the run happens again when they are.
     pub waiting_for_files: bool,
+    /// The model could not read a sheet just now (a retryable error or the budget); nothing was recorded for it and
+    /// it is tried again later.
+    pub deferred: bool,
 }
 
 impl Run {
@@ -138,13 +154,33 @@ fn mismatch(sheet: &Sheet, tolerance: f64) -> bool {
     }
 }
 
-/// Keeps only what the text itself states: a model may copy but not invent.
-fn sanitize_model(mut s: Sheet, text: &str) -> Sheet {
+/// A month or period the text really names: both end dates are written, or it is the month named in the text or subject.
+fn period_supported(period: &(String, String), text: &str, subject: &str, hint_year: i64) -> bool {
+    let written: HashSet<String> = text.lines().flat_map(|l| parse::dates_in(l, hint_year)).collect();
+    (written.contains(&period.0) && written.contains(&period.1)) || parse::month_named(text, subject, hint_year).as_ref() == Some(period)
+}
+
+/// Keeps only what the text itself states: a model may copy but not invent. A day stays only when its date is written
+/// in the text and its hours stand on the same line; the period must be written too; a total must be a stated number.
+fn sanitize_model(mut s: Sheet, text: &str, subject: &str, hint_year: i64) -> (Sheet, Vec<Issue>) {
+    let mut issues = vec![];
     let numbers = parse::numbers_in(text);
     let stated = |n: f64| numbers.iter().any(|x| parse::same_hours(*x, n));
-    s.entries.retain(|e| stated(e.hours));
-    let sum: f64 = s.entries.iter().map(|e| e.hours).sum();
-    if s.total.is_some_and(|t| !stated(t) && !parse::same_hours(t, sum)) {
+    let lines: Vec<(Vec<String>, Vec<f64>)> =
+        text.lines().filter(|l| l.chars().any(|c| c.is_ascii_digit())).map(|l| (parse::dates_in(l, hint_year), parse::numbers_in(l))).collect();
+    let before = s.entries.len();
+    s.entries.retain(|e| match &e.date {
+        Some(d) => lines.iter().any(|(dates, nums)| dates.contains(d) && nums.iter().any(|n| parse::same_hours(*n, e.hours))),
+        None => stated(e.hours),
+    });
+    let dropped = before - s.entries.len();
+    if dropped > 0 {
+        issues.push(check("model_days_dropped", format!("{dropped} day(s) the model returned are not in the sheet's text and were left out.")));
+    }
+    if s.period.as_ref().is_some_and(|p| !period_supported(p, text, subject, hint_year)) {
+        s.period = None;
+    }
+    if s.total.is_some_and(|t| !stated(t)) {
         s.total = None;
     }
     let lower = text.to_lowercase();
@@ -154,9 +190,10 @@ fn sanitize_model(mut s: Sheet, text: &str) -> Sheet {
             *field = None;
         }
     }
-    s
+    (s, issues)
 }
 
+/// The rules' reading wins wherever it found something: its total is never replaced by the model's.
 fn merge(mut base: Sheet, model: Sheet) -> Sheet {
     let id = &mut base.identity;
     id.code = id.code.take().or(model.identity.code);
@@ -166,41 +203,73 @@ fn merge(mut base: Sheet, model: Sheet) -> Sheet {
     id.manager = id.manager.take().or(model.identity.manager);
     id.location = id.location.take().or(model.identity.location);
     base.period = model.period.or(base.period);
-    base.total = model.total.or(base.total);
+    base.total = base.total.or(model.total);
     if !model.entries.is_empty() {
         base.entries = model.entries;
     }
     base
 }
 
+struct Read {
+    sheet: Sheet,
+    cost: f64,
+    issues: Vec<Issue>,
+    /// The model could not be asked now (retryable error, over budget): record nothing yet.
+    deferred: bool,
+}
+
 /// Plain rules first. The model reads only what they could not: nothing found, or entries that do not add up to
 /// the stated total. Cheap model, then the strong one when the cheap answer still fails or the sheet is large.
-async fn read_text(state: &AppState, ws: &str, subject: &str, text: &str, hint_year: i64, tolerance: f64) -> (Sheet, f64) {
-    let mut sheet = parse::parse_sheet(text, subject, hint_year);
+async fn read_text(state: &AppState, ws: &str, subject: &str, text: &str, hint_year: i64, tolerance: f64, allow_model: bool) -> Read {
+    let mut out = Read { sheet: parse::parse_sheet(text, subject, hint_year), cost: 0.0, issues: vec![], deferred: false };
     let bad = |s: &Sheet| !s.has_data() || mismatch(s, tolerance);
-    if !bad(&sheet) || !text.chars().any(|c| c.is_ascii_digit()) || !crate::ai_ledger::within_budget(&state.db, state.config.ai_daily_budget_usd, ws).await {
-        return (sheet, 0.0);
+    if !allow_model || !bad(&out.sheet) || !text.chars().any(|c| c.is_ascii_digit()) {
+        return out;
     }
     let (chars, rows) = (text.chars().count(), text.lines().count());
-    let tiers: &[SheetTier] = if sheet_tier(chars, rows, false) == SheetTier::Strong { &[SheetTier::Strong] } else { &[SheetTier::Cheap, SheetTier::Strong] };
-    let mut cost = 0.0;
-    for &tier in tiers.iter().filter(|t| state.timesheet_reader.has(**t)) {
+    let wanted: &[SheetTier] = if sheet_tier(chars, rows, false) == SheetTier::Strong { &[SheetTier::Strong] } else { &[SheetTier::Cheap, SheetTier::Strong] };
+    let tiers: Vec<SheetTier> = wanted.iter().copied().filter(|t| state.timesheet_reader.has(*t)).collect();
+    if tiers.is_empty() {
+        return out;
+    }
+    if !crate::ai_ledger::within_budget(&state.db, state.config.ai_daily_budget_usd, ws).await {
+        out.deferred = !out.sheet.has_data();
+        return out;
+    }
+    let rules = out.sheet.clone();
+    let mut model_issues: Vec<Issue> = vec![];
+    let mut from_model = false;
+    for tier in tiers {
         match state.timesheet_reader.read(tier, subject, text, hint_year).await {
             Ok(m) => {
-                cost += m.cost_usd;
-                let candidate = merge(sheet.clone(), sanitize_model(m.sheet, text));
-                let better = !bad(&candidate) || (!sheet.has_data() && candidate.has_data());
+                out.cost += m.cost_usd;
+                let (clean, dropped) = sanitize_model(m.sheet, text, subject, hint_year);
+                let uses_model_days = !clean.entries.is_empty();
+                let candidate = merge(rules.clone(), clean);
+                let better = !bad(&candidate) || (!out.sheet.has_data() && candidate.has_data());
                 if better {
-                    sheet = candidate;
+                    out.sheet = candidate;
+                    model_issues = dropped;
+                    from_model = uses_model_days;
                 }
-                if !bad(&sheet) {
+                if !bad(&out.sheet) {
                     break;
                 }
+            }
+            Err(AiError::Retryable(e)) => {
+                tracing::warn!(error = %e, %ws, "timesheet model is not available just now; the sheet is read again later");
+                out.deferred = true;
+                return out;
             }
             Err(e) => tracing::warn!(error = %e, %ws, "timesheet model could not read the sheet"),
         }
     }
-    (sheet, cost)
+    out.issues = model_issues;
+    let sum: f64 = out.sheet.entries.iter().map(|e| e.hours).sum();
+    if from_model && !out.sheet.total.is_some_and(|t| parse::same_hours(sum, t)) {
+        out.issues.push(check("model_read", "The days were read by an AI model and do not add up to a total the sheet states; check them against the sheet."));
+    }
+    out
 }
 
 fn weekday_name(d: i64) -> &'static str {
@@ -292,6 +361,39 @@ struct MessageRow {
     suppressed: bool,
 }
 
+/// `Some(true)` for a forwarded-message header, `Some(false)` for the header of a quoted reply.
+fn quote_marker(lines: &[&str], i: usize) -> Option<bool> {
+    let lower = lines[i].trim().to_lowercase();
+    if lower.starts_with("begin forwarded message") || (lower.starts_with("--") && lower.contains("forwarded message")) {
+        return Some(true);
+    }
+    if lower.starts_with("--") && lower.contains("original message") {
+        return Some(false);
+    }
+    let wraps = lines.get(i + 1).is_some_and(|n| n.trim().to_lowercase().starts_with("wrote:"));
+    (lower.starts_with("on ") && (lower.ends_with("wrote:") || wraps)).then_some(false)
+}
+
+/// What the sender wrote in this email: quoted lines (`>`) and everything under an "On ... wrote:" or "Original
+/// message" header are an earlier email. A forward whose own words are only a short note is the exception: the
+/// forwarded sheet is what the email is about.
+fn own_text(subject: &str, body: &str) -> String {
+    let lines: Vec<&str> = body.lines().collect();
+    let fresh = |part: &[&str]| -> Vec<String> { part.iter().filter(|l| !l.trim_start().starts_with('>')).map(|l| (*l).to_string()).collect() };
+    let Some((cut, marker_forward)) = (0..lines.len()).find_map(|i| quote_marker(&lines, i).map(|forward| (i, forward))) else {
+        return fresh(&lines).join("\n");
+    };
+    let mut kept = fresh(&lines[..cut]);
+    let note_chars: usize = kept.iter().map(|l| l.trim().chars().count()).sum();
+    let note_lines = kept.iter().filter(|l| !l.trim().is_empty()).count();
+    let subject = subject.trim().to_lowercase();
+    let forward = marker_forward || subject.starts_with("fwd:") || subject.starts_with("fw:");
+    if forward && note_chars <= 300 && note_lines <= 6 {
+        kept.extend(lines[cut + 1..].iter().map(|l| l.trim_start_matches(['>', ' ']).to_string()));
+    }
+    kept.join("\n")
+}
+
 async fn load_units(db: &SqlitePool, message_id: &str, msg: &MessageRow) -> sqlx::Result<(Vec<Unit>, bool)> {
     let rows: Vec<AttachmentRow> = sqlx::query_as(
         "SELECT id, filename, text_content, extract_status, extract_kind FROM attachments WHERE message_id = ?1 ORDER BY filename",
@@ -305,7 +407,7 @@ async fn load_units(db: &SqlitePool, message_id: &str, msg: &MessageRow) -> sqlx
         attachment_id: None,
         filename: None,
         kind: None,
-        text: msg.body_text.lines().map(|l| l.trim_start_matches(['>', ' '])).collect::<Vec<_>>().join("\n"),
+        text: own_text(&msg.subject, &msg.body_text),
         unreadable: false,
     }];
     let mut waiting = false;
@@ -356,14 +458,22 @@ pub async fn record_message(state: &AppState, ws: &str, message_id: &str) -> sql
     let (people, aliases) = load_people(db, ws).await?;
     let hint_year: i64 = clock::month_of(received_at, cfg.tz_offset_minutes)[..4].parse().unwrap_or(2026);
     let (units, waiting) = load_units(db, message_id, &msg).await?;
-    let has_files = units.iter().any(|u| u.source == "attachment") || waiting;
-    let mut run = Run { waiting_for_files: waiting, ..Default::default() };
+    // Files still being read: the run happens again when they are, and no model is paid for in the meantime.
+    if waiting {
+        return Ok(Run { waiting_for_files: true, ..Default::default() });
+    }
+    let has_files = units.iter().any(|u| u.source == "attachment");
+    // Words alone, with no figure and no file, hold no timesheet.
+    if !has_files && !units.iter().any(|u| u.text.chars().any(|c| c.is_ascii_digit())) {
+        return Ok(Run::default());
+    }
+    let mut run = Run::default();
     let mut file_record_made = false;
 
     // Second pass: if the first one left nothing (a body that only says "see attached" next to files with no hours),
     // the body is recorded as empty so that someone looks, and the email is not read again and again.
     for force in [false, true] {
-        if force && (!run.records.is_empty() || waiting) {
+        if force && (!run.records.is_empty() || run.deferred) {
             break;
         }
         for unit in units.iter().take(if force { 1 } else { usize::MAX }) {
@@ -372,10 +482,20 @@ pub async fn record_message(state: &AppState, ws: &str, message_id: &str) -> sql
                 run.records.push(existing);
                 continue;
             }
-            let (sheet, cost) = if unit.unreadable { (Sheet::default(), 0.0) } else { read_text(state, ws, &msg.subject, &unit.text, hint_year, cfg.hours_tolerance).await };
-            if cost > 0.0 {
-                tracing::info!(%message_id, cost_usd = cost, "timesheet read with a model");
+            let read = if unit.unreadable {
+                Read { sheet: Sheet::default(), cost: 0.0, issues: vec![], deferred: false }
+            } else {
+                let allow_model = !(unit.source == "pasted" && has_files);
+                read_text(state, ws, &msg.subject, &unit.text, hint_year, cfg.hours_tolerance, allow_model).await
+            };
+            if read.deferred {
+                run.deferred = true;
+                continue;
             }
+            if read.cost > 0.0 {
+                tracing::info!(%message_id, cost_usd = read.cost, "timesheet read with a model");
+            }
+            let Read { sheet, issues: read_issues, .. } = read;
             let empty = !sheet.has_data();
             if !force && unit.source == "pasted" && empty && has_files {
                 continue;
@@ -398,6 +518,7 @@ pub async fn record_message(state: &AppState, ws: &str, message_id: &str) -> sql
                 (None, None) => format!("no name or ID in the sheet; sent by {}", address_of(&msg.sender_address)),
             };
             let (total, mut issues) = assess(&sheet, &period, assumed, cfg.hours_tolerance, m.person_id.is_some(), &who_text);
+            issues.extend(read_issues);
             if m.ambiguous {
                 issues.push(note("ambiguous_person", "More than one person has this name."));
             }
@@ -416,8 +537,9 @@ pub async fn record_message(state: &AppState, ws: &str, message_id: &str) -> sql
                 method: m.method,
                 confidence: m.person_id.as_ref().map(|_| m.confidence),
                 period,
+                assumed,
                 total,
-                issues: &issues,
+                issues,
                 status,
                 client: sheet.identity.client.clone(),
             };
@@ -442,8 +564,10 @@ struct Draft<'a> {
     method: &'static str,
     confidence: Option<f64>,
     period: (String, String),
+    /// The sheet named no period; the month of the email was used.
+    assumed: bool,
     total: Option<f64>,
-    issues: &'a [Issue],
+    issues: Vec<Issue>,
     status: &'static str,
     client: Option<String>,
 }
@@ -451,6 +575,138 @@ struct Draft<'a> {
 async fn existing_by_source(db: &SqlitePool, ws: &str, source_key: &str) -> sqlx::Result<Option<Saved>> {
     let row: Option<RecordRow> = sqlx::query_as(&format!("{SELECT} WHERE r.workspace_id = ?1 AND r.source_key = ?2")).bind(ws).bind(source_key).fetch_optional(db).await?;
     Ok(row.map(|r| r.saved(false)))
+}
+
+/// A record already kept for the same person whose period overlaps.
+#[derive(sqlx::FromRow)]
+struct Kept {
+    id: String,
+    message_id: Option<String>,
+    client: Option<String>,
+    period_start: String,
+    period_end: String,
+    email_received_at: Option<i64>,
+    issues_json: String,
+}
+
+impl Kept {
+    fn assumed(&self) -> bool {
+        serde_json::from_str::<Vec<Value>>(&self.issues_json).unwrap_or_default().iter().any(|i| i["code"] == "period_assumed")
+    }
+
+    fn received(&self) -> i64 {
+        self.email_received_at.unwrap_or(0)
+    }
+}
+
+/// The record being placed.
+struct Placed<'a> {
+    id: &'a str,
+    message_id: Option<&'a str>,
+    client: Option<&'a str>,
+    start: &'a str,
+    end: &'a str,
+    received: i64,
+    assumed: bool,
+}
+
+fn client_key(c: Option<&str>) -> Option<String> {
+    c.map(|c| c.trim().to_lowercase()).filter(|c| !c.is_empty())
+}
+
+fn same_mail(a: Option<&str>, b: Option<&str>) -> bool {
+    a.is_some() && a == b
+}
+
+impl Placed<'_> {
+    fn same_client(&self, old: &Kept) -> bool {
+        client_key(self.client) == client_key(old.client.as_deref())
+    }
+
+    fn clients_differ(&self, old: &Kept) -> bool {
+        matches!((client_key(self.client), client_key(old.client.as_deref())), (Some(a), Some(b)) if a != b)
+    }
+
+    /// The corrected version of `old`: same client, a stated period that covers it, from a later email.
+    fn replaces(&self, old: &Kept) -> bool {
+        !self.assumed
+            && self.same_client(old)
+            && self.start <= old.period_start.as_str()
+            && self.end >= old.period_end.as_str()
+            && !same_mail(self.message_id, old.message_id.as_deref())
+            && self.received >= old.received()
+    }
+
+    /// `old` is a later email that would have replaced this one (mail read out of order).
+    fn replaced_by(&self, old: &Kept) -> bool {
+        !old.assumed()
+            && self.same_client(old)
+            && old.period_start.as_str() <= self.start
+            && old.period_end.as_str() >= self.end
+            && !same_mail(self.message_id, old.message_id.as_deref())
+            && old.received() > self.received
+    }
+}
+
+#[derive(Default)]
+struct Settled {
+    /// A later email already replaces this record.
+    superseded: bool,
+    replaced: Vec<String>,
+    /// This record is the newer of two overlapping sheets that were both kept.
+    duplicate_of: Option<(String, String)>,
+}
+
+fn duplicate_issue(start: &str, end: &str) -> Issue {
+    note("possible_duplicate", format!("Another timesheet for this person covers {start} to {end}; check this is not a duplicate."))
+}
+
+/// Decides what an overlapping record means for the one being placed: replace it, be replaced, or sit beside it.
+async fn settle(conn: &mut SqliteConnection, ws: &str, person_id: &str, me: &Placed<'_>, now: i64) -> sqlx::Result<Settled> {
+    let kept: Vec<Kept> = sqlx::query_as(
+        "SELECT id, message_id, client, period_start, period_end, email_received_at, issues_json FROM timesheet_records
+         WHERE workspace_id = ?1 AND person_id = ?2 AND status != 'replaced' AND id != ?5 AND period_start <= ?4 AND period_end >= ?3
+         ORDER BY COALESCE(email_received_at, 0) DESC, created_at DESC, id",
+    )
+    .bind(ws)
+    .bind(person_id)
+    .bind(me.start)
+    .bind(me.end)
+    .bind(me.id)
+    .fetch_all(&mut *conn)
+    .await?;
+    let mut out = Settled { superseded: kept.iter().any(|k| me.replaced_by(k)), ..Default::default() };
+    for old in &kept {
+        if !out.superseded && me.replaces(old) {
+            sqlx::query("UPDATE timesheet_records SET status = 'replaced', updated_at = ?1 WHERE id = ?2 AND workspace_id = ?3").bind(now).bind(&old.id).bind(ws).execute(&mut *conn).await?;
+            out.replaced.push(old.id.clone());
+        } else if !out.superseded && !me.clients_differ(old) {
+            if old.received() > me.received {
+                add_issue(&mut *conn, ws, &old.id, duplicate_issue(me.start, me.end), now).await?;
+            } else if out.duplicate_of.is_none() {
+                out.duplicate_of = Some((old.period_start.clone(), old.period_end.clone()));
+            }
+        }
+    }
+    Ok(out)
+}
+
+async fn add_issue(conn: &mut SqliteConnection, ws: &str, id: &str, issue: Issue, now: i64) -> sqlx::Result<()> {
+    let json: Option<String> = sqlx::query_scalar("SELECT issues_json FROM timesheet_records WHERE id = ?1 AND workspace_id = ?2").bind(id).bind(ws).fetch_optional(&mut *conn).await?;
+    let Some(json) = json else { return Ok(()) };
+    let mut issues: Vec<Value> = serde_json::from_str(&json).unwrap_or_default();
+    if issues.iter().any(|i| i["code"] == issue.code) {
+        return Ok(());
+    }
+    issues.push(json!(issue));
+    sqlx::query("UPDATE timesheet_records SET issues_json = ?1, updated_at = ?2 WHERE id = ?3 AND workspace_id = ?4")
+        .bind(serde_json::to_string(&issues).unwrap_or_else(|_| "[]".into()))
+        .bind(now)
+        .bind(id)
+        .bind(ws)
+        .execute(conn)
+        .await?;
+    Ok(())
 }
 
 async fn insert_record(db: &SqlitePool, d: Draft<'_>, person_name: Option<String>) -> sqlx::Result<Saved> {
@@ -462,46 +718,20 @@ async fn insert_record(db: &SqlitePool, d: Draft<'_>, person_name: Option<String
         tx.commit().await?;
         return Ok(existing);
     }
-    // A record from an older email never replaces a newer one that is already kept (reading old mail out of order).
-    let newer_exists: bool = match &d.person_id {
-        Some(p) => sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM timesheet_records WHERE workspace_id = ?1 AND person_id = ?2 AND status != 'replaced'
-                           AND period_start <= ?4 AND period_end >= ?3 AND COALESCE(email_received_at, 0) > ?5)",
-        )
-        .bind(d.ws)
-        .bind(p)
-        .bind(&d.period.0)
-        .bind(&d.period.1)
-        .bind(d.msg.received_at)
-        .fetch_one(&mut *tx)
-        .await?,
-        None => false,
-    };
-    let status = if newer_exists { "replaced" } else { d.status };
-    let replaces: Option<String> = match (&d.person_id, newer_exists) {
-        (Some(p), false) => {
-            let olds: Vec<String> = sqlx::query_scalar(
-                "SELECT id FROM timesheet_records WHERE workspace_id = ?1 AND person_id = ?2 AND status != 'replaced'
-                   AND period_start <= ?4 AND period_end >= ?3 ORDER BY COALESCE(email_received_at, 0) DESC, created_at DESC",
-            )
-            .bind(d.ws)
-            .bind(p)
-            .bind(&d.period.0)
-            .bind(&d.period.1)
-            .fetch_all(&mut *tx)
-            .await?;
-            for old in &olds {
-                sqlx::query("UPDATE timesheet_records SET status = 'replaced', updated_at = ?1 WHERE id = ?2 AND workspace_id = ?3")
-                    .bind(now)
-                    .bind(old)
-                    .bind(d.ws)
-                    .execute(&mut *tx)
-                    .await?;
-            }
-            olds.into_iter().next()
+    let mut issues = d.issues.clone();
+    let mut status = d.status;
+    let mut replaces: Option<String> = None;
+    if let Some(person) = &d.person_id {
+        let me = Placed { id: &id, message_id: Some(d.message_id), client: d.client.as_deref(), start: &d.period.0, end: &d.period.1, received: d.msg.received_at, assumed: d.assumed };
+        let settled = settle(&mut tx, d.ws, person, &me, now).await?;
+        if settled.superseded {
+            status = "replaced";
         }
-        _ => None,
-    };
+        if let Some((a, b)) = &settled.duplicate_of {
+            issues.push(duplicate_issue(a, b));
+        }
+        replaces = settled.replaced.into_iter().next();
+    }
     sqlx::query(
         "INSERT INTO timesheet_records
            (id, workspace_id, person_id, employee_code, person_name, sender_address, identity_json, match_method, match_confidence,
@@ -533,7 +763,7 @@ async fn insert_record(db: &SqlitePool, d: Draft<'_>, person_name: Option<String
     .bind(&d.client)
     .bind(status)
     .bind(&replaces)
-    .bind(serde_json::to_string(d.issues).unwrap_or_else(|_| "[]".into()))
+    .bind(serde_json::to_string(&issues).unwrap_or_else(|_| "[]".into()))
     .bind(now)
     .execute(&mut *tx)
     .await?;
@@ -546,7 +776,7 @@ async fn insert_record(db: &SqlitePool, d: Draft<'_>, person_name: Option<String
         period_start: d.period.0,
         period_end: d.period.1,
         total_hours: d.total,
-        issues: d.issues.iter().map(|i| json!(i)).collect(),
+        issues: issues.iter().map(|i| json!(i)).collect(),
         created: true,
     })
 }
@@ -688,6 +918,7 @@ pub async fn list(db: &SqlitePool, ws: &str, f: &Filter, a: &Access) -> sqlx::Re
            AND (?4 IS NULL OR (r.period_start <= ?5 AND r.period_end >= ?4))
            AND (?6 IS NULL OR r.person_name LIKE ?6 OR p.name LIKE ?6 OR r.employee_code LIKE ?6 OR r.client LIKE ?6
                 OR r.email_subject LIKE ?6 OR r.attachment_filename LIKE ?6 OR r.sender_address LIKE ?6)
+           AND (?7 IS NULL OR r.person_id IN (SELECT value FROM json_each(?7)))
          ORDER BY r.period_start DESC, r.created_at DESC LIMIT 500"
     ))
     .bind(ws)
@@ -696,6 +927,7 @@ pub async fn list(db: &SqlitePool, ws: &str, f: &Filter, a: &Access) -> sqlx::Re
     .bind(bounds.as_ref().map(|b| b.0.clone()))
     .bind(bounds.as_ref().map(|b| b.1.clone()))
     .bind(like)
+    .bind(a.visible().map(|v| json!(v).to_string()))
     .fetch_all(db)
     .await?;
     Ok(rows.iter().filter(|r| visible(a, r)).map(|r| r.json(false)).collect())
@@ -726,15 +958,22 @@ pub async fn attention(db: &SqlitePool, ws: &str, message_id: &str) -> sqlx::Res
     Ok(Some(rows.iter().any(|(status, person)| status == "needs_check" || person.is_none())))
 }
 
-/// Mail the timesheet desk has taken (or will take): no automatic reply is drafted for it. A person can still ask
-/// for a draft by hand.
+/// Mail the timesheet desk has taken: it is labelled `timesheet` now and a record with real hours was read from it.
+/// No automatic reply is drafted for it; a person can still ask for a draft by hand. Relabelled mail, and a record
+/// with nothing in it (no hours found) get the normal replies again. A timesheet file that could not be read is
+/// still the desk's: a person is asked to look at it.
 pub async fn suppresses_auto_reply(db: &SqlitePool, ws: &str, message_id: &str) -> sqlx::Result<bool> {
-    let recorded: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM timesheet_records WHERE workspace_id = ?1 AND message_id = ?2)").bind(ws).bind(message_id).fetch_one(db).await?;
-    if recorded {
-        return Ok(true);
-    }
     let labelled: Option<String> = sqlx::query_scalar("SELECT category FROM classifications WHERE message_id = ?1").bind(message_id).fetch_optional(db).await?;
-    Ok(labelled.as_deref() == Some(LABEL) && packs::enabled(db, ws, packs::STAFFING).await?)
+    if labelled.as_deref() != Some(LABEL) {
+        return Ok(false);
+    }
+    sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM timesheet_records WHERE workspace_id = ?1 AND message_id = ?2 AND (total_hours IS NOT NULL OR entries_json != '[]' OR issues_json LIKE '%\"unreadable\"%'))",
+    )
+    .bind(ws)
+    .bind(message_id)
+    .fetch_one(db)
+    .await
 }
 
 // ---------------------------------------------------------------- link to a person
@@ -754,7 +993,7 @@ pub async fn link_person(db: &SqlitePool, ws: &str, record_id: &str, person_id: 
         remember(&mut tx, ws, "name", key, person_id, now).await?;
     }
     let others: Vec<(String, Option<String>, Option<String>)> =
-        sqlx::query_as("SELECT id, employee_code, person_name FROM timesheet_records WHERE workspace_id = ?1 AND person_id IS NULL").bind(ws).fetch_all(&mut *tx).await?;
+        sqlx::query_as("SELECT id, employee_code, person_name FROM timesheet_records WHERE workspace_id = ?1 AND person_id IS NULL ORDER BY created_at, id").bind(ws).fetch_all(&mut *tx).await?;
     for (id, other_code, other_name) in others {
         let same = id == record_id
             || (code.is_some() && other_code.as_deref().map(str::to_lowercase) == code.as_deref().map(str::to_lowercase))
@@ -782,51 +1021,39 @@ async fn remember(conn: &mut SqliteConnection, ws: &str, kind: &str, value: &str
     Ok(())
 }
 
-/// Gives an unmatched record its person: clears "who is this", settles the status and replaces overlapping records.
+/// Gives an unmatched record its person: clears "who is this", settles the status and applies the replace rule.
 async fn attach_person(conn: &mut SqliteConnection, ws: &str, id: &str, person_id: &str, now: i64) -> sqlx::Result<()> {
-    let (issues_json, start, end, received): (String, String, String, Option<i64>) =
-        sqlx::query_as("SELECT issues_json, period_start, period_end, email_received_at FROM timesheet_records WHERE id = ?1").bind(id).fetch_one(&mut *conn).await?;
-    let mut issues: Vec<Value> = serde_json::from_str(&issues_json).unwrap_or_default();
-    issues.retain(|i| i["code"] != "person_unmatched" && i["code"] != "ambiguous_person");
-    let status = if issues.iter().any(|i| i["severity"] == CHECK) { "needs_check" } else { "recorded" };
-    let newer: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM timesheet_records WHERE workspace_id = ?1 AND person_id = ?2 AND status != 'replaced' AND id != ?6
-                       AND period_start <= ?4 AND period_end >= ?3 AND COALESCE(email_received_at, 0) > ?5)",
+    type Own = (String, String, String, Option<i64>, Option<String>, Option<String>);
+    let (issues_json, start, end, received, message_id, client): Own = sqlx::query_as(
+        "SELECT issues_json, period_start, period_end, email_received_at, message_id, client FROM timesheet_records WHERE id = ?1 AND workspace_id = ?2",
     )
-    .bind(ws)
-    .bind(person_id)
-    .bind(&start)
-    .bind(&end)
-    .bind(received.unwrap_or(0))
     .bind(id)
+    .bind(ws)
     .fetch_one(&mut *conn)
     .await?;
-    let olds: Vec<String> = if newer {
-        vec![]
-    } else {
-        sqlx::query_scalar(
-            "SELECT id FROM timesheet_records WHERE workspace_id = ?1 AND person_id = ?2 AND status != 'replaced' AND id != ?5
-               AND period_start <= ?4 AND period_end >= ?3 ORDER BY COALESCE(email_received_at, 0) DESC",
-        )
-        .bind(ws)
-        .bind(person_id)
-        .bind(&start)
-        .bind(&end)
-        .bind(id)
-        .fetch_all(&mut *conn)
-        .await?
-    };
-    for old in &olds {
-        sqlx::query("UPDATE timesheet_records SET status = 'replaced', updated_at = ?1 WHERE id = ?2").bind(now).bind(old).execute(&mut *conn).await?;
+    let mut issues: Vec<Value> = serde_json::from_str(&issues_json).unwrap_or_default();
+    issues.retain(|i| i["code"] != "person_unmatched" && i["code"] != "ambiguous_person" && i["code"] != "possible_duplicate");
+    let assumed = issues.iter().any(|i| i["code"] == "period_assumed");
+    let me = Placed { id, message_id: message_id.as_deref(), client: client.as_deref(), start: &start, end: &end, received: received.unwrap_or(0), assumed };
+    let settled = settle(&mut *conn, ws, person_id, &me, now).await?;
+    if let Some((a, b)) = &settled.duplicate_of {
+        issues.push(json!(duplicate_issue(a, b)));
     }
+    let status = if settled.superseded {
+        "replaced"
+    } else if issues.iter().any(|i| i["severity"] == CHECK) {
+        "needs_check"
+    } else {
+        "recorded"
+    };
     sqlx::query(
         "UPDATE timesheet_records SET person_id = ?1, match_method = 'manual', match_confidence = 1, issues_json = ?2, status = ?3,
                 replaces_id = COALESCE(?4, replaces_id), updated_at = ?5 WHERE id = ?6 AND workspace_id = ?7",
     )
     .bind(person_id)
     .bind(serde_json::to_string(&issues).unwrap_or_else(|_| "[]".into()))
-    .bind(if newer { "replaced" } else { status })
-    .bind(olds.first())
+    .bind(status)
+    .bind(settled.replaced.first())
     .bind(now)
     .bind(id)
     .bind(ws)
@@ -907,7 +1134,7 @@ pub async fn grid(db: &SqlitePool, ws: &str, month: &str, now: i64, a: &Access) 
         let i = match r.person_id.as_ref().and_then(|p| index.get(p)) {
             Some(i) => *i,
             None => {
-                rows.push(Row { person_id: r.person_id.clone(), name: r.person_name.clone().unwrap_or_else(|| "Unknown".into()), code: r.employee_code.clone(), client: r.client.clone(), ..Default::default() });
+                rows.push(Row { person_id: r.person_id.clone(), name: r.linked_name.clone().or_else(|| r.person_name.clone()).unwrap_or_else(|| "Unknown".into()), code: r.employee_code.clone(), client: r.client.clone(), ..Default::default() });
                 if let Some(p) = &r.person_id {
                     index.insert(p.clone(), rows.len() - 1);
                 }
@@ -919,14 +1146,17 @@ pub async fn grid(db: &SqlitePool, ws: &str, month: &str, now: i64, a: &Access) 
         row.records.push(r.id.clone());
         row.check |= r.status == "needs_check" || r.person_id.is_none();
         let entries = r.entries();
-        if entries.is_empty() {
+        // A sheet that spans months counts its undated hours once, in the month it starts.
+        let starts_here = r.period_start.as_str() >= first.as_str() && r.period_start.as_str() <= last.as_str();
+        if entries.is_empty() && starts_here {
             row.undated += r.total_hours.unwrap_or(0.0);
         }
         for e in entries {
             match e.date {
                 Some(d) if d.as_str() >= first.as_str() && d.as_str() <= last.as_str() => *row.cells.entry(d).or_default() += e.hours,
                 Some(_) => {}
-                None => row.undated += e.hours,
+                None if starts_here => row.undated += e.hours,
+                None => {}
             }
         }
     }
@@ -963,8 +1193,12 @@ pub async fn grid(db: &SqlitePool, ws: &str, month: &str, now: i64, a: &Access) 
 
 // ---------------------------------------------------------------- backfill
 
+/// A mail the scan may try this many times: after that it is left for a person (or a new label) to bring back.
+const MAX_ATTEMPTS: i64 = 3;
+
 /// Records timesheets from mail labelled `timesheet` that has none yet (oldest first, a bounded batch per call).
-/// Safe to repeat: mail that already has a record is skipped.
+/// Safe to repeat: mail that already has a record is skipped, and mail that gave nothing is tried at most
+/// `MAX_ATTEMPTS` times so a model is not paid for the same mail every scan.
 pub async fn backfill(state: &AppState, ws: &str, limit: i64) -> sqlx::Result<usize> {
     if !packs::enabled(&state.db, ws, packs::STAFFING).await? {
         return Ok(0);
@@ -973,18 +1207,50 @@ pub async fn backfill(state: &AppState, ws: &str, limit: i64) -> sqlx::Result<us
         "SELECT m.id FROM email_messages m JOIN classifications c ON c.message_id = m.id
          WHERE m.workspace_id = ?1 AND m.direction = 'inbound' AND m.suppressed = 0 AND c.category = ?2
            AND NOT EXISTS (SELECT 1 FROM timesheet_records r WHERE r.message_id = m.id)
-         ORDER BY m.received_at LIMIT ?3",
+           AND COALESCE((SELECT a.attempts FROM timesheet_attempts a WHERE a.message_id = m.id), 0) < ?4
+         ORDER BY m.received_at, m.id LIMIT ?3",
     )
     .bind(ws)
     .bind(LABEL)
     .bind(limit)
+    .bind(MAX_ATTEMPTS)
     .fetch_all(&state.db)
     .await?;
     let mut recorded = 0;
     for id in ids {
-        recorded += record_message(state, ws, &id).await?.records.iter().filter(|r| r.created).count();
+        let run = record_message(state, ws, &id).await?;
+        let made = run.records.iter().filter(|r| r.created).count();
+        recorded += made;
+        if made == 0 && !run.waiting_for_files {
+            sqlx::query(
+                "INSERT INTO timesheet_attempts (message_id, workspace_id, attempts, last_at) VALUES (?1, ?2, 1, ?3)
+                 ON CONFLICT(message_id) DO UPDATE SET attempts = attempts + 1, last_at = excluded.last_at",
+            )
+            .bind(&id)
+            .bind(ws)
+            .bind(now_ms())
+            .execute(&state.db)
+            .await?;
+        }
     }
     Ok(recorded)
+}
+
+/// Forgetting a sender erases what was kept of their timesheets: the records and the code / name links a person
+/// made for them. (Deleting an email or disconnecting a mailbox does not call this: the records are kept on purpose.)
+pub async fn erase_sender(conn: &mut SqliteConnection, ws: &str, sender: &str) -> sqlx::Result<u64> {
+    let address = address_of(sender);
+    let who: Vec<(Option<String>, Option<String>)> =
+        sqlx::query_as("SELECT employee_code, person_name FROM timesheet_records WHERE workspace_id = ?1 AND lower(sender_address) = lower(?2)").bind(ws).bind(&address).fetch_all(&mut *conn).await?;
+    for (code, name) in who {
+        if let Some(code) = code.map(|c| c.to_lowercase()) {
+            sqlx::query("DELETE FROM timesheet_aliases WHERE workspace_id = ?1 AND kind = 'code' AND value = ?2").bind(ws).bind(code).execute(&mut *conn).await?;
+        }
+        if let Some(key) = name.as_deref().map(name_key).filter(|k| !k.is_empty()) {
+            sqlx::query("DELETE FROM timesheet_aliases WHERE workspace_id = ?1 AND kind = 'name' AND value = ?2").bind(ws).bind(key).execute(&mut *conn).await?;
+        }
+    }
+    Ok(sqlx::query("DELETE FROM timesheet_records WHERE workspace_id = ?1 AND lower(sender_address) = lower(?2)").bind(ws).bind(&address).execute(conn).await?.rows_affected())
 }
 
 #[cfg(test)]
@@ -995,6 +1261,11 @@ mod tests {
     #[test]
     fn the_label_rule_reads_subject_and_file_names() {
         assert!(looks_like_timesheet("September timesheet", &[]));
+        assert!(looks_like_timesheet("September timesheet - Priya", &[]));
+        assert!(looks_like_timesheet("Question", &["timesheet_sep.xlsx".into()]));
+        for talk in ["Question about my timesheet", "Timesheet policy for Q4", "Re: timesheet not approved", "Reminder: submit your timesheet", "Timesheet approval", "Where is my timesheet?"] {
+            assert!(!looks_like_timesheet(talk, &[]), "{talk}");
+        }
         assert!(looks_like_timesheet("Hello", &["Ravi_Time Sheet_Sep.xlsx".into()]));
         assert!(looks_like_timesheet("fyi", &["timecard-09.pdf".into()]));
         assert!(looks_like_timesheet("Monthly hours report", &[]));
@@ -1053,6 +1324,10 @@ mod tests {
         assert_eq!((q.severity, q.message.as_str()), (CHECK, "Who is this? (Ravi Kumar, ID E1)"));
     }
 
+    fn entry(date: &str, hours: f64) -> Entry {
+        Entry { date: Some(date.into()), hours, project: None, note: None }
+    }
+
     #[test]
     fn a_model_cannot_add_numbers_the_sheet_does_not_state() {
         let text = "Ravi Kumar\n01 Sep 8\n02 Sep 8\nTotal 16";
@@ -1060,15 +1335,64 @@ mod tests {
             identity: Identity { name: Some("Ravi Kumar".into()), code: Some("E999".into()), ..Default::default() },
             period: None,
             total: Some(18.0),
-            entries: vec![
-                Entry { date: Some("2026-09-01".into()), hours: 8.0, project: None, note: None },
-                Entry { date: Some("2026-09-02".into()), hours: 9.5, project: None, note: None },
-            ],
+            entries: vec![entry("2026-09-01", 8.0), entry("2026-09-02", 9.5)],
         };
-        let s = sanitize_model(model, text);
+        let (s, issues) = sanitize_model(model, text, "Timesheet", 2026);
         assert_eq!(s.entries.len(), 1);
         assert_eq!(s.total, None);
         assert_eq!(s.identity.code, None);
         assert_eq!(s.identity.name.as_deref(), Some("Ravi Kumar"));
+        assert!(issues.iter().any(|i| i.code == "model_days_dropped" && i.severity == CHECK));
+    }
+
+    #[test]
+    fn a_model_day_needs_its_date_and_its_hours_on_one_line_in_any_date_format() {
+        let text = "Name: Ravi\n3 Sep 2026   8\n2026-09-04 | 6\n05/09/2026 | 7.5\nSep 8, 2026: 4\n1 Sep 16\nHours: 8 on one day";
+        let model = Sheet {
+            entries: vec![
+                entry("2026-09-03", 8.0),
+                entry("2026-09-04", 6.0),
+                entry("2026-09-05", 7.5),
+                entry("2026-09-08", 4.0),
+                entry("2026-09-01", 16.0),
+                entry("2026-09-04", 8.0),
+                entry("2026-09-20", 6.0),
+            ],
+            ..Default::default()
+        };
+        let kept: Vec<(String, f64)> = sanitize_model(model, text, "Timesheet", 2026).0.entries.into_iter().map(|e| (e.date.unwrap(), e.hours)).collect();
+        let want: Vec<(String, f64)> =
+            [("2026-09-03", 8.0), ("2026-09-04", 6.0), ("2026-09-05", 7.5), ("2026-09-08", 4.0), ("2026-09-01", 16.0)].iter().map(|(d, h)| ((*d).to_string(), *h)).collect();
+        assert_eq!(kept, want, "8h on 4 Sep is on another line, 20 Sep is nowhere");
+    }
+
+    #[test]
+    fn a_model_period_must_be_written_in_the_text() {
+        let model = |p: (&str, &str)| Sheet { period: Some((p.0.into(), p.1.into())), ..Default::default() };
+        let text = "Timesheet 1 Sep 2026 to 30 Sep 2026\n1 Sep 8";
+        assert!(sanitize_model(model(("2026-09-01", "2026-09-30")), text, "x", 2026).0.period.is_some());
+        assert!(sanitize_model(model(("2026-08-01", "2026-08-31")), text, "x", 2026).0.period.is_none());
+        assert!(sanitize_model(model(("2026-09-01", "2026-09-30")), "Hours for the month\n1 Sep 8", "September timesheet", 2026).0.period.is_some());
+        assert!(sanitize_model(model(("2026-09-01", "2026-09-30")), "1 Sep 8", "Hello", 2026).0.period.is_none(), "a month nobody named");
+    }
+
+    #[test]
+    fn a_rule_total_is_never_replaced_by_the_model_total() {
+        let base = Sheet { total: Some(24.0), ..Default::default() };
+        let model = Sheet { total: Some(30.0), entries: vec![entry("2026-09-01", 8.0)], ..Default::default() };
+        assert_eq!(merge(base, model).total, Some(24.0));
+    }
+
+    #[test]
+    fn replies_and_forwards_keep_only_what_the_sender_wrote() {
+        let table = "| Date | Hours |\n| 2026-09-01 | 8 |";
+        assert_eq!(own_text("Re: timesheet", &format!("Thanks!\n\nOn Mon, 5 Oct 2026 at 10:00, Ravi <r@x.test> wrote:\n> {table}")).trim(), "Thanks!");
+        assert_eq!(own_text("Re: x", "Looks right.\n> | 2026-09-01 | 8 |").trim(), "Looks right.");
+        let fwd = own_text("Fwd: Sept timesheet", &format!("FYI\n\n---------- Forwarded message ---------\nFrom: Ravi\n\n{table}"));
+        assert!(fwd.contains("FYI") && fwd.contains("2026-09-01 | 8"));
+        let long_note = format!("{}\n\n---------- Forwarded message ---------\n{table}", "Please read this carefully. ".repeat(20));
+        assert!(!own_text("Fwd: x", &long_note).contains("2026-09-01"));
+        let wrapped = own_text("Re: x", "ok\nOn Mon, 5 Oct 2026 at 10:00, Ravi Kumar <ravi@x.test>\nwrote:\n2026-09-01 | 8");
+        assert_eq!(wrapped.trim(), "ok");
     }
 }
