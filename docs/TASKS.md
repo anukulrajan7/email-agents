@@ -16,6 +16,10 @@ like C1, H10, P1.3) with findings from the 14–15 Oct build session. Details fo
 Rules: `CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0`; never two cargo builds at once; never merge while a build runs;
 one full suite only before a push; `caffeinate -i` for long runs; push only as `anukulrajan7`.
 
+**Priority: foundation first.** Sections 1 and 2 (fast tests and builds, then a clean structure) come before any
+fix or feature, because every later task is quicker on a fast, readable codebase. Don't start section 3 until
+section 1's targets are met and R1–R4 are done.
+
 Size: **S** = hours, **M** = days, **L** = a week or more. **Owner** = needs the owner's decision before starting.
 
 ---
@@ -32,7 +36,7 @@ Size: **S** = hours, **M** = days, **L** = a week or more. **Owner** = needs the
 | [ ] 0.6 | Send the live test pack and record the scorecard | `scripts/test-pack/send.py` on the VPS, then `check.py` |
 | [ ] 0.7 | Clean up worktrees and the extra build folders (~19 GB in `~/.cache/postroom-target*`) | keep one target dir |
 
-## 1. Speed (rest of Part A)
+## 1. Foundation: fast tests and builds (rest of Part A)
 
 | | Task | Size | Done when |
 |---|---|---|---|
@@ -42,7 +46,7 @@ Size: **S** = hours, **M** = days, **L** = a week or more. **Owner** = needs the
 
 Targets: local `cargo test` < 4 min after a one-line change (12.4 min on 15 Oct).
 
-## 2. Structure pass (before the fixes, so fixes land in the new layout)
+## 2. Foundation: structure pass (before the fixes, so fixes land in the new layout)
 
 The module map the owner was shown on 15 Oct: feature-first folders `platform/ mail/ understanding/ replies/ agents/
 learning/ hr/ ai/ assistant/ automations/ alerts/ evals/ metrics/ jobs/`. Each feature has `mod.rs` (public API),
@@ -115,13 +119,45 @@ Cost target across P2.1, P2.2, P2.6 and P2.7: about ₹0.11 → ₹0.05 per emai
 - [ ] D2 `ALLOW_TEST_EMAILS=true` is set in production. Keep or remove?
 - [ ] D3 Kavya was merged into Arjun. Split again?
 
-## 7. Phase 3: differentiate (check with the owner before each)
+## 7. Phase 3: differentiate (check with the owner before each item)
 
-| | Task | Size |
-|---|---|---|
-| [ ] P3.1 | Autonomy ladder explicit: first-run confirmation of the starting level, recorded in audit | M |
-| [ ] P3.2 | Designer v2: test against a chosen email, show cost per email before save | M |
-| [ ] P3.3 | LLM rerank for matching; lift the five-attachment cap | M |
-| [ ] P3.4 | Ask Meera answers HR numbers with citations | S |
-| [ ] P3.5 | Billing per mailbox with usage against plan | L |
-| [ ] P3.6 | Backup restore drill and migration rehearsal in CI | S |
+Each item is split into small tasks; do them in order, one commit each.
+
+**P3.1 Autonomy ladder explicit in the product** (M)
+- [ ] P3.1a Store a workspace's chosen starting level (a migration and a settings field); default = today's automatic default
+- [ ] P3.1b First-run screen: "How much should your helpers do alone?" with 3 plain choices (ask first / act on routine mail / act on everything except sensitive)
+- [ ] P3.1c Apply the choice to every agent's cap; record it in the audit trail with who chose it
+- [ ] P3.1d Per-agent "why this level" line on the agent card (earned, capped, or the owner's choice)
+- [ ] P3.1e Tests: the choice applies, is audited, and the sensitive floor still always asks
+
+**P3.2 Designer v2: try before you save** (M)
+- [ ] P3.2a "Test on an email" picker in the builder (recent inbox mail, search)
+- [ ] P3.2b Dry run against that email: route, steps, the draft it would write, nothing sent
+- [ ] P3.2c Show the estimated cost per email and per month (from the ledger prices) before save
+- [ ] P3.2d Show which existing agent would have handled it (overlap check, reusing the routing preview)
+- [ ] P3.2e Un-`fixme` the builder e2e spec and make it pass
+
+**P3.3 Smarter matching** (M, after P2.5)
+- [ ] P3.3a Build a labelled set: 50 requirement ↔ candidate pairs with a "good match" mark
+- [ ] P3.3b Measure today's precision@3 on that set (baseline)
+- [ ] P3.3c LLM rerank of the top 10 by explained score; keep the explanation
+- [ ] P3.3d Lift the five-attachment cap (bounded by size and budget)
+- [ ] P3.3e Ship only if precision@3 improves; record before/after in docs/evals.md
+
+**P3.4 Ask Meera answers HR numbers** (S)
+- [ ] P3.4a Expose the existing HR metric functions as assistant tools (headcount, timesheets missing, submissions, hours by client)
+- [ ] P3.4b Answers cite the source (the record, the grid month or the email) with a link
+- [ ] P3.4c Golden questions for the assistant with expected numbers; tests
+
+**P3.5 Billing per mailbox** (L)
+- [ ] P3.5a Plans table (mailboxes, emails per month, AI budget) and a per-workspace plan
+- [ ] P3.5b Usage meter from the AI ledger and email counts; monthly roll-up
+- [ ] P3.5c Usage-against-plan page; warning at 80%, soft stop at 100% (AI pauses, mail still syncs)
+- [ ] P3.5d Payment provider integration (owner picks the provider: Razorpay or Stripe)
+- [ ] P3.5e Invoices and receipts by email
+- [ ] P3.5f Two paying pilots
+
+**P3.6 Backup restore drill** (S)
+- [ ] P3.6a Nightly CI job downloads yesterday's backup (read-only credentials)
+- [ ] P3.6b Restore into a temp DB and run migrations on it
+- [ ] P3.6c Smoke checks (row counts, health query); email the owner on failure (reuse the self-test mailer)
