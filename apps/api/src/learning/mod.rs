@@ -12,3 +12,6 @@ pub mod preferences;
 pub mod retrieve;
 pub mod scope;
 pub mod signals;
+pub mod memory;
+pub mod memory_learning;
+pub mod knowledge;
