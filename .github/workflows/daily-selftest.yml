@@ -56,6 +56,7 @@ jobs:
         run: |
           echo "=== cargo test ===" | tee -a selftest.log
           cargo test --manifest-path apps/api/Cargo.toml 2>&1 | tee -a selftest.log
+          cargo test --manifest-path apps/api/Cargo.toml --test api -- --ignored --exact deletion::a_two_thousand_email_purge_never_holds_the_write_lock_long 2>&1 | tee -a selftest.log
       - name: Build failure report
         if: failure()
         env:

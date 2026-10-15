@@ -590,7 +590,10 @@ async fn a_purged_forwarding_address_can_be_set_up_again_with_a_new_alias() {
     assert!(!new_alias.is_empty() && new_alias != alias);
 }
 
+// Measures wall-clock lock holds, so it runs alone (CI runs it as its own step); hundreds of tests sharing the CPU
+// would make it flaky.
 #[tokio::test]
+#[ignore = "timing: run alone with --ignored"]
 async fn a_two_thousand_email_purge_never_holds_the_write_lock_long() {
     let env = Env::new(Opts::packs(&["general"])).await;
     {

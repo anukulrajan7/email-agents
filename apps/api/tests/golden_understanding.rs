@@ -14,8 +14,7 @@ use serde::Deserialize;
 use harness::{label_accuracy, label_accuracy_md, label_set, load_scenarios, write_scorecard};
 use serde_json::Value;
 
-#[path = "golden/harness.rs"]
-mod harness;
+use crate::golden_harness as harness;
 
 #[derive(Deserialize)]
 struct Files {
