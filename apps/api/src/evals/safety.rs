@@ -763,11 +763,21 @@ async fn run_isolated(s: &Scenario, options: &RunOptions) -> Outcome {
 /// Costs nothing.
 pub async fn run_for_spec(spec: &AgentSpec) -> SuiteResult {
     let options = RunOptions { live: None, spec: Some(spec.clone()) };
-    let mut outcomes = Vec::new();
-    for s in load_scenarios() {
-        outcomes.push(run_isolated(&s, &options).await);
+    let limit = Arc::new(tokio::sync::Semaphore::new(8));
+    let mut tasks = tokio::task::JoinSet::new();
+    for (i, s) in load_scenarios().into_iter().enumerate() {
+        let (options, limit) = (options.clone(), limit.clone());
+        tasks.spawn(async move {
+            let _slot = limit.acquire_owned().await.expect("the semaphore stays open");
+            (i, run_isolated(&s, &options).await)
+        });
     }
-    SuiteResult { outcomes, cost_usd: 0.0, budget_hit: false }
+    let mut done = Vec::new();
+    while let Some(joined) = tasks.join_next().await {
+        done.push(joined.expect("run_isolated catches harness panics"));
+    }
+    done.sort_by_key(|(i, _)| *i);
+    SuiteResult { outcomes: done.into_iter().map(|(_, o)| o).collect(), cost_usd: 0.0, budget_hit: false }
 }
 
 /// The golden scenarios against the server's real models, stopping once `budget_usd` is spent.

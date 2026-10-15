@@ -303,6 +303,25 @@ docker compose logs --since 24h app | grep <request_id>
    state, not on sleeps; check `apps/web/e2e/support/api.ts` for the helpers that poll.
 5. The API log for the run is in the Playwright output (`stdout: 'pipe'` for the webServer).
 
+## Why tests are fast now
+
+- Per-file binaries became one binary: Rust links every file in `tests/` separately, so 61 files meant 61 links. Now `tests/api.rs` pulls every file in as a module (files did not move), so there is one link.
+- Migrations per test became a template copy: every test used to run all the migrations on a fresh SQLite file. Now that happens once per run, and each test copies the finished file (`db::seed_from_template`, used when `Config::for_tests` is set).
+- Repeated safety runs became one shared run: `run_for_spec` ran 49 scenarios one after another, and several tests asked for the same spec. Now scenarios run 8 at a time and `common::safety_suite` caches the result per spec. (There are no real-time waits in the tests: the 10-minute send hold is checked against the clock value, not slept.)
+
+Adding a test file: add two lines to `tests/api.rs` (`#[path = "x.rs"]` and `mod x;`). A guard test fails if you forget.
+
+Measured on a 10-core M4 Mac, deps already cached, `CARGO_PROFILE_DEV_DEBUG=0`, `cargo test --no-fail-fast`:
+
+| | before | after |
+|---|---|---|
+| Whole run (build + link + tests) | 676 s | 99 s |
+| Test execution only | about 450 s | 45 s |
+| `experts` + `workflow_gate` tests | about 208 s | 20 s |
+| Rebuild after touching one test file | not measured | 10 s |
+
+Test count is the same (875 passed, 3 ignored) plus one new guard test.
+
 ## In this repo
 
 - `Makefile`: the five commands you use every day.

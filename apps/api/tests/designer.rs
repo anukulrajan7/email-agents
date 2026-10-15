@@ -1,7 +1,7 @@
 //! The system agent designer: plain English to a validated spec, repair, a dry run that writes nothing,
 //! saving as a versioned agent, the daily and per-session limits, and rollback.
 
-mod common;
+use crate::common;
 
 use axum::http::StatusCode;
 use common::*;

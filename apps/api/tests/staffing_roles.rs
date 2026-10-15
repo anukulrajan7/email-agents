@@ -1,6 +1,6 @@
 //! The super admin and role-scoped access, enforced on the server for every level.
 
-mod staffing_common;
+use crate::staffing_common;
 
 use axum::http::StatusCode;
 use serde_json::{Value, json};

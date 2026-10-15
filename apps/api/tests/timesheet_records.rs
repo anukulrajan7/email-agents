@@ -1,7 +1,7 @@
 //! Timesheets as records: read from pasted mail and attached sheets, matched to people, replaced not duplicated,
 //! kept after the email is gone, and never answered by an agent.
 
-mod staffing_common;
+use crate::staffing_common;
 
 use std::sync::{Arc, Mutex};
 

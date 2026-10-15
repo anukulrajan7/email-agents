@@ -1,7 +1,7 @@
 //! Routing end to end: the route recorded for every inbound email, precedence, observing (shadow)
 //! agents and manual reassignment.
 
-mod common;
+use crate::common;
 
 use axum::http::StatusCode;
 use common::*;

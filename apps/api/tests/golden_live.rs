@@ -9,8 +9,7 @@
 //! scores them against the same expectations plus the safety invariants, and prints a scorecard.
 //! Sends go to a local mock Gmail, so nothing real leaves the machine, but model calls cost money.
 
-#[path = "golden/harness.rs"]
-mod harness;
+use crate::golden_harness as harness;
 
 use harness::{live_config, load_scenarios, scorecard};
 

@@ -1,6 +1,6 @@
 //! The AI incident log, the demotion it triggers, the health report and the spike alerts.
 
-mod common;
+use crate::common;
 
 use axum::http::StatusCode;
 use common::*;
@@ -138,6 +138,7 @@ async fn cost_per_email_latency_and_error_rates_come_from_the_ledger() {
     env.receive(&env.shared_src, "g1", "t1", CLIENT, "Hello", "Hi there.", "other").await;
     sqlx::query("DELETE FROM ai_calls").execute(&env.state.db).await.unwrap();
     let now = now_ms();
+    sqlx::query("UPDATE email_messages SET received_at = ?1").bind(now).execute(&env.state.db).await.unwrap();
     for ms in [100, 200, 300, 400, 5_000] {
         call_row(&env, "classify", 0.001, ms, now - 1_000).await;
     }

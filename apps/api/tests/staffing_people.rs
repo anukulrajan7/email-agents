@@ -1,7 +1,7 @@
 //! Gap 1: the people directory. Owner writes, validation, manager chain, CSV import with a validation
 //! report (and dry run), HR fields only with the staffing pack.
 
-mod staffing_common;
+use crate::staffing_common;
 
 use axum::http::StatusCode;
 use serde_json::json;

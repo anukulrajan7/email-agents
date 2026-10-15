@@ -2,7 +2,7 @@
 //! people keep their full mailbox; a billable person with no timesheet three days after month end raises
 //! `timesheet_missing`, which resolves when the timesheet arrives.
 
-mod staffing_common;
+use crate::staffing_common;
 
 use axum::http::StatusCode;
 use email_ai_api::alerts;

@@ -1,7 +1,7 @@
 //! Messaging end to end: send_message rules at every level, ask and report back, the single nudge, vendor support
 //! tickets, in-app privacy, notify owner and tenant isolation. Gmail is a local mock; nothing real is sent.
 
-mod common;
+use crate::common;
 
 use std::sync::Arc;
 

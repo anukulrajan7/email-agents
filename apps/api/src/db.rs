@@ -75,6 +75,53 @@ pub async fn migrate(pool: &SqlitePool) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Tests only: if `database_url` names a file that does not exist yet, copies a database that was
+/// migrated and seeded once per process into it, so each test skips the 50-odd migrations.
+#[doc(hidden)]
+pub fn seed_from_template(database_url: &str) -> anyhow::Result<()> {
+    static TEMPLATE: std::sync::OnceLock<Result<std::path::PathBuf, String>> = std::sync::OnceLock::new();
+    let Ok(options) = SqliteConnectOptions::from_str(database_url) else { return Ok(()) };
+    let target = options.get_filename().to_path_buf();
+    if target.as_os_str().is_empty() || target.to_str() == Some(":memory:") || target.exists() {
+        return Ok(());
+    }
+    let template = TEMPLATE
+        .get_or_init(|| {
+            std::thread::spawn(|| -> anyhow::Result<std::path::PathBuf> {
+                let dir = std::env::temp_dir().join("postroom-db-template");
+                std::fs::create_dir_all(&dir)?;
+                let path = dir.join(format!("template-{}.db", std::process::id()));
+                let _ = std::fs::remove_file(&path);
+                let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+                rt.block_on(async {
+                    let pool = connect(&format!("sqlite://{}", path.display())).await?;
+                    migrate(&pool).await?;
+                    sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)").execute(&pool).await?;
+                    pool.close().await;
+                    anyhow::Ok(())
+                })?;
+                for entry in std::fs::read_dir(&dir)?.flatten() {
+                    let name = entry.file_name().to_string_lossy().into_owned();
+                    let stale = name.starts_with("template-") && !name.starts_with(&format!("template-{}.", std::process::id()));
+                    if stale && entry.metadata().and_then(|m| m.modified()).is_ok_and(|t| t.elapsed().is_ok_and(|e| e.as_secs() > 3600)) {
+                        let _ = std::fs::remove_file(entry.path());
+                    }
+                }
+                Ok(path)
+            })
+            .join()
+            .map_err(|_| "the template thread panicked".to_string())
+            .and_then(|r| r.map_err(|e| format!("{e:#}")))
+        })
+        .as_ref()
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    if let Some(parent) = target.parent() {
+        std::fs::create_dir_all(parent).context("creating database directory")?;
+    }
+    std::fs::copy(template, &target).context("copying the template database")?;
+    Ok(())
+}
+
 thread_local! {
     static FROZEN_CLOCK: std::cell::Cell<Option<i64>> = const { std::cell::Cell::new(None) };
 }

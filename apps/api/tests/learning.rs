@@ -1,7 +1,7 @@
 //! The learning loop: every hook writes its signal, edits become suggested style preferences, guarded so a
 //! preference is never an instruction, memories can belong to one agent, and edit distance trends are exposed.
 
-mod common;
+use crate::common;
 
 use std::sync::{
     Arc, Mutex,

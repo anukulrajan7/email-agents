@@ -29,6 +29,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: apps/api
+          shared-key: api
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: pnpm/action-setup@v4
         with:
           version: 12.5.1

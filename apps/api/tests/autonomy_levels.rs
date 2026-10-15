@@ -2,7 +2,7 @@
 //! injection gate, delayed and stoppable automatic sends, observe-only agents, tool scopes and the
 //! audit trail, fixed workflows and their hand-over to the planner, pausing and schedule triggers.
 
-mod common;
+use crate::common;
 
 use axum::http::StatusCode;
 use common::*;

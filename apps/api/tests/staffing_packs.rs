@@ -1,7 +1,7 @@
 //! Pack scope: the directory, escalation, scoping and metrics framework are available in every workspace;
 //! billable policy, timesheets, submissions, portal reconciliation and matching belong to the staffing pack.
 
-mod staffing_common;
+use crate::staffing_common;
 
 use axum::http::StatusCode;
 use email_ai_api::alerts;

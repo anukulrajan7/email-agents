@@ -108,6 +108,8 @@ pub struct Config {
     pub agent_max_autonomy: i64,
     /// Automatic sends (level 2 and up) wait this many seconds so a person can stop them; 0 sends at once.
     pub agent_auto_send_delay_secs: i64,
+    /// Tests only: a new database file starts as a copy of a once-migrated template.
+    pub db_from_template: bool,
     /// A behaviour-changing agent version queues its safety and replay evals (`EVALS_ON_VERSION`).
     pub evals_on_version: bool,
     /// Most one in-product live eval run may spend, in USD (`EVALS_LIVE_MAX_USD`).
@@ -210,6 +212,7 @@ impl Config {
             agent_max_autonomy: var("AGENT_MAX_AUTONOMY", "3").parse::<i64>().context("AGENT_MAX_AUTONOMY")?.clamp(0, 3),
             evals_on_version: var("EVALS_ON_VERSION", "1") != "0",
             evals_live_max_usd: var("EVALS_LIVE_MAX_USD", "0.50").parse::<f64>().context("EVALS_LIVE_MAX_USD")?.clamp(0.0, 5.0),
+            db_from_template: false,
             agent_auto_send_delay_secs: var("AGENT_AUTO_SEND_DELAY_SECS", "600").parse::<i64>().context("AGENT_AUTO_SEND_DELAY_SECS")?.clamp(0, 86_400),
             email_retention_days: var("EMAIL_RETENTION_DAYS", "30").parse().context("EMAIL_RETENTION_DAYS")?,
             job_worker_concurrency: var("JOB_WORKER_CONCURRENCY", "2").parse().context("JOB_WORKER_CONCURRENCY")?,
@@ -297,6 +300,7 @@ impl Config {
             timesheet_escalation_model_id: String::new(),
             agent_auto_send_daily_cap: 20,
             agent_max_autonomy: 3,
+            db_from_template: true,
             agent_auto_send_delay_secs: 0,
             evals_on_version: false,
             evals_live_max_usd: 0.50,

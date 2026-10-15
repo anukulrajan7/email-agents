@@ -1,7 +1,7 @@
 //! Gap 6: layered escalation. An alert about a person goes to them, then their manager, then the final contacts,
 //! with configurable delays. Works in every workspace; `below_target` is a generic rule.
 
-mod staffing_common;
+use crate::staffing_common;
 
 use email_ai_api::{alerts, db::now_ms};
 use serde_json::{Value, json};

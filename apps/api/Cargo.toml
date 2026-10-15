@@ -3,6 +3,7 @@ name = "email-ai-api"
 version = "0.1.0"
 edition = "2024"
 publish = false
+autotests = false
 
 [lib]
 path = "src/lib.rs"
@@ -10,6 +11,10 @@ path = "src/lib.rs"
 [[bin]]
 name = "email-ai-api"
 path = "src/main.rs"
+
+[[test]]
+name = "api"
+path = "tests/api.rs"
 
 [dependencies]
 ammonia = "4"

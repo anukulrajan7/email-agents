@@ -1,7 +1,7 @@
 //! Gap 7: per-person mailbox scoping. The inbox can be narrowed to one mailbox or to the mailbox linked to one
 //! person, and the filter never leaks the other mailbox's mail.
 
-mod staffing_common;
+use crate::staffing_common;
 
 use axum::http::StatusCode;
 use serde_json::{Value, json};

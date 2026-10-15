@@ -2,8 +2,8 @@
 //! What is derived from an email goes with it, a deleted email is not imported again, and the
 //! permission rules (personal mailboxes, the access wall) hold.
 
-mod common;
-mod staffing_common;
+use crate::common;
+use crate::staffing_common;
 
 use axum::http::StatusCode;
 use common::*;

@@ -1,7 +1,7 @@
 //! Round 2: suppressed mail stays out of every read path, release re-judges each message and finishes the skipped
 //! steps, the mail wall holds on drafts / reviews / alerts / runs / contacts, owner checks run inside the transaction.
 
-mod staffing_common;
+use crate::staffing_common;
 
 use axum::http::StatusCode;
 use email_ai_api::alerts;
