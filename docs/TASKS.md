@@ -4,6 +4,8 @@ One list, worked top to bottom, **one task at a time on `main`**. It combines th
 like C1, H10, P1.3) with findings from the 14–15 Oct build session. Details for audit items are in
 `docs/product-engineering/07-engineering-mistakes-and-improvements.md` (C/H/L ids) and `15-test-speed-plan.md` (A ids).
 
+Ready-to-paste prompts for every task: `docs/TASK-PROMPTS.md`.
+
 ## How to work a task
 
 1. Write or extend the test first (it should fail).
@@ -28,10 +30,10 @@ Size: **S** = hours, **M** = days, **L** = a week or more. **Owner** = needs the
 
 | | Task | Notes |
 |---|---|---|
-| [ ] 0.1 | Merge `wp-ts-fix` (timesheet review fixes) | overlap-replace, over-labelling, retryable model errors, model-number checks, "submitted" rule, CSV injection, UI dates |
-| [ ] 0.2 | Merge `wp-evals` (95 scenarios, per-agent scorecard) | replaces the early `docs/evals/scorecard.md` |
-| [ ] 0.3 | Merge `wp-fasttests` (one test binary, template DB, safety suite run once and in parallel, CI cache) | covers A1–A4; record before/after |
-| [ ] 0.4 | One full suite, then push and deploy | migrations 0055, 0056 (+0057 if added) |
+| [x] 0.1 | Merge `wp-ts-fix` (timesheet review fixes) | overlap-replace, over-labelling, retryable model errors, model-number checks, "submitted" rule, CSV injection, UI dates |
+| [x] 0.2 | Merge `wp-evals` (95 scenarios, per-agent scorecard) | replaces the early `docs/evals/scorecard.md` |
+| [x] 0.3 | Merge `wp-fasttests` (one test binary, template DB, safety suite run once and in parallel, CI cache) | covers A1–A4; record before/after |
+| [x] 0.4 | One full suite, then push and deploy (65b427b; 895 pass in 116 s) | migrations 0055, 0056 (+0057 if added) |
 | [ ] 0.5 | Owner: HR pack on or off for the live test | it is **off** now, so HR mail goes to Meera |
 | [ ] 0.6 | Send the live test pack and record the scorecard | `scripts/test-pack/send.py` on the VPS, then `check.py` |
 | [ ] 0.7 | Clean up worktrees and the extra build folders (~19 GB in `~/.cache/postroom-target*`) | keep one target dir |
