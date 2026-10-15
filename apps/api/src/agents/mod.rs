@@ -40,3 +40,6 @@ mod tests {
         assert_eq!(sentence("abcdefghij", 5), "abcd…");
     }
 }
+pub mod registry;
+pub mod profiles;
+pub mod designer;
