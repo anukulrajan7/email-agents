@@ -1,8 +1,6 @@
 <div align="center">
 
-# 📮 Post Room
-
-### The sorting office for your email
+<img src="docs/assets/banner.svg" alt="Post Room: the sorting office for your email" width="100%"/>
 
 **A personal AI agent for your inbox.** Post Room reads every email, understands what it needs, and hands it to the
 right helper on your team. Helpers draft, file, record and follow up, and they earn the freedom to act on their own.
