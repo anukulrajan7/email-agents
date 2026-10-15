@@ -11,3 +11,7 @@ dist/
 
 # Internal docs (plans, audit, tasks, learning, evals): local only, never pushed
 /private/
+
+# Python bytecode
+__pycache__/
+*.pyc
