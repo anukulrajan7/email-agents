@@ -29,7 +29,7 @@ use crate::{
     error::{AppError, AppResult},
     http::AppState,
     jobs::{self, handlers::JobError, kind},
-    send_safety::{self, CheckInput},
+    send_safety::CheckInput,
     sources::nango::NangoError,
 };
 
@@ -874,3 +874,10 @@ mod tests {
         assert_eq!(sent_in_thread(&json!({}), &mid, 0), None);
     }
 }
+pub mod send_safety;
+pub mod signoff;
+pub mod reply_settings;
+pub mod repair;
+pub mod gap_resolver;
+pub mod owner_said;
+pub mod skills;
