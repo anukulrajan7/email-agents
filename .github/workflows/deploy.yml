@@ -21,24 +21,45 @@ env:
   CARGO_PROFILE_DEV_DEBUG: "0"
   CARGO_INCREMENTAL: "0"
 
+# Gates run in parallel, and the image builds alongside them; deploy waits for all five.
 jobs:
-  test:
+  clippy:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
+      # Each job keeps its own cache: clippy (check) and test (build) artifacts differ, and a shared key
+      # makes whichever job saves first win.
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: apps/api
-          shared-key: api
+          shared-key: api-clippy
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - name: Rust lint + tests
-        run: |
-          cargo clippy --manifest-path apps/api/Cargo.toml --all-targets -- -D warnings
-          cargo test --manifest-path apps/api/Cargo.toml
-          cargo test --manifest-path apps/api/Cargo.toml --test api -- --ignored --exact deletion::a_two_thousand_email_purge_never_holds_the_write_lock_long
+      - run: cargo clippy --manifest-path apps/api/Cargo.toml --all-targets -- -D warnings
+
+  rust-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/api
+          shared-key: api-test
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: cargo test --manifest-path apps/api/Cargo.toml
+      # Measures write-lock timing, so it runs alone.
+      - run: cargo test --manifest-path apps/api/Cargo.toml --test api -- --ignored --exact deletion::a_two_thousand_email_purge_never_holds_the_write_lock_long
+
+  e2e:
+    uses: ./.github/workflows/e2e.yml
+
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
         with:
           version: 12.5.1
@@ -54,8 +75,9 @@ jobs:
           pnpm typecheck
           pnpm test --run
 
+  # Builds while the gates run. Only the sha tag is pushed here: an image that fails a gate is never
+  # deployed, and `latest` is not moved to it.
   image:
-    needs: test
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -72,14 +94,12 @@ jobs:
         with:
           context: .
           push: true
-          tags: |
-            ${{ env.IMAGE }}:${{ github.sha }}
-            ${{ env.IMAGE }}:latest
+          tags: ${{ env.IMAGE }}:${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
   deploy:
-    needs: image
+    needs: [clippy, rust-tests, web, e2e, image]
     runs-on: ubuntu-latest
     # The VPS pulls the image with this job's GITHUB_TOKEN.
     permissions:

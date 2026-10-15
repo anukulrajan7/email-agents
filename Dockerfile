@@ -8,8 +8,18 @@ RUN pnpm install --frozen-lockfile
 COPY apps/web/ ./
 RUN pnpm build
 
-FROM rust:1-bookworm AS api
+# cargo-chef: dependencies build in their own layer, keyed only on Cargo.toml/Cargo.lock, so a code-only
+# change reuses the cached layer and compiles just this crate.
+FROM lukemathwalker/cargo-chef:latest-rust-1-bookworm AS chef
 WORKDIR /api
+
+FROM chef AS planner
+COPY apps/api/ ./
+RUN cargo chef prepare --recipe-path recipe.json
+
+FROM chef AS api
+COPY --from=planner /api/recipe.json recipe.json
+RUN cargo chef cook --release --locked --recipe-path recipe.json
 COPY apps/api/ ./
 RUN cargo build --release --locked
 

@@ -2,13 +2,17 @@ name: e2e
 
 # Browser E2E (Playwright, Chromium only, headless) against the real API: fresh SQLite file, AI_MOCK=1, captured mail
 # and a stand-in for Nango/Gmail. No secrets, no network calls to AI providers. See apps/web/e2e.
+# On main it runs inside deploy.yml (workflow_call) as a required gate, so the push trigger skips main.
 on:
   push:
+    branches-ignore: [main]
   pull_request:
   workflow_dispatch:
+  workflow_call:
 
 concurrency:
-  group: e2e-${{ github.ref }}
+  # In a called workflow github.workflow is the caller's name, so the deploy copy gets its own group.
+  group: e2e-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
