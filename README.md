@@ -7,7 +7,7 @@ right helper on your team. Helpers draft, file, record and follow up, and they e
 A guard checks every outgoing action, and the audit trail keeps a record of it.
 
 [Live app](https://mail.anukulraj.tech) · [Features](docs/features.md) · [Architecture](docs/architecture.md) ·
-[Learn the codebase](docs/learn/README.md) · [Task list](docs/TASKS.md)
+[API](docs/api.md) · [Setup](docs/setup.md)
 
 ![Rust](https://img.shields.io/badge/Rust-Axum%20%2B%20SQLx-b7410e?logo=rust)
 ![React](https://img.shields.io/badge/React-TypeScript%20%2B%20Vite-1f6feb?logo=react)
@@ -144,7 +144,7 @@ make web                 # second terminal → http://localhost:5173
 ```
 
 Without AI keys it still runs: rules for labels, templates for drafts. Add `OPENROUTER_API_KEY` for the real thing.
-Setup for Gmail (Nango), forwarding (Resend) and production: [docs/setup-and-design.md](docs/setup-and-design.md).
+Setup for Gmail (Nango), forwarding (Resend) and production: [docs/setup.md](docs/setup.md).
 
 ## Tests and evals
 
@@ -157,15 +157,15 @@ cd ../web && pnpm typecheck && pnpm vitest run   # ~306 web tests
 ```
 
 The integration tests run as **one test binary** that starts each test from a pre-migrated template database, so a
-full run takes about 2 minutes instead of 11. Golden evals and the live model baseline:
-[docs/evals.md](docs/evals.md). The scorecard history is in [docs/evals/scorecard.md](docs/evals/scorecard.md).
+full run takes about 2 minutes instead of 11. Golden evals run offline in CI; a live run against real models is
+`cargo test --test api golden_live -- --ignored` (needs `OPENROUTER_API_KEY`).
 
 ## Repository map
 
 ```
 apps/api        Rust API + worker (Axum, SQLx, SQLite)
 apps/web        React app
-docs/           product, architecture, API contract, evals, learning path
+docs/           features, architecture, API contract, setup
 scripts/        live test pack (dummy emails per workflow + checker)
 .github/        CI: lint, tests, e2e, image, deploy, daily self-test
 ```
@@ -177,16 +177,13 @@ scripts/        live test pack (dummy emails per workflow + checker)
 | [docs/features.md](docs/features.md) | Everything the product does today |
 | [docs/architecture.md](docs/architecture.md) | How it fits together |
 | [docs/api.md](docs/api.md) | The REST contract |
-| [docs/learn/](docs/learn/README.md) | A 9-module course on this codebase: Rust, architecture, tools, AI + email, agents, evals |
-| [docs/product-engineering/](docs/product-engineering/README.md) | The engineering audit: defects, cost, security, test speed |
-| [docs/TASKS.md](docs/TASKS.md) | The ordered task list, with [ready-to-paste prompts](docs/TASK-PROMPTS.md) |
-| [docs/status-2026-10-15.md](docs/status-2026-10-15.md) | An honest status: what's live, what isn't yet |
+| [docs/agent-building-guide.md](docs/agent-building-guide.md) | How helpers are designed, tested and given freedom |
+| [docs/setup.md](docs/setup.md) | Gmail, forwarding and production setup |
 
 ## Status
 
-Live at [mail.anukulraj.tech](https://mail.anukulraj.tech) for a first workspace. Safety on golden scenarios is
-clean (0 safety failures in the live baseline). The open work, in order, is in [docs/TASKS.md](docs/TASKS.md): faster
-CI, a feature-first code structure, job-queue hardening, the planner loop, then cheaper understanding and members
-connecting their own Gmail.
+Live at [mail.anukulraj.tech](https://mail.anukulraj.tech) for a first workspace, with 0 safety failures on the golden
+scenarios. Next up: faster CI, a cleaner feature-first code layout, job-queue hardening, and members connecting their
+own Gmail.
 
 <div align="center"><sub>Built with Rust, React and a lot of careful email handling.</sub></div>

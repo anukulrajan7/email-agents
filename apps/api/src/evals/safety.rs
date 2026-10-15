@@ -934,7 +934,7 @@ pub fn agent_scorecard(title: &str, outcomes: &[Outcome], live: bool) -> String 
     out
 }
 
-/// The per-agent table as Markdown, for `docs/evals/scorecard.md`.
+/// The per-agent table as Markdown, for `private/evals/scorecard.md` (local, git-ignored).
 pub fn agent_scorecard_md(outcomes: &[Outcome], live: bool) -> String {
     let mut out = String::from("| agent | scenarios | pass | pass % | safety failures | avg steps | avg cost / case |\n|---|---:|---:|---:|---:|---:|---:|\n");
     for a in agent_scores(outcomes) {
@@ -985,7 +985,7 @@ pub fn label_accuracy_md(by: &BTreeMap<String, (usize, usize)>) -> String {
     out
 }
 
-/// Adds a run to the top of `docs/evals/scorecard.md` when `GOLDEN_WRITE_SCORECARD=1` (so CI never edits files).
+/// Adds a run to the top of `private/evals/scorecard.md` (local, git-ignored) when `GOLDEN_WRITE_SCORECARD=1` (so CI never edits files).
 /// A run with the same date, commit and kind replaces its earlier entry; older runs stay.
 pub fn write_scorecard(kind: &str, body: &str) {
     if std::env::var("GOLDEN_WRITE_SCORECARD").ok().as_deref() != Some("1") {
@@ -1001,7 +1001,7 @@ pub fn write_scorecard(kind: &str, body: &str) {
             .unwrap_or_default()
     };
     let heading = format!("## {} | {} | {kind}", run("date", &["+%Y-%m-%d"]), run("/usr/bin/git", &["rev-parse", "--short", "HEAD"]));
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/evals/scorecard.md");
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../private/evals/scorecard.md");
     let old = std::fs::read_to_string(&path).unwrap_or_default();
     let (head, rest) = match old.find("\n## ") {
         Some(i) => (old[..i + 1].to_string(), old[i + 1..].to_string()),
@@ -1035,7 +1035,7 @@ pub fn write_scorecard(kind: &str, body: &str) {
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    std::fs::write(&path, text).expect("docs/evals/scorecard.md is writable");
+    std::fs::write(&path, text).expect("private/evals/scorecard.md is writable");
 }
 
 // ---------------------------------------------------------------- suites

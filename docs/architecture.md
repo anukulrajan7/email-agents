@@ -358,7 +358,7 @@ flowchart LR
 6. **Backups.** A nightly job (`backup.rs`) writes a consistent copy with `VACUUM INTO data/backups/email_ai-YYYYMMDD.db`
    (owner-only permissions) and keeps the newest seven. Restoring is copying one of those files over `email_ai.db`
    with the app stopped. **Not yet automated:** a restore drill in CI and running migrations on a copy of the
-   production database before the swap; both are on the list in `docs/status-2026-10-15.md`.
+   production database before the swap; both are on the roadmap.
 
 ## 14. Where to look first
 

@@ -3,7 +3,7 @@
 //! ```text
 //! OPENROUTER_API_KEY=... cargo test --test golden_live -- --ignored --nocapture
 //! GOLDEN_FILTER=inj_ cargo test --test golden_live -- --ignored --nocapture   # a subset by id prefix
-//! GOLDEN_WRITE_SCORECARD=1 ...                                                # also record the run in docs/evals/scorecard.md
+//! GOLDEN_WRITE_SCORECARD=1 ...                                                # also record the run in private/evals/scorecard.md
 //! GOLDEN_BUDGET_USD=2 ...                                                     # stop once this much is spent (default 2)
 //! GOLDEN_AS_LEAD=1 ...                                                        # run every scenario as the lead, not as its own expert
 //! ```

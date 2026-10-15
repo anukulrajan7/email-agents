@@ -8,3 +8,6 @@ dist/
 *.db-shm
 .DS_Store
 .claude/worktrees/
+
+# Internal docs (plans, audit, tasks, learning, evals): local only, never pushed
+/private/

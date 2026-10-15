@@ -1,4 +1,4 @@
-//! Offline understanding golden set (docs/evals.md): new-content-only bodies, the bulk filter and the
+//! Offline understanding golden set : new-content-only bodies, the bulk filter and the
 //! code-side verification of a model's reading, on real-world-shaped emails. No model is called; the live
 //! variant would feed the same emails to the understanding call and grade the same expectations.
 

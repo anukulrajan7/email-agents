@@ -1,7 +1,7 @@
 name: e2e
 
 # Browser E2E (Playwright, Chromium only, headless) against the real API: fresh SQLite file, AI_MOCK=1, captured mail
-# and a stand-in for Nango/Gmail. No secrets, no network calls to AI providers. See apps/web/e2e and docs/acceptance-matrix.md.
+# and a stand-in for Nango/Gmail. No secrets, no network calls to AI providers. See apps/web/e2e.
 on:
   push:
   pull_request:
