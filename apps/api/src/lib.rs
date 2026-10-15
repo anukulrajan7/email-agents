@@ -35,7 +35,7 @@ pub mod learning;
 pub use understanding::labels;
 pub use platform::mailer;
 pub use hr::matching;
-pub mod messaging;
+pub use alerts::messaging;
 pub mod metrics;
 pub use replies::owner_said;
 pub use platform::packs;

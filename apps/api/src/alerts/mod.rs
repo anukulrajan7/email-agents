@@ -886,3 +886,4 @@ mod tests {
         assert_eq!(dedupe_key("automation", None, 1), "automation:-:1");
     }
 }
+pub mod messaging;
