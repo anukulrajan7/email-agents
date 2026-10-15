@@ -198,7 +198,10 @@ describe('TimesheetsPage', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Save policy' }));
     await waitFor(() => expect(fetchMock.mock.calls.some(([, init]) => init?.method === 'PUT')).toBe(true));
     const put = fetchMock.mock.calls.find(([, init]) => init?.method === 'PUT');
-    expect(JSON.parse(put?.[1]?.body as string)).toMatchObject({ hr_source_id: 'src_hr', timesheet_grace_days: 3 });
+    const body = JSON.parse(put?.[1]?.body as string);
+    expect(body).toMatchObject({ hr_source_id: 'src_hr', timesheet_grace_days: 3 });
+    // The API rejects unknown fields; `sources` is read-only and must not be sent back.
+    expect(body).not.toHaveProperty('sources');
   });
 });
 

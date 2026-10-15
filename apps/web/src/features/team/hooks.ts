@@ -74,7 +74,9 @@ export function useTeamSettings(ws: string) {
 export function useSaveTeamSettings(ws: string) {
   const invalidate = useInvalidateTeam(ws);
   return useMutation({
-    mutationFn: (body: TeamSettings) => api<TeamSettings>(`/workspaces/${ws}/team/settings`, { method: 'PUT', body }),
+    // `sources` is read-only (GET lists the mailboxes to pick from); the API rejects unknown fields.
+    mutationFn: ({ sources: _sources, ...body }: TeamSettings) =>
+      api<TeamSettings>(`/workspaces/${ws}/team/settings`, { method: 'PUT', body }),
     onSuccess: invalidate,
   });
 }
