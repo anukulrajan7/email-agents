@@ -288,3 +288,6 @@ pub(crate) fn classify_http_error(status: reqwest::StatusCode, what: &str) -> Ai
         AiError::Permanent(msg)
     }
 }
+pub mod ledger;
+pub mod health;
+pub mod incidents;
