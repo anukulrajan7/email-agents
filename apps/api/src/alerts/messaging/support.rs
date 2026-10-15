@@ -9,11 +9,11 @@ use serde_json::{Value, json};
 use sqlx::SqlitePool;
 
 use crate::{
-    db::{iso, new_id, now_ms},
-    error::{AppError, AppResult},
+    platform::db::{iso, new_id, now_ms},
+    platform::error::{AppError, AppResult},
     http::AppState,
-    send_safety::{bare_address, is_automated_address, valid_address},
-    sources::normalize::truncate_chars,
+    replies::send_safety::{bare_address, is_automated_address, valid_address},
+    mail::sources::normalize::truncate_chars,
 };
 
 static ADDRESS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+").expect("valid regex"));

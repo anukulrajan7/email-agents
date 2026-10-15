@@ -11,13 +11,13 @@ use super::{
     dto::{Items, Workspace, WorkspaceRow},
 };
 use crate::{
-    audit::{self, Actor, Entry},
-    auth::{AuthUser, VERIFIED_USER, require_role},
-    config::AuthMode,
-    db::{new_id, now_ms},
-    domain::{OTHER_SEED, Role},
-    error::{AppError, AppResult},
-    packs,
+    platform::audit::{self, Actor, Entry},
+    platform::auth::{AuthUser, VERIFIED_USER, require_role},
+    platform::config::AuthMode,
+    platform::db::{new_id, now_ms},
+    platform::domain::{OTHER_SEED, Role},
+    platform::error::{AppError, AppResult},
+    platform::packs,
 };
 
 async fn workspaces_for(state: &AppState, user: &AuthUser) -> AppResult<Vec<Workspace>> {
@@ -129,10 +129,10 @@ pub async fn create(
         .bind(&user.id)
         .execute(&mut *tx)
         .await?;
-    crate::team::access::seed_owner(&mut tx, &id, &user.id).await?;
+    crate::hr::team::access::seed_owner(&mut tx, &id, &user.id).await?;
     packs::seed_labels(&mut tx, &id, &seeds).await?;
     packs::enable(&mut tx, &id, &chosen).await?;
-    crate::agent_registry::seed::seed_workspace(&mut tx, &id).await?;
+    crate::agents::registry::seed::seed_workspace(&mut tx, &id).await?;
     crate::automations::seed_defaults(&mut tx, &id).await?;
     audit::record(
         &mut tx,
@@ -154,7 +154,7 @@ pub async fn create(
             id,
             name: name.to_string(),
             role: Role::Admin.as_str().into(),
-            created_at: crate::db::iso(now),
+            created_at: crate::platform::db::iso(now),
             packs: chosen.iter().map(|k| k.to_string()).collect(),
         }),
     ))
@@ -216,13 +216,13 @@ pub async fn put_packs(
         .bind(&ws)
         .fetch_one(&mut *tx)
         .await?;
-    if changes.active_delta() > 0 && active + changes.active_delta() > crate::labels::MAX_ACTIVE_LABELS {
+    if changes.active_delta() > 0 && active + changes.active_delta() > crate::understanding::labels::MAX_ACTIVE_LABELS {
         let names: Vec<&str> = changes.added.iter().map(|(_, l)| l.name).chain(changes.restored.iter().map(|l| l.name.as_str())).collect();
         return Err(AppError::Conflict(format!(
             "these packs bring back {} ({}), but a workspace can have at most {} active labels; archive some labels first",
             names.len(),
             names.join(", "),
-            crate::labels::MAX_ACTIVE_LABELS
+            crate::understanding::labels::MAX_ACTIVE_LABELS
         )));
     }
     if dry_run {
@@ -337,7 +337,7 @@ pub async fn add_member(
     .bind(role.as_str())
     .execute(&mut *tx)
     .await?;
-    crate::agent_registry::seed::ensure_personal(&mut tx, &ws, &member_id).await?;
+    crate::agents::registry::seed::ensure_personal(&mut tx, &ws, &member_id).await?;
     let admins: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM memberships WHERE workspace_id = ?1 AND role = 'admin'")
         .bind(&ws)
         .fetch_one(&mut *tx)

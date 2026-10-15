@@ -10,12 +10,12 @@ use sqlx::FromRow;
 
 use super::{AppState, dto::Items};
 use crate::{
-    audit::{self, Actor, Entry},
-    auth::{AuthUser, require_role},
-    db::iso,
-    domain::{Role, template},
-    error::{AppError, AppResult},
-    labels,
+    platform::audit::{self, Actor, Entry},
+    platform::auth::{AuthUser, require_role},
+    platform::db::iso,
+    platform::domain::{Role, template},
+    platform::error::{AppError, AppResult},
+    understanding::labels,
 };
 
 #[derive(Serialize)]
@@ -150,7 +150,7 @@ pub async fn runs(State(state): State<AppState>, user: AuthUser, Path(ws): Path<
          ORDER BY r.created_at DESC LIMIT 100",
     )
     .bind(&ws)
-    .bind(crate::team::scope::wall_for(&state.db, &ws, &user).await?)
+    .bind(crate::hr::team::scope::wall_for(&state.db, &ws, &user).await?)
     .fetch_all(&state.db)
     .await?;
     let items: Vec<Value> = rows
@@ -180,7 +180,7 @@ pub async fn setup(
         .await?
         .ok_or(AppError::NotFound)?;
     let t = template(&key).filter(|t| t.available).ok_or_else(|| AppError::Conflict("this workflow is not available".into()))?;
-    let seed = crate::domain::LABEL_TEMPLATES
+    let seed = crate::platform::domain::LABEL_TEMPLATES
         .iter()
         .flat_map(|tpl| tpl.labels.iter())
         .find(|l| l.key == t.label_key)
@@ -191,13 +191,13 @@ pub async fn setup(
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, (SELECT COALESCE(MAX(position), 0) + 1 FROM labels WHERE workspace_id = ?2), ?7)
          ON CONFLICT(workspace_id, key) DO UPDATE SET archived = 0, archived_by_pack = 0",
     )
-    .bind(crate::db::new_id("lbl"))
+    .bind(crate::platform::db::new_id("lbl"))
     .bind(&ws)
     .bind(seed.key)
     .bind(seed.name)
     .bind(seed.description)
     .bind(seed.color)
-    .bind(crate::db::now_ms())
+    .bind(crate::platform::db::now_ms())
     .execute(&mut *tx)
     .await?;
     sqlx::query("UPDATE workflows SET enabled = 1 WHERE id = ?1 AND workspace_id = ?2").bind(&id).bind(&ws).execute(&mut *tx).await?;

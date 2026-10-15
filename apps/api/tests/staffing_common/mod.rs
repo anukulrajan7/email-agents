@@ -11,12 +11,12 @@ use axum::{
 };
 use email_ai_api::{
     build_state,
-    config::Config,
-    db,
-    domain::{AttachmentMeta, NormalizedEmail},
+    platform::config::Config,
+    platform::db,
+    platform::domain::{AttachmentMeta, NormalizedEmail},
     http::{AppState, router},
-    ingest,
-    mailer::Mailer,
+    mail::ingest,
+    platform::mailer::Mailer,
 };
 use http_body_util::BodyExt;
 use serde_json::{Value, json};

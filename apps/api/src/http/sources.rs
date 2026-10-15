@@ -11,13 +11,13 @@ use super::{
     dto::{Items, Source, SourceRow},
 };
 use crate::{
-    audit::{self, Actor, Entry},
-    auth::{AuthUser, require_role},
-    db::{iso, new_id, now_ms},
-    domain::Role,
-    error::{AppError, AppResult},
+    platform::audit::{self, Actor, Entry},
+    platform::auth::{AuthUser, require_role},
+    platform::db::{iso, new_id, now_ms},
+    platform::domain::Role,
+    platform::error::{AppError, AppResult},
     jobs::{self, kind},
-    sources::{
+    mail::sources::{
         self, nango,
         resend::{ReceivedAttachment, ReceivedEmail},
     },
@@ -122,7 +122,7 @@ pub async fn test_email(
     .await?
     .flatten();
     let alias = alias.ok_or(AppError::NotFound)?;
-    if !crate::security::take(&state.db, "test_email", &ws, TEST_EMAILS_PER_DAY, 86_400_000).await? {
+    if !crate::platform::security::take(&state.db, "test_email", &ws, TEST_EMAILS_PER_DAY, 86_400_000).await? {
         return Err(AppError::RateLimited);
     }
     let body = body.map(|Json(b)| b).unwrap_or_default();
@@ -286,9 +286,9 @@ pub async fn purge_preview(
     user: AuthUser,
     Path((ws, source_id)): Path<(String, String)>,
 ) -> AppResult<Json<Value>> {
-    crate::deletion::authorize_source(&state.db, &ws, &user, &source_id).await?;
-    let c = crate::deletion::source_counts(&state.db, &ws, &source_id).await?;
-    let (scheduled_replies, open_tickets) = crate::deletion::source_loose_ends(&state.db, &ws, &source_id).await?;
+    crate::mail::deletion::authorize_source(&state.db, &ws, &user, &source_id).await?;
+    let c = crate::mail::deletion::source_counts(&state.db, &ws, &source_id).await?;
+    let (scheduled_replies, open_tickets) = crate::mail::deletion::source_loose_ends(&state.db, &ws, &source_id).await?;
     Ok(Json(json!({
         "emails": c.emails, "attachments": c.attachments, "drafts": c.drafts, "summaries": c.summaries,
         "scheduled_replies": scheduled_replies, "open_tickets": open_tickets,
@@ -303,7 +303,7 @@ pub async fn disconnect(
     Path((ws, source_id)): Path<(String, String)>,
     body: Option<Json<DisconnectBody>>,
 ) -> AppResult<Json<Source>> {
-    crate::deletion::authorize_source(&state.db, &ws, &user, &source_id).await?;
+    crate::mail::deletion::authorize_source(&state.db, &ws, &user, &source_id).await?;
     let purge = body.is_some_and(|Json(b)| b.purge);
     let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     let kind_of: String = sqlx::query_scalar(
@@ -340,7 +340,7 @@ pub async fn disconnect(
             .fetch_optional(&mut *tx)
             .await?;
     if purge {
-        crate::deletion::start_purge(&mut tx, &ws, &source_id, &user.id).await?;
+        crate::mail::deletion::start_purge(&mut tx, &ws, &source_id, &user.id).await?;
     }
     let row: SourceRow =
         sqlx::query_as(&format!("SELECT {SOURCE_COLUMNS} FROM email_sources WHERE id = ?1 AND workspace_id = ?2"))

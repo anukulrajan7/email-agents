@@ -18,9 +18,9 @@ use super::{
     prepare_text_up_to,
 };
 use crate::{
-    domain::{ClassificationSource, Label, Priority},
-    format::summary::summary_style,
-    labels,
+    platform::domain::{ClassificationSource, Label, Priority},
+    platform::format::summary::summary_style,
+    understanding::labels,
 };
 
 pub const PROMPT_VERSION: &str = "understand-v2";
@@ -222,7 +222,7 @@ fn opt_text(v: &Value, key: &str) -> Option<String> {
 }
 
 fn cut(s: &str, max: usize) -> String {
-    crate::sources::normalize::truncate_chars(s.trim(), max)
+    crate::mail::sources::normalize::truncate_chars(s.trim(), max)
 }
 
 fn list<'a>(v: &'a Value, key: &str) -> &'a [Value] {
@@ -342,7 +342,7 @@ pub fn parse_understanding(raw: &str, input: &UnderstandInput) -> Result<Underst
         needs_reply: v.get("needs_reply").and_then(Value::as_bool).unwrap_or(true),
         intent: pick(INTENTS, &text(&v, "intent"), "other"),
         sentiment: pick(SENTIMENTS, &text(&v, "sentiment"), "calm"),
-        summary: cut(&crate::format::summary::polish(&text(&v, "summary"), &raw_source, input.received_at_ms), 400),
+        summary: cut(&crate::platform::format::summary::polish(&text(&v, "summary"), &raw_source, input.received_at_ms), 400),
         asks,
         commitments,
         deadlines,
@@ -551,7 +551,7 @@ pub async fn record_shadow(
     .bind(v2_priority)
     .bind(model)
     .bind(error)
-    .bind(crate::db::now_ms())
+    .bind(crate::platform::db::now_ms())
     .execute(db)
     .await?;
     Ok(())

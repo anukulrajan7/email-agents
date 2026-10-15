@@ -18,16 +18,16 @@ use axum::{
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use email_ai_api::{
     ai::{AiError, Analyst, Insight, openrouter::OpenRouterClient},
-    attachments::{
+    mail::attachments::{
         audio::{AudioSummary, OpenRouterAudio, StubAudio, read_audio},
         vision::{OpenRouterVision, StubVision, VisionReader, VisionReading},
     },
     build_state,
-    config::Config,
-    db::{self, new_id, now_ms},
-    domain::{AttachmentMeta, NormalizedEmail},
+    platform::config::Config,
+    platform::db::{self, new_id, now_ms},
+    platform::domain::{AttachmentMeta, NormalizedEmail},
     http::{AppState, router},
-    ingest,
+    mail::ingest,
     jobs::worker,
 };
 use http_body_util::BodyExt;

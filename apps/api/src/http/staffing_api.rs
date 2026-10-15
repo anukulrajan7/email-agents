@@ -11,12 +11,12 @@ use serde_json::{Value, json};
 
 use super::AppState;
 use crate::{
-    audit::{self, Actor, Entry},
-    auth::AuthUser,
-    db::{new_id, now_ms},
-    error::{AppError, AppResult},
-    staffing::{self, SUBMISSION_UPDATE_LABEL, portal, submissions, timesheet_records as records},
-    team::{access, clock, settings},
+    platform::audit::{self, Actor, Entry},
+    platform::auth::AuthUser,
+    platform::db::{new_id, now_ms},
+    platform::error::{AppError, AppResult},
+    hr::staffing::{self, SUBMISSION_UPDATE_LABEL, portal, submissions, timesheet_records as records},
+    hr::team::{access, clock, settings},
 };
 
 pub fn routes() -> Router<AppState> {
@@ -186,9 +186,9 @@ pub async fn timesheets(State(state): State<AppState>, user: AuthUser, Path(ws):
         .into_iter()
         .filter(|r| a.can_see(&r.person_id))
         .map(|r| {
-            json!({ "person_id": r.person_id, "name": r.name, "month": r.month, "status": r.status, "due_at": crate::db::iso(r.due_at),
+            json!({ "person_id": r.person_id, "name": r.name, "month": r.month, "status": r.status, "due_at": crate::platform::db::iso(r.due_at),
                     "timesheet": r.timesheet.map(|t| json!({ "message_id": t.message_id, "record_id": t.record_id, "subject": t.subject,
-                                                             "received_at": crate::db::iso(t.received_at), "hours": t.hours })) })
+                                                             "received_at": crate::platform::db::iso(t.received_at), "hours": t.hours })) })
         })
         .collect();
     let missing = rows.iter().filter(|r| r["status"] == "missing").count();
@@ -281,7 +281,7 @@ pub async fn import_submissions(State(state): State<AppState>, user: AuthUser, P
     imported(&state, &ws, &user, &body, "portal.submissions_imported", portal::import_submissions(&state.db, &ws, &body.csv, body.dry_run).await).await
 }
 
-use crate::team::people;
+use crate::hr::team::people;
 
 async fn imported(state: &AppState, ws: &str, user: &AuthUser, body: &CsvBody, action: &str, result: Result<people::ImportReport, String>) -> AppResult<Json<people::ImportReport>> {
     gate(state, ws, user).await?.require_owner()?;
@@ -312,7 +312,7 @@ pub async fn mismatches(State(state): State<AppState>, user: AuthUser, Path(ws):
         .filter(|m| a.can_see(&m.person_id))
         .map(|m| json!({ "id": m.id, "person_id": m.person_id, "person_name": m.person_name, "month": m.month, "kind": m.kind,
                          "detail": serde_json::from_str::<Value>(&m.detail_json).unwrap_or(Value::Null), "status": m.status,
-                         "updated_at": crate::db::iso(m.updated_at) }))
+                         "updated_at": crate::platform::db::iso(m.updated_at) }))
         .collect();
     Ok(Json(json!({ "items": items, "portal_hours_rows": hours, "portal_submission_rows": subs })))
 }

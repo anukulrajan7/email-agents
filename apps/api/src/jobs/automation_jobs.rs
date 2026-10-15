@@ -10,10 +10,10 @@ use super::{
     kind,
 };
 use crate::{
-    audit::{self, Actor, Entry},
+    platform::audit::{self, Actor, Entry},
     automations::{self, Action, Automation, CONTEXT_SELECT, MessageContext},
-    db::{new_id, now_ms},
-    error::AppError,
+    platform::db::{new_id, now_ms},
+    platform::error::AppError,
     http::AppState,
     replies,
 };
@@ -193,7 +193,7 @@ async fn execute(
 ) -> Result<Vec<ActionResult>, JobError> {
     let mut results = Vec::with_capacity(automation.actions.len());
     let mut draft_id: Option<String> = None;
-    let auto_reply = crate::reply_settings::load(&state.db, &state.config, workspace_id).await?.auto_reply;
+    let auto_reply = crate::replies::reply_settings::load(&state.db, &state.config, workspace_id).await?.auto_reply;
     for action in &automation.actions {
         let kind_name = action.type_name();
         let result = match action {
@@ -310,9 +310,9 @@ async fn send_reply(
         .fetch_optional(&state.db)
         .await?;
     if let Some(why) = crate::agents::injection::scan_conversation(&state.db, workspace_id, thread_id.as_deref(), Some(&ctx.id)).await? {
-        crate::incidents::record(
+        crate::ai::incidents::record(
             &state.db,
-            crate::incidents::NewIncident::new(workspace_id, crate::incidents::Kind::InjectionDetected, json!({"gate": "auto_reply", "why": why}))
+            crate::ai::incidents::NewIncident::new(workspace_id, crate::ai::incidents::Kind::InjectionDetected, json!({"gate": "auto_reply", "why": why}))
                 .message(Some(&ctx.id))
                 .dedupe(format!("injection:auto:{}", ctx.id)),
         )
@@ -426,7 +426,7 @@ async fn insert_review(
     .bind(workspace_id)
     .bind(message_id)
     .bind(review_kind)
-    .bind(crate::sources::normalize::truncate_chars(title, 200))
+    .bind(crate::mail::sources::normalize::truncate_chars(title, 200))
     .bind(now_ms())
     .bind(automation_id)
     .execute(&mut *tx)
@@ -500,7 +500,7 @@ pub async fn remind_no_reply(state: &AppState, payload: &Value) -> Result<(), Jo
         return Ok(());
     }
     // Answered = our side replied in the thread (outbound mail or a sent draft), not just anyone writing again.
-    let answered = crate::threads::thread_has_reply_after(&state.db, &workspace_id, &thread_id, received_at).await?;
+    let answered = crate::mail::threads::thread_has_reply_after(&state.db, &workspace_id, &thread_id, received_at).await?;
     if answered {
         return Ok(());
     }

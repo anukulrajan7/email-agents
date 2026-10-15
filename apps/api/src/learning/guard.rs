@@ -5,7 +5,7 @@ use std::sync::LazyLock;
 
 use regex::Regex;
 
-use crate::memory_learning::{is_instruction, is_sensitive};
+use crate::learning::memory_learning::{is_instruction, is_sensitive};
 
 pub const MAX_PREFERENCE_CHARS: usize = 160;
 pub const CATEGORIES: &[&str] = &["greeting", "sign_off", "length", "tone", "structure", "phrasing", "process"];

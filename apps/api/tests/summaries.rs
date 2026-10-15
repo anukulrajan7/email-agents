@@ -11,11 +11,11 @@ use email_ai_api::{
         understand::{UnderstandInput, parse_understanding},
     },
     build_state,
-    config::Config,
-    db,
-    domain::NormalizedEmail,
+    platform::config::Config,
+    platform::db,
+    platform::domain::NormalizedEmail,
     http::{AppState, router},
-    ingest,
+    mail::ingest,
 };
 use axum::{Router, body::Body, http::Request};
 use http_body_util::BodyExt;
@@ -128,7 +128,7 @@ fn rules_fallback_uses_the_same_voice() {
         (&FIXTURES[1], "You spent ₹8,138.76 on your card ending 4755 at Amazon on 12 Oct."),
         (&FIXTURES[3], "Your salary of ₹85,000 was credited to your account ending 9876 on 1 Oct."),
     ] {
-        let got = email_ai_api::format::summary::rules_summary(f.subject, f.body, RECEIVED);
+        let got = email_ai_api::platform::format::summary::rules_summary(f.subject, f.body, RECEIVED);
         assert_eq!(got, expected, "{}", f.name);
     }
 }

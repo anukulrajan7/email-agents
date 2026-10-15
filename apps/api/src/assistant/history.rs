@@ -9,8 +9,8 @@ use super::{
     plain_answer,
 };
 use crate::{
-    db::{iso, now_ms},
-    sources::normalize::truncate_chars,
+    platform::db::{iso, now_ms},
+    mail::sources::normalize::truncate_chars,
 };
 
 /// Turns the planner is shown, each clipped, and the total it may take.

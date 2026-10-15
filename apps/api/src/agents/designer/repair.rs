@@ -4,7 +4,7 @@
 
 use super::{DesignRequest, Designer, MAX_REPAIRS, lenient, prompt, validate::{self, WsCtx}};
 use crate::{
-    agent_registry::spec::{AgentSpec, Issue},
+    agents::registry::spec::{AgentSpec, Issue},
     ai::AiError,
 };
 
@@ -94,8 +94,8 @@ mod tests {
 
     use super::*;
     use crate::{
-        agent_registry::templates::{INBOX_KEY, template},
-        designer::{ScriptedDesigner, schema::spec_schema, validate::tests_support::ctx},
+        agents::registry::templates::{INBOX_KEY, template},
+        agents::designer::{ScriptedDesigner, schema::spec_schema, validate::tests_support::ctx},
     };
 
     fn good() -> Value {

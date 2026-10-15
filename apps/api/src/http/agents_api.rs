@@ -13,17 +13,17 @@ use serde_json::{Value, json};
 
 use super::AppState;
 use crate::{
-    agent_profiles,
+    agents::profiles,
     agents::{
         approvals,
         case::{self, Case, KINDS, NewStep},
         triggers,
     },
-    audit::{self, Actor, Entry},
-    auth::{AuthUser, require_role},
-    db::{iso, now_ms},
-    domain::Role,
-    error::{AppError, AppResult},
+    platform::audit::{self, Actor, Entry},
+    platform::auth::{AuthUser, require_role},
+    platform::db::{iso, now_ms},
+    platform::domain::Role,
+    platform::error::{AppError, AppResult},
 };
 
 pub fn routes() -> Router<AppState> {
@@ -47,9 +47,9 @@ struct Who {
 
 impl Who {
     async fn load(state: &AppState, ws: &str) -> AppResult<Self> {
-        let mut agent = agent_profiles::agent(&state.db, &state.config, ws).await?.badge();
+        let mut agent = profiles::agent(&state.db, &state.config, ws).await?.badge();
         agent["kind"] = json!("lead");
-        let agents = crate::agent_registry::store::list(&state.db, ws)
+        let agents = crate::agents::registry::store::list(&state.db, ws)
             .await?
             .into_iter()
             .map(|a| {
@@ -105,7 +105,7 @@ impl Who {
 /// A case of this workspace that the member may see: another member's personal agent's cases are not found.
 async fn visible_case(state: &AppState, ws: &str, user_id: &str, id: &str) -> AppResult<Case> {
     let c = case::get_in(&state.db, ws, id).await?.ok_or(AppError::NotFound)?;
-    if !crate::agent_registry::store::can_see(&state.db, ws, c.agent_id.as_deref(), user_id).await? {
+    if !crate::agents::registry::store::can_see(&state.db, ws, c.agent_id.as_deref(), user_id).await? {
         return Err(AppError::NotFound);
     }
     Ok(c)
@@ -151,7 +151,7 @@ async fn list_cases(
            AND (?4 IS NULL OR agent_id = ?4) AND (?5 = 1 OR shadow = 0) AND {}
          ORDER BY updated_at DESC, id DESC LIMIT 200",
         case::CASE_COLUMNS,
-        crate::agent_registry::store::hide_foreign_personal("cases", "?6")
+        crate::agents::registry::store::hide_foreign_personal("cases", "?6")
     ))
     .bind(&ws)
     .bind(status)
@@ -256,7 +256,7 @@ async fn cancel_case(State(state): State<AppState>, user: AuthUser, Path((ws, id
     .execute(&mut *tx)
     .await?;
     if let (Some(agent_id), Some(message_id)) = (c.agent_id.as_deref(), c.message_id.as_deref()) {
-        crate::agent_registry::store::release_held_sends(&mut tx, &ws, Some(agent_id), Some(message_id)).await?;
+        crate::agents::registry::store::release_held_sends(&mut tx, &ws, Some(agent_id), Some(message_id)).await?;
     }
     case::insert_step(&mut tx, &c, NewStep::note(c.step_count, "Cancelled by a person", "ok")).await?;
     audit::record(

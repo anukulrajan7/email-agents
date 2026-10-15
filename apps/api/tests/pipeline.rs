@@ -18,11 +18,11 @@ use base64::{Engine, engine::general_purpose::STANDARD as B64};
 use email_ai_api::{
     ai::{AiError, Classifier, ClassifyInput, ClassifyOutput},
     build_state,
-    config::Config,
-    db,
+    platform::config::Config,
+    platform::db,
     http::{AppState, router},
     jobs::{self, worker},
-    sources::resend::sign,
+    mail::sources::resend::sign,
 };
 use http_body_util::BodyExt;
 use serde_json::{Value, json};

@@ -8,9 +8,9 @@ use serde_json::{Value, json};
 
 use super::{AiError, fence::fence_inline, openrouter::OpenRouterClient, prepare_text};
 use crate::{
-    domain::Label,
-    labels::{COLORS, slugify},
-    sources::normalize::truncate_chars,
+    platform::domain::Label,
+    understanding::labels::{COLORS, slugify},
+    mail::sources::normalize::truncate_chars,
 };
 
 pub const MAX_SUGGESTIONS: usize = 5;

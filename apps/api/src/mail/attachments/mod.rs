@@ -13,7 +13,7 @@ use regex::Regex;
 use serde_json::{Value, json};
 use sqlx::SqlitePool;
 
-use crate::{matching, sources::normalize::truncate_chars};
+use crate::{hr::matching, mail::sources::normalize::truncate_chars};
 
 pub const MAX_IMAGE_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_AUDIO_BYTES: usize = 25 * 1024 * 1024;

@@ -15,14 +15,14 @@ use super::{
 };
 use crate::{
     ai::{ClassifyOutput, DraftQuality, policy},
-    audit::{self, Actor, Entry},
-    auth::{AuthUser, require_role},
-    db::{iso, new_id, now_ms},
-    domain::{Capabilities, ClassificationSource, Priority, Role, TAXONOMY_VERSION},
-    labels,
-    error::{AppError, AppResult},
+    platform::audit::{self, Actor, Entry},
+    platform::auth::{AuthUser, require_role},
+    platform::db::{iso, new_id, now_ms},
+    platform::domain::{Capabilities, ClassificationSource, Priority, Role, TAXONOMY_VERSION},
+    understanding::labels,
+    platform::error::{AppError, AppResult},
     jobs::{self, handlers, kind},
-    memory,
+    learning::memory,
 };
 
 // ---------------------------------------------------------------- list
@@ -97,11 +97,11 @@ const BODY_SEARCH_CHARS: usize = 20_000;
 const SUMMARY_MAX_CHARS: usize = 140;
 
 fn short_summary(s: String) -> String {
-    let s = crate::attachments::strip_attachment_markup(&s).trim();
+    let s = crate::mail::attachments::strip_attachment_markup(&s).trim();
     if s.chars().count() <= SUMMARY_MAX_CHARS {
         return s.to_string();
     }
-    format!("{}…", crate::sources::normalize::truncate_chars(s, SUMMARY_MAX_CHARS - 1).trim_end())
+    format!("{}…", crate::mail::sources::normalize::truncate_chars(s, SUMMARY_MAX_CHARS - 1).trim_end())
 }
 
 fn encode_offset_cursor(offset: i64) -> String {
@@ -148,8 +148,8 @@ pub async fn list(
     Path(ws): Path<String>,
     Query(query): Query<ListQuery>,
 ) -> AppResult<Json<Value>> {
-    let access = crate::team::access::resolve(&state.db, &ws, &user).await?;
-    let scope = crate::team::scope::source_filter(&state.db, &ws, &access, query.source_id.as_deref(), query.person_id.as_deref())
+    let access = crate::hr::team::access::resolve(&state.db, &ws, &user).await?;
+    let scope = crate::hr::team::scope::source_filter(&state.db, &ws, &access, query.source_id.as_deref(), query.person_id.as_deref())
         .await?
         .map(|ids| json!(ids).to_string());
     let limit = query.limit.unwrap_or(50).clamp(1, 100);
@@ -322,7 +322,7 @@ impl From<AttachmentRow> for AttachmentDto {
     fn from(r: AttachmentRow) -> Self {
         let done = r.extract_status.as_deref() == Some("done");
         let meta: Option<Value> = r.extract_meta_json.as_deref().and_then(|m| serde_json::from_str(m).ok());
-        let preview = done.then(|| crate::attachments::preview(meta.as_ref().unwrap_or(&Value::Null), r.text_head.as_deref().unwrap_or_default())).flatten();
+        let preview = done.then(|| crate::mail::attachments::preview(meta.as_ref().unwrap_or(&Value::Null), r.text_head.as_deref().unwrap_or_default())).flatten();
         Self {
             id: r.id,
             name: r.name,
@@ -354,8 +354,8 @@ pub async fn detail(
     user: AuthUser,
     Path((ws, id)): Path<(String, String)>,
 ) -> AppResult<Json<Value>> {
-    let access = crate::team::access::resolve(&state.db, &ws, &user).await?;
-    let wall = crate::team::scope::wall(&state.db, &ws, &access).await?.map(|ids| json!(ids).to_string());
+    let access = crate::hr::team::access::resolve(&state.db, &ws, &user).await?;
+    let wall = crate::hr::team::scope::wall(&state.db, &ws, &access).await?.map(|ids| json!(ids).to_string());
     let m: DetailRow = sqlx::query_as(
         "SELECT m.id, m.source_id, s.kind AS source_kind, s.capabilities_json, m.sender_address, m.original_sender_address,
                 m.recipients_json, m.subject, m.body_text, m.body_html, m.received_at, m.processing_status,
@@ -434,8 +434,8 @@ pub async fn detail(
     .await?;
     let mut visible_audit = Vec::with_capacity(audit_rows.len());
     for row in audit_rows {
-        let agent = crate::agent_registry::store::entity_agent(&state.db, &ws, &row.entity_type, &row.entity_id).await?;
-        if crate::agent_registry::store::can_see(&state.db, &ws, agent.as_deref(), &user.id).await? {
+        let agent = crate::agents::registry::store::entity_agent(&state.db, &ws, &row.entity_type, &row.entity_id).await?;
+        if crate::agents::registry::store::can_see(&state.db, &ws, agent.as_deref(), &user.id).await? {
             visible_audit.push(row);
         }
     }
@@ -452,13 +452,13 @@ pub async fn detail(
     let contact_memories = super::memories::contact_memories(&state, &ws, &user.id, &m.sender_address).await?;
 
     let capabilities: Capabilities =
-        serde_json::from_str(&m.capabilities_json).unwrap_or_else(|_| crate::sources::capabilities(&m.source_kind));
+        serde_json::from_str(&m.capabilities_json).unwrap_or_else(|_| crate::mail::sources::capabilities(&m.source_kind));
     let cc: Vec<String> = serde_json::from_str(&m.cc_json).unwrap_or_default();
     // `recipients_json` holds To and Cc together for mail stored before Cc was kept separately.
     let to: Vec<String> =
         serde_json::from_str::<Vec<String>>(&m.recipients_json).unwrap_or_default().into_iter().filter(|a| !cc.contains(a)).collect();
 
-    let timesheet_records = crate::staffing::timesheet_records::for_message(&state.db, &ws, &m.id).await?;
+    let timesheet_records = crate::hr::staffing::timesheet_records::for_message(&state.db, &ws, &m.id).await?;
 
     Ok(Json(json!({
         "id": m.id,
@@ -478,7 +478,7 @@ pub async fn detail(
         "subject": m.subject,
         "body_text": m.body_text,
         // Sanitised server-side; the UI renders it only inside a sandboxed iframe.
-        "body_html_safe": m.body_html.as_deref().map(crate::sources::normalize::safe_email_html),
+        "body_html_safe": m.body_html.as_deref().map(crate::mail::sources::normalize::safe_email_html),
         "received_at": iso(m.received_at),
         "processing_status": m.processing_status,
         "attachments": attachments,
@@ -498,7 +498,7 @@ pub async fn detail(
 }
 
 async fn ensure_message(state: &AppState, ws: &str, user: &AuthUser, id: &str) -> AppResult<()> {
-    crate::team::scope::require_message(&state.db, ws, user, id).await
+    crate::hr::team::scope::require_message(&state.db, ws, user, id).await
 }
 
 // ---------------------------------------------------------------- classification override
@@ -679,7 +679,7 @@ pub async fn understand_now(
     require_role(&state.db, &ws, &user, Role::Operator).await?;
     ensure_message(&state, &ws, &user, &id).await?;
     // Mail filed by the bulk rules gets the full treatment once a person opens it.
-    if crate::bulk::release_for_person(&state.db, &id).await? {
+    if crate::mail::bulk::release_for_person(&state.db, &id).await? {
         let key = format!("classify:{id}:{TAXONOMY_VERSION}:open:{}", new_id("req"));
         let mut conn = state.db.acquire().await?;
         jobs::enqueue(&mut conn, kind::CLASSIFY_EMAIL, &key, Some(&ws), &json!({ "message_id": id, "full": true })).await?;
@@ -698,7 +698,7 @@ pub async fn understand_now(
         .bind(&id)
         .fetch_one(&state.db)
         .await?;
-    let matching = crate::packs::has_feature(&state.db, &ws, crate::packs::FEATURE_MATCHING).await?;
+    let matching = crate::platform::packs::has_feature(&state.db, &ws, crate::platform::packs::FEATURE_MATCHING).await?;
     let category = category.filter(|_| matching);
     let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     if has_attachments {
@@ -739,7 +739,7 @@ pub async fn update_draft(
     Json(body): Json<DraftPatch>,
 ) -> AppResult<Json<Draft>> {
     require_role(&state.db, &ws, &user, Role::Operator).await?;
-    crate::team::scope::require_draft(&state.db, &ws, &user, &id).await?;
+    crate::hr::team::scope::require_draft(&state.db, &ws, &user, &id).await?;
     // Clients can only edit or approve. "sent" is reserved for a future, audited send action.
     let status = match body.status.as_deref() {
         Some(s @ ("edited" | "approved")) => Some(s),
@@ -779,8 +779,8 @@ pub async fn update_draft(
     .await?
     .ok_or(AppError::NotFound)?;
     if let Some(new_text) = &body.body_text {
-        let added = crate::owner_said::added_by_edit(&before_text, new_text);
-        crate::owner_said::record(&mut tx, &ws, &row.id, &row.message_id, Some(&user.id), Some(&added)).await?;
+        let added = crate::replies::owner_said::added_by_edit(&before_text, new_text);
+        crate::replies::owner_said::record(&mut tx, &ws, &row.id, &row.message_id, Some(&user.id), Some(&added)).await?;
     }
     audit::record(
         &mut tx,

@@ -16,10 +16,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     ai::judge::{self, Question},
-    auth::{AuthUser, require_role},
-    db::now_ms,
-    domain::Role,
-    error::{AppError, AppResult},
+    platform::auth::{AuthUser, require_role},
+    platform::db::now_ms,
+    platform::domain::Role,
+    platform::error::{AppError, AppResult},
     http::AppState,
     replies::{self, ReplyContext},
 };
@@ -397,7 +397,7 @@ async fn gather(state: &AppState, input: &CheckInput<'_>) -> AppResult<(Facts, V
     .bind(bare_address(&r.sender_address))
     .fetch_all(&state.db)
     .await?;
-    let settings = crate::reply_settings::load(&state.db, &state.config, ws).await?;
+    let settings = crate::replies::reply_settings::load(&state.db, &state.config, ws).await?;
     let mut known = String::new();
     for (subject, body, recipients, sender, original_sender) in &thread {
         for part in [subject.as_str(), body.as_str(), recipients.as_str(), sender.as_str(), original_sender.as_deref().unwrap_or_default()] {
@@ -414,7 +414,7 @@ async fn gather(state: &AppState, input: &CheckInput<'_>) -> AppResult<(Facts, V
     known.push_str(settings.signature.as_deref().unwrap_or_default());
 
     let now = now_ms();
-    let recent_reply_in_thread = crate::threads::thread_has_reply_after(&state.db, ws, &r.thread_id, now - DUPLICATE_WINDOW_MS).await?;
+    let recent_reply_in_thread = crate::mail::threads::thread_has_reply_after(&state.db, ws, &r.thread_id, now - DUPLICATE_WINDOW_MS).await?;
     let other_scheduled_in_thread: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM drafts d JOIN email_messages m ON m.id = d.message_id
                        WHERE m.thread_id = ?1 AND d.workspace_id = ?2 AND d.id != ?3
@@ -427,9 +427,9 @@ async fn gather(state: &AppState, input: &CheckInput<'_>) -> AppResult<(Facts, V
     .await?;
     let mut trusted_notes = team_notes;
     // A send is supported only by its own author's words (and the shared team notes above).
-    let mut spoken = crate::owner_said::for_send(&state.db, &r.draft_id, input.actor_user).await?;
+    let mut spoken = crate::replies::owner_said::for_send(&state.db, &r.draft_id, input.actor_user).await?;
     if input.actor_user.is_some() && input.body != r.body_text {
-        let typed = crate::owner_said::added_by_edit(&r.body_text, input.body);
+        let typed = crate::replies::owner_said::added_by_edit(&r.body_text, input.body);
         if !typed.is_empty() {
             spoken.push(typed);
         }
@@ -488,7 +488,7 @@ fn review_context(r: &ReplyContext, notes: &str, body: &str) -> String {
     format!(
         "{}\n<team_notes>\n{}\n</team_notes>\n<reply>\n{}\n</reply>",
         judge::email_context(&r.sender_address, &r.subject, None, &r.original_body),
-        crate::sources::normalize::truncate_chars(notes, 3_000),
+        crate::mail::sources::normalize::truncate_chars(notes, 3_000),
         body.trim()
     )
 }
@@ -519,9 +519,9 @@ async fn record_leak(state: &AppState, input: &CheckInput<'_>, count: usize) {
         .ok()
         .flatten()
         .flatten();
-    crate::incidents::record(
+    crate::ai::incidents::record(
         &state.db,
-        crate::incidents::NewIncident::new(input.workspace_id, crate::incidents::Kind::LeakBlocked, serde_json::json!({"check": "send_review", "items": count}))
+        crate::ai::incidents::NewIncident::new(input.workspace_id, crate::ai::incidents::Kind::LeakBlocked, serde_json::json!({"check": "send_review", "items": count}))
             .agent(agent_id.as_deref())
             .message(Some(&input.reply.message_id))
             .dedupe(format!("leak:{}", input.reply.draft_id)),
@@ -531,16 +531,16 @@ async fn record_leak(state: &AppState, input: &CheckInput<'_>, count: usize) {
 
 /// Everything the drafter was given that a reply may legitimately repeat: the resolved voice and
 /// signature, sign-off, the memories and learned preferences in the agent's scope, and past reply examples.
-async fn drafter_inputs(state: &AppState, input: &CheckInput<'_>, settings: &crate::reply_settings::ReplySettings) -> AppResult<String> {
+async fn drafter_inputs(state: &AppState, input: &CheckInput<'_>, settings: &crate::replies::reply_settings::ReplySettings) -> AppResult<String> {
     let (ws, r) = (input.workspace_id, input.reply);
     let instructions = if settings.reply_instructions.is_empty() {
-        crate::packs::reply_style(&state.db, ws).await?.to_string()
+        crate::platform::packs::reply_style(&state.db, ws).await?.to_string()
     } else {
         settings.reply_instructions.clone()
     };
     let (instructions, signature) =
-        crate::agent_profiles::draft_voice(&state.db, &state.config, ws, &r.message_id, instructions, settings.signature.clone()).await?;
-    let mut out = vec![instructions, signature.unwrap_or_default(), crate::packs::default_sign_off(&state.db, ws).await?];
+        crate::agents::profiles::draft_voice(&state.db, &state.config, ws, &r.message_id, instructions, settings.signature.clone()).await?;
+    let mut out = vec![instructions, signature.unwrap_or_default(), crate::platform::packs::default_sign_off(&state.db, ws).await?];
 
     let draft_agent: Option<String> =
         sqlx::query_scalar("SELECT agent_id FROM drafts WHERE id = ?1 AND workspace_id = ?2").bind(&r.draft_id).bind(ws).fetch_optional(&state.db).await?.flatten();
@@ -548,8 +548,8 @@ async fn drafter_inputs(state: &AppState, input: &CheckInput<'_>, settings: &cra
         let mut conn = state.db.acquire().await?;
         crate::learning::scope::resolve(&mut conn, ws, draft_agent.as_deref(), Some(&r.message_id)).await?
     };
-    let view = agent.agent_id.clone().map(|id| crate::memory::AgentMemory { agent_id: id, scope: agent.memory });
-    let ctx = crate::memory::context_for_agent(&state.db, ws, &r.sender_address, &r.subject, false, view.as_ref()).await?;
+    let view = agent.agent_id.clone().map(|id| crate::learning::memory::AgentMemory { agent_id: id, scope: agent.memory });
+    let ctx = crate::learning::memory::context_for_agent(&state.db, ws, &r.sender_address, &r.subject, false, view.as_ref()).await?;
     out.extend(ctx.lines());
     out.extend(ctx.sender_history);
     let preferences = crate::learning::retrieve::for_draft(
@@ -562,7 +562,7 @@ async fn drafter_inputs(state: &AppState, input: &CheckInput<'_>, settings: &cra
     )
     .await?;
     out.extend(crate::learning::retrieve::lines(&preferences));
-    for e in crate::knowledge::reply_examples(&state.db, state.embedder.as_ref(), ws, &r.message_id, &r.subject, &r.original_body).await {
+    for e in crate::learning::knowledge::reply_examples(&state.db, state.embedder.as_ref(), ws, &r.message_id, &r.subject, &r.original_body).await {
         out.push(e.reply);
     }
     Ok(out.join("\n"))
@@ -617,7 +617,7 @@ pub async fn check_draft(
     body: Option<Json<CheckBody>>,
 ) -> AppResult<Json<SafetyReport>> {
     require_role(&state.db, &ws, &user, Role::Operator).await?;
-    crate::team::scope::require_draft(&state.db, &ws, &user, &id).await?;
+    crate::hr::team::scope::require_draft(&state.db, &ws, &user, &id).await?;
     let reply = replies::load(&state, &ws, &id).await?;
     let text = body.and_then(|Json(b)| b.body_text).unwrap_or_else(|| reply.body_text.clone());
     if text.chars().count() > 10_000 {

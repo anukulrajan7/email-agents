@@ -15,11 +15,11 @@ use super::{
     agent_registry_api::{detail_json, look, require_edit, visible_agent},
 };
 use crate::{
-    agent_registry::{spec::AgentSpec, store},
-    auth::{AuthUser, require_role},
-    designer::session::{self, SaveOptions, Session},
-    domain::Role,
-    error::{AppError, AppResult},
+    agents::registry::{spec::AgentSpec, store},
+    platform::auth::{AuthUser, require_role},
+    agents::designer::session::{self, SaveOptions, Session},
+    platform::domain::Role,
+    platform::error::{AppError, AppResult},
 };
 
 pub fn routes() -> Router<AppState> {

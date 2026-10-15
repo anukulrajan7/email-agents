@@ -17,11 +17,11 @@ use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use email_ai_api::{
     agents::planner::{Scripted, ScriptedPlanner, call as tool, finish},
     build_state,
-    config::Config,
-    db,
-    domain::NormalizedEmail,
+    platform::config::Config,
+    platform::db,
+    platform::domain::NormalizedEmail,
     http::{AppState, router},
-    ingest,
+    mail::ingest,
     jobs::worker,
 };
 use http_body_util::BodyExt;

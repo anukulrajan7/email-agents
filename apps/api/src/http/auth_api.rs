@@ -10,13 +10,13 @@ use serde_json::{Value, json};
 
 use super::AppState;
 use crate::{
-    auth::{accept_invitations, request_token},
-    config::AuthMode,
-    db::{iso, new_id, now_ms},
-    error::{AppError, AppResult},
-    security::{self, ClientIp},
-    sessions::{self, MAX_PASSWORD, MIN_PASSWORD},
-    sources::normalize,
+    platform::auth::{accept_invitations, request_token},
+    platform::config::AuthMode,
+    platform::db::{iso, new_id, now_ms},
+    platform::error::{AppError, AppResult},
+    platform::security::{self, ClientIp},
+    platform::sessions::{self, MAX_PASSWORD, MIN_PASSWORD},
+    mail::sources::normalize,
 };
 
 const VERIFY_EMAIL: &str = "verify_email";
@@ -259,9 +259,9 @@ async fn issue_code(state: &AppState, user_id: &str, email: &str, purpose: &'sta
         return Err(AppError::EmailNotSent(email.to_string()));
     }
     let (subject, text, html) =
-        if purpose == PASSWORD_RESET { password_reset_email(&code) } else { crate::mailer::verification_email(&code) };
-    let out = crate::mailer::OutgoingEmail { kind: crate::mailer::kind::OTP, to: email, subject: &subject, text: &text, html: &html };
-    if let Err(e) = crate::mailer::deliver(&state.db, mailer.as_ref(), out).await {
+        if purpose == PASSWORD_RESET { password_reset_email(&code) } else { crate::platform::mailer::verification_email(&code) };
+    let out = crate::platform::mailer::OutgoingEmail { kind: crate::platform::mailer::kind::OTP, to: email, subject: &subject, text: &text, html: &html };
+    if let Err(e) = crate::platform::mailer::deliver(&state.db, mailer.as_ref(), out).await {
         tracing::error!(error = %e, %purpose, "failed to send email code");
         // Not delivered: drop the code so "resend" isn't throttled by a code nobody received.
         if let Err(e) = sqlx::query("DELETE FROM email_codes WHERE id = ?1").bind(&code_id).execute(&state.db).await {

@@ -10,7 +10,7 @@ use super::{
     store::{self, AgentRow},
     templates,
 };
-use crate::db::{iso, now_ms};
+use crate::platform::db::{iso, now_ms};
 
 pub const SOURCES: &[&str] = &["template", "tuned", "designer", "manual", "rollback", "backfill"];
 
@@ -278,11 +278,11 @@ pub async fn activate(conn: &mut SqliteConnection, ws: &str, agent: &AgentRow, v
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent_registry::templates::{INBOX_KEY, template};
+    use crate::agents::registry::templates::{INBOX_KEY, template};
 
     #[test]
     fn widening_triggers_or_scopes_counts_as_a_behaviour_change() {
-        use crate::agent_registry::spec::{Scope, Trigger};
+        use crate::agents::registry::spec::{Scope, Trigger};
         let a = template(INBOX_KEY).unwrap().spec();
         assert!(!behaviour_changed(&a, &a.clone()));
         let mut wider = a.clone();

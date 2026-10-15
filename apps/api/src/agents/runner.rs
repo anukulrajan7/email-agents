@@ -14,12 +14,12 @@ use super::{
     tools::{self, Preview, Risk, ToolCtx, ToolError, ToolOutput},
 };
 use crate::{
-    agent_profiles::{self, AgentContext},
-    agent_registry::spec::scope_of_tool,
-    agent_registry::runtime::{self, CaseAgent},
+    agents::profiles::{self, AgentContext},
+    agents::registry::spec::scope_of_tool,
+    agents::registry::runtime::{self, CaseAgent},
     ai::AiError,
-    audit::{self, Actor, Entry},
-    db::{new_id, now_ms},
+    platform::audit::{self, Actor, Entry},
+    platform::db::{new_id, now_ms},
     http::AppState,
     jobs::handlers::JobError,
 };
@@ -48,7 +48,7 @@ enum TurnResult {
 }
 
 fn clip(v: &str, max: usize) -> String {
-    crate::sources::normalize::truncate_chars(v, max)
+    crate::mail::sources::normalize::truncate_chars(v, max)
 }
 
 /// The planner's view of the case, ordered for prompt caching: what never changes first (the
@@ -149,13 +149,13 @@ pub async fn run_step(state: &AppState, ws: &str, case_id: &str, turn: i64) -> R
         return Ok(());
     }
     // Over the workspace's daily AI budget: sleep until the next UTC midnight, then take this turn.
-    if !crate::ai_ledger::within_budget(&state.db, state.config.ai_daily_budget_usd, &case.workspace_id).await {
+    if !crate::ai::ledger::within_budget(&state.db, state.config.ai_daily_budget_usd, &case.workspace_id).await {
         const DAY_MS: i64 = 86_400_000;
-        let resume_at = (crate::db::now_ms() / DAY_MS + 1) * DAY_MS;
+        let resume_at = (crate::platform::db::now_ms() / DAY_MS + 1) * DAY_MS;
         let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
         sqlx::query("UPDATE cases SET status = 'waiting_event', next_wake_at = ?1, updated_at = ?2 WHERE id = ?3 AND status = 'running'")
             .bind(resume_at)
-            .bind(crate::db::now_ms())
+            .bind(crate::platform::db::now_ms())
             .bind(&case.id)
             .execute(&mut *tx)
             .await?;
@@ -190,7 +190,7 @@ pub async fn run_step(state: &AppState, ws: &str, case_id: &str, turn: i64) -> R
     }
     let steps = case::steps(&state.db, &case.workspace_id, &case.id).await?;
     let registry = tools::registry();
-    let tier = agent_profiles::effective_tier(&agent.agent.quality, case.premium());
+    let tier = profiles::effective_tier(&agent.agent.quality, case.premium());
     let allowed = case_agent.allowed_tools(runtime::matching_enabled(&state.db, &case.workspace_id).await?);
     let req = PlanRequest {
         case_id: case.id.clone(),
@@ -200,7 +200,7 @@ pub async fn run_step(state: &AppState, ws: &str, case_id: &str, turn: i64) -> R
         message_id: case.message_id.clone(),
         facts: case.state(),
         system: planner::system_prompt(&agent.planner_block()),
-        model: Some(agent_profiles::tier_model(&state.config, tier).to_string()).filter(|m| !m.is_empty()),
+        model: Some(profiles::tier_model(&state.config, tier).to_string()).filter(|m| !m.is_empty()),
         prompt: render_prompt(&case, &steps, turn),
         tools: registry.specs_for(&allowed),
     };
@@ -228,9 +228,9 @@ pub async fn run_step(state: &AppState, ws: &str, case_id: &str, turn: i64) -> R
             Err(AiError::Permanent(e)) => {
                 // The same request fails the same way: stop now instead of retrying it.
                 tracing::warn!(case_id = %case.id, error = %e, "planner refused the request");
-                crate::incidents::record(
+                crate::ai::incidents::record(
                     &state.db,
-                    crate::incidents::NewIncident::new(&case.workspace_id, crate::incidents::Kind::Refusal, json!({"source": "planner"}))
+                    crate::ai::incidents::NewIncident::new(&case.workspace_id, crate::ai::incidents::Kind::Refusal, json!({"source": "planner"}))
                         .agent(case.agent_id.as_deref())
                         .case(Some(&case.id))
                         .message(case.message_id.as_deref())
@@ -315,10 +315,10 @@ async fn park_while_inactive(state: &AppState, case: &Case, agent: &CaseAgent, t
         tx.commit().await?;
         return Ok(());
     }
-    let resume_at = crate::db::now_ms() + PAUSED_RECHECK_MS;
+    let resume_at = crate::platform::db::now_ms() + PAUSED_RECHECK_MS;
     sqlx::query("UPDATE cases SET status = 'waiting_event', next_wake_at = ?1, updated_at = ?2 WHERE id = ?3 AND workspace_id = ?4 AND status = 'running'")
         .bind(resume_at)
-        .bind(crate::db::now_ms())
+        .bind(crate::platform::db::now_ms())
         .bind(&case.id)
         .bind(&case.workspace_id)
         .execute(&mut *tx)
@@ -412,7 +412,7 @@ async fn evaluate(
         let preview = preview.unwrap_or_default();
         let on_its_own = match tool.name() {
             "send_email" => autonomy::may_send_on_its_own(state, case, agent, case_agent, &preview).await?,
-            "send_message" => crate::messaging::rules::may_send_on_its_own(state, case, agent, case_agent, &args).await?,
+            "send_message" => crate::alerts::messaging::rules::may_send_on_its_own(state, case, agent, case_agent, &args).await?,
             _ => false,
         };
         if critic_down {
@@ -441,8 +441,8 @@ async fn evaluate(
                     if let Err(e) = autonomy::record_hold(state, &case.workspace_id, draft_id, at, ctx.hold_secs).await {
                         tracing::warn!(case_id = %case.id, draft_id, error = %e, "could not note the send hold in the audit trail; the send stays scheduled");
                     }
-                    out.value["held_until"] = json!(crate::db::iso(at));
-                    out.summary = format!("{} Held until {} so you can stop it.", out.summary, crate::db::iso(at));
+                    out.value["held_until"] = json!(crate::platform::db::iso(at));
+                    out.summary = format!("{} Held until {} so you can stop it.", out.summary, crate::platform::db::iso(at));
                 }
             }
             if critic_down {
@@ -672,7 +672,7 @@ async fn commit(state: &AppState, case: &Case, turn: i64, usage: &Usage, result:
                 .bind(&case.workspace_id)
                 .execute(&mut *tx)
                 .await?;
-            crate::messaging::watch::on_case_ended(&mut tx, &case.workspace_id, &case.id).await?;
+            crate::alerts::messaging::watch::on_case_ended(&mut tx, &case.workspace_id, &case.id).await?;
             audit::record(
                 &mut tx,
                 Entry {

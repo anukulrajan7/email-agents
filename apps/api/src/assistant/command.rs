@@ -10,16 +10,16 @@ use super::{
 };
 use crate::{
     agents::{approvals, case, planner::{Decision, strip_reasoning}, sentence},
-    messaging,
-    auth::AuthUser,
+    alerts::messaging,
+    platform::auth::AuthUser,
     automations::{self, Action, AutomationInput},
-    db::{iso, new_id, now_ms},
-    domain::Role,
-    error::{AppError, AppResult},
+    platform::db::{iso, new_id, now_ms},
+    platform::domain::Role,
+    platform::error::{AppError, AppResult},
     http::AppState,
     jobs::handlers,
-    knowledge::{self, Scope},
-    sources::normalize::truncate_chars,
+    learning::knowledge::{self, Scope},
+    mail::sources::normalize::truncate_chars,
 };
 
 const MAX_TRANSCRIPT_LINE_CHARS: usize = 4_000;
@@ -328,8 +328,8 @@ pub struct Extras {
 
 pub async fn run(state: &AppState, ws: &str, user: &AuthUser, role: Role, text: &str, extras: &Extras) -> AppResult<Outcome> {
     let features = Features {
-        matching: crate::packs::has_feature(&state.db, ws, crate::packs::FEATURE_MATCHING).await?,
-        requirement_agent: crate::packs::has_feature(&state.db, ws, crate::packs::FEATURE_REQUIREMENT_AGENT).await?,
+        matching: crate::platform::packs::has_feature(&state.db, ws, crate::platform::packs::FEATURE_MATCHING).await?,
+        requirement_agent: crate::platform::packs::has_feature(&state.db, ws, crate::platform::packs::FEATURE_REQUIREMENT_AGENT).await?,
     };
     let mut session = Session {
         state,
@@ -345,7 +345,7 @@ pub async fn run(state: &AppState, ws: &str, user: &AuthUser, role: Role, text: 
         request: text.to_string(),
     };
     let preface = format!("{}{}", extras.viewing.block, extras.history);
-    let today = iso(crate::db::now_ms());
+    let today = iso(crate::platform::db::now_ms());
     let today = today.get(..10).unwrap_or(&today).to_string();
     let mut transcript: Vec<String> = vec![];
     let mut repaired = false;
@@ -426,7 +426,7 @@ impl Session<'_> {
     async fn finish(&self, args: &Value) -> AppResult<Outcome> {
         let mut answer = plain_answer(args.get("text").and_then(Value::as_str).unwrap_or(""), MAX_ANSWER_WORDS);
         if !answer.is_empty() {
-            answer = crate::format::summary::tidy(&answer, crate::db::now_ms());
+            answer = crate::platform::format::summary::tidy(&answer, crate::platform::db::now_ms());
         }
         if answer.is_empty() {
             answer = if self.plan.is_empty() {
@@ -614,7 +614,7 @@ impl Session<'_> {
     async fn get_case(&mut self, args: &Value) -> ToolResult {
         let id = text_arg(args, "id").ok_or_else(|| failed("id is required"))?;
         let c = case::get_in(&self.state.db, self.ws, id).await?.ok_or_else(|| failed("no case with that id"))?;
-        if !crate::agent_registry::store::can_see(&self.state.db, self.ws, c.agent_id.as_deref(), &self.user.id).await? {
+        if !crate::agents::registry::store::can_see(&self.state.db, self.ws, c.agent_id.as_deref(), &self.user.id).await? {
             return Err(failed("no case with that id"));
         }
         let steps = case::steps(&self.state.db, self.ws, &c.id).await?;
@@ -784,7 +784,7 @@ impl Session<'_> {
         let to = text_arg(args, "to").ok_or_else(|| failed("to is required"))?;
         let subject = text_arg(args, "subject").ok_or_else(|| failed("subject is required"))?;
         let body = text_arg(args, "body").ok_or_else(|| failed("body is required"))?;
-        let body = truncate_chars(body, crate::messaging::inapp::MAX_BODY_CHARS);
+        let body = truncate_chars(body, crate::alerts::messaging::inapp::MAX_BODY_CHARS);
         let target = messaging::recipients::resolve(&self.state.db, self.ws, to).await.map_err(failed)?;
         let team = matches!(target, messaging::recipients::Target::Team { .. });
         let channel = if team { "in_app" } else { channel };
@@ -849,10 +849,10 @@ impl Session<'_> {
         let body = truncate_chars(text_arg(args, "body").ok_or_else(|| failed("body is required"))?, messaging::inapp::MAX_BODY_CHARS);
         let row = self.mail_by_id(id).await?.ok_or_else(|| failed("no email with that id"))?;
         let found = messaging::support::find_address(&self.state.db, self.ws, &row.id).await?;
-        let given = text_arg(args, "support_address").map(crate::send_safety::bare_address);
+        let given = text_arg(args, "support_address").map(crate::replies::send_safety::bare_address);
         let (address, source, company) = match (given, found) {
             (Some(a), found) => {
-                if !crate::send_safety::valid_address(&a) {
+                if !crate::replies::send_safety::valid_address(&a) {
                     return Err(failed("that is not a valid email address"));
                 }
                 let from_person = self.request.to_lowercase().contains(&a);

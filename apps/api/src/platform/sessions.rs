@@ -19,8 +19,8 @@ use sqlx::SqlitePool;
 use tokio::sync::Semaphore;
 
 use crate::{
-    db::{new_id, now_ms},
-    error::AppError,
+    platform::db::{new_id, now_ms},
+    platform::error::AppError,
 };
 
 /// Sliding: every use (at most every `TOUCH_AFTER_MS`) pushes the expiry this far out again.

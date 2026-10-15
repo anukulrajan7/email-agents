@@ -7,10 +7,10 @@ use sqlx::{SqliteConnection, SqlitePool};
 use tokio::sync::RwLock;
 
 use crate::{
-    config::{AuthMode, Config},
-    db::{new_id, now_ms},
-    domain::Role,
-    error::{AppError, AppResult},
+    platform::config::{AuthMode, Config},
+    platform::db::{new_id, now_ms},
+    platform::domain::Role,
+    platform::error::{AppError, AppResult},
     http::AppState,
 };
 
@@ -57,7 +57,7 @@ impl Authenticator {
     pub async fn authenticate(&self, db: &SqlitePool, token: &str) -> AppResult<AuthUser> {
         let (subject, email) = match self.mode {
             AuthMode::Password => {
-                let (id, email) = crate::sessions::lookup(db, token).await?.ok_or(AppError::Unauthorized)?;
+                let (id, email) = crate::platform::sessions::lookup(db, token).await?.ok_or(AppError::Unauthorized)?;
                 return Ok(AuthUser { id, email });
             }
             AuthMode::Dev => dev_identity(token)?,
@@ -213,11 +213,11 @@ pub async fn accept_invitations(conn: &mut SqliteConnection, user_id: &str, emai
             .bind(role)
             .execute(&mut *conn)
             .await?;
-        crate::audit::record(
+        crate::platform::audit::record(
             &mut *conn,
-            crate::audit::Entry {
+            crate::platform::audit::Entry {
                 workspace_id,
-                actor: crate::audit::Actor::User(user_id),
+                actor: crate::platform::audit::Actor::User(user_id),
                 action: "member.joined",
                 entity_type: "user",
                 entity_id: user_id,

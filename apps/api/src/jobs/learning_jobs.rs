@@ -10,13 +10,13 @@ use crate::{
         LearnInput, LearnOutput, LearnTask,
         memory_extractor::{LearnDirection, MemoryExtractInput},
     },
-    config::UnderstandMode,
+    platform::config::UnderstandMode,
     http::AppState,
     learning::{
         edit_distance::{self, TINY_EDIT},
         guard, hooks, preferences::{self, Outcome, Target}, retrieve, scope,
     },
-    memory_learning::{self, AUTO_MEMORY_CAP},
+    learning::memory_learning::{self, AUTO_MEMORY_CAP},
 };
 
 const MIN_TEXT_CHARS: usize = 20;
@@ -110,7 +110,7 @@ pub async fn learn_from_message(state: &AppState, payload: &Value) -> Result<(),
         }
     } else {
         // Newsletters/notifications: labelled `other` with nothing to answer, or an automated sender.
-        let is_noise = m.category.as_deref() == Some(crate::domain::OTHER_LABEL) && m.needs_reply != Some(true);
+        let is_noise = m.category.as_deref() == Some(crate::platform::domain::OTHER_LABEL) && m.needs_reply != Some(true);
         if is_noise || memory_learning::is_automated_sender(&m.sender_address) {
             return Ok(());
         }
@@ -204,7 +204,7 @@ pub async fn learn_from_reply(state: &AppState, payload: &Value) -> Result<(), J
         tracing::debug!(%draft_id, "reply taught nothing new: skipped");
         return Ok(());
     }
-    if !crate::ai_ledger::within_budget(&state.db, state.config.ai_daily_budget_usd, &r.workspace_id).await {
+    if !crate::ai::ledger::within_budget(&state.db, state.config.ai_daily_budget_usd, &r.workspace_id).await {
         tracing::debug!(%draft_id, "AI budget reached: learning skipped");
         return Ok(());
     }
@@ -285,7 +285,7 @@ async fn learn_from_note(state: &AppState, payload: &Value) -> Result<(), JobErr
     .await?;
     let Some((ws, agent_id, Some(note), approval_id)) = row else { return Ok(()) };
     let Some(learner) = state.learner.clone() else { return Ok(()) };
-    if !crate::ai_ledger::within_budget(&state.db, state.config.ai_daily_budget_usd, &ws).await {
+    if !crate::ai::ledger::within_budget(&state.db, state.config.ai_daily_budget_usd, &ws).await {
         return Ok(());
     }
     let proposed: String = match &approval_id {

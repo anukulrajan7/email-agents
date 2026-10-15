@@ -19,9 +19,9 @@ use email_ai_api::{
         understand::{UnderstandInput, Understander, Understanding, parse_understanding, shadow_report},
     },
     build_state,
-    config::{Config, UnderstandMode},
-    db,
-    domain::{ClassificationSource, Priority},
+    platform::config::{Config, UnderstandMode},
+    platform::db,
+    platform::domain::{ClassificationSource, Priority},
     http::{AppState, router},
     jobs::worker,
 };

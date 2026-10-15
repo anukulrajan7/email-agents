@@ -12,15 +12,15 @@ use async_trait::async_trait;
 use axum::http::StatusCode;
 use common::*;
 use email_ai_api::{
-    agent_registry::spec::MemoryScope,
+    agents::registry::spec::MemoryScope,
     ai::{AiError, LearnInput, LearnOutput, Learner, StyleLesson, memory_extractor::ExtractedFact},
-    db::now_ms,
+    platform::db::now_ms,
     jobs::worker,
     learning::{
         gain,
         preferences::{self, Outcome, Target},
     },
-    memory::{self, AgentMemory},
+    learning::memory::{self, AgentMemory},
 };
 use serde_json::json;
 

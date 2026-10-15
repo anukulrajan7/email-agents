@@ -10,13 +10,13 @@ use super::{
     versions,
 };
 use crate::{
-    agent_profiles::{self, AgentContext, Owner, WorkspaceAgent},
+    agents::profiles::{self, AgentContext, Owner, WorkspaceAgent},
     agents::{
         autonomy::{self, Effective, LevelInputs},
         case::Case,
     },
-    config::Config,
-    packs,
+    platform::config::Config,
+    platform::packs,
 };
 
 /// Tools that need the HR & recruiting pack's matching feature.
@@ -132,7 +132,7 @@ pub fn adapt(mut ctx: AgentContext, agent: &CaseAgent) -> AgentContext {
         avatar,
         color,
         persona: playbook(&agent.spec, &ws.persona, personal),
-        permissions: agent_profiles::Permissions { draft: ws.permissions.draft && agent.spec.permissions.draft, send: send.into() },
+        permissions: profiles::Permissions { draft: ws.permissions.draft && agent.spec.permissions.draft, send: send.into() },
         quality,
         enabled: ws.enabled,
         ..ws.clone()
@@ -142,7 +142,7 @@ pub fn adapt(mut ctx: AgentContext, agent: &CaseAgent) -> AgentContext {
 
 /// The context a case runs in (voice, owner, permissions) and the agent behind it.
 pub async fn context_for_case(db: &SqlitePool, config: &Config, case: &Case) -> sqlx::Result<(AgentContext, CaseAgent)> {
-    let ctx = agent_profiles::context_for_case(db, config, case).await?;
+    let ctx = profiles::context_for_case(db, config, case).await?;
     let agent = load(db, config, case, ctx.owner.as_ref()).await?;
     Ok((adapt(ctx, &agent), agent))
 }
@@ -155,7 +155,7 @@ pub async fn matching_enabled(db: &SqlitePool, ws: &str) -> sqlx::Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent_registry::templates;
+    use crate::agents::registry::templates;
 
     #[test]
     fn the_persona_reaches_the_playbook_and_the_mail_is_never_signed_by_the_agent() {

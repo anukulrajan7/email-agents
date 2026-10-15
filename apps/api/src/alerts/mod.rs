@@ -22,12 +22,12 @@ use sqlx::SqlitePool;
 
 use crate::{
     ai::judge,
-    audit::{self, Actor, Entry},
-    db::{iso, new_id, now_ms},
+    platform::audit::{self, Actor, Entry},
+    platform::db::{iso, new_id, now_ms},
     http::AppState,
     jobs::{self, handlers::JobError, kind},
-    mailer::{OutgoingEmail, kind as mail_kind},
-    memory_learning::team_addresses,
+    platform::mailer::{OutgoingEmail, kind as mail_kind},
+    learning::memory_learning::team_addresses,
 };
 
 pub const IMPORTANT_UNANSWERED: &str = "important_unanswered";
@@ -79,8 +79,8 @@ pub async fn raise(pool: &SqlitePool, a: NewAlert<'_>) -> sqlx::Result<(String, 
     .bind(a.workspace_id)
     .bind(a.kind)
     .bind(severity)
-    .bind(crate::sources::normalize::truncate_chars(&a.title, 200))
-    .bind(crate::sources::normalize::truncate_chars(&a.body, 1_000))
+    .bind(crate::mail::sources::normalize::truncate_chars(&a.title, 200))
+    .bind(crate::mail::sources::normalize::truncate_chars(&a.body, 1_000))
     .bind(a.message_id)
     .bind(&key)
     .bind(level)
@@ -262,7 +262,7 @@ pub async fn save_settings(pool: &SqlitePool, workspace_id: &str, s: &AlertSetti
 /// Replied = outbound mail / sent draft in the thread (direction column), or mail from a team
 /// address (covers send-as aliases Gmail didn't label SENT).
 async fn thread_has_reply_after(db: &SqlitePool, workspace_id: &str, thread_key: &str, after_ms: i64) -> sqlx::Result<bool> {
-    Ok(crate::threads::thread_has_reply_after(db, workspace_id, thread_key, after_ms).await?
+    Ok(crate::mail::threads::thread_has_reply_after(db, workspace_id, thread_key, after_ms).await?
         || team_sent_after(db, workspace_id, thread_key, after_ms).await?)
 }
 
@@ -362,7 +362,7 @@ async fn worth_alerting(state: &AppState, workspace_id: &str, c: &Candidate) -> 
         return Ok(true);
     }
     // Understanding v2 already decided what is time-sensitive while reading the email: no judge call.
-    if state.config.understand_mode == crate::config::UnderstandMode::On
+    if state.config.understand_mode == crate::platform::config::UnderstandMode::On
         && let Some(u) = crate::ai::understand::stored(&state.db, &c.id).await?
     {
         return Ok(u.important());
@@ -413,7 +413,7 @@ async fn raise_rule(pool: &SqlitePool, alert: NewAlert<'_>, message_id: &str) ->
     let workspace_id = alert.workspace_id;
     let (id, created) = raise(pool, alert).await?;
     if created {
-        crate::team::escalation::tag_owner_for_message(pool, workspace_id, &id, message_id).await?;
+        crate::hr::team::escalation::tag_owner_for_message(pool, workspace_id, &id, message_id).await?;
     }
     Ok(created)
 }
@@ -522,10 +522,10 @@ pub async fn evaluate_workspace(state: &AppState, workspace_id: &str, now: i64) 
         }
         report.raised += raise_rule(pool, rule_alert(workspace_id, IMPORTANT_UNANSWERED, c, now), &c.id).await? as usize;
     }
-    report.raised += crate::team::evaluate_alerts(state, workspace_id, now).await?;
+    report.raised += crate::hr::team::evaluate_alerts(state, workspace_id, now).await?;
 
     // Alerts about a person wait at the owner, then at the manager, for their own configurable delays.
-    let (manager_hours, final_hours) = crate::team::escalation::delays(pool, workspace_id, settings.escalate_after_hours).await?;
+    let (manager_hours, final_hours) = crate::hr::team::escalation::delays(pool, workspace_id, settings.escalate_after_hours).await?;
     let escalated: Vec<(String, Option<String>, i64)> = sqlx::query_as(
         "UPDATE alerts SET escalation_level = escalation_level + 1, severity = 'high', level_since = ?1, updated_at = ?1
          WHERE workspace_id = ?2 AND status = 'open' AND escalation_level < ?3
@@ -560,7 +560,7 @@ pub async fn evaluate_workspace(state: &AppState, workspace_id: &str, now: i64) 
     }
     report.escalated = escalated.len();
 
-    report.raised += crate::ai_health::evaluate_spikes(pool, workspace_id, now).await?;
+    report.raised += crate::ai::health::evaluate_spikes(pool, workspace_id, now).await?;
     report.emails_sent = deliver(state, workspace_id, &settings).await?;
     if settings.daily_digest && (now / HOUR_MS) % 24 == settings.digest_hour {
         report.digest_sent = digest(state, workspace_id, &settings, now).await?;
@@ -629,7 +629,7 @@ async fn deliver(state: &AppState, workspace_id: &str, settings: &AlertSettings)
     for (i, p) in pending.iter().enumerate() {
         let targets: Vec<String> = match &p.person_id {
             Some(person) => {
-                crate::team::escalation::recipients(&state.db, workspace_id, person, p.escalation_level, &settings.recipients).await?
+                crate::hr::team::escalation::recipients(&state.db, workspace_id, person, p.escalation_level, &settings.recipients).await?
             }
             None if p.escalation_level <= 1 || settings.escalate_to.is_empty() => settings.recipients.clone(),
             None => settings.escalate_to.clone(),
@@ -652,7 +652,7 @@ async fn deliver(state: &AppState, workspace_id: &str, settings: &AlertSettings)
             .collect();
         let (subject, text, html) = render_email(&ws_name, &base, workspace_id, &lines, None);
         let email = OutgoingEmail { kind: mail_kind::ALERT, to: &to, subject: &subject, text: &text, html: &html };
-        match crate::mailer::deliver(&state.db, mailer.as_ref(), email).await {
+        match crate::platform::mailer::deliver(&state.db, mailer.as_ref(), email).await {
             Ok(()) => {
                 sent += 1;
                 for &i in &idxs {
@@ -724,7 +724,7 @@ async fn digest(state: &AppState, workspace_id: &str, settings: &AlertSettings, 
     let mut any = false;
     for to in &settings.recipients {
         let email = OutgoingEmail { kind: mail_kind::ALERT_DIGEST, to, subject: &subject, text: &text, html: &html };
-        match crate::mailer::deliver(&state.db, mailer.as_ref(), email).await {
+        match crate::platform::mailer::deliver(&state.db, mailer.as_ref(), email).await {
             Ok(()) => any = true,
             Err(e) => tracing::warn!(error = %e, "digest email failed"),
         }

@@ -11,8 +11,8 @@ use axum::{
 use email_ai_api::{
     ai::{AiError, DraftInput, DraftOutput, DraftQuality, Drafter, routing::DEFAULT_REPLY_STYLE},
     build_state,
-    config::Config,
-    db,
+    platform::config::Config,
+    platform::db,
     http::{AppState, router},
     jobs::worker,
 };

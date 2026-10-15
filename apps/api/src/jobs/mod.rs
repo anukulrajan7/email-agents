@@ -17,7 +17,7 @@ use rand::Rng;
 use serde_json::Value;
 use sqlx::{FromRow, SqliteConnection, SqlitePool};
 
-use crate::db::{new_id, now_ms};
+use crate::platform::db::{new_id, now_ms};
 
 pub const LEASE_MS: i64 = 120_000;
 
@@ -233,7 +233,7 @@ pub fn backoff_ms(attempt: i64) -> i64 {
 pub async fn fail(pool: &SqlitePool, job: &Job, worker_id: &str, error: &str, permanent: bool) -> sqlx::Result<bool> {
     let now = now_ms();
     let dead = permanent || job.attempts >= job.max_attempts;
-    let error = crate::sources::normalize::truncate_chars(error, 500);
+    let error = crate::mail::sources::normalize::truncate_chars(error, 500);
     let res = sqlx::query(
         "UPDATE jobs SET status = ?1, run_at = ?2, last_error = ?3, locked_by = NULL, locked_until = NULL, updated_at = ?4
          WHERE id = ?5 AND locked_by = ?6 AND attempts = ?7 AND status = 'running'",

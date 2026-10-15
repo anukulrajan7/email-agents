@@ -9,10 +9,10 @@ use std::sync::Arc;
 
 use email_ai_api::{
     build_state,
-    config::{AuthMode, Config},
-    db,
+    platform::config::{AuthMode, Config},
+    platform::db,
     http::router,
-    mailer::MemoryMailer,
+    platform::mailer::MemoryMailer,
 };
 use http_body_util::BodyExt;
 use serde_json::{Value, json};

@@ -5,7 +5,7 @@
 
 use sqlx::{SqliteConnection, SqlitePool};
 
-use crate::{assistant::history, db::now_ms, sources::normalize::truncate_chars};
+use crate::{assistant::history, platform::db::now_ms, mail::sources::normalize::truncate_chars};
 
 pub const MAX_CHARS: usize = 2_000;
 

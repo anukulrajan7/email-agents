@@ -6,8 +6,8 @@ use async_trait::async_trait;
 
 use super::{AiError, Classifier, ClassifyInput, ClassifyOutput, DraftInput, DraftOutput, Drafter};
 use crate::{
-    domain::{ClassificationSource, OTHER_LABEL, Priority},
-    labels,
+    platform::domain::{ClassificationSource, OTHER_LABEL, Priority},
+    understanding::labels,
 };
 
 pub struct RulesClassifier;
@@ -104,7 +104,7 @@ mod tests {
                 body_text: "Please review".into(),
                 attachment_names: vec![],
                 sender_history: None,
-                labels: crate::domain::label_template("hr").unwrap().labels.iter().map(|l| crate::domain::Label {
+                labels: crate::platform::domain::label_template("hr").unwrap().labels.iter().map(|l| crate::platform::domain::Label {
                     key: l.key.into(), name: l.name.into(), description: l.description.into(),
                 }).collect(),
                 examples: vec![],

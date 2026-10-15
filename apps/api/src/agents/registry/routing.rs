@@ -10,8 +10,8 @@ use super::{
 };
 use crate::{
     agents::autonomy::{self, LevelInputs},
-    config::Config,
-    db::now_ms,
+    platform::config::Config,
+    platform::db::now_ms,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -373,7 +373,7 @@ pub async fn record(conn: &mut SqliteConnection, ws: &str, message_id: &str, rou
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent_registry::templates::{self, template};
+    use crate::agents::registry::templates::{self, template};
 
     fn agent(key: &str, id: &str, level: i64, created_at: i64) -> RoutingAgent {
         let t = template(key).unwrap();

@@ -70,7 +70,7 @@ fn create_private(_path: &Path) -> std::io::Result<()> {
 
 pub async fn migrate(pool: &SqlitePool) -> anyhow::Result<()> {
     sqlx::migrate!("./migrations").run(pool).await.context("running migrations")?;
-    crate::agent_registry::seed::backfill_all(pool).await.context("seeding agents")?;
+    crate::agents::registry::seed::backfill_all(pool).await.context("seeding agents")?;
     crate::evals::gate::repair_template_demotions(pool).await.context("restoring agents demoted by the old safety gate")?;
     Ok(())
 }

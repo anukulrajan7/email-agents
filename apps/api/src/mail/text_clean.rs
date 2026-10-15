@@ -7,7 +7,7 @@ use std::sync::LazyLock;
 
 use regex::Regex;
 
-use crate::sources::normalize;
+use crate::mail::sources::normalize;
 
 const TAGS: &str = "html|head|body|title|meta|link|style|script|div|span|p|br|hr|table|thead|tbody|tfoot|tr|td|th|ul|ol|li|a|b|i|u|s|em|strong|small|big|sup|sub|font|center|img|h[1-6]|blockquote|pre|code|section|header|footer|nav|article|button|form|input|label|o:p|v:[a-z]+|xml|!doctype";
 

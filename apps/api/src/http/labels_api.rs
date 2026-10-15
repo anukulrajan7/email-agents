@@ -12,13 +12,13 @@ use std::collections::HashSet;
 use super::AppState;
 use crate::{
     ai::label_suggest::{MAX_SAMPLES, SampleMail, finalize},
-    audit::{self, Actor, Entry},
-    auth::{AuthUser, require_role},
-    db::{new_id, now_ms},
-    domain::{LABEL_TEMPLATES, OTHER_LABEL, Role, WORKFLOW_TEMPLATES},
-    error::{AppError, AppResult},
-    labels::{COLORS, MAX_ACTIVE_LABELS, slugify},
-    sources::normalize::truncate_chars,
+    platform::audit::{self, Actor, Entry},
+    platform::auth::{AuthUser, require_role},
+    platform::db::{new_id, now_ms},
+    platform::domain::{LABEL_TEMPLATES, OTHER_LABEL, Role, WORKFLOW_TEMPLATES},
+    platform::error::{AppError, AppResult},
+    understanding::labels::{COLORS, MAX_ACTIVE_LABELS, slugify},
+    mail::sources::normalize::truncate_chars,
 };
 
 const LABEL_SELECT: &str = "SELECT l.id, l.key, l.name, l.description, l.color, l.position, l.system, l.archived,
@@ -187,7 +187,7 @@ pub async fn update(
             .ok_or(AppError::NotFound)?;
     match body.archived {
         Some(true) if key == OTHER_LABEL => return Err(AppError::Conflict("the Other label is the safety net and cannot be archived".into())),
-        Some(true) if crate::packs::has_feature(&state.db, &ws, crate::packs::FEATURE_HR_WORKFLOWS).await? => {
+        Some(true) if crate::platform::packs::has_feature(&state.db, &ws, crate::platform::packs::FEATURE_HR_WORKFLOWS).await? => {
             let keys: Vec<&str> = WORKFLOW_TEMPLATES.iter().filter(|t| t.label_key == key).map(|t| t.key).collect();
             for template_key in keys {
                 let enabled: Option<bool> =
@@ -288,7 +288,7 @@ pub async fn suggest(State(state): State<AppState>, user: AuthUser, Path(ws): Pa
             snippet: truncate_chars(&r.body_text.split_whitespace().collect::<Vec<_>>().join(" "), 200),
         })
         .collect();
-    let existing = crate::labels::active(&state.db, &ws).await?;
+    let existing = crate::understanding::labels::active(&state.db, &ws).await?;
     // Archived labels keep their key too, so a suggestion can never collide with one.
     let taken: HashSet<String> = sqlx::query_scalar::<_, String>("SELECT key FROM labels WHERE workspace_id = ?1")
         .bind(&ws)
@@ -337,7 +337,7 @@ async fn recheck_other_mail(conn: &mut sqlx::SqliteConnection, ws: &str, _label_
             crate::jobs::enqueue_at(
                 &mut *conn,
                 crate::jobs::kind::CLASSIFY_EMAIL,
-                &format!("classify:{id}:{}:recheck:{bucket}", crate::domain::TAXONOMY_VERSION),
+                &format!("classify:{id}:{}:recheck:{bucket}", crate::platform::domain::TAXONOMY_VERSION),
                 Some(ws),
                 &json!({ "message_id": id }),
                 crate::jobs::DEFAULT_MAX_ATTEMPTS,

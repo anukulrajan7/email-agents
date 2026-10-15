@@ -15,7 +15,7 @@ use axum::{
 };
 use sqlx::SqlitePool;
 
-use crate::{db::now_ms, error::AppError, http::AppState};
+use crate::{platform::db::now_ms, platform::error::AppError, http::AppState};
 
 /// The email body renders in a `srcdoc` iframe, which inherits this policy (plus its own
 /// stricter one): remote images over https, inline styles. The Gmail connect flow is Nango's

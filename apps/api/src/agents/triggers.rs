@@ -6,16 +6,16 @@ use sqlx::SqliteConnection;
 
 use super::case::{self, NewCase};
 use crate::{
-    agent_profiles::{self, TASK_REPLY, TASK_REQUIREMENTS},
-    agent_registry::{
+    agents::profiles::{self, TASK_REPLY, TASK_REQUIREMENTS},
+    agents::registry::{
         SHADOW_MAX_PER_DAY,
         routing::{self, RoutingAgent},
         spec::Trigger,
         store, templates,
     },
     ai::Insight,
-    db::now_ms,
-    domain::OTHER_LABEL,
+    platform::db::now_ms,
+    platform::domain::OTHER_LABEL,
     http::AppState,
     jobs::{self, Job, handlers::JobError, kind, matching_jobs::REQUIREMENT_LABEL},
 };
@@ -51,7 +51,7 @@ pub enum Started {
 }
 
 /// Why a person may not start a case on mail in another member's own mailbox (their own agent handles it).
-fn foreign_personal_refusal(ctx: &agent_profiles::AgentContext, started_by: Option<&str>) -> Option<String> {
+fn foreign_personal_refusal(ctx: &profiles::AgentContext, started_by: Option<&str>) -> Option<String> {
     let starter = started_by?;
     let owner = ctx.owner.as_ref().filter(|o| o.user_id != starter)?;
     let name = owner
@@ -61,12 +61,12 @@ fn foreign_personal_refusal(ctx: &agent_profiles::AgentContext, started_by: Opti
         .filter(|n| !n.is_empty())
         .or_else(|| owner.email.split('@').next().filter(|n| !n.is_empty()))
         .unwrap_or(&owner.email);
-    Some(format!("This is in {name}'s personal mailbox \u{2014} their own {} handles it.", crate::agent_registry::templates::PERSONAL_NAME))
+    Some(format!("This is in {name}'s personal mailbox \u{2014} their own {} handles it.", crate::agents::registry::templates::PERSONAL_NAME))
 }
 
 /// Same refusal for the assistant's plan step, before any card is prepared.
 pub async fn personal_refusal(state: &AppState, ws: &str, message_id: &str, started_by: &str) -> sqlx::Result<Option<String>> {
-    let ctx = agent_profiles::context_for_message(&state.db, &state.config, ws, message_id).await?;
+    let ctx = profiles::context_for_message(&state.db, &state.config, ws, message_id).await?;
     Ok(foreign_personal_refusal(&ctx, Some(started_by)))
 }
 
@@ -78,7 +78,7 @@ async fn agent_for(
     task: &str,
     started_by: Option<&str>,
 ) -> sqlx::Result<Result<Option<String>, String>> {
-    let ctx = agent_profiles::context_for_message(&state.db, &state.config, ws, message_id).await?;
+    let ctx = profiles::context_for_message(&state.db, &state.config, ws, message_id).await?;
     let name = &ctx.agent.name;
     if let Some(why) = foreign_personal_refusal(&ctx, started_by) {
         return Ok(Err(why));
@@ -96,7 +96,7 @@ async fn agent_for(
 /// Starts (or finds) the requirement case.
 pub async fn start_requirement_case(state: &AppState, ws: &str, requirement_id: &str, created_by: Option<&str>) -> sqlx::Result<Started> {
     let Some(r) = requirement_facts(state, ws, requirement_id).await? else { return Ok(Started::NotFound) };
-    if !crate::packs::has_feature(&state.db, ws, crate::packs::FEATURE_REQUIREMENT_AGENT).await? {
+    if !crate::platform::packs::has_feature(&state.db, ws, crate::platform::packs::FEATURE_REQUIREMENT_AGENT).await? {
         return Ok(Started::NotAllowed("The HR & recruiting pack is not turned on for this workspace".into()));
     }
     let owner = match agent_for(state, ws, &r.message_id, TASK_REQUIREMENTS, created_by).await? {
@@ -165,7 +165,7 @@ async fn requirement_facts(state: &AppState, ws: &str, requirement_id: &str) -> 
 
 /// Hook after matching ran for a requirement record: start its case once, for new mail only.
 pub async fn after_requirement_matched(state: &AppState, ws: &str, requirement_id: &str) -> Result<(), JobError> {
-    if !state.planner.enabled() || !crate::packs::has_feature(&state.db, ws, crate::packs::FEATURE_REQUIREMENT_AGENT).await? {
+    if !state.planner.enabled() || !crate::platform::packs::has_feature(&state.db, ws, crate::platform::packs::FEATURE_REQUIREMENT_AGENT).await? {
         return Ok(());
     }
     let Some(r) = requirement_facts(state, ws, requirement_id).await? else { return Ok(()) };
@@ -262,7 +262,7 @@ pub async fn start_inbox_case(state: &AppState, ws: &str, message_id: &str, crea
 /// Automatic cases never answer a timesheet: the timesheet desk records it and asks a person only when the record
 /// needs a look. Anything else that would work the email (Meera as the fallback, an observing agent) stands down.
 async fn timesheet_gate(state: &AppState, ws: &str, message_id: &str, routed: Option<&routing::Routed>) -> sqlx::Result<Option<String>> {
-    use crate::staffing::timesheet_records as ts;
+    use crate::hr::staffing::timesheet_records as ts;
     if !ts::suppresses_auto_reply(&state.db, ws, message_id).await? {
         return Ok(None);
     }
@@ -275,7 +275,7 @@ async fn timesheet_gate(state: &AppState, ws: &str, message_id: &str, routed: Op
 /// day, and none once half of the workspace's daily AI budget is used.
 async fn shadow_allowed(state: &AppState, ws: &str) -> sqlx::Result<bool> {
     Ok(shadow_cases_today(state, ws).await? < SHADOW_MAX_PER_DAY
-        && crate::ai_ledger::within_budget(&state.db, state.config.ai_daily_budget_usd * 0.5, ws).await)
+        && crate::ai::ledger::within_budget(&state.db, state.config.ai_daily_budget_usd * 0.5, ws).await)
 }
 
 async fn shadow_cases_today(state: &AppState, ws: &str) -> sqlx::Result<i64> {
@@ -342,11 +342,11 @@ pub async fn after_analysis(state: &AppState, job: &Job, message_id: &str, insig
     let Some(ws) = job.workspace_id.as_deref() else { return Ok(()) };
     routing::route_message(&state.db, &state.config, ws, message_id).await?;
     if let Some(m) = message_facts(state, ws, message_id).await?
-        && m.category.as_deref() == Some(crate::staffing::timesheet_records::LABEL)
-        && crate::packs::enabled(&state.db, ws, crate::packs::STAFFING).await?
+        && m.category.as_deref() == Some(crate::hr::staffing::timesheet_records::LABEL)
+        && crate::platform::packs::enabled(&state.db, ws, crate::platform::packs::STAFFING).await?
     {
         // The desk records the timesheet and nothing is drafted; a record that needs a look gets the workflow's review item.
-        crate::staffing::timesheet_records::record_message(state, ws, message_id).await?;
+        crate::hr::staffing::timesheet_records::record_message(state, ws, message_id).await?;
         return Ok(());
     }
     if !insight.needs_reply || !state.planner.enabled() {
@@ -357,7 +357,7 @@ pub async fn after_analysis(state: &AppState, job: &Job, message_id: &str, insig
     if m.direction != "inbound" || !label_ok || !is_recent(state, m.received_at) || thread_has_open_case(state, ws, &m.thread_id).await? {
         return Ok(());
     }
-    if !crate::reply_settings::load(&state.db, &state.config, ws).await?.auto_reply {
+    if !crate::replies::reply_settings::load(&state.db, &state.config, ws).await?.auto_reply {
         return Ok(());
     }
     start_inbox_case(state, ws, message_id, None).await?;

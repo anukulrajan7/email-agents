@@ -1,8 +1,8 @@
 //! Staffing operations for the HR & recruiting pack: submissions and outcomes read from sent mail, the
 //! billable-staff mail policy and timesheet-missing alerts, portal reconciliation and the HRMS metrics
-//! (which plug into `crate::team::metrics`). Everything here is gated by the `staffing` pack.
+//! (which plug into `crate::hr::team::metrics`). Everything here is gated by the `staffing` pack.
 //!
-//! The people directory, escalation, scoping and the metrics framework are generic and live in `crate::team`.
+//! The people directory, escalation, scoping and the metrics framework are generic and live in `crate::hr::team`.
 
 pub mod metrics;
 pub mod policy;
@@ -14,11 +14,11 @@ pub mod timesheet_records;
 use serde_json::{Value, json};
 
 use crate::{
-    db::now_ms,
-    error::{AppError, AppResult},
+    platform::db::now_ms,
+    platform::error::{AppError, AppResult},
     http::AppState,
     jobs::{self, handlers::JobError, kind},
-    packs,
+    platform::packs,
 };
 
 pub const SUBMISSION_UPDATE_LABEL: &str = "submission_update";

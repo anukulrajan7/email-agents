@@ -10,9 +10,9 @@ use sha2::Sha256;
 use subtle::ConstantTimeEq;
 
 use crate::{
-    db::{now_ms, parse_iso_ms},
-    domain::{AttachmentMeta, NormalizedEmail},
-    sources::normalize,
+    platform::db::{now_ms, parse_iso_ms},
+    platform::domain::{AttachmentMeta, NormalizedEmail},
+    mail::sources::normalize,
 };
 
 const TOLERANCE_SECS: i64 = 5 * 60;
@@ -167,7 +167,7 @@ impl ReceivedEmail {
             bulk_signals: self
                 .headers
                 .as_ref()
-                .map(|h| crate::bulk::header_signals(&crate::bulk::header_lookup(h), &[]))
+                .map(|h| crate::mail::bulk::header_signals(&crate::mail::bulk::header_lookup(h), &[]))
                 .unwrap_or_default(),
         }
     }
@@ -227,7 +227,7 @@ mod tests {
     use axum::http::HeaderValue;
 
     fn secret() -> String {
-        crate::config::test_webhook_secret()
+        crate::platform::config::test_webhook_secret()
     }
 
     fn headers(id: &str, ts: i64, sig: &str) -> HeaderMap {

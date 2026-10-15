@@ -6,8 +6,8 @@ use crate::common;
 use axum::http::StatusCode;
 use common::*;
 use email_ai_api::{
-    agent_registry::{spec::AgentSpec, templates},
-    designer::{DAILY_LIMIT, ScriptedDesigner, session},
+    agents::registry::{spec::AgentSpec, templates},
+    agents::designer::{DAILY_LIMIT, ScriptedDesigner, session},
     jobs::worker,
 };
 use serde_json::{Value, json};
@@ -235,7 +235,7 @@ async fn a_session_has_one_designer_call_at_a_time_and_failed_calls_are_recorded
     sqlx::query("INSERT INTO designer_calls (id, workspace_id, session_id, user_id, kind, status, created_at) VALUES ('dcl_busy', ?1, ?2, 'u', 'design', 'pending', ?3)")
         .bind(&env.ws)
         .bind(id)
-        .bind(email_ai_api::db::now_ms())
+        .bind(email_ai_api::platform::db::now_ms())
         .execute(&env.state.db)
         .await
         .unwrap();
@@ -251,10 +251,10 @@ async fn a_session_has_one_designer_call_at_a_time_and_failed_calls_are_recorded
 struct Bumper(sqlx::SqlitePool);
 
 #[async_trait::async_trait]
-impl email_ai_api::designer::Designer for Bumper {
-    async fn design(&self, _: &email_ai_api::designer::DesignRequest) -> Result<email_ai_api::designer::DesignReply, email_ai_api::ai::AiError> {
+impl email_ai_api::agents::designer::Designer for Bumper {
+    async fn design(&self, _: &email_ai_api::agents::designer::DesignRequest) -> Result<email_ai_api::agents::designer::DesignReply, email_ai_api::ai::AiError> {
         sqlx::query("UPDATE designer_sessions SET rev = rev + 1").execute(&self.0).await.unwrap();
-        Ok(email_ai_api::designer::DesignReply { json: refund_spec().to_string(), cost_usd: 0.01 })
+        Ok(email_ai_api::agents::designer::DesignReply { json: refund_spec().to_string(), cost_usd: 0.01 })
     }
 }
 
@@ -266,7 +266,7 @@ async fn a_design_turn_that_lost_a_race_does_not_overwrite_the_newer_session() {
     let mut racing = env.state.clone();
     racing.designer = std::sync::Arc::new(Bumper(env.state.db.clone()));
     let err = session::design_turn(&racing, &env.ws, &id, "shorter please").await;
-    assert!(matches!(err, Err(email_ai_api::error::AppError::Conflict(_))), "{err:?}");
+    assert!(matches!(err, Err(email_ai_api::platform::error::AppError::Conflict(_))), "{err:?}");
     let after = session::get(&env.state.db, &env.ws, &id).await.unwrap().unwrap();
     assert_eq!(after.turns.len(), 2, "the losing turn wrote nothing");
     assert!(after.cost_usd >= 0.01, "but what it cost is still charged");
@@ -354,7 +354,7 @@ async fn a_personal_agents_session_only_sees_its_owners_mailbox_and_has_its_own_
 async fn only_an_admin_approver_opens_a_designer_session_from_a_proposal() {
     let env = env_with(ScriptedDesigner::new().reply(refund_spec())).await;
     let err = session::open_from_proposal(&env.state, &env.ws, &env.op_id, "Refund helper", "Collect order numbers").await;
-    assert!(matches!(err, Err(email_ai_api::error::AppError::Forbidden)));
+    assert!(matches!(err, Err(email_ai_api::platform::error::AppError::Forbidden)));
     assert_eq!(env.count("SELECT COUNT(*) FROM designer_sessions WHERE workspace_id = ?1").await, 0);
 }
 
@@ -390,7 +390,7 @@ struct CostlyExtractor;
 
 #[async_trait::async_trait]
 impl email_ai_api::ai::field_extract::FieldExtractor for CostlyExtractor {
-    async fn extract(&self, _: &str, _: &str, _: &[email_ai_api::agent_registry::spec::ExtractField]) -> Result<email_ai_api::ai::field_extract::Extracted, email_ai_api::ai::AiError> {
+    async fn extract(&self, _: &str, _: &str, _: &[email_ai_api::agents::registry::spec::ExtractField]) -> Result<email_ai_api::ai::field_extract::Extracted, email_ai_api::ai::AiError> {
         Ok(email_ai_api::ai::field_extract::Extracted { found: [("order_id".to_string(), "4411".to_string())].into(), cost_usd: 0.0042 })
     }
 }

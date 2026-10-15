@@ -8,11 +8,11 @@ use crate::staffing_common;
 use axum::http::StatusCode;
 use common::*;
 use email_ai_api::{
-    audit::Actor,
-    db,
-    deletion::{self, Opts as DelOpts},
-    domain::NormalizedEmail,
-    ingest,
+    platform::audit::Actor,
+    platform::db,
+    mail::deletion::{self, Opts as DelOpts},
+    platform::domain::NormalizedEmail,
+    mail::ingest,
     jobs::{self, kind, worker},
 };
 use serde_json::{Value, json};

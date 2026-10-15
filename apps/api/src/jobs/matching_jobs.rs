@@ -15,12 +15,12 @@ use crate::{
         embeddings::{EMBEDDING_DIMS, to_blob},
         prepare_text,
     },
-    audit::{self, Actor, Entry},
-    db::{new_id, now_ms},
+    platform::audit::{self, Actor, Entry},
+    platform::db::{new_id, now_ms},
     http::AppState,
-    jobs, knowledge,
-    matching::{self, CandidateFields, MIN_MATCH_SCORE, RequirementFields, TextResult},
-    sources::normalize::truncate_chars,
+    jobs, learning::knowledge,
+    hr::matching::{self, CandidateFields, MIN_MATCH_SCORE, RequirementFields, TextResult},
+    mail::sources::normalize::truncate_chars,
 };
 
 pub const REQUIREMENT_LABEL: &str = "client_requirement";
@@ -64,7 +64,7 @@ pub async fn download_gmail_attachment(
     let path = format!("messages/{source_message_id}/attachments/{provider_attachment_id}");
     match state.nango.gmail_call(Method::GET, connection_id, provider_config_key, &path, None).await {
         Ok(v) => Ok(v.get("data").and_then(Value::as_str).and_then(|d| URL_SAFE_NO_PAD.decode(d.trim_end_matches('=')).ok())),
-        Err(crate::sources::nango::NangoError::Unavailable(m)) => Err(JobError::Retry(m)),
+        Err(crate::mail::sources::nango::NangoError::Unavailable(m)) => Err(JobError::Retry(m)),
         Err(e) => {
             tracing::warn!(error = %e, "attachment download failed");
             Ok(None)
@@ -140,7 +140,7 @@ pub async fn extract_record(state: &AppState, payload: &Value) -> Result<(), Job
     for (name, t) in &attachments {
         text.push_str(&format!("\n\n--- Attachment: {name} ---\n{t}"));
     }
-    let text = crate::sources::normalize::truncate_chars(&text, 20_000);
+    let text = crate::mail::sources::normalize::truncate_chars(&text, 20_000);
     let domain = msg.sender_address.split_once('@').map(|(_, d)| d.to_string());
     let source = if state.config.openrouter_api_key.is_empty() || state.config.openrouter_classifier_model_id.is_empty() {
         "rules"
@@ -166,7 +166,7 @@ pub async fn extract_record(state: &AppState, payload: &Value) -> Result<(), Job
             .bind(&msg.workspace_id)
             .bind(message_id)
             .bind(&r.client)
-            .bind(crate::sources::normalize::truncate_chars(&r.role_title, 200))
+            .bind(crate::mail::sources::normalize::truncate_chars(&r.role_title, 200))
             .bind(json!(r.must_have_skills).to_string())
             .bind(json!(r.nice_to_have_skills).to_string())
             .bind(r.min_experience)
@@ -199,14 +199,14 @@ pub async fn extract_record(state: &AppState, payload: &Value) -> Result<(), Job
             .bind(new_id("cand"))
             .bind(&msg.workspace_id)
             .bind(message_id)
-            .bind(crate::sources::normalize::truncate_chars(&c.name, 120))
+            .bind(crate::mail::sources::normalize::truncate_chars(&c.name, 120))
             .bind(&c.email)
             .bind(json!(c.skills).to_string())
             .bind(c.total_experience)
             .bind(&c.location)
             .bind(c.notice_days)
             .bind(&c.referred_by)
-            .bind(c.summary.as_deref().map(|s| crate::sources::normalize::truncate_chars(s, 600)))
+            .bind(c.summary.as_deref().map(|s| crate::mail::sources::normalize::truncate_chars(s, 600)))
             .bind(source)
             .bind(now)
             .fetch_one(&state.db)
@@ -464,7 +464,7 @@ async fn recall(db: &SqlitePool, ws: &str, record_kind: &str, vector: Option<&[f
         .fetch_all(db)
         .await?;
     }
-    let terms = crate::skills::overlap_terms(skills);
+    let terms = crate::replies::skills::overlap_terms(skills);
     if !terms.is_empty() {
         let has_skill = |column: &str| {
             format!("EXISTS (SELECT 1 FROM json_each(x.{column}) j WHERE lower(trim(j.value)) IN (SELECT value FROM json_each(?2)))")
@@ -606,8 +606,8 @@ pub async fn match_record(state: &AppState, job: &Job, payload: &Value) -> Resul
     tracing::info!(record_kind, recalled, kept, semantic = own_vector.is_some(), "matching finished");
     if record_kind == "requirement" {
         crate::agents::triggers::after_requirement_matched(state, &ws, id).await?;
-        let outcome = crate::candidate_watch::notify_matches(state, &ws, id).await?;
-        crate::candidate_watch::schedule_more(state, &ws, id, outcome).await?;
+        let outcome = crate::hr::candidate_watch::notify_matches(state, &ws, id).await?;
+        crate::hr::candidate_watch::schedule_more(state, &ws, id, outcome).await?;
     }
     Ok(())
 }

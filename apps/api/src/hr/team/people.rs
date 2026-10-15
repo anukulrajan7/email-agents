@@ -8,8 +8,8 @@ use sqlx::{SqliteConnection, SqlitePool};
 
 use crate::{
     alerts::valid_email,
-    db::{new_id, now_ms},
-    team::clock,
+    platform::db::{new_id, now_ms},
+    hr::team::clock,
 };
 
 pub const BILLABLE: &str = "billable";

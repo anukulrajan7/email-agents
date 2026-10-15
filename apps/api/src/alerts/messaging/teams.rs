@@ -4,9 +4,9 @@ use serde_json::{Value, json};
 use sqlx::SqlitePool;
 
 use crate::{
-    audit::{self, Actor, Entry},
-    db::{new_id, now_ms},
-    error::{AppError, AppResult},
+    platform::audit::{self, Actor, Entry},
+    platform::db::{new_id, now_ms},
+    platform::error::{AppError, AppResult},
     http::AppState,
 };
 
@@ -59,7 +59,7 @@ pub async fn save(state: &AppState, ws: &str, actor: &str, team_id: Option<&str>
     }
     let members = only_members(state, ws, members).await?;
     if let Some(agent) = desk_agent_id {
-        let known = crate::agent_registry::store::get_in(&state.db, ws, agent).await?.is_some_and(|a| a.scope == crate::agent_registry::store::SCOPE_WORKSPACE);
+        let known = crate::agents::registry::store::get_in(&state.db, ws, agent).await?.is_some_and(|a| a.scope == crate::agents::registry::store::SCOPE_WORKSPACE);
         if !known {
             return Err(AppError::BadRequest("the desk agent was not found".into()));
         }

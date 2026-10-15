@@ -13,9 +13,9 @@ use super::{
     policy::{self, started_by_month},
 };
 use crate::{
-    db::{new_id, now_ms},
+    platform::db::{new_id, now_ms},
     http::AppState,
-    team::{
+    hr::team::{
         clock::{self, DAY_MS},
         escalation::{self, PersonAlert},
         people::{self, ImportReport, RowError},

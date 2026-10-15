@@ -3,7 +3,7 @@
 
 use super::{Turn, validate::WsCtx};
 use crate::{
-    agent_registry::spec::{AgentSpec, Issue},
+    agents::registry::spec::{AgentSpec, Issue},
     agents::tools,
     ai::fence::fence,
 };
@@ -41,7 +41,7 @@ pub fn system_prompt(ctx: &WsCtx) -> String {
     let labels = list_or_none(ctx.labels.iter().map(|l| format!("{} ({})", l.key, l.name)).collect());
     let tool_catalogue = tools::registry()
         .all()
-        .filter(|t| ctx.matching || !crate::agent_registry::runtime::MATCHING_TOOLS.contains(&t.name()))
+        .filter(|t| ctx.matching || !crate::agents::registry::runtime::MATCHING_TOOLS.contains(&t.name()))
         .map(|t| format!("{} [{}]: {}", t.name(), t.risk().as_str(), t.description()))
         .collect::<Vec<_>>()
         .join("\n");
@@ -97,7 +97,7 @@ pub fn repair_user(previous: &str, issues: &[Issue]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::designer::validate::{AgentBrief, LabelBrief};
+    use crate::agents::designer::validate::{AgentBrief, LabelBrief};
 
     #[test]
     fn the_system_prompt_names_the_workspace_and_hides_matching_without_staffing() {

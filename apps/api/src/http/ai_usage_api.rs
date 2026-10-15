@@ -6,10 +6,10 @@ use serde::Deserialize;
 
 use super::AppState;
 use crate::{
-    ai_ledger::{self, AiUsage},
-    auth::{AuthUser, require_role},
-    domain::Role,
-    error::AppResult,
+    ai::ledger::{self, AiUsage},
+    platform::auth::{AuthUser, require_role},
+    platform::domain::Role,
+    platform::error::AppResult,
 };
 
 #[derive(Deserialize)]
@@ -24,7 +24,7 @@ pub async fn get(
     Query(q): Query<UsageQuery>,
 ) -> AppResult<Json<AiUsage>> {
     require_role(&state.db, &ws, &user, Role::Admin).await?;
-    let usage = ai_ledger::usage(&state.db, &ws, q.days.unwrap_or(30), state.config.ai_daily_budget_usd).await?;
+    let usage = ledger::usage(&state.db, &ws, q.days.unwrap_or(30), state.config.ai_daily_budget_usd).await?;
     Ok(Json(usage))
 }
 

@@ -10,9 +10,9 @@ use sqlx::SqlitePool;
 
 use crate::{
     ai::understand::{self, ShadowReport},
-    ai_ledger::{AUTOMATIC_TASKS, task_label},
+    ai::ledger::{AUTOMATIC_TASKS, task_label},
     alerts::{self, NewAlert},
-    incidents::{self, ALL_KINDS, IncidentRow, Kind, NewIncident},
+    ai::incidents::{self, ALL_KINDS, IncidentRow, Kind, NewIncident},
     metrics::{DAY_MS, percentile, ratio},
 };
 
@@ -148,7 +148,7 @@ fn view(row: IncidentRow, agent_names: &HashMap<String, String>) -> OpenIncident
 
 pub async fn report(db: &SqlitePool, ws: &str, days: i64, daily_budget_usd: f64) -> sqlx::Result<HealthReport> {
     let days = days.clamp(1, 90);
-    let now = crate::db::now_ms();
+    let now = crate::platform::db::now_ms();
     let today = day_start(now);
     let since = today - (days - 1) * DAY_MS;
 

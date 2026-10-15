@@ -7,18 +7,18 @@ use serde_json::{Value, json};
 
 use super::AppState;
 use crate::{
-    audit::{self, Actor, Entry},
-    auth::{AuthUser, require_role},
-    db::{iso, new_id, now_ms},
-    domain::{LABEL_TEMPLATES, Role},
-    error::{AppError, AppResult},
+    platform::audit::{self, Actor, Entry},
+    platform::auth::{AuthUser, require_role},
+    platform::db::{iso, new_id, now_ms},
+    platform::domain::{LABEL_TEMPLATES, Role},
+    platform::error::{AppError, AppResult},
     jobs::matching_jobs::{CANDIDATE_LABEL, REQUIREMENT_LABEL},
 };
 
 /// Ensures the two labels matching depends on exist and are active.
 pub async fn setup(State(state): State<AppState>, user: AuthUser, Path(ws): Path<String>) -> AppResult<Json<Value>> {
     require_role(&state.db, &ws, &user, Role::Admin).await?;
-    if !crate::packs::has_feature(&state.db, &ws, crate::packs::FEATURE_MATCHING).await? {
+    if !crate::platform::packs::has_feature(&state.db, &ws, crate::platform::packs::FEATURE_MATCHING).await? {
         return Err(AppError::Conflict("matching is part of the HR & recruiting pack; turn that pack on first".into()));
     }
     let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;

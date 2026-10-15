@@ -9,10 +9,10 @@ use sha2::Digest;
 
 use super::AppState;
 use crate::{
-    db::{new_id, now_ms},
-    error::{AppError, AppResult},
+    platform::db::{new_id, now_ms},
+    platform::error::{AppError, AppResult},
     jobs::{self, kind},
-    sources::{
+    mail::sources::{
         nango,
         resend::{WebhookEnvelope, verify_svix},
     },

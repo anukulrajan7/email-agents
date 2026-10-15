@@ -1,6 +1,6 @@
-//! HR & recruiting metrics, plugged into `crate::team::metrics`, and the read-only functions the Ask Meera
+//! HR & recruiting metrics, plugged into `crate::hr::team::metrics`, and the read-only functions the Ask Meera
 //! assistant calls for exact numbers. Nothing here writes, authorises or uses a model: the caller decides
-//! whether the person asking may see the answer (use `crate::team::access` for that).
+//! whether the person asking may see the answer (use `crate::hr::team::access` for that).
 //!
 //! ```ignore
 //! let me = staffing::metrics::find_people(&db, ws, "priya").await?;          // who is "Priya"?
@@ -11,7 +11,7 @@
 use serde::Serialize;
 use sqlx::SqlitePool;
 
-use crate::team::{
+use crate::hr::team::{
     access,
     metrics::{self, MetricDef, PersonMetrics, TeamMetrics, Unit},
     people,

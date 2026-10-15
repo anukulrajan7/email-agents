@@ -155,7 +155,7 @@ async fn a_timesheet_counts_only_for_the_month_it_is_for() {
     h.classify(&aug, "timesheet").await;
     let get = |m: &'static str| {
         let (db, ws, pid) = (h.state.db.clone(), ws.clone(), pid.to_string());
-        async move { email_ai_api::staffing::policy::timesheet_mail(&db, &ws, &pid, m).await.unwrap() }
+        async move { email_ai_api::hr::staffing::policy::timesheet_mail(&db, &ws, &pid, m).await.unwrap() }
     };
     // Sent 2 Sep, inside August's three-day grace: it is August's.
     assert_eq!(get("2026-08").await.unwrap().hours, Some(150.0));
@@ -168,18 +168,18 @@ async fn a_timesheet_counts_only_for_the_month_it_is_for() {
 
     // Portal hours for August are never compared with September's mail.
     h.call("POST", &format!("{}/staffing/portal/hours", api(&ws)), OWNER, Some(json!({"csv": "email,month,hours\nravi@client.test,2026-08,150\n"}))).await;
-    let r = email_ai_api::staffing::portal::reconcile(&h.state.db, &ws, OCT5).await.unwrap();
+    let r = email_ai_api::hr::staffing::portal::reconcile(&h.state.db, &ws, OCT5).await.unwrap();
     assert!(r.mismatches.is_empty(), "{r:?}");
     assert_eq!(r.matched, 1);
     h.call("POST", &format!("{}/staffing/portal/hours", api(&ws)), OWNER, Some(json!({"csv": "email,month,hours\nravi@client.test,2026-08,152\n"}))).await;
-    let r = email_ai_api::staffing::portal::reconcile(&h.state.db, &ws, OCT5).await.unwrap();
+    let r = email_ai_api::hr::staffing::portal::reconcile(&h.state.db, &ws, OCT5).await.unwrap();
     assert_eq!(r.mismatches.len(), 1, "152 portal vs 150 mailed for August");
     assert_eq!(r.mismatches[0].detail["email_hours"], 150.0);
 }
 
 #[test]
 fn periods_from_subjects_and_dates() {
-    use email_ai_api::staffing::policy::period_of;
+    use email_ai_api::hr::staffing::policy::period_of;
     assert_eq!(period_of("Timesheet", OCT5 - 33 * DAY, 0, 3), "2026-08");
     assert_eq!(period_of("Timesheet", OCT5 - 20 * DAY, 0, 3), "2026-09");
     assert_eq!(period_of("Sept timesheet", OCT5, 0, 3), "2026-09");

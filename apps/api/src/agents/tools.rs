@@ -11,12 +11,12 @@ use serde_json::{Value, json};
 use super::{case::Case, sentence};
 use crate::{
     ai::DraftQuality,
-    audit::{self, Actor, Entry},
-    db::{iso, new_id, now_ms},
-    error::AppError,
+    platform::audit::{self, Actor, Entry},
+    platform::db::{iso, new_id, now_ms},
+    platform::error::AppError,
     http::AppState,
     jobs::handlers::{self, JobError},
-    knowledge, memory, replies,
+    learning::knowledge, learning::memory, replies,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -664,7 +664,7 @@ impl Tool for DraftEmail {
         let (draft_id, body) = match reused.clone() {
             Some(d) => d,
             None => {
-                let (agent, _) = crate::agent_registry::runtime::context_for_case(&ctx.state.db, &ctx.state.config, ctx.case).await?;
+                let (agent, _) = crate::agents::registry::runtime::context_for_case(&ctx.state.db, &ctx.state.config, ctx.case).await?;
                 let quality = match opt_str(args, "quality") {
                     _ if agent.agent.quality == "best" => Some(DraftQuality::Premium),
                     Some("premium") => Some(DraftQuality::Premium),
@@ -677,7 +677,7 @@ impl Tool for DraftEmail {
                     Some((o.get("user_id")?.as_str()?.to_string(), o.get("text")?.as_str()?.to_string()))
                 });
                 if ctx.case.shadow {
-                    let body = crate::agent_profiles::with_draft_style(style, handlers::preview_draft(ctx.state, &msg.id, quality)).await?;
+                    let body = crate::agents::profiles::with_draft_style(style, handlers::preview_draft(ctx.state, &msg.id, quality)).await?;
                     if body.trim().is_empty() {
                         return failed("The writer judged that this email needs no reply.");
                     }
@@ -694,7 +694,7 @@ impl Tool for DraftEmail {
                     Some(text) => format!("agent:{}:{}:{}", ctx.case.id, msg.id, instruction_key(text)),
                     None => format!("agent:{}:{}", ctx.case.id, ctx.turn),
                 };
-                crate::agent_profiles::with_draft_style(style, handlers::create_agent_draft(ctx.state, &msg.id, instructions, quality, &origin, ctx.case.agent_id.as_deref(), owner_said.as_ref().map(|(u, t)| (u.as_str(), t.as_str()))))
+                crate::agents::profiles::with_draft_style(style, handlers::create_agent_draft(ctx.state, &msg.id, instructions, quality, &origin, ctx.case.agent_id.as_deref(), owner_said.as_ref().map(|(u, t)| (u.as_str(), t.as_str()))))
                     .await?
                     .ok_or_else(|| ToolError::Failed("The writer judged that this email needs no reply.".into()))?
             }
@@ -883,12 +883,12 @@ impl Tool for ExtractFields {
         if msg.direction != "inbound" {
             return failed("Details can only be read from an email we received.");
         }
-        let fields: Vec<crate::agent_registry::spec::ExtractField> = serde_json::from_value(args.get("fields").cloned().unwrap_or(Value::Null))
+        let fields: Vec<crate::agents::registry::spec::ExtractField> = serde_json::from_value(args.get("fields").cloned().unwrap_or(Value::Null))
             .map_err(|_| ToolError::Failed("The details to find are not in the expected shape.".into()))?;
         if fields.is_empty() || fields.len() > 12 {
             return failed("Ask for 1 to 12 details.");
         }
-        if !fields.iter().all(crate::agent_registry::spec::field_ok) {
+        if !fields.iter().all(crate::agents::registry::spec::field_ok) {
             return failed("Each detail needs a lower-case name and a description of at most 200 characters.");
         }
         let extracted = ctx
@@ -943,7 +943,7 @@ impl Tool for RecordTimesheet {
                 ..Default::default()
             });
         }
-        let run = crate::staffing::timesheet_records::record_message(ctx.state, ctx.ws(), &msg.id).await?;
+        let run = crate::hr::staffing::timesheet_records::record_message(ctx.state, ctx.ws(), &msg.id).await?;
         let clean = !run.records.is_empty() && !run.needs_attention();
         let summary = match run.records.as_slice() {
             [] if run.deferred => "The timesheet could not be read just now; it is tried again later".to_string(),
@@ -994,7 +994,7 @@ impl Tool for LabelEmail {
                 ..Default::default()
             });
         }
-        if !crate::labels::is_active(&ctx.state.db, ctx.ws(), label).await? {
+        if !crate::understanding::labels::is_active(&ctx.state.db, ctx.ws(), label).await? {
             return failed("That label does not exist in this workspace.");
         }
         let existing: Option<(String, String, bool, String)> =
@@ -1012,10 +1012,10 @@ impl Tool for LabelEmail {
         }
         let out = crate::ai::ClassifyOutput {
             category: label.to_string(),
-            priority: crate::domain::Priority::parse(&priority).unwrap_or(crate::domain::Priority::Normal),
+            priority: crate::platform::domain::Priority::parse(&priority).unwrap_or(crate::platform::domain::Priority::Normal),
             requires_reply,
             confidence: None,
-            source: crate::domain::ClassificationSource::Llm,
+            source: crate::platform::domain::ClassificationSource::Llm,
             model_id: Some("agent".into()),
             model_version: None,
         };
@@ -1313,7 +1313,7 @@ impl Tool for ProposeAutomation {
             return failed("Only an admin who approves the suggestion can open the agent designer.");
         };
         let reason = opt_str(args, "reason").map(|r| sentence(r, 240)).unwrap_or_default();
-        let session = crate::designer::session::open_from_proposal(ctx.state, ctx.ws(), admin_id, &input.name, &Self::describe(&input, &reason)).await?;
+        let session = crate::agents::designer::session::open_from_proposal(ctx.state, ctx.ws(), admin_id, &input.name, &Self::describe(&input, &reason)).await?;
         audit::record(
             &mut *ctx.state.db.acquire().await?,
             Entry {
@@ -1341,15 +1341,15 @@ impl Tool for ProposeAutomation {
 struct SendMessage;
 
 impl SendMessage {
-    async fn target(ctx: &ToolCtx<'_>, args: &Value) -> Result<crate::messaging::recipients::Target, ToolError> {
-        crate::messaging::recipients::resolve(&ctx.state.db, ctx.ws(), str_arg(args, "to")?).await.map_err(ToolError::Failed)
+    async fn target(ctx: &ToolCtx<'_>, args: &Value) -> Result<crate::alerts::messaging::recipients::Target, ToolError> {
+        crate::alerts::messaging::recipients::resolve(&ctx.state.db, ctx.ws(), str_arg(args, "to")?).await.map_err(ToolError::Failed)
     }
 
-    fn channel(args: &Value) -> crate::messaging::dispatch::Channel {
+    fn channel(args: &Value) -> crate::alerts::messaging::dispatch::Channel {
         if opt_str(args, "channel") == Some("in_app") {
-            crate::messaging::dispatch::Channel::InApp
+            crate::alerts::messaging::dispatch::Channel::InApp
         } else {
-            crate::messaging::dispatch::Channel::Email
+            crate::alerts::messaging::dispatch::Channel::Email
         }
     }
 }
@@ -1383,7 +1383,7 @@ impl Tool for SendMessage {
     async fn preview(&self, ctx: &ToolCtx<'_>, args: &Value) -> Result<Option<Preview>, ToolError> {
         let target = Self::target(ctx, args).await?;
         let subject = str_arg(args, "subject")?;
-        let via = if matches!(Self::channel(args), crate::messaging::dispatch::Channel::InApp) || matches!(target, crate::messaging::recipients::Target::Team { .. }) {
+        let via = if matches!(Self::channel(args), crate::alerts::messaging::dispatch::Channel::InApp) || matches!(target, crate::alerts::messaging::recipients::Target::Team { .. }) {
             "in the app"
         } else {
             "by email"
@@ -1413,9 +1413,9 @@ impl Tool for SendMessage {
         };
         let owner = ctx.case.agent_user_id.as_deref();
         let ask = args.get("ask").and_then(Value::as_bool) == Some(true);
-        let sent = crate::messaging::dispatch::send(
+        let sent = crate::alerts::messaging::dispatch::send(
             ctx.state,
-            crate::messaging::dispatch::Request {
+            crate::alerts::messaging::dispatch::Request {
                 ws: ctx.ws(),
                 owner,
                 agent_id: ctx.case.agent_id.as_deref(),
@@ -1426,7 +1426,7 @@ impl Tool for SendMessage {
                 approver,
                 hold_secs: ctx.hold_secs,
                 watch: (ask && owner.is_some())
-                    .then_some(crate::messaging::dispatch::WatchSpec { question: body, nudge_hours: crate::messaging::watch::DEFAULT_NUDGE_HOURS }),
+                    .then_some(crate::alerts::messaging::dispatch::WatchSpec { question: body, nudge_hours: crate::alerts::messaging::watch::DEFAULT_NUDGE_HOURS }),
                 support: None,
                 via: "agent",
             },
@@ -1478,7 +1478,7 @@ impl Tool for NotifyOwner {
             return failed("This case has no owner to notify.");
         };
         let link = ctx.case.message_id.as_deref().map_or(json!({"kind": "meera"}), |m| json!({"kind": "message", "id": m}));
-        let id = crate::messaging::inapp::notify_owner(
+        let id = crate::alerts::messaging::inapp::notify_owner(
             ctx.state,
             ctx.ws(),
             owner,

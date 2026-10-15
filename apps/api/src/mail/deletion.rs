@@ -16,17 +16,17 @@ use serde_json::{Value, json};
 use sqlx::{SqliteConnection, SqlitePool};
 
 use crate::{
-    agent_registry::store,
+    agents::registry::store,
     agents::case,
-    audit::{self, Actor, Entry},
-    auth::{AuthUser, require_role},
-    db::now_ms,
-    domain::Role,
-    error::{AppError, AppResult},
+    platform::audit::{self, Actor, Entry},
+    platform::auth::{AuthUser, require_role},
+    platform::db::now_ms,
+    platform::domain::Role,
+    platform::error::{AppError, AppResult},
     http::AppState,
     jobs::{self, handlers::JobError, kind},
-    memory_learning::CONFIRMED,
-    team::access::{Level, resolve},
+    learning::memory_learning::CONFIRMED,
+    hr::team::access::{Level, resolve},
 };
 
 /// Emails deleted per transaction: short write locks, so syncs and requests keep flowing.
@@ -579,7 +579,7 @@ pub async fn is_blocked(conn: &mut SqliteConnection, source_id: &str, provider_m
 /// Nothing is revealed about ids the user may not touch.
 pub async fn authorize(db: &SqlitePool, ws: &str, user: &AuthUser, ids: &[String]) -> AppResult<()> {
     let access = resolve(db, ws, user).await?;
-    let wall = crate::team::scope::wall(db, ws, &access).await?.map(|w| json!(w).to_string());
+    let wall = crate::hr::team::scope::wall(db, ws, &access).await?.map(|w| json!(w).to_string());
     let rows: Vec<(String, Option<String>)> = sqlx::query_as(
         "SELECT m.id, s.connected_by_user_id FROM email_messages m JOIN email_sources s ON s.id = m.source_id
          WHERE m.workspace_id = ?1 AND m.suppressed = 0 AND m.id IN (SELECT value FROM json_each(?2))

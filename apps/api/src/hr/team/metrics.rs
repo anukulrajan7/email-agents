@@ -2,7 +2,7 @@
 //!
 //! A metric is a `MetricDef`: a key, a label, a unit and one SQL query over `(workspace, person, from, to)`.
 //! Every workspace gets the generic definitions (replies sent, average response time); a pack adds its own
-//! (`crate::staffing::metrics::DEFS`). The primary metric is the one daily and weekly targets count.
+//! (`crate::hr::staffing::metrics::DEFS`). The primary metric is the one daily and weekly targets count.
 
 use serde::Serialize;
 use sqlx::SqlitePool;
@@ -12,7 +12,7 @@ use super::{
     people::Person,
     settings,
 };
-use crate::packs;
+use crate::platform::packs;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -76,7 +76,7 @@ pub const GENERIC_DEFS: &[MetricDef] = &[
 pub fn defs_for(pack_keys: &[&str]) -> Vec<MetricDef> {
     let mut defs = GENERIC_DEFS.to_vec();
     if pack_keys.contains(&packs::STAFFING) {
-        let staffing = crate::staffing::metrics::DEFS;
+        let staffing = crate::hr::staffing::metrics::DEFS;
         if staffing.iter().any(|d| d.primary) {
             defs.iter_mut().for_each(|d| d.primary = false);
         }

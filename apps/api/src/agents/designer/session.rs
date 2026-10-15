@@ -9,16 +9,16 @@ use super::{
     validate::{self, AgentBrief, CUSTOM_CEILING, LabelBrief, WsCtx},
 };
 use crate::{
-    agent_registry::{
+    agents::registry::{
         spec::{AgentSpec, Issue, Trigger},
         store::{self, AgentRow, NewAgent},
         versions::{self, NewVersion},
     },
-    audit::{self, Actor, Entry},
-    db::{iso, new_id, now_ms},
-    error::{AppError, AppResult},
+    platform::audit::{self, Actor, Entry},
+    platform::db::{iso, new_id, now_ms},
+    platform::error::{AppError, AppResult},
     http::AppState,
-    jobs, packs,
+    jobs, platform::packs,
 };
 
 const DAY_MS: i64 = 86_400_000;
@@ -301,7 +301,7 @@ pub async fn design_turn(state: &AppState, ws: &str, id: &str, text: &str) -> Ap
     if !state.designer.enabled() {
         return Err(AppError::AiUnavailable);
     }
-    if !crate::ai_ledger::within_budget(&state.db, state.config.ai_daily_budget_usd, ws).await {
+    if !crate::ai::ledger::within_budget(&state.db, state.config.ai_daily_budget_usd, ws).await {
         return Err(AppError::LimitReached("this workspace has used its AI budget for today; try again tomorrow".into()));
     }
     let editing = match &session.agent_id {
@@ -459,7 +459,7 @@ pub async fn request_dry_run(state: &AppState, ws: &str, id: &str, message_ids: 
             return Err(AppError::BadRequest("one of those emails was not found".into()));
         }
     }
-    if !crate::ai_ledger::within_budget(&state.db, state.config.ai_daily_budget_usd, ws).await {
+    if !crate::ai::ledger::within_budget(&state.db, state.config.ai_daily_budget_usd, ws).await {
         return Err(AppError::LimitReached("this workspace has used its AI budget for today; try again tomorrow".into()));
     }
     let hash = spec.hash();
@@ -537,7 +537,7 @@ pub async fn save(state: &AppState, ws: &str, user_id: &str, id: &str, opts: Sav
     let ctx = load_ctx(state, ws, editing.as_ref()).await?;
     let issues = validate::validate(&spec, &ctx);
     if !issues.is_empty() {
-        return Err(AppError::BadRequest(crate::agent_registry::spec::issues_message(&issues)));
+        return Err(AppError::BadRequest(crate::agents::registry::spec::issues_message(&issues)));
     }
     let dry = session.dry_run.as_ref().filter(|_| session.dry_run_status == "done");
     if dry.and_then(|d| d["spec_hash"].as_str()) != Some(spec.hash().as_str()) {

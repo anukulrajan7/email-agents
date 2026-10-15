@@ -10,7 +10,7 @@ use super::{
     command::{Session, ToolError, ToolResult, failed, text_arg},
     datamark,
 };
-use crate::{attachments, jobs};
+use crate::{mail::attachments, jobs};
 
 /// Characters of one file handed to the planner per call, and in total per request.
 pub const READ_CHARS: usize = 6_000;

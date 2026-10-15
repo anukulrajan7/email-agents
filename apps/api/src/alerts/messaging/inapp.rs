@@ -6,13 +6,13 @@ use serde_json::{Value, json};
 use sqlx::{SqliteConnection, SqlitePool};
 
 use crate::{
-    audit::{self, Actor, Entry},
-    db::{iso, new_id, now_ms},
-    error::{AppError, AppResult},
+    platform::audit::{self, Actor, Entry},
+    platform::db::{iso, new_id, now_ms},
+    platform::error::{AppError, AppResult},
     http::AppState,
     jobs::handlers::JobError,
-    mailer::OutgoingEmail,
-    sources::normalize::truncate_chars,
+    platform::mailer::OutgoingEmail,
+    mail::sources::normalize::truncate_chars,
 };
 
 pub const MAX_BODY_CHARS: usize = 4_000;
@@ -346,8 +346,8 @@ pub async fn notify_owner(
             let line = truncate_chars(subject.trim(), MAX_SUBJECT_CHARS);
             let text = format!("{line}\n\nOpen Post Room to read more.");
             let html = format!("<p>{}</p><p>Open Post Room to read more.</p>", crate::alerts::escape_html(&line));
-            let out = OutgoingEmail { kind: crate::mailer::kind::ALERT, to: &to, subject: &line, text: &text, html: &html };
-            if let Err(e) = crate::mailer::deliver(&state.db, mailer.as_ref(), out).await {
+            let out = OutgoingEmail { kind: crate::platform::mailer::kind::ALERT, to: &to, subject: &line, text: &text, html: &html };
+            if let Err(e) = crate::platform::mailer::deliver(&state.db, mailer.as_ref(), out).await {
                 tracing::warn!(error = %e, "notice email line not sent");
             }
         }

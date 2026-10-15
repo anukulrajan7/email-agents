@@ -8,10 +8,10 @@ use serde_json::{Map, Value, json};
 use sqlx::SqlitePool;
 
 use crate::{
-    agent_registry::store,
-    db::{new_id, now_ms},
+    agents::registry::store,
+    platform::db::{new_id, now_ms},
     evals::gate,
-    sources::normalize::truncate_chars,
+    mail::sources::normalize::truncate_chars,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]

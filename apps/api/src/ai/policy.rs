@@ -2,7 +2,7 @@
 
 use crate::{
     ai::ClassifyOutput,
-    domain::ClassificationSource,
+    platform::domain::ClassificationSource,
 };
 
 /// Labels at or above this confidence are auto-approved. Recalibrate on labelled examples.
@@ -16,11 +16,11 @@ pub fn needs_review(c: &ClassifyOutput) -> bool {
 }
 
 /// Sending requires a capable source; it always also needs an explicit user action.
-pub fn can_send(capabilities: &crate::domain::Capabilities) -> bool {
+pub fn can_send(capabilities: &crate::platform::domain::Capabilities) -> bool {
     capabilities.read && capabilities.send
 }
 
 /// Provider-side drafts require a capable source *and* an explicit user action.
-pub fn can_create_provider_draft(capabilities: &crate::domain::Capabilities) -> bool {
+pub fn can_create_provider_draft(capabilities: &crate::platform::domain::Capabilities) -> bool {
     capabilities.read && capabilities.provider_drafts
 }

@@ -22,15 +22,15 @@ use serde_json::{Value, json};
 
 use crate::{
     ai::policy,
-    audit::{self, Actor, Entry},
-    auth::{AuthUser, require_role},
-    db::{iso, new_id, now_ms},
-    domain::{Capabilities, Role},
-    error::{AppError, AppResult},
+    platform::audit::{self, Actor, Entry},
+    platform::auth::{AuthUser, require_role},
+    platform::db::{iso, new_id, now_ms},
+    platform::domain::{Capabilities, Role},
+    platform::error::{AppError, AppResult},
     http::AppState,
     jobs::{self, handlers::JobError, kind},
-    send_safety::CheckInput,
-    sources::nango::NangoError,
+    replies::send_safety::CheckInput,
+    mail::sources::nango::NangoError,
 };
 
 #[derive(sqlx::FromRow)]
@@ -79,7 +79,7 @@ pub async fn load(state: &AppState, ws: &str, draft_id: &str) -> AppResult<Reply
 }
 
 pub fn capabilities(ctx: &ReplyContext) -> Capabilities {
-    serde_json::from_str(&ctx.capabilities_json).unwrap_or_else(|_| crate::sources::capabilities(&ctx.source_kind))
+    serde_json::from_str(&ctx.capabilities_json).unwrap_or_else(|_| crate::mail::sources::capabilities(&ctx.source_kind))
 }
 
 pub fn connection(ctx: &ReplyContext) -> AppResult<(&str, &str)> {
@@ -100,7 +100,7 @@ pub fn header_safe(value: &str) -> String {
 pub fn reply_subject(subject: &str) -> String {
     let s = header_safe(subject);
     let s = if s.to_lowercase().starts_with("re:") { s } else { format!("Re: {s}") };
-    crate::sources::normalize::truncate_chars(&s, MAX_SUBJECT_CHARS)
+    crate::mail::sources::normalize::truncate_chars(&s, MAX_SUBJECT_CHARS)
 }
 
 static MSG_ID: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^<[^\s<>]+>$").expect("valid regex"));
@@ -215,7 +215,7 @@ pub async fn save_to_provider(
     Path((ws, id)): Path<(String, String)>,
 ) -> AppResult<Json<Value>> {
     require_role(&state.db, &ws, &user, Role::Operator).await?;
-    crate::team::scope::require_draft(&state.db, &ws, &user, &id).await?;
+    crate::hr::team::scope::require_draft(&state.db, &ws, &user, &id).await?;
     let provider_draft_id = save_draft(&state, &ws, &id, Actor::User(&user.id)).await?;
     Ok(Json(json!({ "status": "saved", "provider_draft_id": provider_draft_id })))
 }
@@ -356,10 +356,10 @@ async fn finalize_sent(state: &AppState, ws: &str, ctx: &ReplyContext, provider_
     )
     .await?;
     let promised: Option<String> = sqlx::query_scalar("SELECT unanswered_json FROM drafts WHERE id = ?1").bind(&ctx.draft_id).fetch_optional(&mut *tx).await?;
-    let promised = promised.map(|j| crate::gap_resolver::parse_unanswered(&j)).unwrap_or_default();
+    let promised = promised.map(|j| crate::replies::gap_resolver::parse_unanswered(&j)).unwrap_or_default();
     if !promised.is_empty() && ctx.body_text.to_lowercase().contains("we'll confirm") {
         let owner: Option<String> = sqlx::query_scalar("SELECT connected_by_user_id FROM email_sources WHERE id = ?1").bind(&ctx.source_id).fetch_optional(&mut *tx).await?.flatten();
-        let title = crate::sources::normalize::truncate_chars(&format!("Follow up: you told {} we'd confirm {}", ctx.sender_address, promised.join(", ")), 200);
+        let title = crate::mail::sources::normalize::truncate_chars(&format!("Follow up: you told {} we'd confirm {}", ctx.sender_address, promised.join(", ")), 200);
         sqlx::query(
             "INSERT INTO review_items (id, workspace_id, message_id, workflow_run_id, kind, title, status, assigned_user_id, created_at)
              VALUES (?1, ?2, ?3, NULL, 'agent_task', ?4, 'open', ?5, ?6)",
@@ -373,8 +373,8 @@ async fn finalize_sent(state: &AppState, ws: &str, ctx: &ReplyContext, provider_
         .execute(&mut *tx)
         .await?;
     }
-    if ctx.body_text.to_lowercase().contains(&crate::gap_resolver::NONE_PHRASE.to_lowercase()) {
-        crate::candidate_watch::queue_enrol(&mut tx, ws, &ctx.message_id, &ctx.draft_id).await?;
+    if ctx.body_text.to_lowercase().contains(&crate::replies::gap_resolver::NONE_PHRASE.to_lowercase()) {
+        crate::hr::candidate_watch::queue_enrol(&mut tx, ws, &ctx.message_id, &ctx.draft_id).await?;
     }
     tx.commit().await?;
     if let Err(e) = jobs::learning_jobs::enqueue_reply_learning(&state.db, &ctx.draft_id).await {
@@ -494,10 +494,10 @@ async fn record_send_blocked(state: &AppState, ws: &str, ctx: &ReplyContext, rep
         None
     };
     let codes: Vec<&str> = report.blocking.iter().map(|i| i.code).collect();
-    let severity = crate::incidents::send_block_severity(&codes);
-    crate::incidents::record(
+    let severity = crate::ai::incidents::send_block_severity(&codes);
+    crate::ai::incidents::record(
         &state.db,
-        crate::incidents::NewIncident::new(ws, crate::incidents::Kind::SendBlocked, serde_json::json!({"codes": codes, "automated": automated}))
+        crate::ai::incidents::NewIncident::new(ws, crate::ai::incidents::Kind::SendBlocked, serde_json::json!({"codes": codes, "automated": automated}))
             .severity(severity)
             .agent(agent_id.as_deref())
             .message(Some(&ctx.message_id))
@@ -543,13 +543,13 @@ pub async fn send_draft_held(state: &AppState, ws: &str, draft_id: &str, actor: 
     let automated = matches!(actor, Actor::System);
     let mut report = send_safety::check(state, &CheckInput { actor_user: requested_by(actor), workspace_id: ws, reply: &ctx, body: &ctx.body_text, automated }).await?;
     // An automatic send gets one repair of an unsupported claim; a person's send never needs it (warning only).
-    if report.is_blocked() && automated && crate::repair::apply(state, ws, &ctx, &report).await? {
+    if report.is_blocked() && automated && crate::replies::repair::apply(state, ws, &ctx, &report).await? {
         ctx = load(state, ws, draft_id).await?;
         report = send_safety::check(state, &CheckInput { actor_user: requested_by(actor), workspace_id: ws, reply: &ctx, body: &ctx.body_text, automated }).await?;
     }
     if report.is_blocked() {
         if automated {
-            crate::repair::hand_off(state, ws, &ctx, &report).await?;
+            crate::replies::repair::hand_off(state, ws, &ctx, &report).await?;
         }
         record_send_blocked(state, ws, &ctx, &report, automated).await;
         return Err(report.into_error());
@@ -609,7 +609,7 @@ pub async fn send(
     Json(body): Json<SendBody>,
 ) -> AppResult<Json<ScheduledSend>> {
     require_role(&state.db, &ws, &user, Role::Operator).await?;
-    crate::team::scope::require_draft(&state.db, &ws, &user, &id).await?;
+    crate::hr::team::scope::require_draft(&state.db, &ws, &user, &id).await?;
     if !body.confirm {
         return Err(AppError::BadRequest("sending needs explicit confirmation".into()));
     }
@@ -623,7 +623,7 @@ pub async fn undo_send(
     Path((ws, id)): Path<(String, String)>,
 ) -> AppResult<Json<Value>> {
     require_role(&state.db, &ws, &user, Role::Operator).await?;
-    crate::team::scope::require_draft(&state.db, &ws, &user, &id).await?;
+    crate::hr::team::scope::require_draft(&state.db, &ws, &user, &id).await?;
     // Read before the update clears it: an agent's own send (nobody asked for it) that a person stops is a learning signal.
     let sender: Option<(String, Option<String>, Option<String>)> = sqlx::query_as(
         "SELECT message_id, agent_id, send_requested_by FROM drafts WHERE id = ?1 AND workspace_id = ?2 AND send_at IS NOT NULL",
@@ -695,7 +695,7 @@ async fn hold(state: &AppState, ws: &str, ctx: &ReplyContext, action: &str, reas
         "UPDATE drafts SET send_at = NULL, send_requested_by = NULL, send_error = ?1, updated_at = ?2
          WHERE id = ?3 AND status != 'sent'",
     )
-    .bind(crate::sources::normalize::truncate_chars(reason, 500))
+    .bind(crate::mail::sources::normalize::truncate_chars(reason, 500))
     .bind(now_ms())
     .bind(&ctx.draft_id)
     .execute(&mut *tx)
@@ -763,10 +763,10 @@ pub async fn send_scheduled(state: &AppState, payload: &Value) -> Result<(), Job
         }
     }
     if requester.is_none()
-        && let Some(reason) = crate::candidate_watch::stop_reason(state, &ws, &ctx.draft_id).await.map_err(|e| job_err(e.into()))?
+        && let Some(reason) = crate::hr::candidate_watch::stop_reason(state, &ws, &ctx.draft_id).await.map_err(|e| job_err(e.into()))?
     {
         tracing::info!(draft_id = %ctx.draft_id, reason, "a watch email is cancelled");
-        crate::candidate_watch::discard(state, &ws, &ctx.draft_id).await.map_err(|e| job_err(e.into()))?;
+        crate::hr::candidate_watch::discard(state, &ws, &ctx.draft_id).await.map_err(|e| job_err(e.into()))?;
         return Ok(());
     }
     if requester.is_none()

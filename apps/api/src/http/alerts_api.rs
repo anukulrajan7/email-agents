@@ -8,11 +8,11 @@ use serde_json::{Value, json};
 use super::AppState;
 use crate::{
     alerts::{self, ALERT_SELECT, AlertLine, AlertRow, AlertSettings},
-    audit::{self, Actor, Entry},
-    auth::{AuthUser, VERIFIED_USER, require_role},
-    db::now_ms,
-    domain::Role,
-    error::{AppError, AppResult},
+    platform::audit::{self, Actor, Entry},
+    platform::auth::{AuthUser, VERIFIED_USER, require_role},
+    platform::db::now_ms,
+    platform::domain::Role,
+    platform::error::{AppError, AppResult},
 };
 
 /// One test alert email per workspace per 10 minutes.
@@ -31,7 +31,7 @@ pub async fn list(
     Query(q): Query<ListQuery>,
 ) -> AppResult<Json<Value>> {
     require_role(&state.db, &ws, &user, Role::Operator).await?;
-    let wall = crate::team::scope::wall_for(&state.db, &ws, &user).await?;
+    let wall = crate::hr::team::scope::wall_for(&state.db, &ws, &user).await?;
     let filter = match q.status.as_deref().unwrap_or("open") {
         "open" => "a.status IN ('open', 'snoozed')",
         "resolved" => "a.status = 'resolved'",
@@ -177,7 +177,7 @@ pub async fn test(State(state): State<AppState>, user: AuthUser, Path(ws): Path<
     if settings.recipients.is_empty() {
         return Err(AppError::BadRequest("add at least one recipient first".into()));
     }
-    if !crate::security::take(&state.db, "alert_test", &ws, 1, TEST_ALERT_WINDOW_MS).await? {
+    if !crate::platform::security::take(&state.db, "alert_test", &ws, 1, TEST_ALERT_WINDOW_MS).await? {
         return Err(AppError::RateLimited);
     }
     let base = state.config.app_base_url.trim_end_matches('/').to_string();
@@ -191,8 +191,8 @@ pub async fn test(State(state): State<AppState>, user: AuthUser, Path(ws): Path<
     let (subject, text, html) = alerts::render_email(&name, &base, &ws, &[line], None);
     let mut sent_to = vec![];
     for to in &settings.recipients {
-        let email = crate::mailer::OutgoingEmail { kind: crate::mailer::kind::ALERT_TEST, to, subject: &subject, text: &text, html: &html };
-        match crate::mailer::deliver(&state.db, mailer.as_ref(), email).await {
+        let email = crate::platform::mailer::OutgoingEmail { kind: crate::platform::mailer::kind::ALERT_TEST, to, subject: &subject, text: &text, html: &html };
+        match crate::platform::mailer::deliver(&state.db, mailer.as_ref(), email).await {
             Ok(()) => sent_to.push(to.clone()),
             Err(e) => tracing::warn!(error = %e, "test alert email failed"),
         }

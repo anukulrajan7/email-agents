@@ -11,11 +11,11 @@ use axum::{
 use email_ai_api::{
     ai::memory_extractor::{LearnDirection, LineMemoryExtractor},
     build_state,
-    config::Config,
-    db,
+    platform::config::Config,
+    platform::db,
     http::{AppState, router},
     jobs::worker,
-    memory_learning::{self, LearnedFact},
+    learning::memory_learning::{self, LearnedFact},
 };
 use http_body_util::BodyExt;
 use serde_json::{Value, json};

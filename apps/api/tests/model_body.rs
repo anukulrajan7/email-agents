@@ -14,9 +14,9 @@ use email_ai_api::{
         AiError, Analyst, Classifier, ClassifyInput, ClassifyOutput, Insight,
     },
     build_state,
-    config::Config,
-    db::{self, now_ms},
-    domain::ClassificationSource,
+    platform::config::Config,
+    platform::db::{self, now_ms},
+    platform::domain::ClassificationSource,
     http::{AppState, router},
     jobs::{handlers, worker},
 };
@@ -53,7 +53,7 @@ impl Classifier for RecordingClassifier {
         self.0.classified.lock().unwrap().push(input.body_text.clone());
         Ok(ClassifyOutput {
             category: "other".into(),
-            priority: email_ai_api::domain::Priority::Normal,
+            priority: email_ai_api::platform::domain::Priority::Normal,
             requires_reply: true,
             confidence: Some(0.95),
             source: ClassificationSource::Llm,

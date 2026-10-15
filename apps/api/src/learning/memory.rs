@@ -8,9 +8,9 @@ use serde_json::json;
 use sqlx::{SqliteConnection, SqlitePool};
 
 use crate::{
-    agent_registry::spec::MemoryScope,
-    audit::{self, Actor, Entry},
-    db::{iso, new_id, now_ms},
+    agents::registry::spec::MemoryScope,
+    platform::audit::{self, Actor, Entry},
+    platform::db::{iso, new_id, now_ms},
 };
 
 const MAX_WORKSPACE_MEMORIES: i64 = 20;

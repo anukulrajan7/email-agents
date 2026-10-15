@@ -16,11 +16,11 @@ use axum::{
 };
 use email_ai_api::{
     build_state,
-    config::Config,
-    db,
+    platform::config::Config,
+    platform::db,
     http::{AppState, router},
     jobs::worker,
-    sources::nango::sign_webhook,
+    mail::sources::nango::sign_webhook,
 };
 use http_body_util::BodyExt;
 use serde_json::{Value, json};

@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 use sqlx::SqlitePool;
 
 use super::{case::Case, planner::Decision};
-use crate::agent_registry::spec::{AgentSpec, ExtractField, Mode, SendMode, Step};
+use crate::agents::registry::spec::{AgentSpec, ExtractField, Mode, SendMode, Step};
 
 /// Case state key: `fixed` (run the workflow) or `planner` (handed over).
 pub const MODE_KEY: &str = "wf";
@@ -208,7 +208,7 @@ pub async fn escalation_reason(db: &SqlitePool, case: &Case) -> sqlx::Result<Opt
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent_registry::templates::{INBOX_KEY, PERSONAL_KEY, template};
+    use crate::agents::registry::templates::{INBOX_KEY, PERSONAL_KEY, template};
 
     #[test]
     fn extracted_values_are_fenced_as_data_in_draft_instructions() {

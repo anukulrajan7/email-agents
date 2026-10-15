@@ -4,7 +4,7 @@
 use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, SqliteConnection, SqlitePool};
 
-use crate::db::{iso, new_id, now_ms};
+use crate::platform::db::{iso, new_id, now_ms};
 
 pub const TRIGGER_EMAIL_RECEIVED: &str = "email_received";
 pub const MAX_CONDITIONS: usize = 10;

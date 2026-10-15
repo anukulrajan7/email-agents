@@ -6,7 +6,7 @@ use crate::common;
 use axum::http::StatusCode;
 use common::*;
 use email_ai_api::{
-    agent_registry::routing::Source,
+    agents::registry::routing::Source,
     agents::planner::{ScriptedPlanner, call as tool, finish},
 };
 use serde_json::{Value, json};

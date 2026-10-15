@@ -4,7 +4,7 @@
 use serde::Serialize;
 use sqlx::SqlitePool;
 
-use crate::db::iso;
+use crate::platform::db::iso;
 
 const WEEK_MS: i64 = 7 * 86_400_000;
 /// Signals that carry an edit distance for a draft a person finalised.

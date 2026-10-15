@@ -50,10 +50,10 @@ use tower_http::{
 
 use crate::{
     ai::{Classifier, Drafter, Learner},
-    auth::Authenticator,
-    config::Config,
-    error::{AppError, AppResult, request_id_middleware},
-    sources::{nango::NangoClient, resend::ResendClient},
+    platform::auth::Authenticator,
+    platform::config::Config,
+    platform::error::{AppError, AppResult, request_id_middleware},
+    mail::sources::{nango::NangoClient, resend::ResendClient},
 };
 
 #[derive(Clone)]
@@ -73,16 +73,16 @@ pub struct AppState {
     pub understander: Arc<dyn crate::ai::understand::Understander>,
     pub embedder: Arc<dyn crate::ai::embeddings::Embedder>,
     pub label_suggester: Arc<dyn crate::ai::label_suggest::LabelSuggester>,
-    pub login_limiter: Arc<crate::sessions::LoginLimiter>,
+    pub login_limiter: Arc<crate::platform::sessions::LoginLimiter>,
     /// Sends verification codes; `None` = verification disabled.
-    pub mailer: Option<Arc<dyn crate::mailer::Mailer>>,
+    pub mailer: Option<Arc<dyn crate::platform::mailer::Mailer>>,
     pub jobs_notify: Arc<Notify>,
     /// Learns durable facts from emails and replies (no-op without a model).
     pub memory_extractor: Arc<dyn crate::ai::memory_extractor::MemoryExtractor>,
     /// Sends alert emails; `None` = alerts stay in-app only.
-    pub alert_mailer: Option<Arc<dyn crate::mailer::Mailer>>,
+    pub alert_mailer: Option<Arc<dyn crate::platform::mailer::Mailer>>,
     /// Drafts agents and workflows from a plain-English description; `None` model = off.
-    pub designer: Arc<dyn crate::designer::Designer>,
+    pub designer: Arc<dyn crate::agents::designer::Designer>,
     /// Reads named details out of an email for the workflow `extract` step.
     pub field_extractor: Arc<dyn crate::ai::field_extract::FieldExtractor>,
     /// Reads timesheets the plain rules could not; a cheap model first, a stronger one only when needed.
@@ -98,9 +98,9 @@ pub struct AppState {
     /// Speech to text for the assistant's push-to-talk.
     pub transcriber: Arc<dyn crate::assistant::transcribe::Transcriber>,
     /// Reads image attachments; `None` (no OpenRouter key or vision model) skips them.
-    pub vision: Option<Arc<dyn crate::attachments::vision::VisionReader>>,
+    pub vision: Option<Arc<dyn crate::mail::attachments::vision::VisionReader>>,
     /// Transcribes audio attachments; `None` skips them.
-    pub audio: Option<Arc<dyn crate::attachments::audio::AudioReader>>,
+    pub audio: Option<Arc<dyn crate::mail::attachments::audio::AudioReader>>,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -112,7 +112,7 @@ pub fn router(state: AppState) -> Router {
         .route("/auth/resend-code", post(auth_api::resend_code))
         .route("/auth/password-reset/request", post(auth_api::password_reset_request))
         .route("/auth/password-reset/confirm", post(auth_api::password_reset_confirm))
-        .route_layer(middleware::from_fn_with_state(state.clone(), crate::security::auth_rate_limit));
+        .route_layer(middleware::from_fn_with_state(state.clone(), crate::platform::security::auth_rate_limit));
     let api = Router::new()
         .route("/me", get(workspaces::me))
         .route("/auth/config", get(auth_api::config))
@@ -148,7 +148,7 @@ pub fn router(state: AppState) -> Router {
         .route("/workspaces/{ws}/drafts/{id}", patch(messages::update_draft))
         .route("/workspaces/{ws}/drafts/{id}/provider-draft", post(crate::replies::save_to_provider))
         .route("/workspaces/{ws}/drafts/{id}/send", post(crate::replies::send))
-        .route("/workspaces/{ws}/drafts/{id}/check", post(crate::send_safety::check_draft))
+        .route("/workspaces/{ws}/drafts/{id}/check", post(crate::replies::send_safety::check_draft))
         .route("/workspaces/{ws}/drafts/{id}/undo-send", post(crate::replies::undo_send))
         .route("/workspaces/{ws}/reviews", get(reviews::list))
         .route("/workspaces/{ws}/reviews/{id}", patch(reviews::update))
@@ -190,7 +190,7 @@ pub fn router(state: AppState) -> Router {
         .merge(team_api::routes())
         .merge(staffing_api::routes())
         .fallback(|| async { AppError::NotFound })
-        .layer(middleware::from_fn(crate::ai_ledger::attach_context))
+        .layer(middleware::from_fn(crate::ai::ledger::attach_context))
         .layer(DefaultBodyLimit::max(256 * 1024));
 
     let cors = CorsLayer::new()
@@ -219,7 +219,7 @@ pub fn router(state: AppState) -> Router {
     app.layer(TraceLayer::new_for_http())
         .layer(middleware::from_fn(request_id_middleware))
         .layer(cors)
-        .layer(middleware::from_fn(crate::security::security_headers))
+        .layer(middleware::from_fn(crate::platform::security::security_headers))
         .with_state(state)
 }
 

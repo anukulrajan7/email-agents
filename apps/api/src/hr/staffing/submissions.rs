@@ -11,10 +11,10 @@ use sqlx::SqlitePool;
 
 use super::{name_key, policy::address_of};
 use crate::{
-    db::{new_id, now_ms},
+    platform::db::{new_id, now_ms},
     http::AppState,
-    matching::SIMILARITY_CLOSE,
-    team::{access, settings},
+    hr::matching::SIMILARITY_CLOSE,
+    hr::team::{access, settings},
 };
 
 pub const LOOKBACK_MS: i64 = 60 * 86_400_000;
@@ -588,7 +588,7 @@ pub const SELECT: &str = "SELECT s.id, s.person_id, p.name AS person_name, s.mes
 pub fn row_json(r: SubmissionRow) -> Value {
     json!({
         "id": r.id, "person_id": r.person_id, "person_name": r.person_name, "message_id": r.message_id,
-        "sent_at": crate::db::iso(r.sent_at), "client_domain": r.client_domain, "client": r.client,
+        "sent_at": crate::platform::db::iso(r.sent_at), "client_domain": r.client_domain, "client": r.client,
         "attachment_name": r.attachment_name, "candidate_name": r.candidate_name, "candidate_id": r.candidate_id,
         "requirement_id": r.requirement_id, "requirement_title": r.requirement_title, "link_status": r.link_status,
         "options": serde_json::from_str::<Value>(&r.link_options_json).unwrap_or(Value::Null),

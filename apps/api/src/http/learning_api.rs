@@ -12,11 +12,11 @@ use serde_json::{Value, json};
 
 use super::AppState;
 use crate::{
-    agent_registry::store::{self, AgentRow},
-    auth::{AuthUser, require_role},
-    db::now_ms,
-    domain::Role,
-    error::{AppError, AppResult},
+    agents::registry::store::{self, AgentRow},
+    platform::auth::{AuthUser, require_role},
+    platform::db::now_ms,
+    platform::domain::Role,
+    platform::error::{AppError, AppResult},
     learning::{
         gain,
         guard::Rejection,

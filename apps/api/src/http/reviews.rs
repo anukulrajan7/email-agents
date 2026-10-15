@@ -10,10 +10,10 @@ use super::{
     dto::{Items, ReviewItem, ReviewRow},
 };
 use crate::{
-    audit::{self, Actor, Entry},
-    auth::{AuthUser, require_role},
-    domain::Role,
-    error::{AppError, AppResult},
+    platform::audit::{self, Actor, Entry},
+    platform::auth::{AuthUser, require_role},
+    platform::domain::Role,
+    platform::error::{AppError, AppResult},
 };
 
 const REVIEW_SELECT: &str = "SELECT r.id, r.kind, r.title, r.status, r.message_id, m.subject AS message_subject,
@@ -39,7 +39,7 @@ pub async fn list(
     ))
     .bind(&ws)
     .bind(status)
-    .bind(crate::team::scope::wall_for(&state.db, &ws, &user).await?)
+    .bind(crate::hr::team::scope::wall_for(&state.db, &ws, &user).await?)
     .fetch_all(&state.db)
     .await?;
     Ok(Json(Items { items: rows.into_iter().map(Into::into).collect() }))

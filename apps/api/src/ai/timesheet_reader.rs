@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 
 use super::{AiError, fence::{fence_inline, defang}, openrouter::OpenRouterClient, routing::SheetTier, prepare_text_up_to};
-use crate::staffing::timesheet_parse::{Entry, Identity, MAX_ENTRIES, Sheet, parse_date_loose};
+use crate::hr::staffing::timesheet_parse::{Entry, Identity, MAX_ENTRIES, Sheet, parse_date_loose};
 
 const CHEAP_CHARS: usize = 14_000;
 const STRONG_CHARS: usize = 60_000;
@@ -82,7 +82,7 @@ fn schema() -> Value {
 fn text_of(v: &Value, key: &str, max: usize) -> Option<String> {
     let s = v.get(key)?.as_str()?;
     let s: String = s.chars().filter(|c| !c.is_control()).collect();
-    let s = crate::sources::normalize::truncate_chars(s.trim(), max);
+    let s = crate::mail::sources::normalize::truncate_chars(s.trim(), max);
     (!s.is_empty()).then_some(s)
 }
 
@@ -139,7 +139,7 @@ impl TimesheetReader for OpenRouterTimesheetReader {
         }
         let user = format!("Subject: {}\n<timesheet>\n{}\n</timesheet>", fence_inline(subject), defang(&prepare_text_up_to(text, cap)));
         let (content, _, usage) = self.client.chat_json_usage(model, SYSTEM_PROMPT, user, "timesheet", schema(), max_tokens).await?;
-        let cost_usd = crate::ai_ledger::cost_usd(model, usage.tokens_in, usage.tokens_out, usage.cost_usd);
+        let cost_usd = crate::ai::ledger::cost_usd(model, usage.tokens_in, usage.tokens_out, usage.cost_usd);
         Ok(ModelSheet { sheet: parse_model_sheet(&content, hint_year)?, cost_usd })
     }
 }

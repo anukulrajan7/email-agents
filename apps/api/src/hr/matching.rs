@@ -34,8 +34,8 @@ pub struct CandidateFields {
 
 // ---------------------------------------------------------------- normalisation
 
-pub use crate::skills::{canonical_skill, canonical_skills};
-use crate::skills::skills_in;
+pub use crate::replies::skills::{canonical_skill, canonical_skills};
+use crate::replies::skills::skills_in;
 
 const CITIES: &[(&str, &[&str])] = &[
     ("Bengaluru", &["bengaluru", "bangalore"]),
@@ -58,7 +58,7 @@ pub fn canonical_city(raw: &str) -> String {
 }
 
 fn contains_word(haystack: &str, needle: &str) -> bool {
-    crate::skills::find_word(haystack, needle).is_some()
+    crate::replies::skills::find_word(haystack, needle).is_some()
 }
 
 fn city_in(text: &str) -> Option<String> {
@@ -197,7 +197,7 @@ pub fn score(req: &RequirementFields, cand: &CandidateFields, similarity: Option
         let mut related: Vec<(&String, &str)> = vec![];
         let mut missing: Vec<&String> = vec![];
         for s in must.iter().filter(|s| !have.contains(*s)) {
-            match crate::skills::related(s).iter().find(|r| have.contains(**r)) {
+            match crate::replies::skills::related(s).iter().find(|r| have.contains(**r)) {
                 Some(r) => related.push((s, r)),
                 None => missing.push(s),
             }
@@ -304,7 +304,7 @@ fn experience_line(min: Option<f64>, max: Option<f64>) -> Option<String> {
 
 fn profile(lines: Vec<Option<String>>, source: &str) -> String {
     let mut out: Vec<String> = lines.into_iter().flatten().filter(|l| !l.trim().is_empty()).collect();
-    let source = crate::sources::normalize::truncate_chars(source.trim(), PROFILE_SOURCE_CHARS);
+    let source = crate::mail::sources::normalize::truncate_chars(source.trim(), PROFILE_SOURCE_CHARS);
     if !source.is_empty() {
         out.push(source);
     }
@@ -364,10 +364,10 @@ pub fn attachment_text(filename: &str, media_type: Option<&str>, bytes: &[u8]) -
     } else if lower.ends_with(".txt") || mt.starts_with("text/plain") {
         Ok(String::from_utf8_lossy(bytes).into_owned())
     } else {
-        return crate::attachments::text_result(filename, media_type, bytes);
+        return crate::mail::attachments::text_result(filename, media_type, bytes);
     };
     match text {
-        Ok(t) => TextResult::Text(crate::sources::normalize::truncate_chars(t.trim(), MAX_TEXT_CHARS)),
+        Ok(t) => TextResult::Text(crate::mail::sources::normalize::truncate_chars(t.trim(), MAX_TEXT_CHARS)),
         Err(e) => TextResult::Failed(e),
     }
 }
@@ -415,7 +415,7 @@ fn docx_text(bytes: &[u8]) -> Result<String, String> {
     }
     document.take(MAX_DOCX_XML).read_to_string(&mut xml).map_err(|e| e.to_string())?;
     let with_breaks = xml.replace("</w:p>", "\n").replace("<w:tab/>", "\t").replace("<w:br/>", "\n");
-    Ok(crate::sources::normalize::html_to_text(&with_breaks))
+    Ok(crate::mail::sources::normalize::html_to_text(&with_breaks))
 }
 
 #[cfg(test)]

@@ -2,7 +2,7 @@
 //! standard tier writes them; the premium tier is kept for mail where a mistake costs more.
 
 use super::{DraftQuality, Insight};
-use crate::domain::Priority;
+use crate::platform::domain::Priority;
 
 /// Staffing labels whose emails always get the premium tier (only in staffing workspaces).
 const PREMIUM_LABELS: &[&str] = &["client_requirement", "candidate_referral"];

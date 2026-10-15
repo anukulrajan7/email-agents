@@ -33,7 +33,7 @@ use sha2::{Digest, Sha256};
 use sqlx::SqlitePool;
 
 use super::{AiError, classify_http_error, openrouter::OpenRouterClient};
-use crate::{db::now_ms, sources::normalize::truncate_chars};
+use crate::{platform::db::now_ms, mail::sources::normalize::truncate_chars};
 
 /// Upper bound on the material sent with one judge call.
 const MAX_CONTEXT_CHARS: usize = 12_000;

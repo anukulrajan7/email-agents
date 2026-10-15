@@ -4,8 +4,8 @@
 
 use email_ai_api::{
     ai::{DRAFT_PROMPT_VERSION, openrouter::draft_system_prompt},
-    gap_resolver::{Opening, Sources, finalize_text},
-    signoff,
+    replies::gap_resolver::{Opening, Sources, finalize_text},
+    replies::signoff,
 };
 
 const SIGNATURE: &str = "Priya Nair\nHR Team, Acme";

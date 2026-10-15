@@ -10,10 +10,10 @@ use super::{
     dto::{Items, JobDto},
 };
 use crate::{
-    audit::{self, Actor, Entry},
-    auth::{AuthUser, require_role},
-    domain::Role,
-    error::{AppError, AppResult},
+    platform::audit::{self, Actor, Entry},
+    platform::auth::{AuthUser, require_role},
+    platform::domain::Role,
+    platform::error::{AppError, AppResult},
     jobs,
 };
 

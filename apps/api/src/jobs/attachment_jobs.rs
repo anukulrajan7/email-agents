@@ -10,10 +10,10 @@ use sqlx::SqliteConnection;
 
 use super::{Job, handlers::{self, JobError}, kind, matching_jobs::download_gmail_attachment};
 use crate::{
-    attachments::{self, Kind, audio, vision},
+    mail::attachments::{self, Kind, audio, vision},
     http::AppState,
     jobs,
-    sources::normalize::truncate_chars,
+    mail::sources::normalize::truncate_chars,
 };
 
 const MAX_PER_MESSAGE: i64 = 20;
@@ -141,7 +141,7 @@ pub async fn extract_attachments(state: &AppState, job: &Job, payload: &Value) -
 /// A timesheet email's files were just read (or could not be): read the timesheet again with them.
 async fn enqueue_timesheet_record(state: &AppState, job: &Job, workspace_id: &str, message_id: &str) -> Result<(), JobError> {
     let labelled: Option<String> = sqlx::query_scalar("SELECT category FROM classifications WHERE message_id = ?1").bind(message_id).fetch_optional(&state.db).await?;
-    if labelled.as_deref() != Some(crate::staffing::timesheet_records::LABEL) || !crate::packs::enabled(&state.db, workspace_id, crate::packs::STAFFING).await? {
+    if labelled.as_deref() != Some(crate::hr::staffing::timesheet_records::LABEL) || !crate::platform::packs::enabled(&state.db, workspace_id, crate::platform::packs::STAFFING).await? {
         return Ok(());
     }
     let mut conn = state.db.acquire().await?;

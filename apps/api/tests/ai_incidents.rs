@@ -5,10 +5,10 @@ use crate::common;
 use axum::http::StatusCode;
 use common::*;
 use email_ai_api::{
-    ai_health,
-    ai_ledger::{self, AiContext, CallMeta, Usage},
-    db::{new_id, now_ms},
-    incidents::{self, Kind, NewIncident},
+    ai::health,
+    ai::ledger::{self, AiContext, CallMeta, Usage},
+    platform::db::{new_id, now_ms},
+    ai::incidents::{self, Kind, NewIncident},
 };
 use serde_json::json;
 
@@ -89,9 +89,9 @@ async fn an_unusable_model_answer_becomes_a_schema_failure_incident_on_the_case_
     .await
     .unwrap();
     let ctx = AiContext { workspace_id: Some(env.ws.clone()), message_id: Some(msg.clone()), case_id: Some(case_id.clone()), attempt: 1 };
-    let row = ai_ledger::with_context(ctx, ai_ledger::record_full(&env.state.db, "agent_plan", "m", Usage::default(), &CallMeta::default(), 100, None)).await.unwrap();
-    ai_ledger::mark_invalid(&env.state.db, &row, "schema", "not json").await;
-    ai_ledger::mark_invalid(&env.state.db, &row, "schema", "not json").await;
+    let row = ledger::with_context(ctx, ledger::record_full(&env.state.db, "agent_plan", "m", Usage::default(), &CallMeta::default(), 100, None)).await.unwrap();
+    ledger::mark_invalid(&env.state.db, &row, "schema", "not json").await;
+    ledger::mark_invalid(&env.state.db, &row, "schema", "not json").await;
 
     let (kind, agent, case): (String, Option<String>, Option<String>) =
         sqlx::query_as("SELECT kind, agent_id, case_id FROM ai_incidents WHERE workspace_id = ?1").bind(&env.ws).fetch_one(&env.state.db).await.unwrap();
@@ -166,10 +166,10 @@ async fn a_spend_spike_raises_one_alert_and_one_incident_per_day() {
     for d in 1..=7 {
         call_row(&env, "classify", 0.01, 100, now - d * 86_400_000).await;
     }
-    assert_eq!(ai_health::evaluate_spikes(&env.state.db, &env.ws, now).await.unwrap(), 0);
+    assert_eq!(health::evaluate_spikes(&env.state.db, &env.ws, now).await.unwrap(), 0);
     call_row(&env, "draft", 3.0, 100, now - 1_000).await;
-    assert_eq!(ai_health::evaluate_spikes(&env.state.db, &env.ws, now).await.unwrap(), 1);
-    assert_eq!(ai_health::evaluate_spikes(&env.state.db, &env.ws, now).await.unwrap(), 0);
+    assert_eq!(health::evaluate_spikes(&env.state.db, &env.ws, now).await.unwrap(), 1);
+    assert_eq!(health::evaluate_spikes(&env.state.db, &env.ws, now).await.unwrap(), 0);
     assert_eq!(env.count("SELECT COUNT(*) FROM alerts WHERE workspace_id = ?1 AND kind = 'ai_cost_spike'").await, 1);
     assert_eq!(env.count("SELECT COUNT(*) FROM ai_incidents WHERE workspace_id = ?1 AND kind = 'cost_spike'").await, 1);
     let report = env.ok("GET", "/ai-health", ADMIN, None).await;
@@ -186,7 +186,7 @@ async fn a_latency_spike_needs_a_clear_jump_over_the_week_before() {
     for i in 0..25 {
         call_row(&env, "draft", 0.0, 6_000, now - 1_000 - i * 1_000).await;
     }
-    assert_eq!(ai_health::evaluate_spikes(&env.state.db, &env.ws, now).await.unwrap(), 1);
+    assert_eq!(health::evaluate_spikes(&env.state.db, &env.ws, now).await.unwrap(), 1);
     assert_eq!(env.count("SELECT COUNT(*) FROM alerts WHERE workspace_id = ?1 AND kind = 'ai_latency_spike'").await, 1);
     assert_eq!(env.count("SELECT COUNT(*) FROM ai_incidents WHERE workspace_id = ?1 AND kind = 'latency_spike'").await, 1);
 }
@@ -235,7 +235,7 @@ async fn a_spend_spike_needs_a_baseline_of_at_least_three_days() {
     call_row(&env, "classify", 0.01, 100, now - 86_400_000).await;
     call_row(&env, "classify", 0.01, 100, now - 2 * 86_400_000).await;
     call_row(&env, "draft", 3.0, 100, now - 1_000).await;
-    assert_eq!(ai_health::evaluate_spikes(&env.state.db, &env.ws, now).await.unwrap(), 0);
+    assert_eq!(health::evaluate_spikes(&env.state.db, &env.ws, now).await.unwrap(), 0);
     call_row(&env, "classify", 0.01, 100, now - 3 * 86_400_000).await;
-    assert_eq!(ai_health::evaluate_spikes(&env.state.db, &env.ws, now).await.unwrap(), 1);
+    assert_eq!(health::evaluate_spikes(&env.state.db, &env.ws, now).await.unwrap(), 1);
 }

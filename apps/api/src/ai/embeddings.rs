@@ -78,7 +78,7 @@ impl OpenRouterEmbedder {
         let parsed = sent.as_ref().map_err(|e| AiError::Retryable(e.to_string())).and_then(|b| parse_embeddings(b, texts.len()));
         if let Some(db) = &self.ledger {
             let error = parsed.as_ref().err().map(ToString::to_string);
-            crate::ai_ledger::log_call(db, "embed", &self.model, started, sent.as_ref().ok(), error.as_deref()).await;
+            crate::ai::ledger::log_call(db, "embed", &self.model, started, sent.as_ref().ok(), error.as_deref()).await;
         }
         match sent {
             Ok(_) => parsed,

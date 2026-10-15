@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sqlx::SqlitePool;
 
-use crate::{alerts::valid_email, db::now_ms};
+use crate::{alerts::valid_email, platform::db::now_ms};
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct TeamSettings {

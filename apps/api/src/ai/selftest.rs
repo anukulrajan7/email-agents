@@ -4,7 +4,7 @@
 use serde_json::{Value, json};
 
 use crate::ai::openrouter::OpenRouterClient;
-use crate::config::Config;
+use crate::platform::config::Config;
 
 const SYSTEM: &str = "You are a connectivity probe. Always answer by calling the provided tool.";
 const USER: &str = "Call the ping tool with ok set to true.";

@@ -8,7 +8,7 @@ use sqlx::SqlitePool;
 use super::{DAY_MS, day_of, percentile, queries};
 use crate::{
     agents::autonomy::AUTO_SENT_ACTION,
-    db::now_ms,
+    platform::db::now_ms,
     metrics::queries::Sample,
 };
 

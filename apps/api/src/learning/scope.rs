@@ -2,7 +2,7 @@
 
 use sqlx::SqliteConnection;
 
-use crate::agent_registry::{
+use crate::agents::registry::{
     spec::{LearnFrom, MemoryScope},
     store, versions,
 };

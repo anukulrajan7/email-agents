@@ -13,8 +13,8 @@ use crate::{
         embeddings::{EMBEDDING_DIMS, Embedder, to_blob},
         prepare_text,
     },
-    db::now_ms,
-    sources::normalize::truncate_chars,
+    platform::db::now_ms,
+    mail::sources::normalize::truncate_chars,
 };
 
 /// Target chunk size and overlap, in characters (~200 tokens per chunk).

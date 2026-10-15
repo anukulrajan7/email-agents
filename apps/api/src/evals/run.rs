@@ -6,9 +6,9 @@ use sqlx::{SqliteConnection, SqliteExecutor, SqlitePool};
 
 use super::{gate, learning_lift, replay, safety};
 use crate::{
-    agent_registry::{store, versions},
-    ai_ledger::{self, AiContext},
-    db::{iso, new_id, now_ms},
+    agents::registry::{store, versions},
+    ai::ledger::{self, AiContext},
+    platform::db::{iso, new_id, now_ms},
     http::AppState,
     jobs::{self, kind},
 };
@@ -273,7 +273,7 @@ async fn compute(state: &AppState, run: &EvalRun) -> sqlx::Result<Finished> {
         }
         "replay" => {
             let ctx = AiContext { workspace_id: Some(ws.to_string()), message_id: Some(format!("eval:{}", run.id)), case_id: None, attempt: 1 };
-            let result = ai_ledger::with_context(ctx, replay::run(state, ws, agent_id, &spec)).await?;
+            let result = ledger::with_context(ctx, replay::run(state, ws, agent_id, &spec)).await?;
             let cost: f64 = sqlx::query_scalar("SELECT COALESCE(SUM(cost_usd), 0.0) FROM ai_calls WHERE message_id = ?1")
                 .bind(format!("eval:{}", run.id))
                 .fetch_one(&state.db)

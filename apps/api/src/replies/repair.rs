@@ -5,11 +5,11 @@
 use std::collections::HashSet;
 
 use crate::{
-    db::{new_id, now_ms},
+    platform::db::{new_id, now_ms},
     http::AppState,
-    incidents::{Kind, NewIncident},
+    ai::incidents::{Kind, NewIncident},
     replies::ReplyContext,
-    send_safety::SafetyReport,
+    replies::send_safety::SafetyReport,
 };
 
 const STOP: &[&str] = &[
@@ -54,7 +54,7 @@ pub fn repaired_body(body: &str, report: &SafetyReport) -> Option<String> {
         return None;
     }
     let reason = reason_of(report)?;
-    if crate::gap_resolver::is_hard(&reason) {
+    if crate::replies::gap_resolver::is_hard(&reason) {
         return None;
     }
     let wanted = words(&reason);
@@ -92,7 +92,7 @@ pub fn repaired_body(body: &str, report: &SafetyReport) -> Option<String> {
             *para = kept.iter().map(|s| s.trim()).collect::<Vec<_>>().join(" ");
         }
     }
-    if removed.iter().any(|s| crate::gap_resolver::is_hard(s)) {
+    if removed.iter().any(|s| crate::replies::gap_resolver::is_hard(s)) {
         return None;
     }
     paras.retain(|p| !p.trim().is_empty());
@@ -112,8 +112,8 @@ pub async fn apply(state: &AppState, ws: &str, ctx: &ReplyContext, report: &Safe
     let Some(body) = repaired_body(&ctx.body_text, report) else { return Ok(false) };
     // A reply that already promises to confirm an amount, date or commitment is not made sendable by a repair.
     let existing: String = sqlx::query_scalar("SELECT unanswered_json FROM drafts WHERE id = ?1 AND workspace_id = ?2").bind(&ctx.draft_id).bind(ws).fetch_optional(&state.db).await?.unwrap_or_default();
-    let mut topics = if existing.is_empty() { vec![] } else { crate::gap_resolver::parse_unanswered(&existing) };
-    if topics.iter().any(|t| crate::gap_resolver::is_hard(t)) {
+    let mut topics = if existing.is_empty() { vec![] } else { crate::replies::gap_resolver::parse_unanswered(&existing) };
+    if topics.iter().any(|t| crate::replies::gap_resolver::is_hard(t)) {
         return Ok(false);
     }
     topics.push("details".to_string());
@@ -134,11 +134,11 @@ pub async fn apply(state: &AppState, ws: &str, ctx: &ReplyContext, report: &Safe
     .rows_affected()
         == 1;
     if changed {
-        crate::audit::record(
+        crate::platform::audit::record(
             &mut tx,
-            crate::audit::Entry {
+            crate::platform::audit::Entry {
                 workspace_id: ws,
-                actor: crate::audit::Actor::System,
+                actor: crate::platform::audit::Actor::System,
                 action: "draft.auto_repaired",
                 entity_type: "draft",
                 entity_id: &ctx.draft_id,
@@ -150,7 +150,7 @@ pub async fn apply(state: &AppState, ws: &str, ctx: &ReplyContext, report: &Safe
     }
     tx.commit().await?;
     if changed {
-        crate::incidents::record(
+        crate::ai::incidents::record(
             &state.db,
             NewIncident::new(ws, Kind::UnsupportedClaim, serde_json::json!({ "repaired": true }))
                 .severity("low")
@@ -167,7 +167,7 @@ pub async fn hand_off(state: &AppState, ws: &str, ctx: &ReplyContext, report: &S
     if !report.blocking.iter().any(|i| i.code == "unsupported_promise") {
         return Ok(());
     }
-    let title = format!("I couldn't send this reply safely - please read it and send it yourself: {}", crate::sources::normalize::truncate_chars(&ctx.subject, 120));
+    let title = format!("I couldn't send this reply safely - please read it and send it yourself: {}", crate::mail::sources::normalize::truncate_chars(&ctx.subject, 120));
     // The mark is unique per draft, so two sends racing to hand off create one task between them.
     let first = sqlx::query("INSERT OR IGNORE INTO handoff_marks (draft_id, created_at) VALUES (?1, ?2)").bind(&ctx.draft_id).bind(now_ms()).execute(&state.db).await?.rows_affected() == 1;
     if !first {
@@ -192,7 +192,7 @@ pub async fn hand_off(state: &AppState, ws: &str, ctx: &ReplyContext, report: &S
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::send_safety::{Issue, SafetyReport};
+    use crate::replies::send_safety::{Issue, SafetyReport};
 
     fn report(reason: &str) -> SafetyReport {
         SafetyReport {

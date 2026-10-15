@@ -20,14 +20,14 @@ use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use email_ai_api::{
     ai::judge::{FixedJudge, Verdict},
     alerts,
-    audit::Actor,
+    platform::audit::Actor,
     build_state,
-    config::{AuthMode, Config},
-    db::{self, now_ms},
-    error::AppError,
+    platform::config::{AuthMode, Config},
+    platform::db::{self, now_ms},
+    platform::error::AppError,
     http::{AppState, router},
     jobs::worker,
-    mailer::Mailer,
+    platform::mailer::Mailer,
     replies,
 };
 use http_body_util::BodyExt;
@@ -530,10 +530,10 @@ fn leaks(c: &[String]) -> bool {
 #[tokio::test]
 async fn the_leak_check_knows_what_the_drafter_was_given() {
     let h = harness(0).await;
-    email_ai_api::reply_settings::save(
+    email_ai_api::replies::reply_settings::save(
         &h.state.db,
         &h.ws,
-        &email_ai_api::reply_settings::ReplySettings {
+        &email_ai_api::replies::reply_settings::ReplySettings {
             auto_reply: false,
             reply_instructions: String::new(),
             signature: Some("HR Operations, call +91 80 4567 8901, https://hr.acme.test/help".into()),
@@ -720,7 +720,7 @@ async fn an_earlier_meera_turn_counts_when_it_is_about_this_email_and_only_the_p
         sqlx::query("INSERT INTO assistant_messages (workspace_id, user_id, role, text, citations_json, plan_json, created_at, links_json) VALUES (?1, ?2, 'user', ?3, '[]', '[]', ?4, '[]')")
             .bind(&h.ws).bind(user).bind(text).bind(at).execute(&h.state.db).await.unwrap();
     }
-    let said = email_ai_api::owner_said::conversation(&h.state.db, &h.ws, &me, &h.msg).await.unwrap();
+    let said = email_ai_api::replies::owner_said::conversation(&h.state.db, &h.ws, &me, &h.msg).await.unwrap();
     assert!(said.contains("UK company is hiring") && said.contains("reply to Priya"), "an older turn about this email (it names the subject) and a turn after it arrived: {said}");
     assert!(!said.contains("weather"), "an old turn about something else is not evidence for this email: {said}");
     assert!(!said.contains("Zeta"), "another member's words are not mine: {said}");
@@ -820,7 +820,7 @@ async fn a_second_draft_of_the_same_request_keeps_the_provenance() {
     owner_said(&h, &first, "tell Priya a UK company is hiring", &me).await;
     let second = h.draft(UK).await;
     let mut conn = h.state.db.acquire().await.unwrap();
-    email_ai_api::owner_said::record(&mut conn, &h.ws, &second, &h.msg, None, None).await.unwrap();
+    email_ai_api::replies::owner_said::record(&mut conn, &h.ws, &second, &h.msg, None, None).await.unwrap();
     drop(conn);
     let (said, author): (String, String) = sqlx::query_as("SELECT text, user_id FROM draft_owner_words WHERE draft_id = ?1").bind(&second).fetch_one(&h.state.db).await.unwrap();
     assert_eq!((said.as_str(), author.as_str()), ("tell Priya a UK company is hiring", me.as_str()));
@@ -831,14 +831,14 @@ async fn racing_hand_offs_create_one_task_and_a_hard_promise_is_not_repaired() {
     let h = harness(0).await;
     let d = h.draft("Hello Priya,\n\nThanks for your note.\n\nWe guarantee a quick outcome for you.\n\nBest regards,\nHR").await;
     let ctx = replies::load(&h.state, &h.ws, &d).await.unwrap();
-    let report = email_ai_api::send_safety::SafetyReport {
-        blocking: vec![email_ai_api::send_safety::Issue { code: "unsupported_promise", message: "may promise (x)".into(), fix: None }],
+    let report = email_ai_api::replies::send_safety::SafetyReport {
+        blocking: vec![email_ai_api::replies::send_safety::Issue { code: "unsupported_promise", message: "may promise (x)".into(), fix: None }],
         warnings: vec![],
     };
     let (a, b, c) = tokio::join!(
-        email_ai_api::repair::hand_off(&h.state, &h.ws, &ctx, &report),
-        email_ai_api::repair::hand_off(&h.state, &h.ws, &ctx, &report),
-        email_ai_api::repair::hand_off(&h.state, &h.ws, &ctx, &report)
+        email_ai_api::replies::repair::hand_off(&h.state, &h.ws, &ctx, &report),
+        email_ai_api::replies::repair::hand_off(&h.state, &h.ws, &ctx, &report),
+        email_ai_api::replies::repair::hand_off(&h.state, &h.ws, &ctx, &report)
     );
     assert!(a.is_ok() && b.is_ok() && c.is_ok());
     let tasks: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM review_items WHERE kind = 'agent_task'").fetch_one(&h.state.db).await.unwrap();

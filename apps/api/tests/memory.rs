@@ -15,8 +15,8 @@ use axum::{
 use email_ai_api::{
     ai::{AiError, LearnInput, LearnOutput, Learner, StyleLesson},
     build_state,
-    config::Config,
-    db,
+    platform::config::Config,
+    platform::db,
     http::{AppState, router},
     jobs::worker,
 };

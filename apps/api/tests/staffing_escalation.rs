@@ -3,7 +3,7 @@
 
 use crate::staffing_common;
 
-use email_ai_api::{alerts, db::now_ms};
+use email_ai_api::{alerts, platform::db::now_ms};
 use serde_json::{Value, json};
 use staffing_common::*;
 

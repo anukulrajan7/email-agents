@@ -4,7 +4,7 @@
 use crate::staffing_common;
 
 use axum::http::StatusCode;
-use email_ai_api::staffing::portal;
+use email_ai_api::hr::staffing::portal;
 use serde_json::{Value, json};
 use staffing_common::*;
 

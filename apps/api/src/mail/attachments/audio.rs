@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 use super::{Parsed, extension};
 use crate::{
     ai::{AiError, openrouter::OpenRouterClient, prepare_text},
-    sources::normalize::truncate_chars,
+    mail::sources::normalize::truncate_chars,
 };
 
 /// Audio longer than this is split.

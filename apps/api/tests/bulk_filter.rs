@@ -15,11 +15,11 @@ use axum::{
 use email_ai_api::{
     ai::{AiError, Analyst, Classifier, ClassifyInput, ClassifyOutput, Insight},
     build_state,
-    config::Config,
-    db::{self, new_id, now_ms},
-    domain::{ClassificationSource, NormalizedEmail, Priority},
+    platform::config::Config,
+    platform::db::{self, new_id, now_ms},
+    platform::domain::{ClassificationSource, NormalizedEmail, Priority},
     http::{AppState, router},
-    ingest,
+    mail::ingest,
     jobs::worker,
 };
 use http_body_util::BodyExt;

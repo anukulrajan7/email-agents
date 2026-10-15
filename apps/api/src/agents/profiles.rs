@@ -11,10 +11,10 @@ use sqlx::SqlitePool;
 
 use crate::{
     ai::routing::DEFAULT_REPLY_STYLE,
-    audit::{self, Actor, Entry},
-    config::Config,
-    db::{iso, now_ms},
-    sources::normalize::truncate_chars,
+    platform::audit::{self, Actor, Entry},
+    platform::config::Config,
+    platform::db::{iso, now_ms},
+    mail::sources::normalize::truncate_chars,
 };
 
 pub const MAX_NAME_CHARS: usize = 60;
@@ -177,8 +177,8 @@ pub async fn agent(db: &SqlitePool, config: &Config, ws: &str) -> sqlx::Result<W
     if let Some(a) = find().await? {
         return Ok(a);
     }
-    let settings = crate::reply_settings::load(db, config, ws).await?;
-    let persona = default_persona(crate::packs::reply_style(db, ws).await?, &settings.reply_instructions);
+    let settings = crate::replies::reply_settings::load(db, config, ws).await?;
+    let persona = default_persona(crate::platform::packs::reply_style(db, ws).await?, &settings.reply_instructions);
     let now = now_ms();
     let mut tx = db.begin_with("BEGIN IMMEDIATE").await?;
     let created = sqlx::query(
@@ -246,10 +246,10 @@ pub async fn save_agent(db: &SqlitePool, ws: &str, f: &AgentFields, user_id: &st
     .execute(&mut *tx)
     .await?;
     // The registry's lead mirrors this agent (it is internal, never shown), and the workspace's send setting moves the default agents with it.
-    if let Some(lead) = crate::agent_registry::store::lead(&mut *tx, ws).await? {
-        crate::agent_registry::store::set_identity(&mut tx, ws, &lead.id, &f.name, &f.avatar, &f.color).await?;
+    if let Some(lead) = crate::agents::registry::store::lead(&mut *tx, ws).await? {
+        crate::agents::registry::store::set_identity(&mut tx, ws, &lead.id, &f.name, &f.avatar, &f.color).await?;
     }
-    crate::agent_registry::store::sync_default_agents_from_settings(&mut tx, ws, &previous_send, &f.permissions.send).await?;
+    crate::agents::registry::store::sync_default_agents_from_settings(&mut tx, ws, &previous_send, &f.permissions.send).await?;
     tx.commit().await
 }
 
@@ -572,7 +572,7 @@ pub fn merge_voice(style: DraftStyle, workspace_instructions: String, signature:
     let signature = style.signature.or(signature);
     let Some(persona) = style.instructions else { return (workspace_instructions, signature) };
     let team = workspace_instructions.trim();
-    if team.is_empty() || team == DEFAULT_REPLY_STYLE || team == crate::packs::NEUTRAL_REPLY_STYLE || persona.contains(team) {
+    if team.is_empty() || team == DEFAULT_REPLY_STYLE || team == crate::platform::packs::NEUTRAL_REPLY_STYLE || persona.contains(team) {
         return (persona, signature);
     }
     (format!("{persona}\n\nTeam reply instructions:\n{team}"), signature)

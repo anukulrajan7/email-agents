@@ -10,8 +10,8 @@ use axum::{
 use email_ai_api::{
     agents::planner::{ScriptedPlanner, call as tool, finish},
     build_state,
-    config::Config,
-    db,
+    platform::config::Config,
+    platform::db,
     http::{AppState, router},
     jobs::worker,
 };
@@ -199,7 +199,7 @@ async fn migration_backfills_existing_workspaces_onto_staffing() {
         .collect();
     assert_eq!(rows, expect);
     for w in ["ws_old1", "ws_old2"] {
-        assert!(email_ai_api::packs::enabled(&pool, w, email_ai_api::packs::STAFFING).await.unwrap());
+        assert!(email_ai_api::platform::packs::enabled(&pool, w, email_ai_api::platform::packs::STAFFING).await.unwrap());
     }
 }
 

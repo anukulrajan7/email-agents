@@ -9,13 +9,13 @@ use sqlx::FromRow;
 
 use super::AppState;
 use crate::{
-    audit::{self, Actor, Entry},
-    auth::{AuthUser, require_role},
-    db::{iso, new_id, now_ms},
-    domain::Role,
-    error::{AppError, AppResult},
-    memory::{self, ContactRow, MAX_MEMORY_CHARS},
-    sources::normalize,
+    platform::audit::{self, Actor, Entry},
+    platform::auth::{AuthUser, require_role},
+    platform::db::{iso, new_id, now_ms},
+    platform::domain::Role,
+    platform::error::{AppError, AppResult},
+    learning::memory::{self, ContactRow, MAX_MEMORY_CHARS},
+    mail::sources::normalize,
 };
 
 pub const MEMORY_COLUMNS: &str =
@@ -97,7 +97,7 @@ pub async fn contact_memories(state: &AppState, ws: &str, viewer: &str, email: &
         "SELECT {MEMORY_COLUMNS} FROM memories
          WHERE workspace_id = ?1 AND scope = 'contact' AND contact_email = ?2 AND status = 'active' AND {}
          ORDER BY updated_at DESC",
-        crate::agent_registry::store::hide_foreign_personal("memories", "?3")
+        crate::agents::registry::store::hide_foreign_personal("memories", "?3")
     ))
     .bind(ws)
     .bind(email)
@@ -166,7 +166,7 @@ pub async fn list(
            AND (?6 IS NULL OR origin = ?6)
            AND {}
          ORDER BY updated_at DESC LIMIT 200",
-        crate::agent_registry::store::hide_foreign_personal("memories", "?7")
+        crate::agents::registry::store::hide_foreign_personal("memories", "?7")
     ))
     .bind(&ws)
     .bind(&status)
@@ -282,7 +282,7 @@ pub async fn update(
                 pinned = COALESCE(?8, pinned), updated_at = ?4
          WHERE id = ?5 AND workspace_id = ?6 AND {}
          RETURNING {MEMORY_COLUMNS}",
-        crate::agent_registry::store::hide_foreign_personal("memories", "?9")
+        crate::agents::registry::store::hide_foreign_personal("memories", "?9")
     ))
     .bind(&content)
     .bind(&body.kind)
@@ -372,7 +372,7 @@ pub async fn contact(
     let row = memory::get_contact(&state.db, &ws, &email).await?.ok_or(AppError::NotFound)?;
     let contact = memory::contact_json(&state.db, &ws, row).await?;
     let memories = contact_memories(&state, &ws, &user.id, &email).await?;
-    let wall = crate::team::scope::wall_for(&state.db, &ws, &user).await?;
+    let wall = crate::hr::team::scope::wall_for(&state.db, &ws, &user).await?;
     let recent: Vec<(String, String, i64, String, Option<String>)> = sqlx::query_as(
         "SELECT m.id, m.subject, m.received_at, m.processing_status, c.category
          FROM email_messages m LEFT JOIN classifications c ON c.message_id = m.id

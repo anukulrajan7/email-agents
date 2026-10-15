@@ -3,8 +3,8 @@
 use sqlx::{SqliteConnection, SqlitePool};
 
 use crate::{
-    db::{new_id, now_ms},
-    domain::{LabelTemplate, Label, OTHER_LABEL},
+    platform::db::{new_id, now_ms},
+    platform::domain::{LabelTemplate, Label, OTHER_LABEL},
 };
 
 pub const MAX_ACTIVE_LABELS: i64 = 30;

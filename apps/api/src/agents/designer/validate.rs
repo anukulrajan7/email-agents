@@ -7,7 +7,7 @@ use std::sync::LazyLock;
 
 use regex::Regex;
 
-use crate::agent_registry::{
+use crate::agents::registry::{
     runtime::MATCHING_TOOLS,
     spec::{self, AgentSpec, CATEGORIES, Issue, MAX_NAME_CHARS, SendMode, Step, Trigger},
 };
@@ -58,7 +58,7 @@ pub struct WsCtx {
 }
 
 fn category_for_pack(pack: &str) -> &str {
-    if pack == crate::packs::STAFFING { "hrms" } else { pack }
+    if pack == crate::platform::packs::STAFFING { "hrms" } else { pack }
 }
 
 impl WsCtx {
@@ -314,7 +314,7 @@ fn text_fields(spec: &AgentSpec) -> Vec<(String, String)> {
 }
 
 pub fn push_capped(list: &mut Vec<String>, line: String, max: usize) {
-    let line = crate::sources::normalize::truncate_chars(&line, 280);
+    let line = crate::mail::sources::normalize::truncate_chars(&line, 280);
     if list.len() < max && !list.contains(&line) {
         list.push(line);
     }
@@ -328,7 +328,7 @@ pub fn normalise(mut spec: AgentSpec, ctx: &WsCtx) -> AgentSpec {
     }
     spec.name = spec.name.split_whitespace().collect::<Vec<_>>().join(" ");
     if spec.name.chars().count() > MAX_NAME_CHARS {
-        spec.name = crate::sources::normalize::truncate_chars(&spec.name, MAX_NAME_CHARS);
+        spec.name = crate::mail::sources::normalize::truncate_chars(&spec.name, MAX_NAME_CHARS);
     }
     let mut notes: Vec<String> = Vec::new();
     let mut asks: Vec<String> = Vec::new();
@@ -435,7 +435,7 @@ pub mod tests_support {
 #[cfg(test)]
 mod tests {
     use super::{tests_support::ctx, *};
-    use crate::agent_registry::templates::{LEAD_KEY, TEMPLATES, template};
+    use crate::agents::registry::templates::{LEAD_KEY, TEMPLATES, template};
 
     #[test]
     fn negated_rules_pass_and_requests_are_caught() {
@@ -483,7 +483,7 @@ mod tests {
     #[test]
     fn names_field_descriptions_and_the_send_cap_are_checked() {
         let base = {
-            let mut s = template(crate::agent_registry::templates::INBOX_KEY).unwrap().spec();
+            let mut s = template(crate::agents::registry::templates::INBOX_KEY).unwrap().spec();
             s.key = "inbox_two".into();
             s.steps.insert(0, Step::Extract { fields: vec![spec::ExtractField { name: "order_id".into(), field_type: spec::FieldType::String, description: "The order".into() }] });
             s.tools.push("extract_fields".into());
@@ -511,7 +511,7 @@ mod tests {
 
     #[test]
     fn normalising_only_tightens() {
-        let mut spec = template(crate::agent_registry::templates::INBOX_KEY).unwrap().spec();
+        let mut spec = template(crate::agents::registry::templates::INBOX_KEY).unwrap().spec();
         spec.key = "mine".into();
         spec.permissions.max_autonomy = 3;
         spec.permissions.send = SendMode::Never;
@@ -538,7 +538,7 @@ mod tests {
     #[test]
     fn each_workspace_rule_has_a_code() {
         let base = {
-            let mut s = template(crate::agent_registry::templates::INBOX_KEY).unwrap().spec();
+            let mut s = template(crate::agents::registry::templates::INBOX_KEY).unwrap().spec();
             s.key = "inbox_two".into();
             s.triggers = vec![Trigger::EmailReceived { matcher: spec::TriggerMatch { labels: vec!["question".into()], ..Default::default() } }];
             s

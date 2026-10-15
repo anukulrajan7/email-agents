@@ -4,7 +4,7 @@
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 
-use crate::{config::Config, db::now_ms};
+use crate::{platform::config::Config, platform::db::now_ms};
 
 pub const MAX_INSTRUCTIONS_CHARS: usize = 2_000;
 pub const MAX_SIGNATURE_CHARS: usize = 200;

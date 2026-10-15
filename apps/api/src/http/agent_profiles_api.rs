@@ -11,12 +11,12 @@ use serde_json::{Value, json};
 
 use super::AppState;
 use crate::{
-    agent_profiles::{self, AgentInput, Owner, UserProfile, UserProfileInput},
+    agents::profiles::{self, AgentInput, Owner, UserProfile, UserProfileInput},
     ai::DraftQuality,
-    audit::{self, Actor, Entry},
-    auth::{AuthUser, require_role},
-    domain::Role,
-    error::{AppError, AppResult},
+    platform::audit::{self, Actor, Entry},
+    platform::auth::{AuthUser, require_role},
+    platform::domain::Role,
+    platform::error::{AppError, AppResult},
     jobs::handlers,
 };
 
@@ -41,10 +41,10 @@ async fn record(state: &AppState, ws: &str, user: &AuthUser, action: &str, entit
 
 async fn get_agent(State(state): State<AppState>, user: AuthUser, Path(ws): Path<String>) -> AppResult<Json<Value>> {
     let role = require_role(&state.db, &ws, &user, Role::Operator).await?;
-    let agent = agent_profiles::agent(&state.db, &state.config, &ws).await?;
+    let agent = profiles::agent(&state.db, &state.config, &ws).await?;
     Ok(Json(json!({
         "agent": agent.to_json(),
-        "standard_guidance": agent_profiles::standard_guidance(crate::packs::reply_style(&state.db, &ws).await?),
+        "standard_guidance": profiles::standard_guidance(crate::platform::packs::reply_style(&state.db, &ws).await?),
         "can_edit": role == Role::Admin,
     })))
 }
@@ -52,9 +52,9 @@ async fn get_agent(State(state): State<AppState>, user: AuthUser, Path(ws): Path
 async fn put_agent(State(state): State<AppState>, user: AuthUser, Path(ws): Path<String>, Json(body): Json<Value>) -> AppResult<Json<Value>> {
     require_role(&state.db, &ws, &user, Role::Admin).await?;
     let input: AgentInput = serde_json::from_value(body).map_err(|e| AppError::BadRequest(format!("invalid agent settings: {e}")))?;
-    let current = agent_profiles::agent(&state.db, &state.config, &ws).await?;
+    let current = profiles::agent(&state.db, &state.config, &ws).await?;
     let next = current.clone().apply(&input).map_err(AppError::BadRequest)?;
-    agent_profiles::save_agent(&state.db, &ws, &next, &user.id).await?;
+    profiles::save_agent(&state.db, &ws, &next, &user.id).await?;
     record(
         &state,
         &ws,
@@ -68,7 +68,7 @@ async fn put_agent(State(state): State<AppState>, user: AuthUser, Path(ws): Path
         }),
     )
     .await?;
-    let saved = agent_profiles::agent(&state.db, &state.config, &ws).await?;
+    let saved = profiles::agent(&state.db, &state.config, &ws).await?;
     Ok(Json(saved.to_json()))
 }
 
@@ -85,8 +85,8 @@ async fn my_mailboxes(state: &AppState, ws: &str, user_id: &str) -> AppResult<Ve
 
 async fn get_my_profile(State(state): State<AppState>, user: AuthUser, Path(ws): Path<String>) -> AppResult<Json<Value>> {
     require_role(&state.db, &ws, &user, Role::Operator).await?;
-    let agent = agent_profiles::agent(&state.db, &state.config, &ws).await?;
-    let profile = agent_profiles::user_profile(&state.db, &ws, &user.id).await?.unwrap_or_else(UserProfile::blank);
+    let agent = profiles::agent(&state.db, &state.config, &ws).await?;
+    let profile = profiles::user_profile(&state.db, &ws, &user.id).await?.unwrap_or_else(UserProfile::blank);
     let mailboxes = my_mailboxes(&state, &ws, &user.id).await?;
     let needs_onboarding = !mailboxes.is_empty() && !profile.saved && !profile.skipped;
     Ok(Json(json!({
@@ -100,17 +100,17 @@ async fn get_my_profile(State(state): State<AppState>, user: AuthUser, Path(ws):
 async fn put_my_profile(State(state): State<AppState>, user: AuthUser, Path(ws): Path<String>, Json(body): Json<Value>) -> AppResult<Json<Value>> {
     require_role(&state.db, &ws, &user, Role::Operator).await?;
     let input: UserProfileInput = serde_json::from_value(body).map_err(|e| AppError::BadRequest(format!("invalid profile: {e}")))?;
-    let current = agent_profiles::user_profile(&state.db, &ws, &user.id).await?.unwrap_or_else(UserProfile::blank);
+    let current = profiles::user_profile(&state.db, &ws, &user.id).await?.unwrap_or_else(UserProfile::blank);
     let next = current.apply(&input).map_err(AppError::BadRequest)?;
-    agent_profiles::save_user_profile(&state.db, &ws, &user.id, &next).await?;
+    profiles::save_user_profile(&state.db, &ws, &user.id, &next).await?;
     record(&state, &ws, &user, "user_agent_profile.updated", "user", &user.id, json!({ "send_approval": next.approvals.send_email })).await?;
-    let saved = agent_profiles::user_profile(&state.db, &ws, &user.id).await?.unwrap_or_else(UserProfile::blank);
+    let saved = profiles::user_profile(&state.db, &ws, &user.id).await?.unwrap_or_else(UserProfile::blank);
     Ok(Json(saved.to_json()))
 }
 
 async fn skip_my_profile(State(state): State<AppState>, user: AuthUser, Path(ws): Path<String>) -> AppResult<Json<Value>> {
     require_role(&state.db, &ws, &user, Role::Operator).await?;
-    agent_profiles::skip_user_profile(&state.db, &ws, &user.id).await?;
+    profiles::skip_user_profile(&state.db, &ws, &user.id).await?;
     record(&state, &ws, &user, "user_agent_profile.skipped", "user", &user.id, json!({})).await?;
     Ok(Json(json!({ "skipped": true })))
 }
@@ -133,7 +133,7 @@ async fn list_profiles(State(state): State<AppState>, user: AuthUser, Path(ws): 
     .await?;
     let mut items = Vec::with_capacity(members.len());
     for m in members {
-        let profile = agent_profiles::user_profile(&state.db, &ws, &m.user_id).await?.filter(|p| p.saved);
+        let profile = profiles::user_profile(&state.db, &ws, &m.user_id).await?.filter(|p| p.saved);
         items.push(json!({
             "user_id": m.user_id, "email": m.email, "role": m.role,
             "mailboxes": my_mailboxes(&state, &ws, &m.user_id).await?,
@@ -165,7 +165,7 @@ async fn preview(State(state): State<AppState>, user: AuthUser, Path(ws): Path<S
         Some("inbound") => {}
         Some(_) => return Err(AppError::BadRequest("pick an email you received".into())),
     }
-    let mut ctx = agent_profiles::context_for_message(&state.db, &state.config, &ws, &body.message_id).await?;
+    let mut ctx = profiles::context_for_message(&state.db, &state.config, &ws, &body.message_id).await?;
     if let Some(input) = &body.agent {
         if role != Role::Admin {
             return Err(AppError::Forbidden);
@@ -173,13 +173,13 @@ async fn preview(State(state): State<AppState>, user: AuthUser, Path(ws): Path<S
         ctx.agent = ctx.agent.clone().apply(input).map_err(AppError::BadRequest)?;
     }
     if let Some(input) = &body.profile {
-        let mine = agent_profiles::user_profile(&state.db, &ws, &user.id).await?.unwrap_or_else(UserProfile::blank);
+        let mine = profiles::user_profile(&state.db, &ws, &user.id).await?.unwrap_or_else(UserProfile::blank);
         let profile = UserProfile { saved: true, ..mine.apply(input).map_err(AppError::BadRequest)? };
         ctx.owner = Some(Owner { user_id: user.id.clone(), email: user.email.clone(), profile: Some(profile) });
     }
     let quality = (ctx.agent.quality == "best").then_some(DraftQuality::Premium);
     let style = ctx.draft_style(&state.config);
-    let text = agent_profiles::with_draft_style(style, handlers::preview_draft(&state, &body.message_id, quality)).await.map_err(|e| {
+    let text = profiles::with_draft_style(style, handlers::preview_draft(&state, &body.message_id, quality)).await.map_err(|e| {
         tracing::warn!(message_id = %body.message_id, error = %e, "agent preview failed");
         AppError::AiUnavailable
     })?;

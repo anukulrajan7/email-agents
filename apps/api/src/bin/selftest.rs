@@ -1,6 +1,6 @@
 use email_ai_api::ai::openrouter::OpenRouterClient;
 use email_ai_api::ai::selftest;
-use email_ai_api::config::Config;
+use email_ai_api::platform::config::Config;
 
 /// Production smoke: one tool-calling request per configured model. Exit 1 lists each failing model.
 #[tokio::main]

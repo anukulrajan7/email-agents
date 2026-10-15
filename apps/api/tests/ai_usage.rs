@@ -14,10 +14,10 @@ use email_ai_api::{
         embeddings::{Embedder, OpenRouterEmbedder},
         openrouter::{OpenRouterAnalyst, OpenRouterClient},
     },
-    ai_ledger::{self, AiContext},
+    ai::ledger::{self, AiContext},
     build_state,
-    config::Config,
-    db::{self, new_id, now_ms},
+    platform::config::Config,
+    platform::db::{self, new_id, now_ms},
     http::{AppState, router},
     jobs::worker,
 };
@@ -151,7 +151,7 @@ async fn openrouter_calls_are_recorded_with_task_tokens_cost_and_context() {
 
     let analyst = OpenRouterAnalyst::new(client, "qwen/qwen3.8-flash");
     let ctx = AiContext { workspace_id: Some(env.ws.clone()), ..Default::default() };
-    ai_ledger::with_context(ctx, analyst.analyze("Payslip", "a@b.co", "Where is my payslip?")).await.unwrap();
+    ledger::with_context(ctx, analyst.analyze("Payslip", "a@b.co", "Where is my payslip?")).await.unwrap();
     // No context (e.g. a call outside a job or request): recorded with NULL workspace.
     analyst.analyze("Payslip", "a@b.co", "Where is my payslip?").await.unwrap();
 
@@ -240,7 +240,7 @@ async fn unparseable_answers_are_logged_as_failures_not_successes() {
 async fn understanding_calls_are_verified_and_recorded_under_their_own_task_and_prompt_version() {
     use email_ai_api::{
         ai::understand::{OpenRouterUnderstander, UnderstandInput, Understander},
-        domain::Label,
+        platform::domain::Label,
     };
     let env = setup_with(|_| {}).await;
     let url = fake_detailed_openrouter(
@@ -271,7 +271,7 @@ async fn the_stronger_model_is_asked_only_below_half_confidence() {
     use axum::extract::State;
     use email_ai_api::{
         ai::{Classifier, ClassifyInput, openrouter::OpenRouterClassifier},
-        domain::Label,
+        platform::domain::Label,
     };
     use std::sync::Mutex;
 
@@ -310,7 +310,7 @@ async fn job_attempt_is_recorded_on_the_ledger_row() {
     let url = fake_detailed_openrouter(r#"{"summary":"s","asks":[],"deadline":null,"needs_reply":false,"missing_info":[]}"#).await;
     let client = OpenRouterClient::new(reqwest::Client::new(), &url, "k").with_ledger(env.state.db.clone());
     let ctx = AiContext::for_job(Some(&env.ws), &json!({}), 3);
-    ai_ledger::with_context(ctx, OpenRouterAnalyst::new(client, "m").analyze("s", "a@b.co", "b")).await.unwrap();
+    ledger::with_context(ctx, OpenRouterAnalyst::new(client, "m").analyze("s", "a@b.co", "b")).await.unwrap();
     assert_eq!(detail_rows(&env).await[0].8, 3);
 }
 
@@ -414,9 +414,9 @@ async fn over_budget_skips_automatic_ai_but_people_can_still_ask() {
         c.auto_drafts = false;
     })
     .await;
-    assert!(ai_ledger::within_budget(&env.state.db, 0.01, &env.ws).await);
+    assert!(ledger::within_budget(&env.state.db, 0.01, &env.ws).await);
     env.insert_call("classify", 0.05, now_ms()).await;
-    assert!(!ai_ledger::within_budget(&env.state.db, 0.01, &env.ws).await);
+    assert!(!ledger::within_budget(&env.state.db, 0.01, &env.ws).await);
 
     // Automatic stages are skipped; classification still runs.
     let id = env.email("Where is my payslip?", "Hi, where can I find my payslip for last month?").await;
@@ -451,11 +451,11 @@ async fn over_budget_skips_automatic_ai_but_people_can_still_ask() {
 async fn budget_is_per_workspace_and_per_day() {
     let env = setup_with(|_| {}).await;
     env.insert_call("draft", 1.9, now_ms()).await;
-    assert!(ai_ledger::within_budget(&env.state.db, 2.0, &env.ws).await);
+    assert!(ledger::within_budget(&env.state.db, 2.0, &env.ws).await);
     env.insert_call("draft", 0.2, now_ms()).await;
-    assert!(!ai_ledger::within_budget(&env.state.db, 2.0, &env.ws).await);
+    assert!(!ledger::within_budget(&env.state.db, 2.0, &env.ws).await);
 
     env.insert_call("draft", 50.0, now_ms() - 2 * DAY_MS).await;
     let (_, other) = call(&env.app, "POST", "/api/v1/workspaces", "dev:other@x.test", Some(json!({"name":"Other"}))).await;
-    assert!(ai_ledger::within_budget(&env.state.db, 2.0, other["id"].as_str().unwrap()).await);
+    assert!(ledger::within_budget(&env.state.db, 2.0, other["id"].as_str().unwrap()).await);
 }

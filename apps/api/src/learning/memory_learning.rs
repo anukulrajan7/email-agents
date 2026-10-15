@@ -19,9 +19,9 @@ use sqlx::{SqliteConnection, SqlitePool};
 
 use crate::{
     ai::memory_extractor::{ExtractedFact, LearnDirection},
-    audit::{self, Actor, Entry},
-    db::{new_id, now_ms},
-    memory::dedupe_key,
+    platform::audit::{self, Actor, Entry},
+    platform::db::{new_id, now_ms},
+    learning::memory::dedupe_key,
 };
 
 pub const AUTO_MEMORY_CAP: i64 = 500;

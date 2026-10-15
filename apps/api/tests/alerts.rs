@@ -12,11 +12,11 @@ use axum::{
 use email_ai_api::{
     alerts::{self, NewAlert},
     build_state,
-    config::Config,
-    db::{self, now_ms},
+    platform::config::Config,
+    platform::db::{self, now_ms},
     http::{AppState, router},
     jobs::worker,
-    mailer::Mailer,
+    platform::mailer::Mailer,
 };
 use http_body_util::BodyExt;
 use serde_json::{Value, json};

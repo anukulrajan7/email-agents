@@ -15,11 +15,11 @@ use email_ai_api::{
         label_suggest::{LabelProposal, LabelSuggester, SampleMail},
     },
     build_state,
-    config::Config,
-    db,
-    domain::{Label, NormalizedEmail},
+    platform::config::Config,
+    platform::db,
+    platform::domain::{Label, NormalizedEmail},
     http::{AppState, router},
-    ingest,
+    mail::ingest,
     jobs::worker,
 };
 use http_body_util::BodyExt;

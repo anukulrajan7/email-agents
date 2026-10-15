@@ -101,7 +101,7 @@ pub fn billing_like(sender: &str, subject: &str, new_part: &str) -> bool {
     if SAFE_LOCAL_PARTS.contains(&local) {
         return true;
     }
-    let head = crate::sources::normalize::truncate_chars(new_part, 1_500);
+    let head = crate::mail::sources::normalize::truncate_chars(new_part, 1_500);
     BILLING_LIKE.is_match(subject) || BILLING_LIKE.is_match(&head)
 }
 
@@ -126,7 +126,7 @@ pub async fn is_known_contact(db: &SqlitePool, workspace_id: &str, sender: &str)
 /// Pure part of the decision: enough signals, a reply-less subject and nothing billing-like.
 pub fn qualifies(stored: &[String], sender: &str, subject: &str, new_part: &str) -> bool {
     let mut signals = stored.to_vec();
-    if crate::memory_learning::is_automated_sender(sender) {
+    if crate::learning::memory_learning::is_automated_sender(sender) {
         merge(&mut signals, vec![NO_REPLY_SENDER.to_string()]);
     }
     signals.len() >= MIN_SIGNALS && !REPLY_SUBJECT.is_match(subject) && !billing_like(sender, subject, new_part)
@@ -149,7 +149,7 @@ pub async fn should_file(db: &SqlitePool, workspace_id: &str, message_id: &str) 
         return Ok(None);
     }
     let mut signals = stored;
-    if crate::memory_learning::is_automated_sender(&sender) {
+    if crate::learning::memory_learning::is_automated_sender(&sender) {
         merge(&mut signals, vec![NO_REPLY_SENDER.to_string()]);
     }
     Ok(Some(signals))
@@ -217,10 +217,10 @@ mod tests {
             "payload": {"headers": [{"name": "From", "value": "News <news@brand.example>"},
                                     {"name": "List-Unsubscribe", "value": "<mailto:u@brand.example>"}]}
         });
-        let mapped = crate::sources::nango::map_gmail_record(&rec, 5_000).unwrap();
+        let mapped = crate::mail::sources::nango::map_gmail_record(&rec, 5_000).unwrap();
         assert_eq!(mapped.email.bulk_signals, [LIST_UNSUBSCRIBE, GMAIL_CATEGORY]);
 
-        let forwarded: crate::sources::resend::ReceivedEmail = serde_json::from_value(
+        let forwarded: crate::mail::sources::resend::ReceivedEmail = serde_json::from_value(
             json!({"id": "r1", "from": "x@y.co", "headers": {"Precedence": "bulk", "Auto-Submitted": "auto-generated"}}),
         )
         .unwrap();

@@ -8,7 +8,7 @@ use super::{Job, handlers::JobError, kind};
 use crate::{
     http::AppState,
     jobs,
-    knowledge::{self, IndexError},
+    learning::knowledge::{self, IndexError},
 };
 
 /// Items enqueued per backfill run; the job re-enqueues itself with a cursor until done.

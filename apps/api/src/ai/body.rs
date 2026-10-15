@@ -12,7 +12,7 @@ use std::sync::LazyLock;
 
 use regex::Regex;
 
-use crate::knowledge::tidy;
+use crate::learning::knowledge::tidy;
 
 /// One email split into what is new and the sender's sign-off.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -203,7 +203,7 @@ pub fn split(subject: &str, text: &str) -> BodySplit {
     if new_part.chars().all(char::is_whitespace) {
         return BodySplit { new_part: tidy(&normalized), signature: String::new() };
     }
-    let signature = crate::sources::normalize::truncate_chars(&tidy(&signature.join("\n")), SIGNATURE_STORED_CHARS);
+    let signature = crate::mail::sources::normalize::truncate_chars(&tidy(&signature.join("\n")), SIGNATURE_STORED_CHARS);
     BodySplit { new_part, signature }
 }
 
@@ -237,7 +237,7 @@ pub fn thread_digest(entries: &[DigestEntry], max_chars: usize) -> String {
             let date = time::OffsetDateTime::from_unix_timestamp(e.received_at_ms / 1000)
                 .map(|t| t.date().to_string())
                 .unwrap_or_default();
-            Some(format!("- {} ({date}): {}", e.who, crate::sources::normalize::truncate_chars(&one_line, DIGEST_LINE_CHARS)))
+            Some(format!("- {} ({date}): {}", e.who, crate::mail::sources::normalize::truncate_chars(&one_line, DIGEST_LINE_CHARS)))
         })
         .collect();
     let mut total: usize = lines.iter().map(|l| l.chars().count() + 1).sum();
@@ -245,7 +245,7 @@ pub fn thread_digest(entries: &[DigestEntry], max_chars: usize) -> String {
         total -= lines.remove(0).chars().count() + 1;
     }
     let digest = lines.join("\n");
-    crate::sources::normalize::truncate_chars(&digest, max_chars)
+    crate::mail::sources::normalize::truncate_chars(&digest, max_chars)
 }
 
 #[cfg(test)]

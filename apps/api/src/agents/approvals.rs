@@ -10,9 +10,9 @@ use super::{
     tools::{self, ToolCtx, ToolError},
 };
 use crate::{
-    audit::{self, Actor, Entry},
-    db::{iso, now_ms},
-    error::{AppError, AppResult},
+    platform::audit::{self, Actor, Entry},
+    platform::db::{iso, now_ms},
+    platform::error::{AppError, AppResult},
     http::AppState,
     learning::{
         edit_distance,
@@ -69,7 +69,7 @@ impl ApprovalRow {
             "candidates": serde_json::from_str::<Value>(&self.candidates_json).unwrap_or_else(|_| json!([])),
             "status": self.status, "decided_by": self.decided_by_email, "decided_at": self.decided_at.map(iso),
             "created_at": iso(self.created_at),
-            "unanswered": self.unanswered_json.as_deref().map(crate::gap_resolver::parse_unanswered).unwrap_or_default(),
+            "unanswered": self.unanswered_json.as_deref().map(crate::replies::gap_resolver::parse_unanswered).unwrap_or_default(),
         })
     }
 }
@@ -80,7 +80,7 @@ pub async fn list(db: &SqlitePool, ws: &str, viewer: &str, status: Option<&str>,
         "{APPROVAL_SELECT} WHERE a.workspace_id = ?1 AND (?2 IS NULL OR a.status = ?2) AND (?3 IS NULL OR a.case_id = ?3)
            AND {}
          ORDER BY a.created_at DESC LIMIT 200",
-        crate::agent_registry::store::hide_foreign_personal("a", "?4")
+        crate::agents::registry::store::hide_foreign_personal("a", "?4")
     ))
     .bind(ws)
     .bind(status)
@@ -93,7 +93,7 @@ pub async fn list(db: &SqlitePool, ws: &str, viewer: &str, status: Option<&str>,
 pub async fn get(db: &SqlitePool, ws: &str, viewer: &str, id: &str) -> sqlx::Result<Option<ApprovalRow>> {
     sqlx::query_as(&format!(
         "{APPROVAL_SELECT} WHERE a.id = ?1 AND a.workspace_id = ?2 AND {}",
-        crate::agent_registry::store::hide_foreign_personal("a", "?3")
+        crate::agents::registry::store::hide_foreign_personal("a", "?3")
     ))
     .bind(id)
     .bind(ws)
@@ -105,7 +105,7 @@ pub async fn get(db: &SqlitePool, ws: &str, viewer: &str, id: &str) -> sqlx::Res
 pub async fn pending_count(db: &SqlitePool, ws: &str, viewer: &str) -> sqlx::Result<i64> {
     sqlx::query_scalar(&format!(
         "SELECT COUNT(*) FROM agent_approvals a WHERE a.workspace_id = ?1 AND a.status = 'pending' AND {}",
-        crate::agent_registry::store::hide_foreign_personal("a", "?2")
+        crate::agents::registry::store::hide_foreign_personal("a", "?2")
     ))
     .bind(ws)
     .bind(viewer)

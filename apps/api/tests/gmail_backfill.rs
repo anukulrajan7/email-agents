@@ -16,7 +16,7 @@ use axum::{
     routing::{get, post, put},
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-use email_ai_api::{build_state, config::Config, db, http::router, jobs::worker};
+use email_ai_api::{build_state, platform::config::Config, platform::db, http::router, jobs::worker};
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use tower::ServiceExt;

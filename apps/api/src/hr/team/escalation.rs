@@ -8,7 +8,7 @@ use super::{clock, metrics, people, settings};
 use crate::{
     alerts::{self, NewAlert},
     http::AppState,
-    packs,
+    platform::packs,
 };
 
 pub const BELOW_TARGET: &str = "below_target";

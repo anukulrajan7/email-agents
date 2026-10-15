@@ -13,7 +13,7 @@ use lettre::{
 };
 use sqlx::SqlitePool;
 
-use crate::db::{new_id, now_ms};
+use crate::platform::db::{new_id, now_ms};
 
 #[async_trait]
 pub trait Mailer: Send + Sync {
@@ -112,7 +112,7 @@ pub struct OutgoingEmail<'a> {
 
 /// Subject as stored in the outbox: verification subjects carry the code, so they are replaced.
 fn logged_subject(kind: &str, subject: &str) -> String {
-    if kind == kind::OTP { "Verification code".into() } else { crate::sources::normalize::truncate_chars(subject, 200) }
+    if kind == kind::OTP { "Verification code".into() } else { crate::mail::sources::normalize::truncate_chars(subject, 200) }
 }
 
 /// Sends with up to `MAX_ATTEMPTS` tries (backoff between them) and records the outcome in
@@ -156,7 +156,7 @@ pub async fn deliver(db: &SqlitePool, mailer: &dyn Mailer, email: OutgoingEmail<
     let recorded = sqlx::query("UPDATE email_outbox SET status = ?1, attempts = ?2, last_error = ?3, updated_at = ?4 WHERE id = ?5")
         .bind(if ok { "sent" } else { "failed" })
         .bind(attempts)
-        .bind((!ok).then(|| crate::sources::normalize::truncate_chars(&last_error, 500)))
+        .bind((!ok).then(|| crate::mail::sources::normalize::truncate_chars(&last_error, 500)))
         .bind(now_ms())
         .bind(&id)
         .execute(db)
@@ -204,8 +204,8 @@ mod tests {
 
     async fn pool() -> (SqlitePool, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
-        let db = crate::db::connect(&format!("sqlite://{}", dir.path().join("t.db").display())).await.unwrap();
-        crate::db::migrate(&db).await.unwrap();
+        let db = crate::platform::db::connect(&format!("sqlite://{}", dir.path().join("t.db").display())).await.unwrap();
+        crate::platform::db::migrate(&db).await.unwrap();
         (db, dir)
     }
 

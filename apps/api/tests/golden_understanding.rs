@@ -7,8 +7,8 @@ use email_ai_api::{
         body::model_body,
         understand::{UnderstandInput, parse_understanding},
     },
-    bulk,
-    domain::Label,
+    mail::bulk,
+    platform::domain::Label,
 };
 use serde::Deserialize;
 use harness::{label_accuracy, label_accuracy_md, label_set, load_scenarios, write_scorecard};

@@ -4,7 +4,7 @@
 use serde_json::{Value, json};
 
 use super::{handlers::JobError, kind};
-use crate::{db::now_ms, evals, http::AppState, jobs, metrics::rollup};
+use crate::{platform::db::now_ms, evals, http::AppState, jobs, metrics::rollup};
 
 pub async fn run_eval(state: &AppState, payload: &Value) -> Result<(), JobError> {
     let run_id = payload.get("run_id").and_then(Value::as_str).ok_or_else(|| JobError::Permanent("payload missing run_id".into()))?;
@@ -23,7 +23,7 @@ pub async fn rollup_agent_metrics(state: &AppState) -> Result<(), JobError> {
 pub async fn on_dead(state: &AppState, payload: &Value, error: &str) -> Result<(), JobError> {
     let Some(run_id) = payload.get("run_id").and_then(Value::as_str) else { return Ok(()) };
     sqlx::query("UPDATE eval_runs SET status = 'error', summary_json = ?1, finished_at = ?2 WHERE id = ?3 AND status IN ('queued','running')")
-        .bind(json!({"note": "The run could not finish.", "error": crate::sources::normalize::truncate_chars(error, 200)}).to_string())
+        .bind(json!({"note": "The run could not finish.", "error": crate::mail::sources::normalize::truncate_chars(error, 200)}).to_string())
         .bind(now_ms())
         .bind(run_id)
         .execute(&state.db)

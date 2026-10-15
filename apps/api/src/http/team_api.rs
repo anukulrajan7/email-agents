@@ -12,11 +12,11 @@ use serde_json::{Value, json};
 
 use super::AppState;
 use crate::{
-    audit::{self, Actor, Entry},
-    auth::AuthUser,
-    error::{AppError, AppResult},
-    packs,
-    team::{
+    platform::audit::{self, Actor, Entry},
+    platform::auth::AuthUser,
+    platform::error::{AppError, AppResult},
+    platform::packs,
+    hr::team::{
         access::{self, Access},
         escalation, metrics, people,
         people::{Context, Draft, Fields, Person},
@@ -41,7 +41,7 @@ pub fn routes() -> Router<AppState> {
 /// Re-judges suppressed mail after a change that the billable policy depends on.
 async fn policy_changed(state: &AppState, ws: &str) -> AppResult<()> {
     if packs::enabled(&state.db, ws, packs::STAFFING).await? {
-        crate::staffing::policy::release_suppressed(&state.db, ws).await?;
+        crate::hr::staffing::policy::release_suppressed(&state.db, ws).await?;
     }
     Ok(())
 }
@@ -149,7 +149,7 @@ pub async fn put_settings(State(state): State<AppState>, user: AuthUser, Path(ws
     }
     settings::save(&state.db, &ws, &next).await?;
     if staffing {
-        crate::staffing::policy::release_suppressed(&state.db, &ws).await?;
+        crate::hr::staffing::policy::release_suppressed(&state.db, &ws).await?;
     }
     let mut conn = state.db.acquire().await?;
     audit::record(&mut conn, Entry { workspace_id: &ws, actor: Actor::User(&user.id), action: "team_settings.updated", entity_type: "workspace", entity_id: &ws, message_id: None, metadata: json!({}) }).await?;
@@ -255,14 +255,14 @@ pub async fn import_people(State(state): State<AppState>, user: AuthUser, Path(w
 pub async fn my_metrics(State(state): State<AppState>, user: AuthUser, Path(ws): Path<String>) -> AppResult<Json<Value>> {
     let a = access::resolve(&state.db, &ws, &user).await?;
     let Some(person_id) = &a.person_id else { return Ok(Json(json!({ "person": null, "metrics": null }))) };
-    let m = crate::staffing::metrics::person_metrics(&state.db, &ws, person_id, crate::db::now_ms()).await?;
+    let m = crate::hr::staffing::metrics::person_metrics(&state.db, &ws, person_id, crate::platform::db::now_ms()).await?;
     Ok(Json(json!({ "person": m.as_ref().map(|m| json!({ "id": m.person_id, "name": m.name })), "metrics": m })))
 }
 
 pub async fn person_metrics(State(state): State<AppState>, user: AuthUser, Path((ws, id)): Path<(String, String)>) -> AppResult<Json<Value>> {
     let a = access::resolve(&state.db, &ws, &user).await?;
     a.require_visible(&id)?;
-    let m = crate::staffing::metrics::person_metrics(&state.db, &ws, &id, crate::db::now_ms()).await?.ok_or(AppError::NotFound)?;
+    let m = crate::hr::staffing::metrics::person_metrics(&state.db, &ws, &id, crate::platform::db::now_ms()).await?.ok_or(AppError::NotFound)?;
     Ok(Json(json!(m)))
 }
 
@@ -286,7 +286,7 @@ pub async fn team_metrics(State(state): State<AppState>, user: AuthUser, Path(ws
             None => return Ok(Json(json!(metrics::combine(&[], None, &packs::enabled_keys(&state.db, &ws).await?)))),
         },
     };
-    let t = crate::staffing::metrics::team_metrics(&state.db, &ws, scope.as_deref(), crate::db::now_ms()).await?;
+    let t = crate::hr::staffing::metrics::team_metrics(&state.db, &ws, scope.as_deref(), crate::platform::db::now_ms()).await?;
     Ok(Json(json!(t)))
 }
 
@@ -338,7 +338,7 @@ pub async fn transfer_ownership(State(state): State<AppState>, user: AuthUser, P
     sqlx::query("INSERT INTO workspace_owners (workspace_id, user_id, created_at) VALUES (?1, ?2, ?3) ON CONFLICT(workspace_id) DO UPDATE SET user_id = excluded.user_id")
         .bind(&ws)
         .bind(&target)
-        .bind(crate::db::now_ms())
+        .bind(crate::platform::db::now_ms())
         .execute(&mut *tx)
         .await?;
     audit::record(&mut tx, Entry { workspace_id: &ws, actor: Actor::User(&user.id), action: "ownership.transferred", entity_type: "workspace", entity_id: &ws, message_id: None, metadata: json!({ "to": target }) }).await?;

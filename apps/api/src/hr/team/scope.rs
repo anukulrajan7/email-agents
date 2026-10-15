@@ -4,7 +4,7 @@
 use sqlx::SqlitePool;
 
 use super::access::Access;
-use crate::error::{AppError, AppResult};
+use crate::platform::error::{AppError, AppResult};
 
 /// `None` = no filter. `Some(ids)` = only mail stored under these mailboxes (an empty list matches nothing).
 pub async fn source_filter(
@@ -66,7 +66,7 @@ pub async fn wall(db: &SqlitePool, workspace_id: &str, access: &Access) -> AppRe
     if access.level != super::access::Level::Operator {
         return Ok(None);
     }
-    if !super::settings::load(db, workspace_id).await?.restrict_mail_to_team || !crate::staffing::enabled(db, workspace_id).await? {
+    if !super::settings::load(db, workspace_id).await?.restrict_mail_to_team || !crate::hr::staffing::enabled(db, workspace_id).await? {
         return Ok(None);
     }
     let Some(visible) = access.visible() else { return Ok(None) };
@@ -84,14 +84,14 @@ pub async fn wall(db: &SqlitePool, workspace_id: &str, access: &Access) -> AppRe
 }
 
 /// The wall as the JSON a query binds (`NULL` = no wall) for the signed-in user.
-pub async fn wall_for(db: &SqlitePool, workspace_id: &str, user: &crate::auth::AuthUser) -> AppResult<Option<String>> {
+pub async fn wall_for(db: &SqlitePool, workspace_id: &str, user: &crate::platform::auth::AuthUser) -> AppResult<Option<String>> {
     let access = super::access::resolve(db, workspace_id, user).await?;
     Ok(wall(db, workspace_id, &access).await?.map(|ids| serde_json::json!(ids).to_string()))
 }
 
 /// 404 unless the message exists here, is not suppressed and is inside the user's wall. Every content route
 /// that acts on one message goes through this (or `require_draft`).
-pub async fn require_message(db: &SqlitePool, workspace_id: &str, user: &crate::auth::AuthUser, message_id: &str) -> AppResult<()> {
+pub async fn require_message(db: &SqlitePool, workspace_id: &str, user: &crate::platform::auth::AuthUser, message_id: &str) -> AppResult<()> {
     let wall = wall_for(db, workspace_id, user).await?;
     let found: Option<i64> = sqlx::query_scalar(
         "SELECT 1 FROM email_messages WHERE id = ?1 AND workspace_id = ?2 AND suppressed = 0
@@ -106,7 +106,7 @@ pub async fn require_message(db: &SqlitePool, workspace_id: &str, user: &crate::
 }
 
 /// Same for a draft, through the message it answers.
-pub async fn require_draft(db: &SqlitePool, workspace_id: &str, user: &crate::auth::AuthUser, draft_id: &str) -> AppResult<()> {
+pub async fn require_draft(db: &SqlitePool, workspace_id: &str, user: &crate::platform::auth::AuthUser, draft_id: &str) -> AppResult<()> {
     let message: Option<String> = sqlx::query_scalar("SELECT message_id FROM drafts WHERE id = ?1 AND workspace_id = ?2")
         .bind(draft_id)
         .bind(workspace_id)

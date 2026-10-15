@@ -9,15 +9,15 @@ use serde_json::{Value, json};
 
 use super::recipients::{self, Kind};
 use crate::{
-    audit::{self, Actor, Entry},
-    db::{iso, new_id, now_ms},
-    domain::Capabilities,
-    error::{AppError, AppResult},
+    platform::audit::{self, Actor, Entry},
+    platform::db::{iso, new_id, now_ms},
+    platform::domain::Capabilities,
+    platform::error::{AppError, AppResult},
     http::AppState,
     jobs::{self, handlers::JobError, kind},
     replies::{attempt_message_id, header_safe, MAX_SUBJECT_CHARS},
-    send_safety::{self, Issue, SafetyReport, bare_address, valid_address},
-    sources::{nango::NangoError, normalize::truncate_chars},
+    replies::send_safety::{self, Issue, SafetyReport, bare_address, valid_address},
+    mail::sources::{nango::NangoError, normalize::truncate_chars},
 };
 
 pub const SENT_ACTION: &str = "message.email_sent";
@@ -54,7 +54,7 @@ pub async fn mailbox_for(state: &AppState, ws: &str, owner: Option<&str>) -> App
     .fetch_all(&state.db)
     .await?;
     for r in rows {
-        let caps: Capabilities = serde_json::from_str(&r.capabilities_json).unwrap_or_else(|_| crate::sources::capabilities("nango_gmail"));
+        let caps: Capabilities = serde_json::from_str(&r.capabilities_json).unwrap_or_else(|_| crate::mail::sources::capabilities("nango_gmail"));
         if let (Some(connection_id), Some(config_key)) = (r.external_connection_id, r.provider_config_key)
             && crate::ai::policy::can_send(&caps)
         {
@@ -80,7 +80,7 @@ pub async fn mailbox_by_source(state: &AppState, ws: &str, source_id: &str) -> A
     .fetch_optional(&state.db)
     .await?;
     if let Some((Some(connection_id), Some(config_key), address, caps)) = row {
-        let caps: Capabilities = serde_json::from_str(&caps).unwrap_or_else(|_| crate::sources::capabilities("nango_gmail"));
+        let caps: Capabilities = serde_json::from_str(&caps).unwrap_or_else(|_| crate::mail::sources::capabilities("nango_gmail"));
         if crate::ai::policy::can_send(&caps) {
             return Ok(Mailbox { source_id: source_id.to_string(), connection_id, config_key, address: address.filter(|a| !a.is_empty()) });
         }

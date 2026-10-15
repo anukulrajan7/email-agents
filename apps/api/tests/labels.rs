@@ -5,7 +5,7 @@ use axum::{
     body::Body,
     http::{Request, StatusCode},
 };
-use email_ai_api::{build_state, config::Config, db, http::{AppState, router}, jobs::worker};
+use email_ai_api::{build_state, platform::config::Config, platform::db, http::{AppState, router}, jobs::worker};
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use tower::ServiceExt;

@@ -10,12 +10,12 @@ use serde_json::{Value, json};
 
 use super::AppState;
 use crate::{
-    ai_health::{self, HealthReport},
-    audit::{self, Actor, Entry},
-    auth::{AuthUser, require_role},
-    domain::Role,
-    error::{AppError, AppResult},
-    incidents,
+    ai::health::{self, HealthReport},
+    platform::audit::{self, Actor, Entry},
+    platform::auth::{AuthUser, require_role},
+    platform::domain::Role,
+    platform::error::{AppError, AppResult},
+    ai::incidents,
 };
 
 pub fn routes() -> Router<AppState> {
@@ -32,7 +32,7 @@ pub struct HealthQuery {
 
 pub async fn health(State(state): State<AppState>, user: AuthUser, Path(ws): Path<String>, Query(q): Query<HealthQuery>) -> AppResult<Json<HealthReport>> {
     require_role(&state.db, &ws, &user, Role::Admin).await?;
-    Ok(Json(ai_health::report(&state.db, &ws, q.days.unwrap_or(14), state.config.ai_daily_budget_usd).await?))
+    Ok(Json(health::report(&state.db, &ws, q.days.unwrap_or(14), state.config.ai_daily_budget_usd).await?))
 }
 
 #[derive(Deserialize)]

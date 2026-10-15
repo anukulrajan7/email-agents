@@ -9,8 +9,8 @@ use serde_json::Value;
 
 use super::recipients::{self, Kind};
 use crate::{
-    agent_profiles::AgentContext,
-    agent_registry::runtime::CaseAgent,
+    agents::profiles::AgentContext,
+    agents::registry::runtime::CaseAgent,
     agents::{
         autonomy::{self, LevelInputs},
         case::Case,
@@ -81,9 +81,9 @@ pub fn injection_signal(texts: &[&str]) -> Option<&'static str> {
 
 /// The effective level of a person's own assistant, 0 when it is paused or missing.
 pub async fn personal_level(state: &AppState, ws: &str, user_id: &str) -> sqlx::Result<i64> {
-    let Some(row) = crate::agent_registry::store::personal_of(&state.db, ws, user_id).await? else { return Ok(0) };
-    let (spec, _) = crate::agent_registry::versions::active_spec_in(&state.db, &row).await?;
-    let routine_ok = crate::agent_profiles::user_profile(&state.db, ws, user_id).await?.is_none_or(|p| p.routine_ok());
+    let Some(row) = crate::agents::registry::store::personal_of(&state.db, ws, user_id).await? else { return Ok(0) };
+    let (spec, _) = crate::agents::registry::versions::active_spec_in(&state.db, &row).await?;
+    let routine_ok = crate::agents::profiles::user_profile(&state.db, ws, user_id).await?.is_none_or(|p| p.routine_ok());
     Ok(autonomy::effective_level(LevelInputs {
         earned: row.autonomy_level,
         cap: row.autonomy_cap,

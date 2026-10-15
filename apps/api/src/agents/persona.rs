@@ -2,7 +2,7 @@
 //! One place for persona/profile prompts, so specialist sub-agents can slot in later. These
 //! blocks always come after the fixed safety rules, and the rules win.
 
-use crate::agent_profiles::{Owner, UserProfile, WorkspaceAgent};
+use crate::agents::profiles::{Owner, UserProfile, WorkspaceAgent};
 
 /// A specialist the lead agent delegates to (later milestone): its own predefined instructions.
 #[derive(Debug, Clone)]
@@ -83,7 +83,7 @@ pub fn working_for_block(owner: &Owner) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent_profiles::{Permissions, UserProfile};
+    use crate::agents::profiles::{Permissions, UserProfile};
 
     fn agent(persona: &str) -> WorkspaceAgent {
         WorkspaceAgent {

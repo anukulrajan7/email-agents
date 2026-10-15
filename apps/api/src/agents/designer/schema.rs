@@ -4,7 +4,7 @@
 
 use serde_json::{Value, json};
 
-use crate::agent_registry::spec::{CATEGORIES, NOTIFY_TARGETS, PRIORITIES};
+use crate::agents::registry::spec::{CATEGORIES, NOTIFY_TARGETS, PRIORITIES};
 
 fn strings() -> Value {
     json!({"type": "array", "items": {"type": "string"}})
@@ -132,7 +132,7 @@ pub fn conforms(schema: &Value, value: &Value, path: &str) -> Result<(), String>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent_registry::{spec::AgentSpec, templates::TEMPLATES};
+    use crate::agents::registry::{spec::AgentSpec, templates::TEMPLATES};
 
     #[test]
     fn every_template_spec_fits_the_schema_and_round_trips() {

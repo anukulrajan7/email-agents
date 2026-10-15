@@ -6,7 +6,7 @@ use serde::Serialize;
 use sqlx::SqlitePool;
 
 use super::{Counts, DAY_MS, Totals, day_label, day_of, edit_distance, ratio, round4};
-use crate::db::now_ms;
+use crate::platform::db::now_ms;
 
 pub const MAX_DAYS: i64 = 180;
 

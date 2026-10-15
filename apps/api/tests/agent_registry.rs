@@ -6,12 +6,12 @@ use crate::common;
 use axum::http::StatusCode;
 use common::*;
 use email_ai_api::{
-    agent_registry::{
+    agents::registry::{
         seed,
         store,
         templates::{self, AgentTemplate},
     },
-    db,
+    platform::db,
 };
 use serde_json::{Value, json};
 

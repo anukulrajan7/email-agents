@@ -18,11 +18,11 @@ use email_ai_api::{
     agents::planner::ScriptedPlanner,
     ai::{AiError, DraftInput, DraftOutput, Drafter, judge::{FixedJudge, Verdict}},
     build_state,
-    config::Config,
-    db,
-    domain::NormalizedEmail,
+    platform::config::Config,
+    platform::db,
+    platform::domain::NormalizedEmail,
     http::{AppState, router},
-    ingest,
+    mail::ingest,
     jobs::worker,
 };
 use http_body_util::BodyExt;
@@ -100,7 +100,7 @@ pub async fn call(app: &Router, method: &str, path: &str, token: &str, body: Opt
 pub struct Opts {
     pub packs: Vec<&'static str>,
     pub planner: ScriptedPlanner,
-    pub designer: Arc<email_ai_api::designer::ScriptedDesigner>,
+    pub designer: Arc<email_ai_api::agents::designer::ScriptedDesigner>,
     pub tweak: Box<dyn FnOnce(&mut Config)>,
 }
 
@@ -114,7 +114,7 @@ impl Opts {
         self
     }
 
-    pub fn designer(mut self, designer: email_ai_api::designer::ScriptedDesigner) -> Self {
+    pub fn designer(mut self, designer: email_ai_api::agents::designer::ScriptedDesigner) -> Self {
         self.designer = Arc::new(designer);
         self
     }
@@ -137,7 +137,7 @@ pub struct Env {
     pub op_id: String,
     pub calls: Calls,
     pub planner: Arc<ScriptedPlanner>,
-    pub designer: Arc<email_ai_api::designer::ScriptedDesigner>,
+    pub designer: Arc<email_ai_api::agents::designer::ScriptedDesigner>,
     pub drafter: Arc<BodyDrafter>,
     pub judge: Arc<FixedJudge>,
     pub dir: tempfile::TempDir,
@@ -225,7 +225,7 @@ impl Env {
 
     /// The retired Inbox Assistant, installed as a custom agent: the fixed-workflow agent a few tests exercise.
     pub async fn install_inbox(&self) -> String {
-        use email_ai_api::agent_registry::{
+        use email_ai_api::agents::registry::{
             store::{self, NewAgent},
             templates,
             versions::{self, NewVersion},
@@ -310,8 +310,8 @@ impl Env {
         .unwrap();
     }
 
-    pub async fn route(&self, message_id: &str) -> email_ai_api::agent_registry::routing::Routed {
-        email_ai_api::agent_registry::routing::route_message(&self.state.db, &self.state.config, &self.ws, message_id)
+    pub async fn route(&self, message_id: &str) -> email_ai_api::agents::registry::routing::Routed {
+        email_ai_api::agents::registry::routing::route_message(&self.state.db, &self.state.config, &self.ws, message_id)
             .await
             .unwrap()
             .expect("a route")
@@ -357,7 +357,7 @@ impl Env {
 }
 
 /// The offline safety suite for a spec, run once per process however many tests ask for the same spec.
-pub async fn safety_suite(spec: &email_ai_api::agent_registry::spec::AgentSpec) -> Arc<email_ai_api::evals::safety::SuiteResult> {
+pub async fn safety_suite(spec: &email_ai_api::agents::registry::spec::AgentSpec) -> Arc<email_ai_api::evals::safety::SuiteResult> {
     use std::{collections::HashMap, sync::OnceLock};
     use tokio::sync::OnceCell;
     type Cell = Arc<OnceCell<Arc<email_ai_api::evals::safety::SuiteResult>>>;

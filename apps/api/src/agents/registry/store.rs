@@ -2,7 +2,7 @@
 
 use sqlx::{SqliteConnection, SqliteExecutor};
 
-use crate::db::now_ms;
+use crate::platform::db::now_ms;
 
 pub const KINDS: &[&str] = &["lead", "system", "custom"];
 pub const STATUSES: &[&str] = &["draft", "active", "paused", "archived"];
@@ -175,7 +175,7 @@ pub struct NewAgent<'a> {
 /// Inserts an agent unless one with this key (or, for a personal agent, this owner) exists.
 /// Returns the new id, or `None` when it already existed.
 pub async fn insert(conn: &mut SqliteConnection, a: NewAgent<'_>) -> sqlx::Result<Option<String>> {
-    let id = crate::db::new_id("agt");
+    let id = crate::platform::db::new_id("agt");
     let now = now_ms();
     let created = sqlx::query(
         "INSERT OR IGNORE INTO agents (id, workspace_id, key, kind, scope, owner_user_id, category, template_key, template_version, cloned_from,

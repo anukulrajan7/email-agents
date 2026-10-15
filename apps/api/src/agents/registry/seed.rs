@@ -9,7 +9,7 @@ use super::{
     templates::{self, AgentTemplate},
     versions::{self, NewVersion},
 };
-use crate::packs;
+use crate::platform::packs;
 
 pub fn personal_key(user_id: &str) -> String {
     format!("me_{user_id}")
@@ -102,9 +102,9 @@ async fn rename_old_defaults(conn: &mut SqliteConnection, ws: &str) -> sqlx::Res
                 .rows_affected();
             if renamed > 0 && t.key == templates::LEAD_KEY {
                 sqlx::query("UPDATE workspace_agents SET name = ?1, persona = REPLACE(REPLACE(persona, ?2, ?3), ?4, ?3) WHERE workspace_id = ?5 AND name = ?6")
-                    .bind(crate::agent_profiles::DEFAULT_NAME)
+                    .bind(crate::agents::profiles::DEFAULT_NAME)
                     .bind(OLD_LEAD_PERSONALITY)
-                    .bind(crate::agent_profiles::DEFAULT_PERSONALITY)
+                    .bind(crate::agents::profiles::DEFAULT_PERSONALITY)
                     .bind(AARAV_PERSONALITY)
                     .bind(ws)
                     .bind(old)
@@ -231,7 +231,7 @@ pub async fn consolidate_roster(conn: &mut SqliteConnection, ws: &str) -> sqlx::
         for agent in agents {
             if agent.tuned {
                 sqlx::query("UPDATE agents SET kind = 'custom', template_key = NULL, template_version = NULL, updated_at = ?1 WHERE id = ?2")
-                    .bind(crate::db::now_ms())
+                    .bind(crate::platform::db::now_ms())
                     .bind(&agent.id)
                     .execute(&mut *conn)
                     .await?;

@@ -11,13 +11,13 @@ use serde_json::{Value, json};
 
 use super::AppState;
 use crate::{
-    agent_registry::{
+    agents::registry::{
         seed,
         store::{self, AgentRow},
     },
-    auth::{AuthUser, require_role},
-    domain::Role,
-    error::{AppError, AppResult},
+    platform::auth::{AuthUser, require_role},
+    platform::domain::Role,
+    platform::error::{AppError, AppResult},
     evals::{gate, run},
     metrics::{Counts, Totals, queries, rollup},
 };
@@ -94,7 +94,7 @@ async fn scorecard(State(state): State<AppState>, user: AuthUser, Path(ws): Path
             "agent": identity(a),
             "totals": totals.remove(&a.id).unwrap_or_default(),
             "autonomy": { "earned": a.autonomy_level, "cap": a.autonomy_cap, "ready_for": ready.then_some(next) },
-            "safety": safety.map(|r| json!({ "status": r.status, "score": r.score, "created_at": crate::db::iso(r.created_at) })),
+            "safety": safety.map(|r| json!({ "status": r.status, "score": r.score, "created_at": crate::platform::db::iso(r.created_at) })),
         }));
     }
     Ok(Json(json!({ "days": DAYS, "totals": Totals::from_counts(&all, None, &[]), "agents": items })))

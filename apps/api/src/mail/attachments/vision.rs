@@ -14,7 +14,7 @@ use serde_json::{Map, Value, json};
 use super::Parsed;
 use crate::{
     ai::{AiError, openrouter::OpenRouterClient},
-    sources::normalize::truncate_chars,
+    mail::sources::normalize::truncate_chars,
 };
 
 pub const IMAGE_KINDS: &[&str] = &["document", "screenshot", "photo", "receipt", "id_card", "other"];

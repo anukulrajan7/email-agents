@@ -1,5 +1,5 @@
 use anyhow::Context;
-use email_ai_api::{build_state, config::Config, db, http, jobs};
+use email_ai_api::{build_state, http, jobs, platform::{config::Config, db}};
 use tokio::sync::watch;
 use tracing_subscriber::{EnvFilter, fmt};
 

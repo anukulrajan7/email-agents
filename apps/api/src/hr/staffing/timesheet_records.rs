@@ -25,10 +25,10 @@ use crate::{
         AiError,
         routing::{SheetTier, sheet_tier},
     },
-    db::{iso, new_id, now_ms},
+    platform::db::{iso, new_id, now_ms},
     http::AppState,
-    packs,
-    team::{access::Access, clock, settings},
+    platform::packs,
+    hr::team::{access::Access, clock, settings},
 };
 
 pub const LABEL: &str = "timesheet";
@@ -232,7 +232,7 @@ async fn read_text(state: &AppState, ws: &str, subject: &str, text: &str, hint_y
     if tiers.is_empty() {
         return out;
     }
-    if !crate::ai_ledger::within_budget(&state.db, state.config.ai_daily_budget_usd, ws).await {
+    if !crate::ai::ledger::within_budget(&state.db, state.config.ai_daily_budget_usd, ws).await {
         out.deferred = !out.sheet.has_data();
         return out;
     }
@@ -1256,7 +1256,7 @@ pub async fn erase_sender(conn: &mut SqliteConnection, ws: &str, sender: &str) -
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::staffing::timesheet_parse::Identity;
+    use crate::hr::staffing::timesheet_parse::Identity;
 
     #[test]
     fn the_label_rule_reads_subject_and_file_names() {

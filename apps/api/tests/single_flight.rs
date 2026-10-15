@@ -15,8 +15,8 @@ use axum::{
 use email_ai_api::{
     ai::{AiError, Analyst, Insight},
     build_state,
-    config::Config,
-    db,
+    platform::config::Config,
+    platform::db,
     http::{AppState, router},
     jobs::{handlers, worker},
 };

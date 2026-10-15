@@ -5,11 +5,11 @@ use serde_json::json;
 use sqlx::SqliteConnection;
 
 use crate::{
-    audit::{self, Actor, Entry},
-    db::{new_id, now_ms},
-    domain::{NormalizedEmail, TAXONOMY_VERSION},
+    platform::audit::{self, Actor, Entry},
+    platform::db::{new_id, now_ms},
+    platform::domain::{NormalizedEmail, TAXONOMY_VERSION},
     jobs::{self, kind},
-    memory, text_clean,
+    learning::memory, mail::text_clean,
 };
 
 /// True for mail the connected mailbox itself sent: Gmail's SENT label, or a sender that is the
@@ -43,11 +43,11 @@ pub async fn persist_message(
             .bind(&email.source_message_id)
             .fetch_optional(&mut *conn)
             .await?;
-    if exists.is_some() || crate::deletion::is_blocked(&mut *conn, source_id, &email.source_message_id).await? {
+    if exists.is_some() || crate::mail::deletion::is_blocked(&mut *conn, source_id, &email.source_message_id).await? {
         return Ok(None);
     }
 
-    let suppressed = crate::staffing::policy::should_suppress(conn, source_id, workspace_id, email).await?;
+    let suppressed = crate::hr::staffing::policy::should_suppress(conn, source_id, workspace_id, email).await?;
 
     let now = now_ms();
     let thread_id = match provider_thread_id {
@@ -157,11 +157,11 @@ pub async fn persist_message(
     }
 
     if !outbound {
-        crate::candidate_watch::opt_out_on_stop(&mut *conn, workspace_id, &email.sender_address, &body_text).await?;
+        crate::hr::candidate_watch::opt_out_on_stop(&mut *conn, workspace_id, &email.sender_address, &body_text).await?;
         memory::record_contact(&mut *conn, workspace_id, &email.sender_address, email.sender_name.as_deref(), email.received_at)
             .await?;
         crate::agents::triggers::wake_for_thread(&mut *conn, workspace_id, &thread_id, &message_id).await?;
-        crate::messaging::watch::on_inbound_email(&mut *conn, workspace_id, source_id, &thread_id, &message_id).await?;
+        crate::alerts::messaging::watch::on_inbound_email(&mut *conn, workspace_id, source_id, &thread_id, &message_id).await?;
     }
 
     for a in &email.attachments {

@@ -2,58 +2,17 @@ pub mod hr;
 pub mod understanding;
 pub mod mail;
 pub mod platform;
-pub use agents::profiles as agent_profiles;
-pub use agents::registry as agent_registry;
 pub mod agents;
 pub mod ai;
-pub use ai::health as ai_health;
-pub use ai::ledger as ai_ledger;
 pub mod alerts;
 pub mod assistant;
-pub use platform::audit;
 pub mod automations;
-pub use mail::attachments;
-pub use platform::auth;
-pub use platform::backup;
-pub use mail::bulk;
-pub use hr::candidate_watch;
-pub use platform::config;
-pub use platform::db;
-pub use mail::deletion;
-pub use agents::designer;
-pub use platform::domain;
-pub use platform::error;
-pub use replies::gap_resolver;
 pub mod evals;
-pub use platform::format;
 pub mod http;
-pub use ai::incidents;
-pub use mail::ingest;
 pub mod jobs;
-pub use learning::knowledge;
 pub mod learning;
-pub use understanding::labels;
-pub use platform::mailer;
-pub use hr::matching;
-pub use alerts::messaging;
 pub mod metrics;
-pub use replies::owner_said;
-pub use platform::packs;
 pub mod replies;
-pub use replies::send_safety;
-pub use platform::security;
-pub use replies::signoff;
-pub use replies::reply_settings;
-pub use replies::repair;
-pub use learning::memory;
-pub use learning::memory_learning;
-pub use platform::sessions;
-pub use replies::skills;
-pub use mail::sources;
-pub use hr::staffing;
-pub use hr::team;
-pub use mail::text_clean;
-pub use mail::threads;
 
 use std::{sync::Arc, time::Duration};
 
@@ -66,10 +25,9 @@ use crate::{
         jev::JevClassifier,
         openrouter::{OpenRouterAnalyst, OpenRouterClassifier, OpenRouterClient, OpenRouterDrafter, OpenRouterExtractor, OpenRouterLearner},
     },
-    auth::Authenticator,
-    config::Config,
     http::AppState,
-    sources::{nango::NangoClient, resend::ResendClient},
+    mail::sources::{nango::NangoClient, resend::ResendClient},
+    platform::{auth::Authenticator, config::Config, db},
 };
 
 /// Wires adapters from config. Missing model keys fall back to the deterministic
@@ -144,15 +102,15 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
     };
 
     // Verification emails are on only when SMTP is fully configured (or E2E mail capture is on).
-    let mailer: Option<Arc<dyn mailer::Mailer>> = if !config.mail_capture_file.is_empty() {
+    let mailer: Option<Arc<dyn platform::mailer::Mailer>> = if !config.mail_capture_file.is_empty() {
         tracing::warn!(file = %config.mail_capture_file, "MAIL_CAPTURE_FILE: outgoing mail is written to a file, not sent");
-        Some(Arc::new(mailer::FileMailer::new(&config.mail_capture_file)))
+        Some(Arc::new(platform::mailer::FileMailer::new(&config.mail_capture_file)))
     } else if config.smtp_host.is_empty() || config.smtp_username.is_empty() {
         tracing::warn!("SMTP not configured: email verification disabled");
         None
     } else {
         let from = if config.smtp_from.is_empty() { format!("Post Room <{}>", config.smtp_username) } else { config.smtp_from.clone() };
-        Some(Arc::new(mailer::SmtpMailer::new(
+        Some(Arc::new(platform::mailer::SmtpMailer::new(
             &config.smtp_host,
             config.smtp_port,
             &config.smtp_username,
@@ -269,11 +227,11 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
         };
 
     // The designer drafts agents from plain English with the best-tier model; without one it is off.
-    let designer: Arc<dyn designer::Designer> = match &openrouter {
+    let designer: Arc<dyn agents::designer::Designer> = match &openrouter {
         Some(client) if !config.designer_model_id.is_empty() => {
-            Arc::new(designer::OpenRouterDesigner::new(client.clone(), &config.designer_model_id, &config.designer_fallback_model_id))
+            Arc::new(agents::designer::OpenRouterDesigner::new(client.clone(), &config.designer_model_id, &config.designer_fallback_model_id))
         }
-        _ => Arc::new(designer::DisabledDesigner),
+        _ => Arc::new(agents::designer::DisabledDesigner),
     };
     // The workflow `extract` step reads named details with the efficient model; without one, plain rules read them.
     let field_extractor: Arc<dyn ai::field_extract::FieldExtractor> = match &openrouter {
@@ -305,15 +263,15 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
     };
 
     // Images and audio need OpenRouter; without it (or without a model id) they are skipped, not failed.
-    let vision: Option<Arc<dyn attachments::vision::VisionReader>> = match &openrouter {
+    let vision: Option<Arc<dyn mail::attachments::vision::VisionReader>> = match &openrouter {
         Some(client) if !config.openrouter_vision_model_id.is_empty() => {
-            Some(Arc::new(attachments::vision::OpenRouterVision::new(client.clone(), &config.openrouter_vision_model_id)))
+            Some(Arc::new(mail::attachments::vision::OpenRouterVision::new(client.clone(), &config.openrouter_vision_model_id)))
         }
         _ => None,
     };
-    let audio: Option<Arc<dyn attachments::audio::AudioReader>> = match &openrouter {
+    let audio: Option<Arc<dyn mail::attachments::audio::AudioReader>> = match &openrouter {
         Some(client) if !config.openrouter_audio_model_id.is_empty() => {
-            Some(Arc::new(attachments::audio::OpenRouterAudio::new(client.clone(), &config.openrouter_audio_model_id, analyst_model)))
+            Some(Arc::new(mail::attachments::audio::OpenRouterAudio::new(client.clone(), &config.openrouter_audio_model_id, analyst_model)))
         }
         _ => None,
     };
@@ -321,7 +279,7 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
     let (mut assistant_planner, mut vision, mut judge) = (assistant_planner, vision, judge);
     if config.ai_mock {
         assistant_planner = Arc::new(ai::mock::MockCommandPlanner);
-        vision = Some(Arc::new(attachments::vision::StubVision::new(ai::mock::mock_image_reading())));
+        vision = Some(Arc::new(mail::attachments::vision::StubVision::new(ai::mock::mock_image_reading())));
         judge = Arc::new(ai::mock::mock_judge());
     }
 
@@ -345,7 +303,7 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
         extractor,
         mailer,
         learner,
-        login_limiter: Arc::new(sessions::LoginLimiter::default()),
+        login_limiter: Arc::new(platform::sessions::LoginLimiter::default()),
         auth: Arc::new(Authenticator::new(&config, http.clone())),
         nango: Arc::new(NangoClient::new(http.clone(), &config.nango_api_url, &config.nango_api_key)),
         resend: Arc::new(ResendClient::new(http, &config.resend_api_url, &config.resend_api_key)),

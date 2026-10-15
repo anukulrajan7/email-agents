@@ -7,8 +7,8 @@ use sqlx::{SqliteConnection, SqliteExecutor, SqlitePool};
 
 use crate::{
     ai::routing::DEFAULT_REPLY_STYLE,
-    db::{new_id, now_ms},
-    domain::{GENERAL_LABELS, HR_LABELS, LabelSeed, OTHER_LABEL, OTHER_SEED, WORKFLOW_TEMPLATES},
+    platform::db::{new_id, now_ms},
+    platform::domain::{GENERAL_LABELS, HR_LABELS, LabelSeed, OTHER_LABEL, OTHER_SEED, WORKFLOW_TEMPLATES},
 };
 
 pub const GENERAL: &str = "general";
@@ -369,7 +369,7 @@ pub async fn enable(conn: &mut SqliteConnection, workspace_id: &str, keys: &[&st
             .await?;
         }
     }
-    crate::agent_registry::seed::seed_for_packs(conn, workspace_id, keys).await?;
+    crate::agents::registry::seed::seed_for_packs(conn, workspace_id, keys).await?;
     Ok(())
 }
 
@@ -382,14 +382,14 @@ pub async fn disable(conn: &mut SqliteConnection, workspace_id: &str, keys: &[&s
             .execute(&mut *conn)
             .await?;
     }
-    crate::agent_registry::seed::pause_for_packs_off(conn, workspace_id, keys).await?;
+    crate::agents::registry::seed::pause_for_packs_off(conn, workspace_id, keys).await?;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{automations, domain::LABEL_TEMPLATES, labels::COLORS};
+    use crate::{automations, platform::domain::LABEL_TEMPLATES, understanding::labels::COLORS};
 
     #[test]
     fn catalogue_is_valid() {
@@ -410,7 +410,7 @@ mod tests {
         assert_eq!(presets_for(&[GENERAL, STAFFING]), automations::PRESET_KEYS);
         let keys: Vec<&str> = labels_for(&["support", "sales"]).iter().map(|l| l.key).collect();
         assert_eq!(keys, ["question", "bug_report", "complaint", "refund_request", "general", "sales_lead", "follow_up", "scheduling", "other"]);
-        assert!(labels_for(&PACKS.iter().map(|p| p.key).collect::<Vec<_>>()).len() as i64 <= crate::labels::MAX_ACTIVE_LABELS);
+        assert!(labels_for(&PACKS.iter().map(|p| p.key).collect::<Vec<_>>()).len() as i64 <= crate::understanding::labels::MAX_ACTIVE_LABELS);
     }
 
     #[test]

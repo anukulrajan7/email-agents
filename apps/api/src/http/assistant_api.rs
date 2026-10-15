@@ -11,17 +11,17 @@ use serde_json::{Value, json};
 
 use super::AppState;
 use crate::{
-    ai_ledger,
+    ai::ledger,
     assistant::{
         MAX_COMMAND_CHARS, command, confirm,
         context::{self, PageContext},
         history,
         transcribe::{AudioClip, MAX_AUDIO_BYTES, MAX_AUDIO_SECONDS},
     },
-    auth::{AuthUser, require_role},
-    domain::Role,
-    error::{AppError, AppResult},
-    sources::normalize::truncate_chars,
+    platform::auth::{AuthUser, require_role},
+    platform::domain::Role,
+    platform::error::{AppError, AppResult},
+    mail::sources::normalize::truncate_chars,
 };
 
 /// Room for the multipart envelope around a maximum-size clip.
@@ -115,7 +115,7 @@ async fn run_command(
     let viewing = context::resolve(&state.db, &ws, &body.context.unwrap_or_default()).await?;
     let extras = command::Extras { viewing, history: history::planner_block(&state.db, &ws, &user.id).await? };
     // A person asked, so this always runs; the cost is recorded either way and the UI can say so.
-    let over_budget = !ai_ledger::within_budget(&state.db, state.config.ai_daily_budget_usd, &ws).await;
+    let over_budget = !ledger::within_budget(&state.db, state.config.ai_daily_budget_usd, &ws).await;
     let mut outcome = command::run(&state, &ws, &user, role, &text, &extras).await?;
     outcome.over_budget = over_budget;
     history::append(&state.db, &ws, &user.id, "user", &text, &[], &[]).await?;

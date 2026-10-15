@@ -12,7 +12,7 @@ use crate::{
         judge::{FixedJudge, Verdict},
     },
     assistant::{ANSWER_TOOL, CommandPlanner, CommandRequest, call},
-    attachments::vision::VisionReading,
+    mail::attachments::vision::VisionReading,
 };
 
 const REQUEST_MARKER: &str = "Request from the signed-in team member (trusted):\n";

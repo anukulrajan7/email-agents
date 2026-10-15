@@ -9,7 +9,7 @@ use regex::Regex;
 use serde_json::{Value, json};
 
 use super::{AiError, fence::{fence, fence_inline}, openrouter::OpenRouterClient};
-use crate::{agent_registry::spec::{ExtractField, FieldType}};
+use crate::{agents::registry::spec::{ExtractField, FieldType}};
 
 pub const MAX_VALUE_CHARS: usize = 40;
 pub const MAX_VALUE_WORDS: usize = 3;
@@ -97,7 +97,7 @@ impl FieldExtractor for OpenRouterFieldExtractor {
             "required": ["fields"], "additionalProperties": false
         });
         let (content, _, usage) = self.client.chat_json_usage(&self.model, SYSTEM_PROMPT, user, "found_details", schema, 400).await?;
-        let cost_usd = crate::ai_ledger::cost_usd(&self.model, usage.tokens_in, usage.tokens_out, usage.cost_usd);
+        let cost_usd = crate::ai::ledger::cost_usd(&self.model, usage.tokens_in, usage.tokens_out, usage.cost_usd);
         Ok(Extracted { found: parse_found(&content, fields, &format!("{subject}\n{body}"))?, cost_usd })
     }
 }

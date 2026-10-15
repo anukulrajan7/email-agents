@@ -5,16 +5,16 @@ use serde_json::{Value, json};
 
 use crate::{
     agents::{approvals, triggers},
-    messaging::{
+    alerts::messaging::{
         self,
         dispatch::{self, Channel, Request, SupportSpec, WatchSpec},
     },
-    audit::{self, Actor, Entry},
-    auth::{AuthUser, require_role},
+    platform::audit::{self, Actor, Entry},
+    platform::auth::{AuthUser, require_role},
     automations::{self, AutomationInput},
-    db::{new_id, now_ms},
-    domain::Role,
-    error::{AppError, AppResult},
+    platform::db::{new_id, now_ms},
+    platform::domain::Role,
+    platform::error::{AppError, AppResult},
     http::AppState,
     jobs::{self, kind},
 };
@@ -124,7 +124,7 @@ async fn draft_reply(state: &AppState, ws: &str, user: &AuthUser, params: &Value
     if let Some(i) = instructions {
         payload["instructions"] = json!(i);
     }
-    let said = crate::owner_said::conversation(&state.db, ws, &user.id, message_id).await?;
+    let said = crate::replies::owner_said::conversation(&state.db, ws, &user.id, message_id).await?;
     if !said.is_empty() {
         payload["owner_said"] = json!(said);
     }
@@ -171,7 +171,7 @@ async fn start_agent(state: &AppState, ws: &str, user: &AuthUser, params: &Value
         },
     };
     let said = match about_message {
-        Some(m) => crate::owner_said::conversation(&state.db, ws, &user.id, &m).await?,
+        Some(m) => crate::replies::owner_said::conversation(&state.db, ws, &user.id, &m).await?,
         None => String::new(),
     };
     if !said.is_empty() {
@@ -261,7 +261,7 @@ fn done_from(sent: dispatch::Dispatched) -> Done {
 }
 
 async fn personal_agent_id(state: &AppState, ws: &str, user: &AuthUser) -> AppResult<Option<String>> {
-    Ok(crate::agent_registry::store::personal_of(&state.db, ws, &user.id).await?.map(|a| a.id))
+    Ok(crate::agents::registry::store::personal_of(&state.db, ws, &user.id).await?.map(|a| a.id))
 }
 
 /// The person confirmed: that is the approval, whoever the message goes to.

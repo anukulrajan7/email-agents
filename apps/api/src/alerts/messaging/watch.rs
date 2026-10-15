@@ -13,13 +13,13 @@ use super::recipients::Kind;
 use crate::{
     agents::{injection, sentence},
     assistant::{command::Citation, plain_answer},
-    audit::{self, Actor, Entry},
-    db::{iso, new_id, now_ms},
-    error::{AppError, AppResult},
+    platform::audit::{self, Actor, Entry},
+    platform::db::{iso, new_id, now_ms},
+    platform::error::{AppError, AppResult},
     http::AppState,
     jobs::{self, handlers::JobError, kind},
-    send_safety::is_automated_address,
-    knowledge,
+    replies::send_safety::is_automated_address,
+    learning::knowledge,
 };
 
 pub const DEFAULT_NUDGE_HOURS: i64 = 24;
@@ -157,10 +157,10 @@ pub fn automatic(sender: &str, subject: &str, signals_json: &str) -> Option<Auto
     let signals: Vec<String> = serde_json::from_str(signals_json).unwrap_or_default();
     let has = |s: &str| signals.iter().any(|x| x == s);
     let local = sender.split('@').next().unwrap_or_default().to_lowercase();
-    if matches!(local.as_str(), "mailer-daemon" | "postmaster") || has(crate::bulk::DELIVERY_STATUS) || BOUNCE_SUBJECT.is_match(subject) {
+    if matches!(local.as_str(), "mailer-daemon" | "postmaster") || has(crate::mail::bulk::DELIVERY_STATUS) || BOUNCE_SUBJECT.is_match(subject) {
         return Some(Automatic::Bounce);
     }
-    if is_automated_address(sender) || has(crate::bulk::AUTO_SUBMITTED) || has(crate::bulk::AUTO_REPLY) || AUTO_SUBJECT.is_match(subject) {
+    if is_automated_address(sender) || has(crate::mail::bulk::AUTO_SUBMITTED) || has(crate::mail::bulk::AUTO_REPLY) || AUTO_SUBJECT.is_match(subject) {
         return Some(Automatic::AutoReply);
     }
     None

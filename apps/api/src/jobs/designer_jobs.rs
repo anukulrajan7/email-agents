@@ -4,7 +4,7 @@
 use serde_json::{Value, json};
 
 use super::{Job, handlers::JobError};
-use crate::{db::now_ms, designer::dry_run, http::AppState};
+use crate::{platform::db::now_ms, agents::designer::dry_run, http::AppState};
 
 fn session_id(payload: &Value) -> Result<&str, JobError> {
     payload.get("session_id").and_then(Value::as_str).ok_or_else(|| JobError::Permanent("payload missing session_id".into()))

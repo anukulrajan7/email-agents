@@ -10,8 +10,8 @@ use sqlx::SqliteConnection;
 
 use super::guard::{self, PROCESS, Rejection};
 use crate::{
-    db::{iso, new_id, now_ms},
-    memory::dedupe_key,
+    platform::db::{iso, new_id, now_ms},
+    learning::memory::dedupe_key,
 };
 
 pub const STATUSES: &[&str] = &["suggested", "active", "archived"];

@@ -19,7 +19,7 @@ use axum::{
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use crate::{
-    agent_registry::{
+    agents::registry::{
         routing::{Hints, MessageFacts, RoutingAgent, route},
         spec::{AgentSpec, Mode},
         store::AgentRow,
@@ -32,11 +32,11 @@ use crate::{
         judge::{FixedJudge, Verdict},
     },
     build_state,
-    config::Config,
-    db,
-    domain::NormalizedEmail,
+    platform::config::Config,
+    platform::db,
+    platform::domain::NormalizedEmail,
     http::router,
-    ingest,
+    mail::ingest,
     jobs::worker,
 };
 use http_body_util::BodyExt;
@@ -852,7 +852,7 @@ fn routing_failures(s: &Scenario) -> Vec<String> {
 }
 
 /// The taxonomy the classifier sees for this scenario: the packs its agent works under.
-pub fn label_set(s: &Scenario) -> Vec<crate::domain::Label> {
+pub fn label_set(s: &Scenario) -> Vec<crate::platform::domain::Label> {
     let packs: &[&str] = match s.agent() {
         "Ananya" | "Rohan" | "Sneha" | "Arjun" | "Aditya" => &["staffing"],
         "Ishaan" => &["support", "general"],
@@ -860,10 +860,10 @@ pub fn label_set(s: &Scenario) -> Vec<crate::domain::Label> {
         "Vikram" => &["finance", "general"],
         _ => &["general", "personal"],
     };
-    let mut out: Vec<crate::domain::Label> = Vec::new();
-    for seed in packs.iter().filter_map(|p| crate::packs::pack(p)).flat_map(|p| p.labels.iter()) {
+    let mut out: Vec<crate::platform::domain::Label> = Vec::new();
+    for seed in packs.iter().filter_map(|p| crate::platform::packs::pack(p)).flat_map(|p| p.labels.iter()) {
         if !out.iter().any(|l| l.key == seed.key) {
-            out.push(crate::domain::Label { key: seed.key.into(), name: seed.name.into(), description: seed.description.into() });
+            out.push(crate::platform::domain::Label { key: seed.key.into(), name: seed.name.into(), description: seed.description.into() });
         }
     }
     out
@@ -1067,7 +1067,7 @@ async fn run_isolated(s: &Scenario, options: &RunOptions) -> Outcome {
     let (scenario, opts) = (s.clone(), options.clone());
     let task = tokio::task::spawn_blocking(move || {
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("a tokio runtime");
-        rt.block_on(crate::ai_ledger::with_context(crate::ai_ledger::AiContext::default(), run_scenario_with(&scenario, &opts)))
+        rt.block_on(crate::ai::ledger::with_context(crate::ai::ledger::AiContext::default(), run_scenario_with(&scenario, &opts)))
     });
     match task.await {
         Ok(outcome) => outcome,

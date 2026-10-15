@@ -10,14 +10,14 @@ use sqlx::{SqliteConnection, SqlitePool};
 
 use super::run;
 use crate::{
-    agent_registry::{
+    agents::registry::{
         spec::MAX_AUTONOMY,
         store::{self, AgentRow},
         versions,
     },
-    audit::{self, Actor, Entry},
-    config::Config,
-    db::{new_id, now_ms},
+    platform::audit::{self, Actor, Entry},
+    platform::config::Config,
+    platform::db::{new_id, now_ms},
     metrics::{self, DAY_MS, queries, rollup},
 };
 
@@ -327,7 +327,7 @@ pub async fn sweep(db: &SqlitePool) -> sqlx::Result<usize> {
     for (ws, agent_id, level, last_change) in agents {
         let since = last_change.unwrap_or(0);
         let incidents = stops.iter().filter(|s| s.workspace_id == ws && s.agent_id.as_deref() == Some(agent_id.as_str()) && s.at > since).count() as i64;
-        let incidents = incidents + crate::incidents::high_since(db, &ws, &agent_id, since).await?;
+        let incidents = incidents + crate::ai::incidents::high_since(db, &ws, &agent_id, since).await?;
         let week = queries::counts(db, &ws, Some(&agent_id), 7).await?.remove(&agent_id).unwrap_or_default();
         let Some(reason) = demotion_reason(level, incidents, week.decided(), week.approved) else { continue };
         let evidence = json!({"incidents_since_change": incidents, "decided_7d": week.decided(), "approved_7d": week.approved});

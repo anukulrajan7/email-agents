@@ -7,7 +7,7 @@ pub mod resend;
 
 use rand::{Rng, distributions::Alphanumeric};
 
-use crate::domain::Capabilities;
+use crate::platform::domain::Capabilities;
 
 pub fn capabilities(kind: &str) -> Capabilities {
     match kind {

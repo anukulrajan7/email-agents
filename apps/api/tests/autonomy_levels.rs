@@ -12,7 +12,7 @@ use email_ai_api::{
         planner::{Scripted, ScriptedPlanner, call as tool, finish},
         triggers,
     },
-    db,
+    platform::db,
     jobs::{self, kind, worker},
 };
 use serde_json::{Value, json};
@@ -538,7 +538,7 @@ async fn cancelling_the_case_and_switching_a_pack_off_release_held_sends() {
     let expert = env.agent_id(ADMIN, "support.resolver").await;
     sqlx::query("UPDATE drafts SET agent_id = ?1 WHERE id = ?2").bind(&expert).bind(&draft).execute(&env.state.db).await.unwrap();
     let mut conn = env.state.db.acquire().await.unwrap();
-    email_ai_api::agent_registry::seed::pause_for_packs_off(&mut conn, &env.ws, &["support"]).await.unwrap();
+    email_ai_api::agents::registry::seed::pause_for_packs_off(&mut conn, &env.ws, &["support"]).await.unwrap();
     drop(conn);
     assert_eq!(send_at(&env, &draft).await, None, "pack switched off");
 }
@@ -673,7 +673,7 @@ async fn the_personal_agent_presents_as_meera_and_observing_cases_stay_cheap() {
     for seen in env.drafter.seen.lock().unwrap().iter() {
         assert!(!seen.reply_instructions.contains("My assistant"), "{}", seen.reply_instructions);
     }
-    assert_eq!(email_ai_api::agent_registry::SHADOW_MAX_PER_DAY, 50);
+    assert_eq!(email_ai_api::agents::registry::SHADOW_MAX_PER_DAY, 50);
 }
 
 #[tokio::test]
@@ -724,7 +724,7 @@ async fn an_outdated_untuned_template_agent_is_brought_up_to_date() {
     let env = Env::new(Opts::packs(&["general"])).await;
     let inbox = env.personal_id(OPERATOR).await;
     sqlx::query("UPDATE agents SET template_version = 0, tuned = 0 WHERE id = ?1").bind(&inbox).execute(&env.state.db).await.unwrap();
-    email_ai_api::agent_registry::seed::ensure_workspace(&env.state.db, &env.ws).await.unwrap();
+    email_ai_api::agents::registry::seed::ensure_workspace(&env.state.db, &env.ws).await.unwrap();
     let version: Option<i64> = sqlx::query_scalar("SELECT template_version FROM agents WHERE id = ?1").bind(&inbox).fetch_one(&env.state.db).await.unwrap();
     assert!(version.unwrap_or(0) >= 1);
 }

@@ -17,12 +17,12 @@ use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use email_ai_api::{
     jobs::worker,
     build_state,
-    config::Config,
-    db,
-    domain::NormalizedEmail,
+    platform::config::Config,
+    platform::db,
+    platform::domain::NormalizedEmail,
     http::{AppState, router},
-    ingest, jobs,
-    threads::thread_has_reply_after,
+    mail::ingest, jobs,
+    mail::threads::thread_has_reply_after,
 };
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
@@ -177,7 +177,7 @@ async fn harness() -> Harness {
     )
     .bind(&source_id)
     .bind(&ws)
-    .bind(serde_json::to_string(&email_ai_api::sources::capabilities("nango_gmail")).unwrap())
+    .bind(serde_json::to_string(&email_ai_api::mail::sources::capabilities("nango_gmail")).unwrap())
     .bind(db::now_ms())
     .execute(&state.db)
     .await

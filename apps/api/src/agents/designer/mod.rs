@@ -93,7 +93,7 @@ impl OpenRouterDesigner {
     async fn ask(&self, model: &str, req: &DesignRequest) -> Result<DesignReply, AiError> {
         let (json, answered_by, usage) =
             self.client.chat_json_usage(model, &req.system, req.user.clone(), "agent_spec", req.schema.clone(), DESIGNER_MAX_TOKENS).await?;
-        let cost_usd = crate::ai_ledger::cost_usd(&answered_by, usage.tokens_in, usage.tokens_out, usage.cost_usd);
+        let cost_usd = crate::ai::ledger::cost_usd(&answered_by, usage.tokens_in, usage.tokens_out, usage.cost_usd);
         Ok(DesignReply { json, cost_usd })
     }
 }

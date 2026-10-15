@@ -21,7 +21,7 @@ pub mod understand;
 
 use async_trait::async_trait;
 
-use crate::domain::{ClassificationSource, Label, Priority};
+use crate::platform::domain::{ClassificationSource, Label, Priority};
 
 pub const PROMPT_VERSION: &str = "classify-v3";
 pub const DRAFT_PROMPT_VERSION: &str = "ack-draft-v4";
@@ -152,8 +152,8 @@ impl Analyst for RulesAnalyst {
             .take(5)
             .map(str::to_string)
             .collect();
-        let plain = crate::attachments::strip_attachment_markup(body);
-        let summary = crate::format::summary::rules_summary(subject, plain, crate::db::now_ms());
+        let plain = crate::mail::attachments::strip_attachment_markup(body);
+        let summary = crate::platform::format::summary::rules_summary(subject, plain, crate::platform::db::now_ms());
         Ok((
             Insight {
                 summary,
@@ -198,8 +198,8 @@ pub trait Drafter: Send + Sync {
 #[async_trait]
 pub trait Extractor: Send + Sync {
     async fn requirement(&self, subject: &str, text: &str, sender_domain: Option<&str>)
-        -> Result<crate::matching::RequirementFields, AiError>;
-    async fn candidate(&self, subject: &str, text: &str, sender: &str) -> Result<crate::matching::CandidateFields, AiError>;
+        -> Result<crate::hr::matching::RequirementFields, AiError>;
+    async fn candidate(&self, subject: &str, text: &str, sender: &str) -> Result<crate::hr::matching::CandidateFields, AiError>;
 }
 
 /// Keyword/regex extraction: used when no model is configured, and in tests.
@@ -208,11 +208,11 @@ pub struct RulesExtractor;
 #[async_trait]
 impl Extractor for RulesExtractor {
     async fn requirement(&self, subject: &str, text: &str, sender_domain: Option<&str>)
-        -> Result<crate::matching::RequirementFields, AiError> {
-        Ok(crate::matching::rules_requirement(subject, text, sender_domain))
+        -> Result<crate::hr::matching::RequirementFields, AiError> {
+        Ok(crate::hr::matching::rules_requirement(subject, text, sender_domain))
     }
-    async fn candidate(&self, subject: &str, text: &str, sender: &str) -> Result<crate::matching::CandidateFields, AiError> {
-        Ok(crate::matching::rules_candidate(subject, text, sender))
+    async fn candidate(&self, subject: &str, text: &str, sender: &str) -> Result<crate::hr::matching::CandidateFields, AiError> {
+        Ok(crate::hr::matching::rules_candidate(subject, text, sender))
     }
 }
 
@@ -262,7 +262,7 @@ pub fn prepare_text(input: &str) -> String {
 
 /// Like `prepare_text` with a caller-chosen bound.
 pub fn prepare_text_up_to(input: &str, max_chars: usize) -> String {
-    let truncated = crate::sources::normalize::truncate_chars(input, max_chars);
+    let truncated = crate::mail::sources::normalize::truncate_chars(input, max_chars);
     truncated
         .lines()
         .map(|line| {

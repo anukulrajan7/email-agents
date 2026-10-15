@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 use sqlx::{SqliteConnection, SqlitePool};
 
 use super::scope;
-use crate::db::{iso, new_id, now_ms};
+use crate::platform::db::{iso, new_id, now_ms};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
@@ -163,7 +163,7 @@ pub async fn record(conn: &mut SqliteConnection, s: Signal<'_>) -> sqlx::Result<
         None => None,
     };
     let id = new_id("fbk");
-    let note = s.note.map(|n| crate::sources::normalize::truncate_chars(n.trim(), MAX_NOTE_CHARS)).filter(|n| !n.is_empty());
+    let note = s.note.map(|n| crate::mail::sources::normalize::truncate_chars(n.trim(), MAX_NOTE_CHARS)).filter(|n| !n.is_empty());
     sqlx::query(
         "INSERT INTO feedback_events (id, workspace_id, agent_id, agent_version, actor_user_id, owner_user_id, kind, message_id, draft_id,
                                       case_id, approval_id, edit_distance, before_json, after_json, note, created_at)
@@ -237,7 +237,7 @@ pub async fn recent(db: &SqlitePool, ws: &str, f: Filter<'_>) -> sqlx::Result<Ve
          WHERE workspace_id = ?1 AND (?2 IS NULL OR agent_id = ?2) AND (?3 IS NULL OR kind = ?3) AND created_at >= ?4
            AND (?6 IS NULL OR owner_user_id = ?6 OR actor_user_id = ?6) AND {}
          ORDER BY created_at DESC, id DESC LIMIT ?5",
-        crate::agent_registry::store::hide_foreign_personal("f", "?7")
+        crate::agents::registry::store::hide_foreign_personal("f", "?7")
     ))
     .bind(ws)
     .bind(f.agent_id)

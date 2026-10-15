@@ -7,20 +7,20 @@ use sha2::{Digest, Sha256};
 
 use super::{Job, kind};
 use crate::{
-    ai_ledger,
+    ai::ledger,
     ai::{
         self, AiError, ClassifyInput, ClassifyOutput, DraftInput, policy,
         understand::{UnderstandInput, Understanding},
     },
-    config::UnderstandMode,
-    audit::{self, Actor, Entry},
-    db::{new_id, now_ms},
-    ingest, memory,
-    domain::{self, ClassificationSource, OTHER_LABEL, Priority, TAXONOMY_VERSION},
-    labels,
+    platform::config::UnderstandMode,
+    platform::audit::{self, Actor, Entry},
+    platform::db::{new_id, now_ms},
+    mail::ingest, learning::memory,
+    platform::domain::{self, ClassificationSource, OTHER_LABEL, Priority, TAXONOMY_VERSION},
+    understanding::labels,
     http::AppState,
     jobs, learning,
-    sources::resend::{FetchError, ReceivedEmail},
+    mail::sources::resend::{FetchError, ReceivedEmail},
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -60,7 +60,7 @@ async fn deferred_until_opened(state: &AppState, job: &Job, payload: &Value) -> 
     let by_person = job.dedupe_key.contains(":open") || job.dedupe_key.contains(":manual:");
     if job.kind == kind::INDEX_MESSAGE
         && !by_person
-        && !ai_ledger::within_global_budget(&state.db, state.config.ai_global_daily_budget_usd).await
+        && !ledger::within_global_budget(&state.db, state.config.ai_global_daily_budget_usd).await
     {
         return Ok(true);
     }
@@ -96,7 +96,7 @@ pub async fn ai_deferred(state: &AppState, job: &Job, payload: &Value, costs_tok
     }
     if costs_tokens
         && let Some(ws) = &job.workspace_id
-        && !ai_ledger::within_budget(&state.db, state.config.ai_daily_budget_usd, ws).await
+        && !ledger::within_budget(&state.db, state.config.ai_daily_budget_usd, ws).await
     {
         return Ok(true);
     }
@@ -127,7 +127,7 @@ pub async fn handle(state: &AppState, job: &Job) -> Result<(), JobError> {
         kind::GENERATE_DRAFT => generate_draft(state, job, &payload).await,
         kind::PURGE_EXPIRED_EVENTS => purge_expired_events(state).await,
         kind::BACKUP_DATABASE => backup_database(state).await,
-        kind::SYNC_NANGO_SOURCE => crate::sources::nango::sync_source(state, &payload).await,
+        kind::SYNC_NANGO_SOURCE => crate::mail::sources::nango::sync_source(state, &payload).await,
         kind::LEARN_FROM_DRAFT | kind::LEARN_FROM_REPLY | kind::LEARN_FROM_SIGNAL => super::learning_jobs::learn_from_signal(state, &payload).await,
         kind::ANALYZE_MESSAGE => {
             let insight = analyze_message(state, &payload).await?;
@@ -141,7 +141,7 @@ pub async fn handle(state: &AppState, job: &Job) -> Result<(), JobError> {
         kind::MATCH_RECORD => super::matching_jobs::match_record(state, job, &payload).await,
         kind::RUN_AUTOMATIONS => super::automation_jobs::run_automations(state, &payload).await,
         kind::REMIND_NO_REPLY => super::automation_jobs::remind_no_reply(state, &payload).await,
-        kind::REGISTER_NANGO_CONNECTION => crate::sources::nango::register_from_webhook(state, &payload).await,
+        kind::REGISTER_NANGO_CONNECTION => crate::mail::sources::nango::register_from_webhook(state, &payload).await,
         kind::INDEX_MESSAGE | kind::INDEX_REPLY | kind::BACKFILL_KNOWLEDGE => super::knowledge_jobs::handle(state, job, &payload).await,
         kind::LEARN_FROM_MESSAGE => super::learning_jobs::learn_from_message(state, &payload).await,
         kind::EVALUATE_ALERTS => crate::alerts::evaluate_job(state, &payload).await,
@@ -149,15 +149,15 @@ pub async fn handle(state: &AppState, job: &Job) -> Result<(), JobError> {
         kind::AGENT_STEP => super::agent_jobs::agent_step(state, job, &payload).await,
         kind::AGENT_SCHEDULE_TICK => crate::agents::triggers::schedule_tick_job(state, job).await,
         kind::SEND_DRAFT => crate::replies::send_scheduled(state, &payload).await,
-        kind::ENROL_CANDIDATE_WATCH => crate::candidate_watch::enrol_job(state, &payload).await,
-        kind::NOTIFY_CANDIDATE_WATCH => crate::candidate_watch::notify_job(state, &payload).await,
-        kind::SEND_OUTBOUND => crate::messaging::email::run_scheduled(state, &payload).await,
-        kind::WATCH_REPLY => crate::messaging::watch::reply_job(state, &payload).await,
-        kind::WATCH_NUDGE => crate::messaging::watch::nudge_job(state, &payload).await,
-        kind::INAPP_DUE => crate::messaging::inapp::due_job(state, &payload).await,
-        kind::PURGE_SOURCE => crate::deletion::purge_source_job(state, &payload).await,
-        kind::STAFFING_SCAN => crate::staffing::scan_job(state, &payload).await,
-        kind::RECORD_TIMESHEET => crate::staffing::record_job(state, &payload).await,
+        kind::ENROL_CANDIDATE_WATCH => crate::hr::candidate_watch::enrol_job(state, &payload).await,
+        kind::NOTIFY_CANDIDATE_WATCH => crate::hr::candidate_watch::notify_job(state, &payload).await,
+        kind::SEND_OUTBOUND => crate::alerts::messaging::email::run_scheduled(state, &payload).await,
+        kind::WATCH_REPLY => crate::alerts::messaging::watch::reply_job(state, &payload).await,
+        kind::WATCH_NUDGE => crate::alerts::messaging::watch::nudge_job(state, &payload).await,
+        kind::INAPP_DUE => crate::alerts::messaging::inapp::due_job(state, &payload).await,
+        kind::PURGE_SOURCE => crate::mail::deletion::purge_source_job(state, &payload).await,
+        kind::STAFFING_SCAN => crate::hr::staffing::scan_job(state, &payload).await,
+        kind::RECORD_TIMESHEET => crate::hr::staffing::record_job(state, &payload).await,
         kind::RUN_EVAL => super::eval_jobs::run_eval(state, &payload).await,
         kind::ROLLUP_AGENT_METRICS => super::eval_jobs::rollup_agent_metrics(state).await,
         kind::DESIGNER_DRY_RUN => super::designer_jobs::designer_dry_run(state, job, &payload).await,
@@ -172,7 +172,7 @@ pub async fn on_dead(state: &AppState, job: &Job, error: &str) {
         match job.kind.as_str() {
             kind::PURGE_SOURCE => {
                 let source_id = str_field(&payload, "source_id")?;
-                crate::deletion::purge_failed(&state.db, &source_id, "The deletion stopped after repeated errors. Disconnect again to retry.").await?;
+                crate::mail::deletion::purge_failed(&state.db, &source_id, "The deletion stopped after repeated errors. Disconnect again to retry.").await?;
                 Ok(())
             }
             kind::CLASSIFY_EMAIL => {
@@ -196,12 +196,12 @@ pub async fn on_dead(state: &AppState, job: &Job, error: &str) {
                 // Only a workflow draft failure fails the message; a manual "regenerate" does not.
                 if let Some(run_id) = payload.get("workflow_run_id").and_then(Value::as_str) {
                     sqlx::query("UPDATE workflow_runs SET status = 'failed', error = ?1 WHERE id = ?2")
-                        .bind(crate::sources::normalize::truncate_chars(error, 500))
+                        .bind(crate::mail::sources::normalize::truncate_chars(error, 500))
                         .bind(run_id)
                         .execute(&state.db)
                         .await?;
                     sqlx::query("UPDATE email_messages SET processing_status = 'failed', processing_error = ?1 WHERE id = ?2")
-                        .bind(crate::sources::normalize::truncate_chars(error, 500))
+                        .bind(crate::mail::sources::normalize::truncate_chars(error, 500))
                         .bind(&message_id)
                         .execute(&state.db)
                         .await?;
@@ -216,7 +216,7 @@ pub async fn on_dead(state: &AppState, job: &Job, error: &str) {
                 crate::replies::give_up_scheduled(state, &payload, error).await?;
                 Ok(())
             }
-            kind::SEND_OUTBOUND => crate::messaging::email::give_up_scheduled(state, &payload, error).await,
+            kind::SEND_OUTBOUND => crate::alerts::messaging::email::give_up_scheduled(state, &payload, error).await,
             kind::FETCH_FORWARDED_EMAIL => {
                 if let Some(event_id) = payload.get("event_id").and_then(Value::as_str) {
                     sqlx::query("UPDATE inbound_events SET status = 'rejected' WHERE id = ?1")
@@ -242,7 +242,7 @@ pub async fn on_dead(state: &AppState, job: &Job, error: &str) {
 
 async fn set_message_error(state: &AppState, message_id: &str, error: &str) -> Result<(), JobError> {
     sqlx::query("UPDATE email_messages SET processing_error = ?1 WHERE id = ?2")
-        .bind(crate::sources::normalize::truncate_chars(error, 500))
+        .bind(crate::mail::sources::normalize::truncate_chars(error, 500))
         .bind(message_id)
         .execute(&state.db)
         .await?;
@@ -356,7 +356,7 @@ async fn classify_email(state: &AppState, job: &Job, payload: &Value) -> Result<
 
     // Bulk and automated mail is filed by rules: no model call. A person's request (reprocess, opening the email) skips this.
     let full_treatment = job.dedupe_key.contains(":reprocess:") || payload.get("full").and_then(Value::as_bool) == Some(true);
-    if !full_treatment && let Some(signals) = crate::bulk::should_file(&state.db, &msg.workspace_id, &message_id).await? {
+    if !full_treatment && let Some(signals) = crate::mail::bulk::should_file(&state.db, &msg.workspace_id, &message_id).await? {
         return file_as_bulk(state, job, &msg, &message_id, &signals).await;
     }
 
@@ -366,19 +366,19 @@ async fn classify_email(state: &AppState, job: &Job, payload: &Value) -> Result<
         .await?;
     let automated_signals: String =
         sqlx::query_scalar("SELECT bulk_signals FROM email_messages WHERE id = ?1").bind(&message_id).fetch_optional(&state.db).await?.unwrap_or_default();
-    let automated = crate::memory_learning::is_automated_sender(&crate::staffing::policy::address_of(&msg.sender_address))
+    let automated = crate::learning::memory_learning::is_automated_sender(&crate::hr::staffing::policy::address_of(&msg.sender_address))
         || serde_json::from_str::<Vec<String>>(&automated_signals).is_ok_and(|s| !s.is_empty());
     if !automated
-        && crate::staffing::timesheet_records::looks_like_timesheet(&msg.subject, &attachment_names)
-        && labels::is_active(&state.db, &msg.workspace_id, crate::staffing::timesheet_records::LABEL).await?
+        && crate::hr::staffing::timesheet_records::looks_like_timesheet(&msg.subject, &attachment_names)
+        && labels::is_active(&state.db, &msg.workspace_id, crate::hr::staffing::timesheet_records::LABEL).await?
     {
         let out = ClassifyOutput {
-            category: crate::staffing::timesheet_records::LABEL.into(),
+            category: crate::hr::staffing::timesheet_records::LABEL.into(),
             priority: Priority::Normal,
             requires_reply: false,
             confidence: Some(0.95),
             source: ClassificationSource::Fallback,
-            model_id: Some(crate::staffing::timesheet_records::MODEL_ID.into()),
+            model_id: Some(crate::hr::staffing::timesheet_records::MODEL_ID.into()),
             model_version: None,
         };
         persist_classification_with(state, &message_id, &out, Actor::System, Some(&job.id), WriteMode::Upsert, None, false).await?;
@@ -388,11 +388,11 @@ async fn classify_email(state: &AppState, job: &Job, payload: &Value) -> Result<
     let sender_history = memory::context_for(&state.db, &msg.workspace_id, &msg.sender_address, "").await?.sender_history;
     // Over the global inbound cap, automatic labelling uses the free rules (no model, no embedding).
     let over_global_cap = !job.dedupe_key.contains(":reprocess:")
-        && !ai_ledger::within_global_budget(&state.db, state.config.ai_global_daily_budget_usd).await;
+        && !ledger::within_global_budget(&state.db, state.config.ai_global_daily_budget_usd).await;
     let examples = if over_global_cap {
         vec![]
     } else {
-        crate::knowledge::label_examples(&state.db, state.embedder.as_ref(), &msg.workspace_id, &message_id, &msg.subject, &msg.body_text).await
+        crate::learning::knowledge::label_examples(&state.db, state.embedder.as_ref(), &msg.workspace_id, &message_id, &msg.subject, &msg.body_text).await
     };
     let input = ClassifyInput {
         examples,
@@ -447,8 +447,8 @@ async fn understand_input(
         .bind(message_id)
         .fetch_one(&state.db)
         .await?;
-    let items = crate::attachments::load_prompt_items(&state.db, message_id).await?;
-    let attachments_block = crate::attachments::prompt_block(&items);
+    let items = crate::mail::attachments::load_prompt_items(&state.db, message_id).await?;
+    let attachments_block = crate::mail::attachments::prompt_block(&items);
     let attachments_hash = (!attachments_block.is_empty()).then(|| format!("{:x}", Sha256::digest(attachments_block.as_bytes())));
     Ok((
         UnderstandInput {
@@ -511,7 +511,7 @@ async fn file_as_bulk(state: &AppState, job: &Job, msg: &MessageForAi, message_i
         requires_reply: false,
         confidence: Some(0.99),
         source: ClassificationSource::Fallback,
-        model_id: Some(crate::bulk::MODEL_ID.into()),
+        model_id: Some(crate::mail::bulk::MODEL_ID.into()),
         model_version: None,
     };
     let written = persist_classification_with(state, message_id, &out, Actor::System, Some(&job.id), WriteMode::Upsert, None, true).await?;
@@ -639,7 +639,7 @@ async fn persist_classification_with(
     if bulk {
         let summary = {
             let subject: String = sqlx::query_scalar("SELECT subject FROM email_messages WHERE id = ?1").bind(message_id).fetch_one(&mut *tx).await?;
-            crate::sources::normalize::truncate_chars(subject.trim(), 200)
+            crate::mail::sources::normalize::truncate_chars(subject.trim(), 200)
         };
         sqlx::query(
             "INSERT OR IGNORE INTO message_insights (message_id, summary, asks_json, deadline, needs_reply, missing_json, source, model_id, created_at)
@@ -647,7 +647,7 @@ async fn persist_classification_with(
         )
         .bind(message_id)
         .bind(summary)
-        .bind(crate::bulk::MODEL_ID)
+        .bind(crate::mail::bulk::MODEL_ID)
         .bind(now)
         .execute(&mut *tx)
         .await?;
@@ -694,7 +694,7 @@ async fn persist_classification_with(
     super::knowledge_jobs::enqueue_index_message(&mut tx, &workspace_id, message_id).await?;
     // Requirement / referral emails also become structured records for matching (staffing pack only).
     if super::matching_jobs::is_extractable(&out.category)
-        && crate::packs::has_feature(&mut *tx, &workspace_id, crate::packs::FEATURE_MATCHING).await?
+        && crate::platform::packs::has_feature(&mut *tx, &workspace_id, crate::platform::packs::FEATURE_MATCHING).await?
     {
         jobs::enqueue(
             &mut tx,
@@ -705,7 +705,7 @@ async fn persist_classification_with(
         )
         .await?;
     }
-    if out.category == crate::staffing::timesheet_records::LABEL && crate::packs::enabled(&mut *tx, &workspace_id, crate::packs::STAFFING).await? {
+    if out.category == crate::hr::staffing::timesheet_records::LABEL && crate::platform::packs::enabled(&mut *tx, &workspace_id, crate::platform::packs::STAFFING).await? {
         jobs::enqueue(
             &mut tx,
             kind::RECORD_TIMESHEET,
@@ -791,9 +791,9 @@ async fn execute_workflow(state: &AppState, payload: &Value) -> Result<(), JobEr
     if source_status == "disconnected" {
         return Ok(());
     }
-    if category == crate::staffing::timesheet_records::LABEL && crate::packs::enabled(&state.db, &workspace_id, crate::packs::STAFFING).await? {
+    if category == crate::hr::staffing::timesheet_records::LABEL && crate::platform::packs::enabled(&state.db, &workspace_id, crate::platform::packs::STAFFING).await? {
         // A timesheet that was recorded cleanly needs no review item; one that needs a look gets the usual one below.
-        let run = crate::staffing::timesheet_records::record_message(state, &workspace_id, &message_id).await?;
+        let run = crate::hr::staffing::timesheet_records::record_message(state, &workspace_id, &message_id).await?;
         if run.deferred {
             return Err(JobError::Retry("the timesheet could not be read by the model yet".into()));
         }
@@ -802,7 +802,7 @@ async fn execute_workflow(state: &AppState, payload: &Value) -> Result<(), JobEr
             return mark_processed_if_classified(state, &message_id).await;
         }
     }
-    let hr_workflows = crate::packs::has_feature(&state.db, &workspace_id, crate::packs::FEATURE_HR_WORKFLOWS).await?;
+    let hr_workflows = crate::platform::packs::has_feature(&state.db, &workspace_id, crate::platform::packs::FEATURE_HR_WORKFLOWS).await?;
     let Some(template) = domain::WORKFLOW_TEMPLATES.iter().find(|t| hr_workflows && t.label_key == category && t.available)
     else {
         // No workflow for this category: classified is the end of the line.
@@ -915,12 +915,12 @@ async fn generate_draft(state: &AppState, job: &Job, payload: &Value) -> Result<
     let run_id = payload.get("workflow_run_id").and_then(Value::as_str).map(str::to_string);
     let msg = load_message(state, &message_id).await?;
     // Automatic drafting can be switched off: then only a person's request (`:manual:`) drafts.
-    let auto_reply = crate::reply_settings::load(&state.db, &state.config, &msg.workspace_id).await?.auto_reply;
+    let auto_reply = crate::replies::reply_settings::load(&state.db, &state.config, &msg.workspace_id).await?.auto_reply;
     if !auto_reply && !job.dedupe_key.contains(":manual:") {
         return finish_without_draft(state, &msg.workspace_id, &message_id, run_id.as_deref(), "automatic drafts are off").await;
     }
     // Timesheets are recorded by the timesheet desk, which never replies; only a person asking for a draft gets one.
-    if !job.dedupe_key.contains(":manual:") && crate::staffing::timesheet_records::suppresses_auto_reply(&state.db, &msg.workspace_id, &message_id).await? {
+    if !job.dedupe_key.contains(":manual:") && crate::hr::staffing::timesheet_records::suppresses_auto_reply(&state.db, &msg.workspace_id, &message_id).await? {
         return finish_without_draft(state, &msg.workspace_id, &message_id, run_id.as_deref(), "a timesheet was recorded; no reply is needed").await;
     }
     let insight = analyze_message(state, &json!({ "message_id": message_id })).await?;
@@ -976,10 +976,10 @@ async fn generate_draft(state: &AppState, job: &Job, payload: &Value) -> Result<
             let author = payload.get("owner_user_id").and_then(Value::as_str);
             let words: Vec<&str> = [payload.get("owner_said"), payload.get("instructions")].into_iter().flatten().filter_map(Value::as_str).collect();
             if words.is_empty() {
-                crate::owner_said::record(&mut tx, &msg.workspace_id, &draft_id, &message_id, author, None).await?;
+                crate::replies::owner_said::record(&mut tx, &msg.workspace_id, &draft_id, &message_id, author, None).await?;
             }
             for w in words {
-                crate::owner_said::record(&mut tx, &msg.workspace_id, &draft_id, &message_id, author, Some(w)).await?;
+                crate::replies::owner_said::record(&mut tx, &msg.workspace_id, &draft_id, &message_id, author, Some(w)).await?;
             }
             audit::record(
                 &mut tx,
@@ -994,7 +994,7 @@ async fn generate_draft(state: &AppState, job: &Job, payload: &Value) -> Result<
                 },
             )
             .await?;
-            crate::memory_learning::record_use(&mut tx, &ctx.ids(), now).await?;
+            crate::learning::memory_learning::record_use(&mut tx, &ctx.ids(), now).await?;
             learning::preferences::record_use(&mut tx, &ctx.preference_ids).await?;
         }
     }
@@ -1056,9 +1056,9 @@ async fn compose_draft(
         .find(|l| l.key == category)
         .map(|l| (l.name, l.description))
         .unwrap_or_else(|| (category.clone(), String::new()));
-    let staffing = crate::packs::enabled(&state.db, &msg.workspace_id, crate::packs::STAFFING).await?;
+    let staffing = crate::platform::packs::enabled(&state.db, &msg.workspace_id, crate::platform::packs::STAFFING).await?;
     // A sender the mailbox owner marked as important gets the premium tier.
-    let vip = crate::agent_profiles::context_for_message(&state.db, &state.config, &msg.workspace_id, message_id)
+    let vip = crate::agents::profiles::context_for_message(&state.db, &state.config, &msg.workspace_id, message_id)
         .await?
         .owner
         .and_then(|o| o.profile)
@@ -1071,15 +1071,15 @@ async fn compose_draft(
         staffing,
         vip,
     );
-    let settings = crate::reply_settings::load(&state.db, &state.config, &msg.workspace_id).await?;
+    let settings = crate::replies::reply_settings::load(&state.db, &state.config, &msg.workspace_id).await?;
     let reply_instructions = if settings.reply_instructions.is_empty() {
-        crate::packs::reply_style(&state.db, &msg.workspace_id).await?.to_string()
+        crate::platform::packs::reply_style(&state.db, &msg.workspace_id).await?.to_string()
     } else {
         settings.reply_instructions
     };
-    let default_sign_off = crate::packs::default_sign_off(&state.db, &msg.workspace_id).await?;
+    let default_sign_off = crate::platform::packs::default_sign_off(&state.db, &msg.workspace_id).await?;
     let (reply_instructions, signature) =
-        crate::agent_profiles::draft_voice(&state.db, &state.config, &msg.workspace_id, message_id, reply_instructions, settings.signature).await?;
+        crate::agents::profiles::draft_voice(&state.db, &state.config, &msg.workspace_id, message_id, reply_instructions, settings.signature).await?;
 
     // Trusted memory (staff notes + learned sender profile), retrieved by sender and topic, within the agent's memory scope.
     let agent = {
@@ -1100,16 +1100,16 @@ async fn compose_draft(
     ctx.preference_ids = preferences.iter().map(|p| p.id.clone()).collect();
     let mut memory_notes = ctx.lines();
     let team_notes = memory_notes.clone();
-    let extra_instructions = extra_instructions.map(crate::signoff::strip_sign_off_instruction);
+    let extra_instructions = extra_instructions.map(crate::replies::signoff::strip_sign_off_instruction);
     if let Some(extra) = extra_instructions.as_deref().map(str::trim).filter(|e| !e.is_empty()) {
         memory_notes.push(format!("Instruction for this reply: {extra}"));
     }
     let (db, embedder) = (&state.db, state.embedder.as_ref());
     let examples = if automated {
         let domain = msg.sender_address.rsplit_once('@').map(|(_, d)| d.to_lowercase()).unwrap_or_default();
-        crate::knowledge::reply_examples_from_domain(db, embedder, &msg.workspace_id, message_id, &msg.subject, &msg.body_text, &domain).await
+        crate::learning::knowledge::reply_examples_from_domain(db, embedder, &msg.workspace_id, message_id, &msg.subject, &msg.body_text, &domain).await
     } else {
-        crate::knowledge::reply_examples(db, embedder, &msg.workspace_id, message_id, &msg.subject, &msg.body_text).await
+        crate::learning::knowledge::reply_examples(db, embedder, &msg.workspace_id, message_id, &msg.subject, &msg.body_text).await
     };
     let input = DraftInput {
         examples,
@@ -1135,7 +1135,7 @@ async fn compose_draft(
         let names: Vec<String> = sqlx::query_scalar("SELECT DISTINCT name FROM agents WHERE workspace_id = ?1").bind(&msg.workspace_id).fetch_all(&state.db).await?;
         let own = input.signature.as_deref().filter(|s| !s.trim().is_empty()).unwrap_or(&input.default_sign_off);
         for name in names {
-            if crate::signoff::replace_agent_sign_off(&mut out.body_text, &name, own) {
+            if crate::replies::signoff::replace_agent_sign_off(&mut out.body_text, &name, own) {
                 tracing::info!(message_id, "an agent's own name at the end of a draft was replaced with the owner's sign-off");
                 break;
             }
@@ -1147,9 +1147,9 @@ async fn compose_draft(
         let unsupported = learning::context_pack::check_draft(&pack, &mut out);
         if !unsupported.is_empty() {
             tracing::info!(message_id, claims = unsupported.len(), "draft claims not in the context pack were turned into [NEEDS]");
-            crate::incidents::record(
+            crate::ai::incidents::record(
                 &state.db,
-                crate::incidents::NewIncident::new(&msg.workspace_id, crate::incidents::Kind::UnsupportedClaim, json!({"claims": unsupported.len()}))
+                crate::ai::incidents::NewIncident::new(&msg.workspace_id, crate::ai::incidents::Kind::UnsupportedClaim, json!({"claims": unsupported.len()}))
                     .message(Some(message_id))
                     .dedupe(format!("unsupported:{message_id}")),
             )
@@ -1157,7 +1157,7 @@ async fn compose_draft(
         }
     }
     if !out.body_text.trim().is_empty() {
-        let sources = crate::gap_resolver::Sources {
+        let sources = crate::replies::gap_resolver::Sources {
             ws: &msg.workspace_id,
             staffing,
             subject: &msg.subject,
@@ -1165,7 +1165,7 @@ async fn compose_draft(
             category: &input.category,
             notes: &team_notes,
         };
-        crate::gap_resolver::resolve_draft(&state.db, &sources, &mut out).await?;
+        crate::replies::gap_resolver::resolve_draft(&state.db, &sources, &mut out).await?;
     }
     Ok((out, ctx, quality))
 }
@@ -1186,7 +1186,7 @@ pub async fn create_draft_for_message(
         return Ok(existing);
     }
     let msg = load_message(state, message_id).await?;
-    if crate::staffing::timesheet_records::suppresses_auto_reply(&state.db, &msg.workspace_id, message_id).await? {
+    if crate::hr::staffing::timesheet_records::suppresses_auto_reply(&state.db, &msg.workspace_id, message_id).await? {
         return Ok(None);
     }
     let insight = analyze_message(state, &json!({ "message_id": message_id })).await?;
@@ -1261,7 +1261,7 @@ pub async fn create_agent_draft(
         return Ok(existing);
     }
     let msg = load_message(state, message_id).await?;
-    if crate::staffing::timesheet_records::suppresses_auto_reply(&state.db, &msg.workspace_id, message_id).await? {
+    if crate::hr::staffing::timesheet_records::suppresses_auto_reply(&state.db, &msg.workspace_id, message_id).await? {
         return Ok(None);
     }
     let insight = analyze_message(state, &json!({ "message_id": message_id })).await?;
@@ -1291,7 +1291,7 @@ pub async fn create_agent_draft(
     .rows_affected()
         == 1;
     if inserted {
-        crate::owner_said::record(&mut tx, &msg.workspace_id, &draft_id, message_id, owner.map(|o| o.0), owner.map(|o| o.1)).await?;
+        crate::replies::owner_said::record(&mut tx, &msg.workspace_id, &draft_id, message_id, owner.map(|o| o.0), owner.map(|o| o.1)).await?;
         audit::record(
             &mut tx,
             Entry {
@@ -1370,8 +1370,8 @@ pub async fn analyze_message(state: &AppState, payload: &Value) -> Result<ai::In
     let _one_at_a_time = lock_analysis(&message_id).await;
     // Set when attachment text arrived after the first reading: read the email again with it, once per change.
     let refresh = payload.get("refresh_attachments").and_then(Value::as_bool).unwrap_or(false);
-    let items = crate::attachments::load_prompt_items(&state.db, &message_id).await?;
-    let attachments_block = crate::attachments::prompt_block(&items);
+    let items = crate::mail::attachments::load_prompt_items(&state.db, &message_id).await?;
+    let attachments_block = crate::mail::attachments::prompt_block(&items);
     let attachments_hash = (!attachments_block.is_empty()).then(|| format!("{:x}", Sha256::digest(attachments_block.as_bytes())));
     let stored: Option<StoredInsight> = sqlx::query_as(
         "SELECT summary, asks_json, deadline, needs_reply, missing_json, attachments_hash FROM message_insights WHERE message_id = ?1",
@@ -1427,7 +1427,7 @@ pub async fn analyze_message(state: &AppState, payload: &Value) -> Result<ai::In
             let analyst_body = if attachments_block.is_empty() {
                 new_part
             } else {
-                format!("{}{attachments_block}", crate::sources::normalize::truncate_chars(&new_part, ai::MAX_MODEL_INPUT_CHARS))
+                format!("{}{attachments_block}", crate::mail::sources::normalize::truncate_chars(&new_part, ai::MAX_MODEL_INPUT_CHARS))
             };
             let (mut insight, model_id) =
                 state.analyst.analyze_in_thread(&msg.subject, &msg.sender_address, &analyst_body, digest.as_deref()).await?;
@@ -1449,10 +1449,10 @@ pub async fn analyze_message(state: &AppState, payload: &Value) -> Result<ai::In
             (insight, model_id, None)
         }
     };
-    insight.summary = crate::attachments::strip_attachment_markup(&insight.summary).to_string();
+    insight.summary = crate::mail::attachments::strip_attachment_markup(&insight.summary).to_string();
     let received_at_ms: i64 = sqlx::query_scalar("SELECT received_at FROM email_messages WHERE id = ?1").bind(&message_id).fetch_one(&state.db).await?;
     let seen = format!("{}\n{}\n{attachments_block}", msg.subject, msg.body_text);
-    insight.summary = crate::format::summary::polish(&insight.summary, &seen, received_at_ms);
+    insight.summary = crate::platform::format::summary::polish(&insight.summary, &seen, received_at_ms);
     let mut conn = state.db.acquire().await?;
     store_insight(&mut conn, &message_id, &insight, &model_id, attachments_hash.as_deref(), understanding.as_ref(), refresh).await?;
     Ok(insight)
@@ -1536,9 +1536,9 @@ async fn finish_without_draft(
 // ---------------------------------------------------------------- retention
 
 async fn backup_database(state: &AppState) -> Result<(), JobError> {
-    let Some(dir) = crate::backup::backup_dir(&state.config.database_url) else { return Ok(()) };
+    let Some(dir) = crate::platform::backup::backup_dir(&state.config.database_url) else { return Ok(()) };
     let today = time::OffsetDateTime::now_utc().date();
-    match crate::backup::run(&state.db, &dir, today, crate::backup::KEEP).await {
+    match crate::platform::backup::run(&state.db, &dir, today, crate::platform::backup::KEEP).await {
         Ok(Some(path)) => tracing::info!(path = %path.display(), "database backup written"),
         Ok(None) => {}
         Err(e) => return Err(JobError::Retry(format!("database backup failed: {e:#}"))),
@@ -1559,9 +1559,9 @@ async fn purge_expired_events(state: &AppState) -> Result<(), JobError> {
         .await?
         .rows_affected();
     sqlx::query("DELETE FROM judge_cache WHERE created_at < ?1").bind(cutoff).execute(&state.db).await?;
-    crate::deletion::prune_tombstones(&state.db).await?;
+    crate::mail::deletion::prune_tombstones(&state.db).await?;
     sqlx::query("DELETE FROM email_outbox WHERE created_at < ?1").bind(cutoff).execute(&state.db).await?;
-    let rate_events = crate::security::purge_rate_events(&state.db).await?;
+    let rate_events = crate::platform::security::purge_rate_events(&state.db).await?;
     tracing::info!(purged_payloads = purged, deleted_jobs = jobs, rate_events, "retention purge");
     Ok(())
 }

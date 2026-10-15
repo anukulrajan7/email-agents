@@ -14,8 +14,8 @@ use serde_json::{Value, json};
 
 use super::AppState;
 use crate::{
-    agent_profiles,
-    agent_registry::{
+    agents::profiles,
+    agents::registry::{
         routing, seed,
         spec::{self, AgentSpec, CATEGORIES, Issue, MAX_AUTONOMY, Trigger},
         store::{self, AgentRow, NewAgent},
@@ -23,12 +23,12 @@ use crate::{
         versions::{self, NewVersion},
     },
     agents::autonomy::{self, LevelInputs},
-    audit::{self, Actor, Entry},
-    auth::{AuthUser, require_role},
-    db::{iso, now_ms},
-    domain::Role,
-    error::{AppError, AppResult},
-    packs,
+    platform::audit::{self, Actor, Entry},
+    platform::auth::{AuthUser, require_role},
+    platform::db::{iso, now_ms},
+    platform::domain::Role,
+    platform::error::{AppError, AppResult},
+    platform::packs,
 };
 
 pub fn routes() -> Router<AppState> {
@@ -101,7 +101,7 @@ async fn validate_in_workspace(state: &AppState, ws: &str, spec: &AgentSpec, cei
         && let Some(i) = spec
             .tools
             .iter()
-            .position(|t| crate::agent_registry::runtime::MATCHING_TOOLS.contains(&t.as_str()) && !previous.is_some_and(|p| p.has_tool(t)))
+            .position(|t| crate::agents::registry::runtime::MATCHING_TOOLS.contains(&t.as_str()) && !previous.is_some_and(|p| p.has_tool(t)))
     {
         issues.push(Issue { path: format!("tools[{i}]"), code: "tool_needs_staffing", message: "candidate matching needs the HR & recruiting pack".into() });
     }
@@ -187,7 +187,7 @@ fn summary(state: &AppState, a: &AgentRow, spec: &AgentSpec, today: Option<&Toda
 
 async fn profile_asks_first(state: &AppState, ws: &str, a: &AgentRow) -> sqlx::Result<bool> {
     let Some(owner) = a.owner_user_id.as_deref() else { return Ok(false) };
-    Ok(!agent_profiles::user_profile(&state.db, ws, owner).await?.is_none_or(|p| p.routine_ok()))
+    Ok(!profiles::user_profile(&state.db, ws, owner).await?.is_none_or(|p| p.routine_ok()))
 }
 
 pub(super) async fn detail_json(state: &AppState, ws: &str, a: &AgentRow) -> AppResult<Value> {
@@ -287,9 +287,9 @@ async fn update(
     require_edit(&state, &ws, &user, &agent).await?;
     let is_lead = agent.kind == "lead";
     if is_lead && (body.name.is_some() || body.avatar.is_some() || body.color.is_some()) {
-        let input = agent_profiles::AgentInput { name: body.name.clone(), avatar: body.avatar.clone(), color: body.color.clone(), ..Default::default() };
-        let next = agent_profiles::agent(&state.db, &state.config, &ws).await?.apply(&input).map_err(AppError::BadRequest)?;
-        agent_profiles::save_agent(&state.db, &ws, &next, &user.id).await?;
+        let input = profiles::AgentInput { name: body.name.clone(), avatar: body.avatar.clone(), color: body.color.clone(), ..Default::default() };
+        let next = profiles::agent(&state.db, &state.config, &ws).await?.apply(&input).map_err(AppError::BadRequest)?;
+        profiles::save_agent(&state.db, &ws, &next, &user.id).await?;
     }
     let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     if let Some(status) = body.status.as_deref() {
@@ -320,12 +320,12 @@ async fn update(
             return Err(AppError::BadRequest(format!("the name must be 1 to {} characters", spec::MAX_NAME_CHARS)));
         }
         let avatar = match &body.avatar {
-            Some(a) => agent_profiles::valid_avatar(a).ok_or_else(|| AppError::BadRequest("the avatar must be a picture, one emoji or 1 to 2 letters".into()))?,
+            Some(a) => profiles::valid_avatar(a).ok_or_else(|| AppError::BadRequest("the avatar must be a picture, one emoji or 1 to 2 letters".into()))?,
             None => agent.avatar.clone(),
         };
         let color = match &body.color {
-            Some(c) if agent_profiles::COLORS.contains(&c.as_str()) => c.clone(),
-            Some(_) => return Err(AppError::BadRequest(format!("color must be one of {}", agent_profiles::COLORS.join(", ")))),
+            Some(c) if profiles::COLORS.contains(&c.as_str()) => c.clone(),
+            Some(_) => return Err(AppError::BadRequest(format!("color must be one of {}", profiles::COLORS.join(", ")))),
             None => agent.color.clone(),
         };
         store::set_identity(&mut tx, &ws, &id, &name, &avatar, &color).await?;
@@ -421,12 +421,12 @@ async fn insert_custom(
 
 pub(super) fn look(avatar: Option<&str>, color: Option<&str>) -> AppResult<(String, String)> {
     let avatar = match avatar {
-        Some(a) => agent_profiles::valid_avatar(a).ok_or_else(|| AppError::BadRequest("the avatar must be a picture, one emoji or 1 to 2 letters".into()))?,
+        Some(a) => profiles::valid_avatar(a).ok_or_else(|| AppError::BadRequest("the avatar must be a picture, one emoji or 1 to 2 letters".into()))?,
         None => "🤖".to_string(),
     };
     let color = match color {
-        Some(c) if agent_profiles::COLORS.contains(&c) => c.to_string(),
-        Some(_) => return Err(AppError::BadRequest(format!("color must be one of {}", agent_profiles::COLORS.join(", ")))),
+        Some(c) if profiles::COLORS.contains(&c) => c.to_string(),
+        Some(_) => return Err(AppError::BadRequest(format!("color must be one of {}", profiles::COLORS.join(", ")))),
         None => "slate".to_string(),
     };
     Ok((avatar, color))

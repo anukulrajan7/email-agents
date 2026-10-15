@@ -6,7 +6,7 @@ use crate::common;
 
 use common::*;
 use email_ai_api::{
-    agent_registry::{
+    agents::registry::{
         spec::SendMode,
         store, templates,
         versions::{self, NewVersion},
@@ -15,7 +15,7 @@ use email_ai_api::{
 };
 use serde_json::json;
 
-fn personal_spec() -> email_ai_api::agent_registry::spec::AgentSpec {
+fn personal_spec() -> email_ai_api::agents::registry::spec::AgentSpec {
     templates::personal_template().spec()
 }
 

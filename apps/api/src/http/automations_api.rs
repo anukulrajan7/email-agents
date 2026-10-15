@@ -14,12 +14,12 @@ use sqlx::FromRow;
 
 use super::{AppState, dto::Items};
 use crate::{
-    audit::{self, Actor, Entry},
-    auth::{AuthUser, require_role},
+    platform::audit::{self, Actor, Entry},
+    platform::auth::{AuthUser, require_role},
     automations::{self, Action, Automation, AutomationInput, AutomationPatch, Condition, MessageContext, PresetInfo},
-    db::iso,
-    domain::Role,
-    error::{AppError, current_request_id},
+    platform::db::iso,
+    platform::domain::Role,
+    platform::error::{AppError, current_request_id},
 };
 
 pub fn routes() -> Router<AppState> {
@@ -149,7 +149,7 @@ pub async fn update(
     .bind(enabled)
     .bind(serde_json::to_string(&conditions).unwrap_or_else(|_| "[]".into()))
     .bind(serde_json::to_string(&actions).unwrap_or_else(|_| "[]".into()))
-    .bind(crate::db::now_ms())
+    .bind(crate::platform::db::now_ms())
     .bind(&id)
     .bind(&ws)
     .execute(&mut *tx)
@@ -208,7 +208,7 @@ pub async fn remove(
 
 pub async fn presets(State(state): State<AppState>, user: AuthUser, Path(ws): Path<String>) -> ApiResult<Json<Items<PresetInfo>>> {
     require_role(&state.db, &ws, &user, Role::Operator).await?;
-    let offered = crate::packs::presets_for(&crate::packs::enabled_keys(&state.db, &ws).await?);
+    let offered = crate::platform::packs::presets_for(&crate::platform::packs::enabled_keys(&state.db, &ws).await?);
     Ok(Json(Items { items: offered.iter().filter_map(|k| automations::preset(k)).collect() }))
 }
 
@@ -218,7 +218,7 @@ pub async fn create_from_preset(
     Path((ws, key)): Path<(String, String)>,
 ) -> ApiResult<(StatusCode, Json<Automation>)> {
     require_role(&state.db, &ws, &user, Role::Admin).await?;
-    let offered = crate::packs::presets_for(&crate::packs::enabled_keys(&state.db, &ws).await?);
+    let offered = crate::platform::packs::presets_for(&crate::platform::packs::enabled_keys(&state.db, &ws).await?);
     let preset = automations::preset(&key).filter(|_| offered.contains(&key.as_str())).ok_or(AppError::NotFound)?;
     let created = create_validated(&state, &ws, &user, &preset.automation.into(), Some(&key)).await?;
     Ok((StatusCode::CREATED, Json(created)))

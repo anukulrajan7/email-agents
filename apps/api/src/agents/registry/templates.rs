@@ -542,7 +542,7 @@ pub fn category_name(category: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{agent_registry::spec::validate_basic, packs};
+    use crate::{agents::registry::spec::validate_basic, platform::packs};
 
     #[test]
     fn every_template_is_valid_and_consistent() {

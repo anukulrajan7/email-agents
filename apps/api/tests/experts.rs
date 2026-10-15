@@ -5,15 +5,15 @@ use crate::common;
 
 use common::*;
 use email_ai_api::{
-    agent_registry::{
+    agents::registry::{
         seed,
         store::{self, NewAgent},
         templates::{self, ESCALATION_KEY, FOLLOWUPS_KEY, INBOX_KEY},
         versions::{self, NewVersion},
     },
     agents::planner::{Scripted, ScriptedPlanner, call as tool, finish},
-    db,
-    messaging::{recipients::Kind, rules},
+    platform::db,
+    alerts::messaging::{recipients::Kind, rules},
 };
 use serde_json::{Value, json};
 
@@ -389,7 +389,7 @@ async fn a_harmless_reply_to_a_sensitive_ask_still_needs_a_person() {
     assert!(stopped, "{case}");
 }
 
-fn privileged_spec() -> email_ai_api::agent_registry::spec::AgentSpec {
+fn privileged_spec() -> email_ai_api::agents::registry::spec::AgentSpec {
     let mut s = templates::personal_template().spec();
     s.permissions.daily_send_cap = 7;
     s
@@ -400,7 +400,7 @@ async fn a_permissions_only_template_upgrade_does_not_drop_an_earned_level_unrec
     let env = Env::new(Opts::packs(&["general"]).config(|c| c.evals_on_version = true)).await;
     let mine = env.personal_id(OPERATOR).await;
     let t = templates::personal_template();
-    let upgraded = [email_ai_api::agent_registry::templates::AgentTemplate {
+    let upgraded = [email_ai_api::agents::registry::templates::AgentTemplate {
         key: t.key, category: t.category, pack: t.pack, version: 99, kind: t.kind, scope: t.scope, initial_level: t.initial_level, name: t.name, avatar: t.avatar, color: t.color, spec: privileged_spec_fn,
     }];
     let mut conn = env.state.db.acquire().await.unwrap();
@@ -413,7 +413,7 @@ async fn a_permissions_only_template_upgrade_does_not_drop_an_earned_level_unrec
     assert_eq!(level, 3, "the safe permission change keeps the earned level");
 }
 
-fn privileged_spec_fn() -> email_ai_api::agent_registry::spec::AgentSpec {
+fn privileged_spec_fn() -> email_ai_api::agents::registry::spec::AgentSpec {
     privileged_spec()
 }
 

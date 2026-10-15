@@ -159,7 +159,7 @@ async fn fixture(env: &Env) -> Fixture {
     seed_row(env, "watches", "id", "wch_a", &[("user_id", &quoted), ("kind", "'ask'"), ("channel", "'email'"), ("status", "'waiting'")]).await;
     seed_row(env, "support_tickets", "id", "tkt_a", &[("user_id", &quoted), ("watch_id", "'wch_a'"), ("status", "'open'")]).await;
     seed_row(env, "in_app_messages", "id", "imsg_a", &[("recipient_user_id", &quoted), ("sender_user_id", &quoted), ("kind", "'message'"), ("subject", "'A-CONFIDENTIAL-SENTINEL'")]).await;
-    email_ai_api::incidents::record(&env.state.db, email_ai_api::incidents::NewIncident::new(&env.ws, email_ai_api::incidents::Kind::Refusal, json!({"source": "test"}))).await;
+    email_ai_api::ai::incidents::record(&env.state.db, email_ai_api::ai::incidents::NewIncident::new(&env.ws, email_ai_api::ai::incidents::Kind::Refusal, json!({"source": "test"}))).await;
 
     let mut ids = HashMap::new();
     let mut empty = vec![];

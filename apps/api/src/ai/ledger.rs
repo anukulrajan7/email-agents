@@ -12,7 +12,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use sqlx::SqlitePool;
 
-use crate::db::{new_id, now_ms};
+use crate::platform::db::{new_id, now_ms};
 
 const DAY_MS: i64 = 86_400_000;
 const MAX_ERROR_CHARS: usize = 300;
@@ -195,7 +195,7 @@ pub async fn record_full(
 ) -> Option<String> {
     let ctx = current_context();
     let (cost, cost_source) = cost_with_source(model, usage.tokens_in, usage.tokens_out, usage.reported_cost);
-    let error = error.map(|e| crate::sources::normalize::truncate_chars(e, MAX_ERROR_CHARS));
+    let error = error.map(|e| crate::mail::sources::normalize::truncate_chars(e, MAX_ERROR_CHARS));
     let id = new_id("aic");
     let result = sqlx::query(
         "INSERT INTO ai_calls (id, workspace_id, task, model, tokens_in, tokens_out, cost_usd, latency_ms, ok, error, message_id, case_id,
@@ -249,7 +249,7 @@ pub async fn log_call(db: &SqlitePool, task: &str, model: &str, started: std::ti
 /// A call that got a well-formed HTTP answer whose content failed parsing or validation: the row
 /// becomes a failure (`ok = 0`, `schema_ok = 0`) instead of looking like a success.
 pub async fn mark_invalid(db: &SqlitePool, row_id: &str, error_class: &str, error: &str) {
-    let error = crate::sources::normalize::truncate_chars(error, MAX_ERROR_CHARS);
+    let error = crate::mail::sources::normalize::truncate_chars(error, MAX_ERROR_CHARS);
     let result = sqlx::query("UPDATE ai_calls SET ok = 0, schema_ok = 0, error = ?2, error_class = ?3 WHERE id = ?1")
         .bind(row_id)
         .bind(error)
@@ -280,10 +280,10 @@ async fn record_call_incident(db: &SqlitePool, row_id: &str, error_class: &str) 
             .flatten(),
         None => None,
     };
-    let kind = if error_class == "refusal" { crate::incidents::Kind::Refusal } else { crate::incidents::Kind::SchemaFailure };
-    crate::incidents::record(
+    let kind = if error_class == "refusal" { crate::ai::incidents::Kind::Refusal } else { crate::ai::incidents::Kind::SchemaFailure };
+    crate::ai::incidents::record(
         db,
-        crate::incidents::NewIncident::new(&ws, kind, json!({"task": task, "error_class": error_class}))
+        crate::ai::incidents::NewIncident::new(&ws, kind, json!({"task": task, "error_class": error_class}))
             .agent(agent_id.as_deref())
             .case(case_id.as_deref())
             .message(message_id.as_deref())

@@ -131,7 +131,7 @@ async fn suppressed_mail_is_invisible_to_every_read_path_and_never_counts_as_a_r
     assert_eq!(subjects, vec!["Timesheet kept"]);
 
     // The thread-level reply check and the alert engine ignore it too.
-    assert!(!email_ai_api::threads::thread_has_reply_after(&h.state.db, &ws, &kept_thread, T).await.unwrap());
+    assert!(!email_ai_api::mail::threads::thread_has_reply_after(&h.state.db, &ws, &kept_thread, T).await.unwrap());
     let _ = alerts::evaluate_workspace(&h.state, &ws, T + 100 * HOUR).await.unwrap();
 }
 

@@ -16,8 +16,8 @@ use email_ai_api::{
         fallback::{RulesClassifier, TemplateDrafter},
     },
     build_state,
-    config::Config,
-    db,
+    platform::config::Config,
+    platform::db,
     http::{AppState, router},
     jobs::{knowledge_jobs, worker},
 };
@@ -178,7 +178,7 @@ async fn indexes_mail_and_finds_it_by_keyword_and_meaning() {
 
     // Deleting chunks removes their vectors (trigger).
     let mut conn = h.state.db.acquire().await.unwrap();
-    email_ai_api::knowledge::delete_message(&mut conn, &leave).await.unwrap();
+    email_ai_api::learning::knowledge::delete_message(&mut conn, &leave).await.unwrap();
     drop(conn);
     assert_eq!(h.count("SELECT COUNT(*) FROM knowledge_vec").await, 2);
     assert_eq!(h.count("SELECT COUNT(*) FROM knowledge_fts WHERE knowledge_fts MATCH 'cancelled'").await, 0);

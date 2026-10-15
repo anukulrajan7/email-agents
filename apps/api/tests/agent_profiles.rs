@@ -16,11 +16,11 @@ use email_ai_api::{
     agents::planner::{SYSTEM_PROMPT, Scripted, ScriptedPlanner, call as tool, finish},
     ai::{AiError, DraftInput, DraftOutput, Drafter, routing::DEFAULT_REPLY_STYLE},
     build_state,
-    config::Config,
-    db,
-    domain::NormalizedEmail,
+    platform::config::Config,
+    platform::db,
+    platform::domain::NormalizedEmail,
     http::{AppState, router},
-    ingest,
+    mail::ingest,
     jobs::worker,
 };
 use http_body_util::BodyExt;

@@ -12,8 +12,8 @@ use serde_json::{Value, json};
 
 use super::{AiError, Classifier, ClassifyInput, ClassifyOutput, classify_http_error, prepare_text};
 use crate::{
-    domain::{ClassificationSource, Label, Priority},
-    labels,
+    platform::domain::{ClassificationSource, Label, Priority},
+    understanding::labels,
 };
 
 pub struct JevClassifier {

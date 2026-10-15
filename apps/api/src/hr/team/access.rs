@@ -11,10 +11,10 @@ use serde::Serialize;
 use sqlx::{SqliteConnection, SqlitePool};
 
 use crate::{
-    auth::{AuthUser, require_role},
-    db::now_ms,
-    domain::Role,
-    error::{AppError, AppResult},
+    platform::auth::{AuthUser, require_role},
+    platform::db::now_ms,
+    platform::domain::Role,
+    platform::error::{AppError, AppResult},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]

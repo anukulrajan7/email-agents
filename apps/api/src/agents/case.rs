@@ -4,9 +4,9 @@ use serde_json::{Value, json};
 use sqlx::{SqliteConnection, SqlitePool};
 
 use crate::{
-    audit::{self, Actor, Entry},
-    config::Config,
-    db::{new_id, now_ms},
+    platform::audit::{self, Actor, Entry},
+    platform::config::Config,
+    platform::db::{new_id, now_ms},
     jobs::{self, kind},
 };
 
@@ -240,7 +240,7 @@ pub async fn create(conn: &mut SqliteConnection, config: &Config, new: NewCase<'
     .bind(super::sentence(&new.goal, 400))
     .bind(new.state.to_string())
     .bind(&new.priority)
-    .bind(if new.shadow { config.agent_max_steps.clamp(1, crate::agent_registry::SHADOW_MAX_STEPS) } else { config.agent_max_steps.max(1) })
+    .bind(if new.shadow { config.agent_max_steps.clamp(1, crate::agents::registry::SHADOW_MAX_STEPS) } else { config.agent_max_steps.max(1) })
     .bind(config.agent_budget_usd.max(0.0))
     .bind(new.message_id)
     .bind(new.requirement_id)
@@ -307,7 +307,7 @@ pub async fn set_status(conn: &mut SqliteConnection, ws: &str, case_id: &str, to
         .rows_affected()
         == 1;
     if changed && is_terminal(to) {
-        crate::messaging::watch::on_case_ended(&mut *conn, ws, case_id).await?;
+        crate::alerts::messaging::watch::on_case_ended(&mut *conn, ws, case_id).await?;
     }
     Ok(changed)
 }
@@ -354,7 +354,7 @@ pub async fn escalate_unresolved_reply(conn: &mut SqliteConnection, case: &Case,
     .fetch_optional(&mut *conn)
     .await?;
     let mut needs = draft.as_ref().map(|(_, body, _)| open_needs(body)).unwrap_or_default();
-    for topic in draft.as_ref().map(|(_, _, json)| crate::gap_resolver::parse_unanswered(json)).unwrap_or_default() {
+    for topic in draft.as_ref().map(|(_, _, json)| crate::replies::gap_resolver::parse_unanswered(json)).unwrap_or_default() {
         if !needs.contains(&topic) {
             needs.push(topic);
         }

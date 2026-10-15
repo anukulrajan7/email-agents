@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 
 use super::{session::{self, Session}, validate};
 use crate::{
-    agent_registry::{
+    agents::registry::{
         routing::{self, Hints, MessageFacts, RoutingAgent, Source},
         spec::{AgentSpec, Mode, SendMode, Step},
         store::AgentRow,
@@ -21,8 +21,8 @@ use crate::{
         workflow::{self, WfStep},
     },
     ai::DraftQuality,
-    audit::Actor,
-    db::now_ms,
+    platform::audit::Actor,
+    platform::db::now_ms,
     http::AppState,
     jobs::handlers::{self, JobError},
 };
@@ -154,29 +154,29 @@ pub fn safety(spec: &AgentSpec, max_case_budget_usd: f64) -> Value {
     json!({"passed": failed.is_empty(), "cases": checks.len(), "failed": failed})
 }
 
-fn model_for(state: &AppState, tier: crate::agent_registry::spec::QualityTier) -> String {
+fn model_for(state: &AppState, tier: crate::agents::registry::spec::QualityTier) -> String {
     let c = &state.config;
     let configured = match tier {
-        crate::agent_registry::spec::QualityTier::Fast => &c.agent_fast_model_id,
-        crate::agent_registry::spec::QualityTier::Balanced => &c.agent_balanced_model_id,
-        crate::agent_registry::spec::QualityTier::Best => &c.agent_best_model_id,
+        crate::agents::registry::spec::QualityTier::Fast => &c.agent_fast_model_id,
+        crate::agents::registry::spec::QualityTier::Balanced => &c.agent_balanced_model_id,
+        crate::agents::registry::spec::QualityTier::Best => &c.agent_best_model_id,
     };
     if configured.is_empty() { "deepseek/deepseek-v4-flash".into() } else { configured.clone() }
 }
 
 /// What one email costs this agent, from typical token counts and the configured models' prices.
 pub fn estimate_cost_per_email(state: &AppState, spec: &AgentSpec) -> f64 {
-    let price = |tier, tokens_in, tokens_out| crate::ai_ledger::cost_usd(&model_for(state, tier), tokens_in, tokens_out, None);
+    let price = |tier, tokens_in, tokens_out| crate::ai::ledger::cost_usd(&model_for(state, tier), tokens_in, tokens_out, None);
     let cost = match spec.mode {
         Mode::Agent => {
             let turns = i64::from(spec.budget.max_steps.min(6));
-            price(crate::agent_registry::spec::QualityTier::Best, 3_000 * turns, 200 * turns)
+            price(crate::agents::registry::spec::QualityTier::Best, 3_000 * turns, 200 * turns)
         }
         Mode::Workflow => spec
             .steps
             .iter()
             .map(|s| match s {
-                Step::Extract { .. } => price(crate::agent_registry::spec::QualityTier::Fast, 1_500, 150),
+                Step::Extract { .. } => price(crate::agents::registry::spec::QualityTier::Fast, 1_500, 150),
                 Step::DraftReply { quality } => price(*quality, 2_500, 350),
                 _ => 0.0,
             })
@@ -224,7 +224,7 @@ async fn simulate_workflow(state: &AppState, ws: &str, spec: &AgentSpec, message
     let Some((subject, body)) = row else { return Ok(ex) };
     for step in workflow::steps_for(spec) {
         match step {
-            WfStep::Extract(fields) => match state.field_extractor.extract(&subject, &crate::knowledge::clean_body(&body), &fields).await {
+            WfStep::Extract(fields) => match state.field_extractor.extract(&subject, &crate::learning::knowledge::clean_body(&body), &fields).await {
                 Ok(extracted) => {
                     let found = extracted.found;
                     let missing: Vec<&str> = fields.iter().map(|f| f.name.as_str()).filter(|n| !found.contains_key(*n)).collect();
@@ -375,7 +375,7 @@ pub async fn report(state: &AppState, s: &Session, picked: &[String]) -> Result<
     let ws = &s.workspace_id;
     let Some(spec) = s.spec.clone() else { return Err(JobError::Permanent("the session has no spec".into())) };
     let existing = match &s.agent_id {
-        Some(id) => crate::agent_registry::store::get_in(&state.db, ws, id).await?,
+        Some(id) => crate::agents::registry::store::get_in(&state.db, ws, id).await?,
         None => None,
     };
     let owner = session::owner_of(state, ws, s).await.map_err(|_| JobError::Permanent("the agent's owner could not be found".into()))?;
@@ -441,7 +441,7 @@ pub async fn report(state: &AppState, s: &Session, picked: &[String]) -> Result<
         "would_handle": would_handle, "sampled": sampled, "window_days": (window_days * 10.0).round() / 10.0,
         "steals": steals, "examples": examples, "safety": safety(&spec, validate::case_budget_ceiling(state)),
         "est_cost_per_email_usd": per_email, "est_monthly_usd": (monthly * 100.0).round() / 100.0,
-        "warnings": warnings, "spec_hash": spec.hash(), "charged_usd": (per_email * examples.len() as f64 * 1e6).round() / 1e6, "ran_at": crate::db::iso(now_ms()),
+        "warnings": warnings, "spec_hash": spec.hash(), "charged_usd": (per_email * examples.len() as f64 * 1e6).round() / 1e6, "ran_at": crate::platform::db::iso(now_ms()),
     }))
 }
 
@@ -492,7 +492,7 @@ pub async fn settle(state: &AppState, call_id: &str, status: &str, cost_usd: f64
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent_registry::templates::{INBOX_KEY, template};
+    use crate::agents::registry::templates::{INBOX_KEY, template};
 
     #[test]
     fn safety_is_structural_and_uses_the_given_cost_ceiling() {

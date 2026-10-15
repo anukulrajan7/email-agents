@@ -5,7 +5,7 @@
 use crate::staffing_common;
 
 use axum::http::StatusCode;
-use email_ai_api::staffing::submissions::{self, Outcome};
+use email_ai_api::hr::staffing::submissions::{self, Outcome};
 use serde_json::json;
 use staffing_common::*;
 

@@ -4,7 +4,7 @@
 use crate::staffing_common;
 
 use axum::http::StatusCode;
-use email_ai_api::{alerts, db::now_ms, jobs::worker, staffing::metrics as hrms};
+use email_ai_api::{alerts, platform::db::now_ms, jobs::worker, hr::staffing::metrics as hrms};
 use serde_json::{Value, json};
 use staffing_common::*;
 
@@ -87,7 +87,7 @@ async fn r7_referrals_match_requirements_and_a_sent_cv_links_to_both() {
 #[tokio::test]
 async fn r1_a_recruiter_sees_today_and_this_week_against_target_and_a_manager_sees_the_team() {
     // A fixed clock (Wednesday 10:00 UTC): "today" must not depend on when the test runs.
-    email_ai_api::db::freeze_clock(WED);
+    email_ai_api::platform::db::freeze_clock(WED);
     let co = company().await;
     let (h, ws) = (&co.h, &co.ws);
     matching_pipeline(&co).await;
@@ -230,8 +230,8 @@ async fn r6_exact_answers_for_what_ask_meera_needs_to_say() {
     }
     h.ingest(ws, &co.priya_box, email("hr@capgemini.com", &["priya@acme.test"], "Re: Profile 0", "Please arrange an interview slot.", OCT5 - 9 * DAY), "m1").await.unwrap();
     h.ingest(ws, &co.priya_box, email("hr@capgemini.com", &["priya@acme.test"], "Re: Profile 1", "We will schedule an interview.", OCT5 - 9 * DAY), "m2").await.unwrap();
-    email_ai_api::staffing::submissions::scan_workspace(&h.state, ws, OCT5).await.unwrap();
-    email_ai_api::staffing::submissions::update_outcomes(&h.state.db, ws, OCT5).await.unwrap();
+    email_ai_api::hr::staffing::submissions::scan_workspace(&h.state, ws, OCT5).await.unwrap();
+    email_ai_api::hr::staffing::submissions::update_outcomes(&h.state.db, ws, OCT5).await.unwrap();
     let m = serde_json::to_value(hrms::person_metrics(&h.state.db, ws, &person[0].id, OCT5).await.unwrap().unwrap()).unwrap();
     assert_eq!(metric(&m, "submissions")["since_joining"].as_f64(), Some(4.0));
     assert_eq!(metric(&m, "interview_rate")["since_joining"].as_f64(), Some(0.5));

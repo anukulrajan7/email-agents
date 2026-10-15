@@ -227,7 +227,7 @@ static ASKS_SENDER: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new
 
 fn sanitize(raw: &str) -> String {
     let no_links = EMAIL_OR_URL.replace_all(raw, "");
-    crate::sources::normalize::truncate_chars(&no_links.split_whitespace().collect::<Vec<_>>().join(" "), 80)
+    crate::mail::sources::normalize::truncate_chars(&no_links.split_whitespace().collect::<Vec<_>>().join(" "), 80)
 }
 
 /// What we may ask the sender for, in our own words. `None` when the gap names no known essential.

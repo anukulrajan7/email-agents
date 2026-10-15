@@ -10,11 +10,11 @@ use tokio::{sync::Semaphore, task::JoinSet};
 
 use super::{handlers::JobError, kind};
 use crate::{
-    db::now_ms,
+    platform::db::now_ms,
     http::AppState,
     jobs,
-    sources::nango,
-    text_clean,
+    mail::sources::nango,
+    mail::text_clean,
 };
 
 const BATCH: i64 = 200;

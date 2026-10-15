@@ -10,10 +10,10 @@ use common::*;
 use email_ai_api::{
     agents::planner::{Scripted, ScriptedPlanner, call as tool, finish},
     assistant::{ScriptedCommandPlanner, call as acall},
-    db,
-    domain::NormalizedEmail,
+    platform::db,
+    platform::domain::NormalizedEmail,
     http::router,
-    ingest,
+    mail::ingest,
     jobs::worker,
 };
 use serde_json::{Value, json};
@@ -528,7 +528,7 @@ async fn an_automatic_in_app_message_is_checked_again_when_due() {
 async fn names_with_wildcards_match_nobody() {
     let env = env_with_script(vec![finish(None, "Done.")], 2, 0).await;
     for name in ["%", "_", "a%", "\\"] {
-        assert!(email_ai_api::messaging::recipients::resolve(&env.state.db, &env.ws, name).await.is_err(), "{name}");
+        assert!(email_ai_api::alerts::messaging::recipients::resolve(&env.state.db, &env.ws, name).await.is_err(), "{name}");
     }
 }
 

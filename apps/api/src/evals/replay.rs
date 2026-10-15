@@ -6,9 +6,9 @@ use serde_json::{Value, json};
 
 use super::judge::closeness;
 use crate::{
-    agent_registry::spec::{AgentSpec, QualityTier},
+    agents::registry::spec::{AgentSpec, QualityTier},
     ai::{DraftInput, DraftQuality},
-    ai_ledger,
+    ai::ledger,
     http::AppState,
     replies,
 };
@@ -77,7 +77,7 @@ pub async fn run(state: &AppState, ws: &str, agent_id: &str, spec: &AgentSpec) -
     let quality = if spec.drafting.quality_tier == QualityTier::Best { DraftQuality::Premium } else { DraftQuality::Standard };
     let mut result = ReplayResult::default();
     for s in samples {
-        if !ai_ledger::within_budget(&state.db, state.config.ai_daily_budget_usd, ws).await {
+        if !ledger::within_budget(&state.db, state.config.ai_daily_budget_usd, ws).await {
             result.budget_hit = true;
             break;
         }

@@ -10,11 +10,11 @@ use serde_json::{Value, json};
 
 use super::{case::Case, tools::Preview};
 use crate::{
-    agent_profiles::AgentContext,
-    agent_registry::runtime::CaseAgent,
-    audit::{self, Actor, Entry},
+    agents::profiles::AgentContext,
+    agents::registry::runtime::CaseAgent,
+    platform::audit::{self, Actor, Entry},
     http::AppState,
-    incidents::{self, Kind, NewIncident},
+    ai::incidents::{self, Kind, NewIncident},
     replies,
 };
 
@@ -205,7 +205,7 @@ pub const HELD_ACTION: &str = "agent.send_held";
 /// Replies sent without asking today (UTC) for one mailbox owner.
 pub async fn sent_today(state: &AppState, ws: &str, owner_id: &str) -> sqlx::Result<i64> {
     const DAY_MS: i64 = 86_400_000;
-    let since = crate::db::now_ms() / DAY_MS * DAY_MS;
+    let since = crate::platform::db::now_ms() / DAY_MS * DAY_MS;
     sqlx::query_scalar(
         "SELECT COUNT(*) FROM audit_events e JOIN cases c ON c.id = e.entity_id
          WHERE e.workspace_id = ?1 AND e.action = ?2 AND e.created_at >= ?3 AND c.agent_user_id = ?4",
@@ -269,7 +269,7 @@ pub async fn may_send_on_its_own(state: &AppState, case: &Case, ctx: &AgentConte
             .unwrap_or_default(),
         None => String::new(),
     };
-    if !(unconfirmed.is_empty() || crate::gap_resolver::parse_unanswered(&unconfirmed).is_empty()) {
+    if !(unconfirmed.is_empty() || crate::replies::gap_resolver::parse_unanswered(&unconfirmed).is_empty()) {
         tracing::info!(case_id = %case.id, "the draft promises to confirm something it could not; a person decides");
         return Ok(false);
     }
@@ -407,11 +407,11 @@ pub async fn automated_send_stopped(state: &AppState, ws: &str, draft_id: &str) 
         .await;
         return Ok(Some("mail in the conversation tries to instruct the agent"));
     }
-    let Some(row) = crate::agent_registry::store::get_in(&state.db, ws, &agent_id).await? else { return Ok(Some("the agent no longer exists")) };
+    let Some(row) = crate::agents::registry::store::get_in(&state.db, ws, &agent_id).await? else { return Ok(Some("the agent no longer exists")) };
     if row.status != "active" {
         return Ok(Some("the agent is not active"));
     }
-    let (spec, _) = crate::agent_registry::versions::active_spec_in(&state.db, &row).await?;
+    let (spec, _) = crate::agents::registry::versions::active_spec_in(&state.db, &row).await?;
     let mailbox_owner: Option<String> = sqlx::query_scalar(
         "SELECT s.connected_by_user_id FROM drafts d JOIN email_messages m ON m.id = d.message_id
          JOIN email_sources s ON s.id = m.source_id WHERE d.id = ?1",
@@ -421,7 +421,7 @@ pub async fn automated_send_stopped(state: &AppState, ws: &str, draft_id: &str) 
     .await?
     .flatten();
     let routine_ok = match mailbox_owner {
-        Some(owner) => crate::agent_profiles::user_profile(&state.db, ws, &owner).await?.is_none_or(|p| p.routine_ok()),
+        Some(owner) => crate::agents::profiles::user_profile(&state.db, ws, &owner).await?.is_none_or(|p| p.routine_ok()),
         None => false,
     };
     let level = effective_level(LevelInputs {
@@ -432,11 +432,11 @@ pub async fn automated_send_stopped(state: &AppState, ws: &str, draft_id: &str) 
         profile_asks_first: !routine_ok,
         active: true,
     });
-    let workspace = crate::agent_profiles::agent(&state.db, &state.config, ws).await?;
+    let workspace = crate::agents::profiles::agent(&state.db, &state.config, ws).await?;
     let send = if row.kind == "lead" {
         workspace.permissions.send.clone()
     } else {
-        crate::agent_registry::runtime::effective_send(&workspace.permissions.send, spec.permissions.send).to_string()
+        crate::agents::registry::runtime::effective_send(&workspace.permissions.send, spec.permissions.send).to_string()
     };
     if let Some(why) = standing_block(workspace.enabled, &send, level.level) {
         return Ok(Some(why));

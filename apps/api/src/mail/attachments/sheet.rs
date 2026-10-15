@@ -7,7 +7,7 @@ use calamine::{Data, Reader, SheetVisible, open_workbook_auto_from_rs};
 use serde_json::{Value, json};
 
 use super::{Parsed, extension};
-use crate::sources::normalize::truncate_chars;
+use crate::mail::sources::normalize::truncate_chars;
 
 /// Data rows shown per sheet (after the header).
 pub const MAX_ROWS: usize = 200;

@@ -6,7 +6,7 @@ use serde::Serialize;
 use sqlx::SqlitePool;
 
 use serde_json::Value;
-use crate::send_safety::{bare_address, valid_address};
+use crate::replies::send_safety::{bare_address, valid_address};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]

@@ -9,10 +9,10 @@ use serde_json::{Value, json};
 
 use super::AppState;
 use crate::{
-    auth::{AuthUser, require_role},
-    db::{iso, now_ms},
-    domain::{OTHER_LABEL, Role},
-    error::{AppError, AppResult},
+    platform::auth::{AuthUser, require_role},
+    platform::db::{iso, now_ms},
+    platform::domain::{OTHER_LABEL, Role},
+    platform::error::{AppError, AppResult},
 };
 
 const DAY_MS: i64 = 86_400_000;

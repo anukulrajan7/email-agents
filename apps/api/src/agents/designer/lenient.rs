@@ -4,7 +4,7 @@
 
 use serde_json::{Map, Value, json};
 
-use crate::agent_registry::spec::{AgentSpec, Step, Trigger};
+use crate::agents::registry::spec::{AgentSpec, Step, Trigger};
 
 type Check = fn(&Value) -> bool;
 

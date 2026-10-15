@@ -12,10 +12,10 @@ use serde_json::{Value, json};
 
 use super::AppState;
 use crate::{
-    auth::{AuthUser, require_role},
-    domain::Role,
-    error::AppResult,
-    messaging::{email, inapp, support, teams, watch},
+    platform::auth::{AuthUser, require_role},
+    platform::domain::Role,
+    platform::error::AppResult,
+    alerts::messaging::{email, inapp, support, teams, watch},
 };
 
 pub fn routes() -> Router<AppState> {
@@ -92,7 +92,7 @@ async fn stop(State(state): State<AppState>, user: AuthUser, Path((ws, id)): Pat
 async fn approve(State(state): State<AppState>, user: AuthUser, Path((ws, id)): Path<(String, String)>) -> AppResult<Json<Value>> {
     require_role(&state.db, &ws, &user, Role::Operator).await?;
     let scheduled = email::approve(&state, &ws, &id, &user.id).await?;
-    Ok(Json(json!({ "ok": true, "send_at": crate::db::iso(scheduled.send_at_ms) })))
+    Ok(Json(json!({ "ok": true, "send_at": crate::platform::db::iso(scheduled.send_at_ms) })))
 }
 
 async fn conversations(State(state): State<AppState>, user: AuthUser, Path(ws): Path<String>) -> AppResult<Json<Value>> {

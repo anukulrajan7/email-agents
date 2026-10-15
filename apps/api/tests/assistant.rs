@@ -17,11 +17,11 @@ use email_ai_api::{
         transcribe::ScriptedTranscriber,
     },
     build_state,
-    config::Config,
-    db,
-    domain::NormalizedEmail,
+    platform::config::Config,
+    platform::db,
+    platform::domain::NormalizedEmail,
     http::{AppState, router},
-    ingest,
+    mail::ingest,
     jobs::worker,
 };
 use http_body_util::BodyExt;
@@ -699,7 +699,7 @@ fn timesheet_xlsx(extra_cell: &str) -> Vec<u8> {
 impl Env {
     /// An attachment as the extraction job leaves it for a spreadsheet: real reader output in text_content.
     async fn add_sheet(&self, message_id: &str, filename: &str, extra_cell: &str) -> String {
-        let parsed = email_ai_api::attachments::read_document(email_ai_api::attachments::Kind::Sheet, filename, None, &timesheet_xlsx(extra_cell)).unwrap();
+        let parsed = email_ai_api::mail::attachments::read_document(email_ai_api::mail::attachments::Kind::Sheet, filename, None, &timesheet_xlsx(extra_cell)).unwrap();
         assert!(parsed.text.contains("Ravi Kumar"), "{}", parsed.text);
         let id = db::new_id("att");
         sqlx::query(

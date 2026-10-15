@@ -6,7 +6,7 @@ use regex::Regex;
 use serde_json::json;
 
 use super::{MAX_DOCUMENT_BYTES, Parsed, decode_entities, extension};
-use crate::sources::normalize::html_to_text;
+use crate::mail::sources::normalize::html_to_text;
 
 const MAX_SLIDES: usize = 200;
 

@@ -11,10 +11,10 @@ use serde::{Deserialize, Serialize};
 
 use super::{AppState, dto::Items};
 use crate::{
-    auth::AuthUser,
-    error::AppResult,
-    knowledge::{self, Scope},
-    sources::normalize::truncate_chars,
+    platform::auth::AuthUser,
+    platform::error::AppResult,
+    learning::knowledge::{self, Scope},
+    mail::sources::normalize::truncate_chars,
 };
 
 const MAX_LIMIT: usize = 50;
@@ -42,8 +42,8 @@ pub async fn search(
     Path(ws): Path<String>,
     Query(params): Query<SearchQuery>,
 ) -> AppResult<Json<Items<SearchItem>>> {
-    let access = crate::team::access::resolve(&state.db, &ws, &user).await?;
-    let wall = crate::team::scope::wall(&state.db, &ws, &access).await?.map(|ids| serde_json::json!(ids).to_string());
+    let access = crate::hr::team::access::resolve(&state.db, &ws, &user).await?;
+    let wall = crate::hr::team::scope::wall(&state.db, &ws, &access).await?.map(|ids| serde_json::json!(ids).to_string());
     let q = truncate_chars(params.q.unwrap_or_default().trim(), MAX_QUERY_CHARS);
     if q.is_empty() {
         return Ok(Json(Items { items: vec![] }));

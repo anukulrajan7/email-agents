@@ -3,7 +3,7 @@
 use serde::Serialize;
 use sqlx::FromRow;
 
-use crate::{db::iso, domain::Capabilities, jobs::Job};
+use crate::{platform::db::iso, platform::domain::Capabilities, jobs::Job};
 
 #[derive(Serialize)]
 pub struct Items<T> {
@@ -34,9 +34,9 @@ impl From<WorkspaceRow> for Workspace {
     fn from(r: WorkspaceRow) -> Self {
         let enabled: Vec<&str> = r.packs.as_deref().unwrap_or_default().split(',').collect();
         let mut packs: Vec<String> =
-            crate::packs::PACKS.iter().map(|p| p.key).filter(|k| enabled.contains(k)).map(str::to_string).collect();
+            crate::platform::packs::PACKS.iter().map(|p| p.key).filter(|k| enabled.contains(k)).map(str::to_string).collect();
         if packs.is_empty() {
-            packs.push(crate::packs::GENERAL.into());
+            packs.push(crate::platform::packs::GENERAL.into());
         }
         Self { id: r.id, name: r.name, role: r.role, created_at: iso(r.created_at), packs }
     }
@@ -84,7 +84,7 @@ pub struct SourceRow {
 impl From<SourceRow> for Source {
     fn from(r: SourceRow) -> Self {
         let capabilities =
-            serde_json::from_str(&r.capabilities_json).unwrap_or_else(|_| crate::sources::capabilities(&r.kind));
+            serde_json::from_str(&r.capabilities_json).unwrap_or_else(|_| crate::mail::sources::capabilities(&r.kind));
         Self {
             id: r.id,
             kind: r.kind,
@@ -196,7 +196,7 @@ impl From<DraftRow> for Draft {
             created_at: iso(r.created_at),
             updated_at: iso(r.updated_at),
             memories_used: vec![],
-            unanswered: crate::gap_resolver::parse_unanswered(&r.unanswered_json),
+            unanswered: crate::replies::gap_resolver::parse_unanswered(&r.unanswered_json),
         }
     }
 }
@@ -238,7 +238,7 @@ pub struct InsightRow {
 impl From<InsightRow> for Insight {
     fn from(r: InsightRow) -> Self {
         Self {
-            summary: crate::attachments::strip_attachment_markup(&r.summary).to_string(),
+            summary: crate::mail::attachments::strip_attachment_markup(&r.summary).to_string(),
             asks: serde_json::from_str(&r.asks_json).unwrap_or_default(),
             deadline: r.deadline,
             needs_reply: r.needs_reply,

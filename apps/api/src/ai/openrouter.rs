@@ -13,8 +13,8 @@ use super::{
     prepare_text, prepare_text_up_to,
 };
 use crate::{
-    domain::{ClassificationSource, Label, Priority},
-    labels,
+    platform::domain::{ClassificationSource, Label, Priority},
+    understanding::labels,
 };
 
 const MAX_DRAFT_CHARS: usize = 1_500;
@@ -133,19 +133,19 @@ impl OpenRouterClient {
         fallback_cost: Option<f64>,
     ) -> Option<String> {
         let db = self.ledger.as_ref()?;
-        let mut usage = body.map(crate::ai_ledger::usage_from).unwrap_or_default();
+        let mut usage = body.map(crate::ai::ledger::usage_from).unwrap_or_default();
         if usage.reported_cost.is_none() {
             usage.reported_cost = fallback_cost;
         }
-        let mut meta = body.map(|b| crate::ai_ledger::meta_from(b, model)).unwrap_or_default();
+        let mut meta = body.map(|b| crate::ai::ledger::meta_from(b, model)).unwrap_or_default();
         meta.prompt_version = Some(self.prompt_version.clone());
         meta.error_class = error_class.map(str::to_string);
-        crate::ai_ledger::record_full(db, &self.task, model, usage, &meta, started.elapsed().as_millis() as i64, error).await
+        crate::ai::ledger::record_full(db, &self.task, model, usage, &meta, started.elapsed().as_millis() as i64, error).await
     }
 
     async fn mark_invalid(&self, row_id: Option<&str>, class: &str, error: &str) {
         if let (Some(db), Some(id)) = (&self.ledger, row_id) {
-            crate::ai_ledger::mark_invalid(db, id, class, error).await;
+            crate::ai::ledger::mark_invalid(db, id, class, error).await;
         }
     }
 
@@ -579,7 +579,7 @@ impl Drafter for OpenRouterDrafter {
             "required": ["needs_reply", "body", "unanswered"],
             "additionalProperties": false
         });
-        let model = crate::agent_profiles::draft_model_or(&self.model, matches!(input.quality, super::DraftQuality::Premium));
+        let model = crate::agents::profiles::draft_model_or(&self.model, matches!(input.quality, super::DraftQuality::Premium));
         let system = draft_system_prompt_with(&input.default_sign_off, &input.writer_preferences);
         let (content, model_id) = self
             .client
@@ -754,7 +754,7 @@ fn nullable(kind: &str) -> Value {
 #[async_trait]
 impl super::Extractor for OpenRouterExtractor {
     async fn requirement(&self, subject: &str, text: &str, sender_domain: Option<&str>)
-        -> Result<crate::matching::RequirementFields, AiError> {
+        -> Result<crate::hr::matching::RequirementFields, AiError> {
         let schema = json!({
             "type": "object",
             "properties": {
@@ -775,22 +775,22 @@ impl super::Extractor for OpenRouterExtractor {
         let (content, _) = self
             .client
             .chat_json_checked(&self.model, EXTRACT_SYSTEM_PROMPT, user, "requirement", schema, 500, |raw| {
-                serde_json::from_str::<crate::matching::RequirementFields>(raw.trim())
+                serde_json::from_str::<crate::hr::matching::RequirementFields>(raw.trim())
                     .map(|_| ())
                     .map_err(|_| AiError::Retryable("requirement JSON did not match".into()))
             })
             .await?;
-        let mut r: crate::matching::RequirementFields =
+        let mut r: crate::hr::matching::RequirementFields =
             serde_json::from_str(content.trim()).map_err(|_| AiError::Retryable("requirement JSON did not match".into()))?;
-        r.must_have_skills = crate::matching::canonical_skills(&r.must_have_skills);
-        r.nice_to_have_skills = crate::matching::canonical_skills(&r.nice_to_have_skills);
+        r.must_have_skills = crate::hr::matching::canonical_skills(&r.must_have_skills);
+        r.nice_to_have_skills = crate::hr::matching::canonical_skills(&r.nice_to_have_skills);
         if r.role_title.trim().is_empty() {
             r.role_title = subject.to_string();
         }
         Ok(r)
     }
 
-    async fn candidate(&self, subject: &str, text: &str, sender: &str) -> Result<crate::matching::CandidateFields, AiError> {
+    async fn candidate(&self, subject: &str, text: &str, sender: &str) -> Result<crate::hr::matching::CandidateFields, AiError> {
         let schema = json!({
             "type": "object",
             "properties": {
@@ -810,14 +810,14 @@ impl super::Extractor for OpenRouterExtractor {
         let (content, _) = self
             .client
             .chat_json_checked(&self.model, EXTRACT_SYSTEM_PROMPT, user, "candidate", schema, 500, |raw| {
-                serde_json::from_str::<crate::matching::CandidateFields>(raw.trim())
+                serde_json::from_str::<crate::hr::matching::CandidateFields>(raw.trim())
                     .map(|_| ())
                     .map_err(|_| AiError::Retryable("candidate JSON did not match".into()))
             })
             .await?;
-        let mut c: crate::matching::CandidateFields =
+        let mut c: crate::hr::matching::CandidateFields =
             serde_json::from_str(content.trim()).map_err(|_| AiError::Retryable("candidate JSON did not match".into()))?;
-        c.skills = crate::matching::canonical_skills(&c.skills);
+        c.skills = crate::hr::matching::canonical_skills(&c.skills);
         if c.name.trim().is_empty() {
             c.name = "Unnamed candidate".into();
         }
@@ -829,7 +829,7 @@ impl super::Extractor for OpenRouterExtractor {
 
 const ANALYZE_SYSTEM_PROMPT: &str = concat!("You read one email for a busy team and report what it actually asks.\n\
 - ",
-crate::format::summary::summary_style!(),
+crate::platform::format::summary::summary_style!(),
 "\
 - asks: each concrete question or request the sender makes of us (empty if none).\n\
 - deadline: any date/time the sender needs something by, as written (null if none).\n\
@@ -893,7 +893,7 @@ impl super::Analyst for OpenRouterAnalyst {
             .await?;
         let mut i: super::Insight =
             serde_json::from_str(content.trim()).map_err(|_| AiError::Retryable("insight JSON did not match".into()))?;
-        i.summary = crate::sources::normalize::truncate_chars(i.summary.trim(), 400);
+        i.summary = crate::mail::sources::normalize::truncate_chars(i.summary.trim(), 400);
         i.asks.truncate(10);
         i.missing_info.truncate(10);
         Ok((i, model_id))

@@ -7,7 +7,7 @@ use serde_json::Value;
 
 use crate::{
     ai::{AiError, classify_http_error},
-    ai_ledger,
+    ai::ledger,
 };
 
 pub const MAX_AUDIO_BYTES: usize = 2 * 1024 * 1024;
@@ -100,9 +100,9 @@ impl Transcriber for OpenRouterTranscriber {
         if let Some(db) = &self.ledger {
             let estimate = clip.seconds.unwrap_or(MAX_AUDIO_SECONDS as f64 / 2.0) / 3600.0 * EST_USD_PER_HOUR;
             let reported = sent.as_ref().ok().and_then(|b| b.pointer("/usage/cost").and_then(Value::as_f64)).unwrap_or(estimate);
-            let usage = ai_ledger::Usage { reported_cost: Some(reported), ..Default::default() };
+            let usage = ledger::Usage { reported_cost: Some(reported), ..Default::default() };
             let error = sent.as_ref().err().map(ToString::to_string);
-            ai_ledger::record(db, TASK, &self.model, usage, started.elapsed().as_millis() as i64, error.as_deref()).await;
+            ledger::record(db, TASK, &self.model, usage, started.elapsed().as_millis() as i64, error.as_deref()).await;
         }
         let body = sent?;
         let text = body.get("text").and_then(Value::as_str).ok_or_else(|| AiError::Retryable("transcription had no text".into()))?;

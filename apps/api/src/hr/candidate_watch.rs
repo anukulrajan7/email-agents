@@ -13,12 +13,12 @@ use serde_json::{Value, json};
 use sqlx::SqliteConnection;
 
 use crate::{
-    audit::{self, Actor, Entry},
-    db::{new_id, now_ms},
+    platform::audit::{self, Actor, Entry},
+    platform::db::{new_id, now_ms},
     http::AppState,
     jobs::{self, handlers::JobError, kind},
-    matching::STRONG_MATCH_SCORE,
-    packs, replies,
+    hr::matching::STRONG_MATCH_SCORE,
+    platform::packs, replies,
 };
 
 pub const WEEK_MS: i64 = 7 * 86_400_000;
@@ -92,7 +92,7 @@ pub async fn queue_enrol(conn: &mut SqliteConnection, ws: &str, message_id: &str
 
 fn made_the_promise(body: &str) -> bool {
     let squash = |t: &str| t.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase();
-    squash(body).contains(&squash(crate::gap_resolver::NONE_SENTENCE))
+    squash(body).contains(&squash(crate::replies::gap_resolver::NONE_SENTENCE))
 }
 
 fn is_free_mail(domain: &str) -> bool {
@@ -374,7 +374,7 @@ pub async fn notify_matches(state: &AppState, ws: &str, requirement_id: &str) ->
         tracing::info!(requirement_id, "candidate watch waits: the requirement is not from a known contact and nobody confirmed it");
         return Ok(none);
     }
-    let Some(lead) = crate::agent_registry::store::lead(&state.db, ws).await? else { return Ok(none) };
+    let Some(lead) = crate::agents::registry::store::lead(&state.db, ws).await? else { return Ok(none) };
     let now = now_ms();
     let mut targets: Vec<Target> = sqlx::query_as(
         "SELECT w.id AS watch_id, w.message_id, c.name, w.email, m.reasons_json
@@ -397,7 +397,7 @@ pub async fn notify_matches(state: &AppState, ws: &str, requirement_id: &str) ->
     if targets.is_empty() {
         return Ok(outcome);
     }
-    let settings = crate::reply_settings::load(&state.db, &state.config, ws).await?;
+    let settings = crate::replies::reply_settings::load(&state.db, &state.config, ws).await?;
     let sign_off = match settings.signature.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
         Some(s) => s.to_string(),
         None => packs::default_sign_off(&state.db, ws).await?,

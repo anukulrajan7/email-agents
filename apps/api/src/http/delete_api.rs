@@ -9,10 +9,10 @@ use serde_json::{Value, json};
 
 use super::AppState;
 use crate::{
-    audit::Actor,
-    auth::AuthUser,
-    deletion::{self, MAX_SELECTION, Opts, Removed},
-    error::{AppError, AppResult},
+    platform::audit::Actor,
+    platform::auth::AuthUser,
+    mail::deletion::{self, MAX_SELECTION, Opts, Removed},
+    platform::error::{AppError, AppResult},
 };
 
 #[derive(Deserialize)]

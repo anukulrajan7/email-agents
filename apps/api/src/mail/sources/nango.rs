@@ -17,14 +17,14 @@ use sha2::Sha256;
 use subtle::ConstantTimeEq;
 
 use crate::{
-    audit::{self, Actor, Entry},
-    db::{iso, new_id, now_ms, parse_iso_ms},
-    domain::{AttachmentMeta, NormalizedEmail},
-    error::AppError,
+    platform::audit::{self, Actor, Entry},
+    platform::db::{iso, new_id, now_ms, parse_iso_ms},
+    platform::domain::{AttachmentMeta, NormalizedEmail},
+    platform::error::AppError,
     http::AppState,
-    ingest,
+    mail::ingest,
     jobs::{self, handlers::JobError, kind},
-    sources::{self, normalize},
+    mail::sources::{self, normalize},
 };
 
 pub const GMAIL_KIND: &str = "nango_gmail";
@@ -405,7 +405,7 @@ pub fn map_gmail_record(rec: &Value, max_body_chars: usize) -> Option<MappedReco
         attachments,
         // Only a snippet unless an explicit body field was present.
         preview_only: str_of(rec, &["body", "text", "bodyText"]).is_none(),
-        bulk_signals: crate::bulk::header_signals(&header, &label_ids(rec)),
+        bulk_signals: crate::mail::bulk::header_signals(&header, &label_ids(rec)),
     };
     let mut mapped = MappedRecord { email, thread_id: str_of(rec, &["threadId", "thread_id"]), deleted, cursor };
     // If the record already carries MIME parts (full format), use them directly.
@@ -493,7 +493,7 @@ pub fn apply_gmail_payload(email: &mut NormalizedEmail, payload: &Value, max_bod
     if !content.attachments.is_empty() {
         email.attachments = content.attachments;
     }
-    crate::bulk::merge(&mut email.bulk_signals, crate::bulk::header_signals(&|n| gmail_header(Some(payload), n), &[]));
+    crate::mail::bulk::merge(&mut email.bulk_signals, crate::mail::bulk::header_signals(&|n| gmail_header(Some(payload), n), &[]));
     if email.sender_address.is_empty()
         && let Some(from) = gmail_header(Some(payload), "From")
     {

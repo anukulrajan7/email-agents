@@ -7,10 +7,10 @@ use crate::common;
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use common::*;
 use email_ai_api::{
-    audit::Actor,
-    candidate_watch::{self, WATCH_DAILY_CAP},
-    db,
-    gap_resolver::NONE_SENTENCE,
+    platform::audit::Actor,
+    hr::candidate_watch::{self, WATCH_DAILY_CAP},
+    platform::db,
+    replies::gap_resolver::NONE_SENTENCE,
     jobs::worker,
     replies,
 };

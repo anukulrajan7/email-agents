@@ -13,10 +13,10 @@ use serde_json::json;
 use sqlx::{SqliteConnection, SqlitePool};
 
 use crate::{
-    domain::NormalizedEmail,
+    platform::domain::NormalizedEmail,
     http::AppState,
-    packs,
-    team::{
+    platform::packs,
+    hr::team::{
         clock::{self, DAY_MS},
         escalation::{self, PersonAlert},
         people::{self, Person},
@@ -110,7 +110,7 @@ pub async fn release_suppressed(db: &SqlitePool, workspace_id: &str) -> sqlx::Re
         if m.direction != "inbound" {
             continue;
         }
-        crate::memory::record_contact(&mut conn, workspace_id, &m.sender_address, m.sender_name.as_deref(), m.received_at).await?;
+        crate::learning::memory::record_contact(&mut conn, workspace_id, &m.sender_address, m.sender_name.as_deref(), m.received_at).await?;
         crate::agents::triggers::wake_for_thread(&mut conn, workspace_id, &m.thread_id, &m.id).await?;
         let files: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM attachments WHERE message_id = ?1").bind(&m.id).fetch_one(&mut *conn).await?;
         if files > 0 {
@@ -119,7 +119,7 @@ pub async fn release_suppressed(db: &SqlitePool, workspace_id: &str) -> sqlx::Re
         crate::jobs::enqueue(
             &mut conn,
             crate::jobs::kind::CLASSIFY_EMAIL,
-            &format!("classify:{}:{}:released", m.id, crate::domain::TAXONOMY_VERSION),
+            &format!("classify:{}:{}:released", m.id, crate::platform::domain::TAXONOMY_VERSION),
             Some(workspace_id),
             &json!({ "message_id": m.id }),
         )

@@ -14,7 +14,7 @@ use email_ai_api::{
         timesheet_reader::{ModelSheet, TimesheetReader},
     },
     jobs::{handlers, worker},
-    staffing::{
+    hr::staffing::{
         policy,
         timesheet_parse::{Entry, Identity, Sheet},
         timesheet_records as records,
@@ -397,7 +397,7 @@ async fn the_backfill_records_old_timesheet_mail_once() {
 #[tokio::test]
 async fn rohan_records_and_never_replies_and_the_upgrade_skips_tuned_agents() {
     let f = fixture().await;
-    email_ai_api::agent_registry::seed::ensure_workspace(&f.h.state.db, &f.ws).await.unwrap();
+    email_ai_api::agents::registry::seed::ensure_workspace(&f.h.state.db, &f.ws).await.unwrap();
     let agent: (String, i64) = sqlx::query_as("SELECT id, template_version FROM agents WHERE workspace_id = ?1 AND template_key = 'hrms.timesheets'")
         .bind(&f.ws)
         .fetch_one(&f.h.state.db)
@@ -411,11 +411,11 @@ async fn rohan_records_and_never_replies_and_the_upgrade_skips_tuned_agents() {
 
     // An agent still on the old template follows the upgrade; a tuned one keeps its own spec.
     sqlx::query("UPDATE agents SET template_version = 3 WHERE id = ?1").bind(&agent.0).execute(&f.h.state.db).await.unwrap();
-    email_ai_api::agent_registry::seed::ensure_workspace(&f.h.state.db, &f.ws).await.unwrap();
+    email_ai_api::agents::registry::seed::ensure_workspace(&f.h.state.db, &f.ws).await.unwrap();
     let after: (i64, i64) = sqlx::query_as("SELECT template_version, active_version FROM agents WHERE id = ?1").bind(&agent.0).fetch_one(&f.h.state.db).await.unwrap();
     assert_eq!(after.0, 4);
     sqlx::query("UPDATE agents SET template_version = 3, tuned = 1 WHERE id = ?1").bind(&agent.0).execute(&f.h.state.db).await.unwrap();
-    email_ai_api::agent_registry::seed::ensure_workspace(&f.h.state.db, &f.ws).await.unwrap();
+    email_ai_api::agents::registry::seed::ensure_workspace(&f.h.state.db, &f.ws).await.unwrap();
     let kept: (i64, i64) = sqlx::query_as("SELECT template_version, active_version FROM agents WHERE id = ?1").bind(&agent.0).fetch_one(&f.h.state.db).await.unwrap();
     assert_eq!(kept, (3, after.1), "a tuned agent is left alone");
 }
@@ -622,8 +622,8 @@ async fn forgetting_a_sender_erases_their_records_and_links_but_other_senders_st
 async fn a_taken_employee_id_is_a_conflict_not_a_server_error() {
     let f = fixture().await;
     let clash = sqlx::query("UPDATE people SET employee_code = 'e2000' WHERE id = ?1").bind(&f.ravi).execute(&f.h.state.db).await.unwrap_err();
-    let e = email_ai_api::error::AppError::from(clash);
-    assert!(matches!(e, email_ai_api::error::AppError::Conflict(_)), "{e:?}");
+    let e = email_ai_api::platform::error::AppError::from(clash);
+    assert!(matches!(e, email_ai_api::platform::error::AppError::Conflict(_)), "{e:?}");
 }
 
 #[tokio::test]

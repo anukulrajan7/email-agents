@@ -1,7 +1,7 @@
 //! A database at migration 0033 (before agents, learning, metrics, designer ...) upgrades cleanly, keeps its
 //! rows, and the startup backfill gives every workspace its lead, desks and personal agents.
 
-use email_ai_api::{agent_registry, db};
+use email_ai_api::{agents::registry, platform::db};
 use sqlx::{SqlitePool, migrate::Migrator};
 
 async fn migrator_up_to(version: i64) -> Migrator {
@@ -57,6 +57,6 @@ async fn a_database_at_0033_migrates_and_backfills() {
     assert_eq!(count(&pool, "SELECT COUNT(*) FROM agents WHERE active_version IS NULL").await, 0, "every agent has a version");
     assert_eq!(count(&pool, "SELECT COUNT(*) FROM agents WHERE name = 'My assistant'").await, 0);
     assert_eq!(count(&pool, "SELECT COUNT(*) FROM agents WHERE scope = 'personal' AND name = 'Meera'").await, 3, "every personal agent is Meera");
-    agent_registry::seed::backfill_all(&pool).await.unwrap();
+    registry::seed::backfill_all(&pool).await.unwrap();
     assert_eq!(count(&pool, "SELECT COUNT(*) FROM agents WHERE scope = 'personal'").await, 3, "the backfill is idempotent");
 }

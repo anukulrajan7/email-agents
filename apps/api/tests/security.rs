@@ -19,13 +19,13 @@ use email_ai_api::{
         fallback::{RulesClassifier, TemplateDrafter},
         memory_extractor::LearnDirection,
     },
-    automations, backup, build_state,
-    config::{AuthMode, Config},
-    db::{self, now_ms},
+    automations, platform::backup, build_state,
+    platform::config::{AuthMode, Config},
+    platform::db::{self, now_ms},
     http::{AppState, router},
     jobs::worker,
-    mailer::MemoryMailer,
-    memory, memory_learning, sessions,
+    platform::mailer::MemoryMailer,
+    learning::memory, learning::memory_learning, platform::sessions,
 };
 use http_body_util::BodyExt;
 use serde_json::{Value, json};

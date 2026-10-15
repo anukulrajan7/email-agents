@@ -11,7 +11,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 use super::{name_key, policy::MONTHS};
-use crate::team::clock;
+use crate::hr::team::clock;
 
 pub const MAX_ENTRIES: usize = 400;
 pub const MONTH_NAMES: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
@@ -328,7 +328,7 @@ fn cell(cells: &[String], i: Option<usize>) -> Option<String> {
 }
 
 fn short(v: String) -> String {
-    crate::sources::normalize::truncate_chars(v.trim(), 120)
+    crate::mail::sources::normalize::truncate_chars(v.trim(), 120)
 }
 
 static DATE_LINE: LazyLock<Regex> = LazyLock::new(|| {
