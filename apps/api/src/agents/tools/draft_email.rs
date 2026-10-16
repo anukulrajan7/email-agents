@@ -57,7 +57,7 @@ impl Tool for DraftEmail {
             Some(d) => d,
             None => {
                 if ctx.case.trigger.as_deref() != Some("manual")
-                    && crate::mail::system_mail::is_own_message(&ctx.state.db, &ctx.state.config, ctx.ws(), &msg.id).await?
+                    && crate::mail::system_mail::is_own_message(&ctx.state.db, ctx.ws(), &msg.id).await?
                 {
                     return failed("This is Post Room's own mail; no reply is needed.");
                 }

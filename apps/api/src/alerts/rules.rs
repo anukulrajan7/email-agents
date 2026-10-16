@@ -44,7 +44,6 @@ pub(super) struct Candidate {
 }
 
 /// Messages matching a rule, received in `[from_ms, to_ms]`, optionally limited to `only_ids`, with no reply.
-#[allow(clippy::too_many_arguments)]
 pub(super) async fn firing(
     pool: &SqlitePool,
     workspace_id: &str,
@@ -53,7 +52,6 @@ pub(super) async fn firing(
     to_ms: i64,
     only_ids: Option<&[String]>,
     team: &[String],
-    own: &[String],
 ) -> sqlx::Result<Vec<Candidate>> {
     let condition = match rule {
         APPROVAL_PENDING => {
@@ -66,7 +64,7 @@ pub(super) async fn firing(
         }
         _ => return Ok(vec![]),
     };
-    let not_own = crate::mail::system_mail::not_own_sql("m", "?7");
+    let not_own = crate::mail::system_mail::not_own_sql("m");
     let rows: Vec<Candidate> = sqlx::query_as(&format!(
         "SELECT m.id, m.thread_id, m.subject, m.sender_address, m.received_at, c.priority, i.summary
          FROM email_messages m
@@ -85,7 +83,6 @@ pub(super) async fn firing(
     .bind(only_ids.map(|i| json!(i).to_string()))
     .bind(json!(team).to_string())
     .bind(MAX_CANDIDATES)
-    .bind(json!(own).to_string())
     .fetch_all(pool)
     .await?;
     let mut out = Vec::with_capacity(rows.len());

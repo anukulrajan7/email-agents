@@ -76,10 +76,20 @@ async fn nothing_was_done_for(env: &Env, id: &str) {
 }
 
 #[tokio::test]
-async fn mail_from_our_own_smtp_address_is_left_alone() {
+async fn mail_from_our_smtp_address_without_our_header_is_ordinary() {
     let env = env().await;
-    let id = env.receive(&env.shared_src, "own1", "t-own1", &FROM.to_uppercase(), SUBJECT, "Two emails have waited.", "general").await;
-    nothing_was_done_for(&env, &id).await;
+    let id = env.receive(&env.shared_src, "ord1", "t-ord1", &FROM.to_uppercase(), "Test-pack mail", "Please confirm the schedule.", "general").await;
+    assert!(!email_ai_api::mail::system_mail::is_own_message(&env.state.db, &env.ws, &id).await.unwrap());
+    let runs: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM automation_runs r JOIN automations a ON a.id = r.automation_id WHERE r.message_id = ?1 AND a.name = 'Draft every email'",
+    )
+    .bind(&id)
+    .fetch_one(&env.state.db)
+    .await
+    .unwrap();
+    assert_eq!(runs, 1, "the automation ran");
+    let started = triggers::start_inbox_case(&env.state, &env.ws, &id, None).await.unwrap();
+    assert!(matches!(started, Started::Case(..)), "a case starts like for any mail: {started:?}");
 }
 
 #[tokio::test]
@@ -100,7 +110,7 @@ async fn our_header_never_relabels_system_mail_as_a_newsletter() {
 async fn a_managers_reply_to_a_post_room_mail_is_ordinary_mail() {
     let env = env().await;
     let id = env.receive(&env.shared_src, "mgr1", "t-mgr1", "manager@client.test", &format!("Re: {SUBJECT}"), "Please send me the numbers.", "general").await;
-    assert!(!email_ai_api::mail::system_mail::is_own_message(&env.state.db, &env.state.config, &env.ws, &id).await.unwrap());
+    assert!(!email_ai_api::mail::system_mail::is_own_message(&env.state.db, &env.ws, &id).await.unwrap());
     run_automations_again(&env, &id).await;
     let runs: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM automation_runs r JOIN automations a ON a.id = r.automation_id WHERE r.message_id = ?1 AND a.name = 'Draft every email'",
@@ -117,7 +127,7 @@ async fn a_managers_reply_to_a_post_room_mail_is_ordinary_mail() {
 #[tokio::test]
 async fn a_person_can_still_ask_for_a_draft_on_it() {
     let env = env().await;
-    let id = env.receive(&env.shared_src, "own4", "t-own4", FROM, SUBJECT, "Two emails have waited.", "general").await;
+    let id = receive_signalled(&env, "own4", FROM, &["postroom"]).await;
     let mut conn = env.state.db.acquire().await.unwrap();
     jobs::enqueue(&mut conn, kind::GENERATE_DRAFT, &format!("draft:{id}:manual:req1"), Some(&env.ws), &json!({ "message_id": id })).await.unwrap();
     drop(conn);
@@ -136,7 +146,7 @@ async fn nobody_is_told_that_our_own_mail_is_unanswered() {
         Some(json!({"enabled": true, "recipients": ["admin@acme.test"], "escalate_to": [], "unanswered_hours": 4, "escalate_after_hours": 24, "daily_digest": false, "digest_hour": 9})),
     )
     .await;
-    let own = env.receive(&env.shared_src, "own5", "t-own5", FROM, SUBJECT, "Two emails have waited.", "general").await;
+    let own = receive_signalled(&env, "own5", FROM, &["postroom"]).await;
     let real = env.receive(&env.shared_src, "mgr2", "t-mgr2", "manager@client.test", "Where is the report?", "Need it today.", "general").await;
     sqlx::query("UPDATE classifications SET priority = 'high'").execute(&env.state.db).await.unwrap();
     sqlx::query("UPDATE email_messages SET received_at = ?1").bind(db::now_ms() - 10 * 3_600_000).execute(&env.state.db).await.unwrap();
