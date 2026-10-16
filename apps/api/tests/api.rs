@@ -131,6 +131,8 @@ mod system_mail;
 mod tenant_isolation;
 #[path = "timesheet_desk.rs"]
 mod timesheet_desk;
+#[path = "timesheet_handoff.rs"]
+mod timesheet_handoff;
 #[path = "timesheet_records.rs"]
 mod timesheet_records;
 #[path = "understanding_v2.rs"]

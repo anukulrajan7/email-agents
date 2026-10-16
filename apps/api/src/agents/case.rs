@@ -44,13 +44,15 @@ pub struct Case {
     pub outcome_detail: Option<String>,
     /// An observing agent's case: runs beside the real one and changes nothing.
     pub shadow: bool,
+    /// Which job of the email this case does (`main`, `desk:timesheet`, `reply`).
+    pub job: String,
     pub created_at: i64,
     pub updated_at: i64,
 }
 
 pub const CASE_COLUMNS: &str = "id, workspace_id, kind, title, goal, status, outcome, status_note, failure_reason, state_json, priority,
     step_count, max_steps, spent_usd, budget_usd, error_streak, message_id, requirement_id, thread_id, next_wake_at, agent_user_id,
-    agent_id, agent_version, \"trigger\", outcome_detail, shadow, created_at, updated_at";
+    agent_id, agent_version, \"trigger\", outcome_detail, shadow, job, created_at, updated_at";
 
 impl Case {
     pub fn state(&self) -> Value {

@@ -105,6 +105,7 @@ mod tests {
             trigger: None,
             outcome_detail: None,
             shadow: false,
+            job: "main".into(),
             created_at: 0,
             updated_at: 0,
         }

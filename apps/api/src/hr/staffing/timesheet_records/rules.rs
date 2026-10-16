@@ -7,6 +7,7 @@
 use serde::Serialize;
 
 use super::{CHECK, Entry, Issue, parse::MONTH_NAMES};
+use crate::agents::handoff::{Decision, Fact, IssueText, ManagerSummary, MessageKind, MessageRequest, Outcome, Wait};
 use crate::hr::{
     staffing::policy::MONTHS,
     team::{
@@ -299,63 +300,6 @@ pub fn check_against_rules(r: &RecordView, rules: &Rules, person: Option<&Person
     out
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum MessageKind {
-    Ack,
-    Correction,
-    Question,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct Fact {
-    pub label: String,
-    pub value: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct IssueText {
-    pub code: String,
-    pub text: String,
-}
-
-/// What the desk wants said to the sender. S7 turns it into Meera's reply; in S6 it is only stored.
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct MessageRequest {
-    pub kind: MessageKind,
-    pub facts: Vec<Fact>,
-    pub issues: Vec<IssueText>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize)]
-#[serde(tag = "on", rename_all = "snake_case")]
-pub enum Wait {
-    PersonLinked { record_id: String },
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum Outcome {
-    Done,
-    NeedsPerson { why: String },
-    NothingToDo,
-}
-
-/// The short note for the manager, sent only for a clean sheet and for a portal question.
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct ManagerSummary {
-    pub headline: String,
-    pub notes: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct Decision {
-    pub outcome: Outcome,
-    pub message: Option<MessageRequest>,
-    pub manager_summary: Option<ManagerSummary>,
-    pub waits: Vec<Wait>,
-}
-
 /// One checked record, as `decision` needs it.
 #[derive(Debug, Clone)]
 pub struct Checked {
@@ -405,11 +349,11 @@ pub fn decision(checked: &[Checked]) -> Decision {
     let note_lines: Vec<String> = notes.iter().map(|n| n.for_manager.clone()).collect();
     if !corrections.is_empty() {
         let all: Vec<&RuleIssue> = corrections.iter().chain(questions.iter()).copied().collect();
-        let message = MessageRequest { kind: MessageKind::Correction, facts: vec![], issues: texts(&all) };
+        let message = MessageRequest::template(MessageKind::Correction, vec![], texts(&all));
         return Decision { outcome: Outcome::Done, message: Some(message), manager_summary: None, waits };
     }
     if !questions.is_empty() {
-        let message = MessageRequest { kind: MessageKind::Question, facts: vec![], issues: texts(&questions) };
+        let message = MessageRequest::template(MessageKind::Question, vec![], texts(&questions));
         let headline = joined(checked.iter().filter(|c| c.issues.iter().any(|i| i.severity == Severity::Question)).map(|c| {
             let ask = c.issues.iter().filter(|i| i.severity == Severity::Question).map(|i| i.for_manager.clone()).collect::<Vec<_>>().join(" ");
             format!("{}'s timesheet for {}: {ask}", who(c), period_label(&c.period.0, &c.period.1))
@@ -421,16 +365,24 @@ pub fn decision(checked: &[Checked]) -> Decision {
         return Decision { outcome: Outcome::NeedsPerson { why }, message: None, manager_summary: None, waits };
     }
     let fact = |label: &str, value: String| Fact { label: label.into(), value };
-    let facts = vec![
-        fact("Name", joined(checked.iter().map(who))),
-        fact("Period", joined(checked.iter().map(|c| period_label(&c.period.0, &c.period.1)))),
-        fact("Hours", joined(checked.iter().map(|c| c.total.map_or_else(|| "no total".to_string(), |t| format!("{} h", hours(t)))))),
-    ];
+    // One Name, Period, Hours run per sheet, so a reply can say which sheet is which.
+    let mut rows: Vec<[Fact; 3]> = vec![];
+    for c in checked {
+        let row = [
+            fact("Name", who(c)),
+            fact("Period", period_label(&c.period.0, &c.period.1)),
+            fact("Hours", c.total.map_or_else(|| "no total".to_string(), |t| format!("{} h", hours(t)))),
+        ];
+        if !rows.contains(&row) {
+            rows.push(row);
+        }
+    }
+    let facts: Vec<Fact> = rows.into_iter().flatten().collect();
     let headline = joined(checked.iter().map(|c| {
         let total = c.total.map_or_else(|| "no total".to_string(), |t| format!("{} h", hours(t)));
         format!("{}'s timesheet is recorded: {}, {total}", who(c), range_short(&c.period.0, &c.period.1))
     }));
-    let message = MessageRequest { kind: MessageKind::Ack, facts, issues: vec![] };
+    let message = MessageRequest::template(MessageKind::Ack, facts, vec![]);
     Decision { outcome: Outcome::Done, message: Some(message), manager_summary: Some(ManagerSummary { headline, notes: note_lines }), waits }
 }
 

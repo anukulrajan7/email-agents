@@ -705,6 +705,8 @@ Shapes are as in the contract, with these details:
   `CaseDetail` also has `state` (case facts, e.g. `candidates`, `last_draft_id`, `new_message_id`), `approvals`,
   `status_note` and `failure_reason` (plain sentence, e.g. "used this case's AI budget of $0.10 without finishing").
 - `Approval` adds `step_seq: number | null` (the timeline step that asked for it). `decided_by` is the person's email.
+  `handoff` is `{ line, from: [{ agent_id, name, kind, job }] } | null`: set when an expert asked Meera for the reply
+  (`line` reads "Rohan asked Meera to tell the sender the timesheet is recorded").| null` (the timeline step that asked for it). `decided_by` is the person's email.
 - `POST /cases` is idempotent: one case per requirement and per (kind, message); an existing case is returned.
   409 `conflict` when no planner model is configured; 404 for an unknown requirement or message.
 - Step and approval `summary` strings are plain sentences; no API string names a model.
@@ -1065,4 +1067,12 @@ matched) makes the record `needs_check`.
 is gone; its `timesheet` object gains `record_id`. People take an optional `employee_code` (unique per workspace, case-insensitive;
 CSV column `employee_code` or `employee_id`). The agent tool `record_timesheet` and the workflow step of the same name run the
 same reading; the timesheet desk (Rohan) never drafts or sends a reply, and no automatic path drafts one for a timesheet.
+
+Under the `handoff` flag (S7) Rohan files a typed request for the sender (`ack`, `correction` or `question`; table `message_requests`,
+one row per message, asking agent and job) and Meera's reply job (`cases.job = "reply"`) writes the one reply from a fixed
+template, with no model, as the message's one live draft (origin `reply:{message_id}`, `drafts.model_id = "reply-template-v1"`,
+`drafts.requested_by_json` names the experts). It is sent through the normal send path, at the lowest level of the experts who
+asked (not Meera's own); a shared mailbox, a level below 2 or any failed send rule asks a person first. `off` changes nothing,
+`compare` only adds `would_send` to the `ownership.compare` audit row. Never replied to: our own mail, bulk or automatic mail, a
+no-reply sender (the request is stored as `dropped`). A newer message on the thread supersedes the old unsent reply.
 

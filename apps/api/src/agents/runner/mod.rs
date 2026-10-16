@@ -131,7 +131,7 @@ pub async fn run_step(state: &AppState, ws: &str, case_id: &str, turn: i64) -> R
     let steps = case::steps(&state.db, &case.workspace_id, &case.id).await?;
     let registry = tools::registry();
     let tier = profiles::effective_tier(&agent.agent.quality, case.premium());
-    let allowed = case_agent.allowed_tools(runtime::matching_enabled(&state.db, &case.workspace_id).await?);
+    let allowed = if workflow::is_reply_job(&case) { workflow::reply_tools() } else { case_agent.allowed_tools(runtime::matching_enabled(&state.db, &case.workspace_id).await?) };
     let req = PlanRequest {
         case_id: case.id.clone(),
         kind: if case.shadow { "shadow".into() } else { case.kind.clone() },
@@ -148,7 +148,10 @@ pub async fn run_step(state: &AppState, ws: &str, case_id: &str, turn: i64) -> R
     let mut fixed: Option<Decision> = None;
     if workflow::applies(&case_agent.spec, &case) && workflow::mode_of(&case).as_deref() != Some("planner") {
         let first_turn = workflow::mode_of(&case).is_none();
-        let why = if first_turn {
+        // A reply job never hands over to the planner: a declined reply ends it (see `workflow::decide`).
+        let why = if workflow::is_reply_job(&case) {
+            None
+        } else if first_turn {
             workflow::escalation_reason(&state.db, &case).await?
         } else {
             case.state().get("declined_draft_id").is_some().then_some("a person declined the draft")
@@ -335,7 +338,10 @@ async fn commit(state: &AppState, case: &Case, turn: i64, usage: &Usage, result:
             case::insert_step(&mut tx, case, step("critic", None, format!("Stopped: {reason}"), input, json!({"reason": reason}), "blocked")).await?;
             error_streak = case.error_streak;
         }
-        TurnResult::Approval { tool, input, preview } => {
+        TurnResult::Approval { tool, mut input, preview } => {
+            if let (Some(handoff), Some(obj)) = (case.state().get("handoff").cloned(), input.as_object_mut()) {
+                obj.insert("handoff".into(), handoff);
+            }
             let seq = case::insert_step(
                 &mut tx,
                 case,

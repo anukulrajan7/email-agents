@@ -151,10 +151,10 @@ async fn rohan_owns_a_timesheet_at_level_0_and_records_it() {
     let d = desk(Some(Mode::On)).await;
     let id = d.receive("gm-1", 1).await;
     assert_eq!(d.record_rows().await.len(), 1);
-    assert_eq!(d.env.cases_by_job(&id).await, [("desk:timesheet".to_string(), "rohan".to_string())]);
-    let leads: i64 = d.env.count("SELECT COUNT(*) FROM cases c JOIN agents a ON a.id = c.agent_id WHERE c.workspace_id = ?1 AND a.kind = 'lead'").await;
-    assert_eq!(leads, 0, "Meera has no case");
-    assert!(d.env.live_drafts(&id).await.is_empty(), "0 drafts");
+    assert_eq!(d.env.cases_by_job(&id).await, [("desk:timesheet".to_string(), "rohan".to_string()), ("reply".to_string(), "meera".to_string())], "Rohan owns the sheet; the reply is Meera's job");
+    let expert_drafts: i64 = d.env.count("SELECT COUNT(*) FROM drafts d JOIN agents a ON a.id = d.agent_id WHERE d.workspace_id = ?1 AND a.template_key = 'hrms.timesheets'").await;
+    assert_eq!(expert_drafts, 0, "Rohan writes no draft");
+    assert_eq!(d.env.live_drafts(&id).await.len(), 1, "Meera's one reply waits for an approval, since Rohan is at level 0");
     let decided = d.audits("ownership.decided").await;
     assert_eq!(decided.len(), 1);
     assert_eq!(decided[0]["jobs"], json!([{"job": "desk:timesheet", "agent_id": d.rohan}]));
@@ -167,7 +167,7 @@ async fn one_case_per_message_and_job_even_when_triggered_twice() {
     let id = d.receive("gm-1", 1).await;
     let again = triggers::start_timesheet_case(&d.env.state, &d.env.ws, &id).await.unwrap();
     assert!(matches!(again, triggers::Started::Case(_, false)), "{again:?}");
-    assert_eq!(d.env.cases_by_job(&id).await.len(), 1);
+    assert_eq!(d.env.cases_by_job(&id).await.iter().filter(|(job, _)| job == "desk:timesheet").count(), 1);
     let dup = sqlx::query(
         "INSERT INTO cases (id, workspace_id, kind, title, goal, status, state_json, priority, max_steps, budget_usd, message_id, created_at, updated_at, job)
          VALUES ('dup', ?1, 'inbox', 't', 'g', 'running', '{}', 'normal', 5, 0.1, ?2, 1, 1, 'desk:timesheet')",
@@ -200,8 +200,8 @@ async fn a_clean_sheet_is_summarised_to_the_manager_once_and_the_decision_is_sto
     let case = d.env.case(ADMIN, case_id).await;
     assert_eq!(case["state"]["decision"]["message"]["kind"], "ack", "{case}");
     assert_eq!(case["state"]["decision"]["message"]["facts"][2], json!({"label": "Hours", "value": "23.5 h"}));
-    assert_eq!(d.env.count("SELECT COUNT(*) FROM drafts WHERE workspace_id = ?1").await, 0);
-    assert!(d.env.sends().is_empty(), "nothing goes to the sender: that is Meera's, a later slice");
+    assert_eq!(d.env.count("SELECT COUNT(*) FROM drafts WHERE workspace_id = ?1").await, 1, "Meera's one acknowledgement, waiting for approval at level 0");
+    assert!(d.env.sends().is_empty(), "nothing goes to the sender without a person at level 0");
 
     // Recording again, and starting the case again, tell nobody twice.
     records::record_message(&d.env.state, &d.env.ws, &id).await.unwrap();
@@ -230,7 +230,7 @@ async fn a_wrong_month_sheet_is_needs_check_with_no_manager_notice() {
     let case = d.env.case(ADMIN, &d.env.cases_of(&id).await[0].0).await;
     assert_eq!(case["state"]["decision"]["message"]["kind"], "correction", "{case}");
     assert!(case["state"]["decision"]["message"]["issues"][0]["text"].as_str().unwrap().contains(&month_back(2).0));
-    assert!(d.env.live_drafts(&id).await.is_empty(), "the correction is stored for the sender reply, not sent");
+    assert_eq!(d.env.live_drafts(&id).await.len(), 1, "Meera writes the correction; at level 0 a person approves it");
     let tasks = d.count("SELECT COUNT(*) FROM review_items WHERE workspace_id = ?1 AND message_id = ?2 AND kind = 'agent_task'", &id).await;
     assert_eq!(tasks, 1, "a person is asked to look, once");
 }
@@ -400,11 +400,11 @@ fn failing_mailer() -> Arc<dyn email_ai_api::platform::mailer::Mailer> {
 async fn a_person_can_still_start_a_reply_case_beside_the_desk_case() {
     let d = desk(Some(Mode::On)).await;
     let id = d.receive("gm-1", 1).await;
-    assert_eq!(d.env.cases_by_job(&id).await.len(), 1);
+    assert_eq!(d.env.cases_by_job(&id).await.len(), 2, "the desk case and Meera's reply case");
     let manual = triggers::start_inbox_case(&d.env.state, &d.env.ws, &id, Some(&d.env.admin_id)).await.unwrap();
     assert!(matches!(manual, triggers::Started::Case(_, true)), "{manual:?}");
     let cases = d.env.cases_by_job(&id).await;
-    assert_eq!(cases.len(), 2, "{cases:?}");
+    assert_eq!(cases.len(), 3, "the desk case, Meera's reply case and the person's own case: {cases:?}");
     assert!(cases.contains(&("desk:timesheet".to_string(), "rohan".to_string())) && cases.contains(&("main".to_string(), "meera".to_string())), "{cases:?}");
 }
 
@@ -571,4 +571,56 @@ async fn a_sheet_recorded_after_the_desk_case_gave_up_waiting_is_still_checked_a
     drop(conn);
     worker_drain(&d.env).await;
     assert_eq!(d.notices(&id).await, 2, "and not again");
+}
+
+/// Drops what the desk case did for a message so `catch_up` and the old workflow path start from the same place.
+async fn forget_the_desk_case(d: &Desk, id: &str) {
+    sqlx::query("UPDATE cases SET status = 'cancelled', state_json = json_remove(state_json, '$.record_ids') WHERE workspace_id = ?1 AND message_id = ?2 AND job = 'desk:timesheet'")
+        .bind(&d.env.ws)
+        .bind(id)
+        .execute(&d.env.state.db)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM review_items WHERE message_id = ?1").bind(id).execute(&d.env.state.db).await.unwrap();
+}
+
+async fn run_the_old_workflow(d: &Desk, id: &str, key: &str) {
+    let mut conn = d.env.state.db.acquire().await.unwrap();
+    email_ai_api::jobs::enqueue(&mut conn, email_ai_api::jobs::kind::EXECUTE_WORKFLOW, key, Some(&d.env.ws), &json!({"message_id": id})).await.unwrap();
+    drop(conn);
+    worker_drain(&d.env).await;
+}
+
+#[tokio::test]
+async fn catch_up_and_the_old_workflow_never_both_open_a_review_item() {
+    // The workflow path first, then catch_up.
+    let d = desk(Some(Mode::On)).await;
+    let id = d.receive("gm-1", 2).await;
+    forget_the_desk_case(&d, &id).await;
+    run_the_old_workflow(&d, &id, "wf-first").await;
+    records::desk::catch_up(&d.env.state, &d.env.ws, &id).await.unwrap();
+    assert_eq!(d.count("SELECT COUNT(*) FROM review_items WHERE workspace_id = ?1 AND message_id = ?2", &id).await, 1, "one review item, workflow first");
+
+    // And catch_up first, then the workflow path.
+    let d = desk(Some(Mode::On)).await;
+    let id = d.receive("gm-1", 2).await;
+    forget_the_desk_case(&d, &id).await;
+    records::desk::catch_up(&d.env.state, &d.env.ws, &id).await.unwrap();
+    run_the_old_workflow(&d, &id, "wf-second").await;
+    assert_eq!(d.count("SELECT COUNT(*) FROM review_items WHERE workspace_id = ?1 AND message_id = ?2", &id).await, 1, "one review item, catch_up first");
+}
+
+#[tokio::test]
+async fn catch_up_leaves_a_portal_question_to_the_summary_the_manager_got() {
+    let d = desk(Some(Mode::On)).await;
+    let (_, month) = month_back(1);
+    let ravi: String = sqlx::query_scalar("SELECT id FROM people WHERE workspace_id = ?1 AND name = 'Ravi Kumar'").bind(&d.env.ws).fetch_one(&d.env.state.db).await.unwrap();
+    sqlx::query("INSERT INTO portal_hours (workspace_id, person_id, month, hours, imported_at) VALUES (?1, ?2, ?3, 168, 1)").bind(&d.env.ws).bind(&ravi).bind(&month).execute(&d.env.state.db).await.unwrap();
+    let id = d.receive("gm-1", 1).await;
+    forget_the_desk_case(&d, &id).await;
+    sqlx::query("UPDATE timesheet_records SET summarized_at = NULL WHERE workspace_id = ?1").bind(&d.env.ws).execute(&d.env.state.db).await.unwrap();
+    let before = d.notices(&id).await;
+    records::desk::catch_up(&d.env.state, &d.env.ws, &id).await.unwrap();
+    assert_eq!(d.notices(&id).await, before + 2, "the manager is told again, as it was never claimed");
+    assert_eq!(d.count("SELECT COUNT(*) FROM review_items WHERE workspace_id = ?1 AND message_id = ?2", &id).await, 0, "the summary is the ask, so no extra review item");
 }

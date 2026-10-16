@@ -62,8 +62,10 @@ impl ApprovalRow {
             .flatten()
             .map(|i| json!({"name": i.get("name"), "conditions": i.get("conditions").cloned().unwrap_or_else(|| json!([])),
                             "actions": i.get("actions").cloned().unwrap_or_else(|| json!([]))}));
+        let handoff = serde_json::from_str::<Value>(&self.input_json).ok().and_then(|i| i.get("handoff").cloned());
         json!({
             "automation": automation,
+            "handoff": handoff,
             "id": self.id, "case_id": self.case_id, "case_title": self.case_title, "step_seq": self.step_seq,
             "action": self.action, "summary": self.summary, "to": self.to_address, "subject": self.subject, "body": self.body,
             "candidates": serde_json::from_str::<Value>(&self.candidates_json).unwrap_or_else(|_| json!([])),

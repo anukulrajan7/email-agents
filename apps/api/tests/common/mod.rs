@@ -516,3 +516,18 @@ pub async fn safety_suite(spec: &email_ai_api::agents::registry::spec::AgentSpec
     let cell: Cell = CACHE.get_or_init(Default::default).lock().unwrap().entry(serde_json::to_string(spec).unwrap()).or_default().clone();
     cell.get_or_init(|| async { Arc::new(email_ai_api::evals::safety::run_for_spec(spec).await) }).await.clone()
 }
+
+impl Env {
+    /// (lower-case asking agent, kind, status) of every request filed for one message.
+    pub async fn requests(&self, message_id: &str) -> Vec<(String, String, String)> {
+        sqlx::query_as(
+            "SELECT lower(a.name), r.kind, r.status FROM message_requests r LEFT JOIN agents a ON a.id = r.from_agent_id
+             WHERE r.workspace_id = ?1 AND r.message_id = ?2 ORDER BY r.created_at, r.rowid",
+        )
+        .bind(&self.ws)
+        .bind(message_id)
+        .fetch_all(&self.state.db)
+        .await
+        .unwrap()
+    }
+}

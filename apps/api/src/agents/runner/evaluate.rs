@@ -68,7 +68,9 @@ pub(super) async fn evaluate(
         let reason = format!("{} does not use {tool_name}; create a task for a person instead.", agent.agent.name);
         return Ok(TurnResult::Blocked { tool: tool_name, input: args, reason });
     }
-    if let Some(reason) = permission_block(agent, &tool_name) {
+    // Sending is switched off for Meera: a reply the experts asked for still reaches a person, who may send it themselves.
+    let ask_person = permission_block(agent, &tool_name).is_some() && crate::agents::workflow::is_reply_job(case) && tool_name == "send_email";
+    if let Some(reason) = permission_block(agent, &tool_name).filter(|_| !ask_person) {
         return Ok(TurnResult::Blocked { tool: tool_name, input: args, reason });
     }
     if case.shadow && (tool.risk() == Risk::High || tool_name == "create_task") {
@@ -108,7 +110,7 @@ pub(super) async fn evaluate(
     let mut auto_sent = false;
     if tool.risk() == Risk::High {
         let preview = preview.unwrap_or_default();
-        let on_its_own = match tool.name() {
+        let on_its_own = !ask_person && match tool.name() {
             "send_email" => autonomy::may_send_on_its_own(state, case, agent, case_agent, &preview).await?,
             "send_message" => crate::alerts::messaging::rules::may_send_on_its_own(state, case, agent, case_agent, &args).await?,
             _ => false,

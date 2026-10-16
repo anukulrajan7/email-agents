@@ -60,15 +60,35 @@ pub async fn load(db: &SqlitePool, config: &Config, case: &Case, owner: Option<&
     }
     let row = row.ok_or(sqlx::Error::RowNotFound)?;
     let (spec, version) = versions::active_spec_in(db, &row).await?;
-    let level = autonomy::effective_level(LevelInputs {
+    let mut level = level_for(&row, &spec, config, owner);
+    // Meera's reply job runs at the level of the experts who asked for the words, not at her own.
+    if case.job == crate::agents::handoff::REPLY_JOB
+        && row.status == "active"
+        && let Some(governing) = crate::agents::handoff::store::governing_for_message(db, &case.workspace_id, case.message_id.as_deref()).await?
+    {
+        level = Effective { level: governing, limited_by: "handoff" };
+    }
+    Ok(CaseAgent { row, spec, version, level })
+}
+
+/// The effective level of an agent working for this mailbox owner (an owner who wants to be asked first caps it at 1).
+pub fn level_for(row: &AgentRow, spec: &AgentSpec, config: &Config, owner: Option<&Owner>) -> Effective {
+    autonomy::effective_level(LevelInputs {
         earned: row.autonomy_level,
         cap: row.autonomy_cap,
         spec_max: i64::from(spec.permissions.max_autonomy),
         env_max: config.agent_max_autonomy,
         profile_asks_first: !owner.is_some_and(Owner::routine_ok),
         active: row.status == "active",
-    });
-    Ok(CaseAgent { row, spec, version, level })
+    })
+}
+
+/// One agent's effective level on one email (the mailbox owner's profile counts), as of now.
+pub async fn level_of(db: &SqlitePool, config: &Config, ws: &str, agent_id: &str, message_id: &str) -> sqlx::Result<i64> {
+    let Some(row) = store::get_in(db, ws, agent_id).await? else { return Ok(0) };
+    let (spec, _) = versions::active_spec_in(db, &row).await?;
+    let ctx = profiles::context_for_message(db, config, ws, message_id).await?;
+    Ok(level_for(&row, &spec, config, ctx.owner.as_ref()).level)
 }
 
 fn playbook(spec: &AgentSpec, team_voice: &str, personal: bool) -> String {

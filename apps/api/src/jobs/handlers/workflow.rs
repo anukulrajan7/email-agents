@@ -114,7 +114,8 @@ pub(super) async fn execute_workflow(state: &AppState, payload: &Value) -> Resul
     let review_id = new_id("rev");
     let review_created = sqlx::query(
         "INSERT OR IGNORE INTO review_items (id, workspace_id, message_id, workflow_run_id, kind, title, status, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'open', ?7)",
+         SELECT ?1, ?2, ?3, ?4, ?5, ?6, 'open', ?7
+         WHERE NOT EXISTS (SELECT 1 FROM review_items WHERE message_id = ?3 AND status = 'open' AND kind = 'agent_task' AND title = 'Check: Timesheet' AND ?5 = 'check_timesheet')",
     )
     .bind(&review_id)
     .bind(&workspace_id)

@@ -5,9 +5,10 @@
 use serde_json::json;
 
 use super::{
-    rules::{self, Checked, Decision, PersonRules, RecordView, Rules, RuleIssue, Severity},
+    rules::{self, Checked, PersonRules, RecordView, Rules, RuleIssue, Severity},
     *,
 };
+use crate::agents::handoff::Decision;
 use crate::{
     hr::team::settings::Cadence,
     platform::audit::{self, Actor, Entry},
@@ -157,8 +158,20 @@ pub async fn compare(state: &AppState, ws: &str, message_id: &str) -> sqlx::Resu
         crate::agents::ownership::Owner::Assigned(jobs) => jobs.first().map(|j| json!({"job": j.key, "agent": j.agent_name})),
         _ => None,
     };
+    // What Meera would be asked to send to the sender, and at whose level: logged only, nothing is filed or drafted.
+    let clean = review.all_matched() && review.rows.iter().all(|r| r.status == "recorded");
+    let would_send = match (&review.decision.message, &owner) {
+        (Some(m), crate::agents::ownership::Owner::Assigned(jobs)) if m.kind != crate::agents::handoff::MessageKind::Ack || clean => {
+            let level = match jobs.first() {
+                Some(j) => crate::agents::registry::runtime::level_of(&state.db, &state.config, ws, &j.agent_id, message_id).await?,
+                None => 0,
+            };
+            Some(json!({"kind": m.kind, "to": m.to, "issues": m.issues.len(), "requester_level": level, "goes_out_on_its_own": level >= 2}))
+        }
+        _ => None,
+    };
     let decision = json!(review.decision);
-    let digest = format!("{:x}", fingerprint(&json!({"d": decision, "t": would_tell, "a": would_assign}).to_string()));
+    let digest = format!("{:x}", fingerprint(&json!({"d": decision, "t": would_tell, "a": would_assign, "s": would_send}).to_string()));
     let seen: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM audit_events WHERE workspace_id = ?1 AND action = 'ownership.compare' AND entity_id = ?2 AND json_extract(metadata_json, '$.digest') = ?3)",
     )
@@ -177,7 +190,7 @@ pub async fn compare(state: &AppState, ws: &str, message_id: &str) -> sqlx::Resu
         message_id,
         "ownership.compare",
         &owner,
-        json!({ "decision": decision, "would_assign": would_assign, "would_tell": would_tell, "records": review.record_ids(), "digest": digest }),
+        json!({ "decision": decision, "would_assign": would_assign, "would_tell": would_tell, "would_send": would_send, "records": review.record_ids(), "digest": digest }),
     )
     .await
 }
@@ -185,6 +198,14 @@ pub async fn compare(state: &AppState, ws: &str, message_id: &str) -> sqlx::Resu
 /// A short stable digest of a string, enough to tell two decisions apart.
 fn fingerprint(s: &str) -> u64 {
     s.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |h, b| (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3))
+}
+
+/// Files what the desk wants said to the sender with Meera. A "recorded" acknowledgement is only filed when every sheet is
+/// recorded and matched to a person, the same rule the manager summary follows.
+pub async fn hand_off(state: &AppState, ws: &str, asker: &crate::agents::handoff::Asker<'_>, message_id: &str, decision: &Decision, clean: bool) -> sqlx::Result<Option<crate::agents::handoff::Filed>> {
+    use crate::agents::handoff::MessageKind;
+    let Some(message) = decision.message.as_ref().filter(|m| m.kind != MessageKind::Ack || clean) else { return Ok(None) };
+    crate::agents::handoff::hand_to_meera(state, ws, asker, message_id, message).await.map(Some)
 }
 
 pub async fn audit_decision(conn: &mut SqliteConnection, ws: &str, message_id: &str, case_id: &str, review: &Review) -> sqlx::Result<()> {
@@ -286,21 +307,31 @@ pub async fn catch_up(state: &AppState, ws: &str, message_id: &str) -> sqlx::Res
         Entry { workspace_id: ws, actor: Actor::System, action: "handoff.caught_up", entity_type: "message", entity_id: message_id, message_id: Some(message_id), metadata: json!({ "decision": review.decision, "records": review.record_ids() }) },
     )
     .await?;
-    if statuses.iter().any(|s| s != "recorded") || !review.all_matched() {
+    drop(conn);
+    let agent = jobs.first().map(|j| j.agent_id.as_str());
+    let told = summary::summarize(state, ws, agent, &review.rows, &review.decision).await?;
+    let clean = review.all_matched() && statuses.iter().all(|s| s == "recorded");
+    // As in the desk case: when the manager was asked to decide a portal question, the summary is the ask, not a second item.
+    let manager_decides = told > 0 && review.decision.message.as_ref().is_some_and(|m| m.kind == crate::agents::handoff::MessageKind::Question);
+    if !clean && !manager_decides {
+        // One review item per sheet: the desk case's task, this one and the old workflow's item count as the same ask.
         sqlx::query(
             "INSERT INTO review_items (id, workspace_id, message_id, workflow_run_id, kind, title, status, created_at)
              SELECT ?1, ?2, ?3, NULL, 'agent_task', 'Check: Timesheet', 'open', ?4
-             WHERE NOT EXISTS (SELECT 1 FROM review_items WHERE message_id = ?3 AND kind = 'agent_task' AND title = 'Check: Timesheet' AND status = 'open')",
+             WHERE NOT EXISTS (SELECT 1 FROM review_items WHERE message_id = ?3 AND status = 'open'
+                               AND ((kind = 'agent_task' AND title = 'Check: Timesheet') OR kind = 'check_timesheet'))",
         )
         .bind(new_id("rev"))
         .bind(ws)
         .bind(message_id)
         .bind(now_ms())
-        .execute(&mut *conn)
+        .execute(&state.db)
         .await?;
     }
-    drop(conn);
-    summary::summarize(state, ws, jobs.first().map(|j| j.agent_id.as_str()), &review.rows, &review.decision).await?;
+    if let Some(agent_id) = agent {
+        let asker = crate::agents::handoff::Asker { agent_id, case_id: None, job: crate::agents::ownership::DESK_JOB };
+        hand_off(state, ws, &asker, message_id, &review.decision, clean).await?;
+    }
     Ok(())
 }
 

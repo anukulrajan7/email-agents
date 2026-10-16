@@ -39,6 +39,7 @@ mod reconcile;
 mod send;
 mod job;
 pub mod live_draft;
+pub mod compose;
 
 pub use message::MAX_SUBJECT_CHARS;
 pub use message::header_safe;

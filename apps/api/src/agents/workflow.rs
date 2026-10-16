@@ -38,6 +38,8 @@ pub enum WfStep {
     SaveDraft,
     /// Read the timesheet into records (`record_timesheet`).
     RecordTimesheet,
+    /// Write the one reply the experts asked for (`compose_reply`): Meera's reply job.
+    Compose,
 }
 
 /// The executable steps of a spec. Draft is followed by a send when the spec may send at all;
@@ -68,9 +70,30 @@ pub fn steps_for(spec: &AgentSpec) -> Vec<WfStep> {
     out
 }
 
-/// Does this case run as a fixed workflow? Needs a workflow-mode spec, one email and steps to run.
+/// The steps of Meera's reply job: write the reply the experts asked for, then send it (which still asks a person unless the
+/// experts' level and every send rule allow it).
+fn reply_steps() -> Vec<WfStep> {
+    vec![WfStep::Compose, WfStep::Send]
+}
+
+/// The only tools a reply job uses, whatever Meera's spec lists.
+pub fn reply_tools() -> Vec<String> {
+    vec!["compose_reply".to_string(), "send_email".to_string()]
+}
+
+/// The steps this case runs: the spec's, or the fixed pair of a reply job whatever Meera's spec says.
+pub fn steps_for_case(spec: &AgentSpec, case: &Case) -> Vec<WfStep> {
+    if is_reply_job(case) { reply_steps() } else { steps_for(spec) }
+}
+
+pub fn is_reply_job(case: &Case) -> bool {
+    case.job == super::handoff::REPLY_JOB && case.kind == "inbox"
+}
+
+/// Does this case run as a fixed workflow? A reply job always does; otherwise it needs a workflow-mode spec, one email and steps to run.
 pub fn applies(spec: &AgentSpec, case: &Case) -> bool {
-    spec.mode == Mode::Workflow && case.kind == "inbox" && case.message_id.is_some() && !steps_for(spec).is_empty()
+    (is_reply_job(case) && case.message_id.is_some())
+        || (spec.mode == Mode::Workflow && case.kind == "inbox" && case.message_id.is_some() && !steps_for(spec).is_empty())
 }
 
 /// What the draft step tells the writer about the details an earlier extract step found or missed.
@@ -104,7 +127,10 @@ pub fn position(case: &Case) -> usize {
 pub fn decide(spec: &AgentSpec, case: &Case) -> Option<Decision> {
     let state = case.state();
     let message_id = case.message_id.as_deref()?;
-    let steps = steps_for(spec);
+    let steps = steps_for_case(spec, case);
+    if is_reply_job(case) && state.get("declined_draft_id").is_some() {
+        return Some(Decision::Finish { outcome: None, summary: "A person declined the reply; nothing was sent.".into() });
+    }
     Some(match steps.get(position(case)) {
         None => Decision::Finish { outcome: None, summary: format!("{} finished its routine steps.", spec.name) },
         Some(WfStep::Draft) => {
@@ -124,6 +150,11 @@ pub fn decide(spec: &AgentSpec, case: &Case) -> Option<Decision> {
         Some(WfStep::SaveDraft) => {
             let draft_id = state.get("last_draft_id").and_then(Value::as_str)?;
             Decision::Call { tool: "save_to_gmail_drafts".into(), args: json!({"draft_id": draft_id}) }
+        }
+        Some(WfStep::Compose) => Decision::Call { tool: "compose_reply".into(), args: json!({"message_id": message_id}) },
+        // Nothing was written (the request is gone, or the email was already answered): the reply job ends.
+        Some(WfStep::Send) if is_reply_job(case) && state.get("last_draft_id").is_none() => {
+            Decision::Finish { outcome: None, summary: format!("{} had nothing to send.", spec.name) }
         }
         Some(WfStep::Send) => {
             let draft_id = state.get("last_draft_id").and_then(Value::as_str)?;
@@ -155,6 +186,9 @@ static LEGAL: LazyLock<Regex> = LazyLock::new(|| {
 /// Why this email is not routine, if it is not. Checked once, when the case starts.
 pub async fn escalation_reason(db: &SqlitePool, case: &Case) -> sqlx::Result<Option<&'static str>> {
     let Some(message_id) = case.message_id.as_deref() else { return Ok(Some("there is no single email to work from")) };
+    if is_reply_job(case) {
+        return Ok(None);
+    }
     let state = case.state();
     if state.get("label").and_then(Value::as_str) == Some("complaint") {
         return Ok(Some("it is a complaint"));
@@ -246,6 +280,7 @@ mod tests {
             trigger: None,
             outcome_detail: None,
             shadow: false,
+            job: "main".into(),
             created_at: 0,
             updated_at: 0,
         }

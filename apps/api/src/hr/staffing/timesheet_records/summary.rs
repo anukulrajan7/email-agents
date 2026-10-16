@@ -5,11 +5,9 @@
 use serde_json::json;
 use sqlx::SqlitePool;
 
-use super::{
-    RecordRow,
-    rules::{Decision, MessageKind},
-};
+use super::RecordRow;
 use crate::{
+    agents::handoff::{Decision, MessageKind},
     alerts::{self, messaging::inapp},
     hr::staffing::policy::address_of,
     hr::team::escalation,

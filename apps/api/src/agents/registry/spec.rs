@@ -52,7 +52,7 @@ impl Scope {
 pub fn scope_of_tool(tool: &str) -> Option<Scope> {
     Some(match tool {
         "search_mail" | "read_email" | "read_thread" | "find_candidates" | "find_requirements" | "recall_memory" | "extract_fields" => Scope::ReadMail,
-        "draft_email" | "save_to_gmail_drafts" => Scope::Draft,
+        "draft_email" | "save_to_gmail_drafts" | "compose_reply" => Scope::Draft,
         "send_email" | "submit_candidate" | "send_message" => Scope::Send,
         "create_task" | "update_case" | "label_email" | "notify_owner" | "record_timesheet" => Scope::Label,
         "schedule_check" | "propose_automation" => Scope::Schedule,

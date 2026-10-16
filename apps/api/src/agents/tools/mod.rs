@@ -31,6 +31,7 @@ mod schedule_check;
 mod update_case;
 mod extract_fields;
 mod record_timesheet;
+mod compose_reply;
 mod label_email;
 mod save_to_gmail_drafts;
 mod send_email;
@@ -52,6 +53,7 @@ pub use schedule_check::MAX_SLEEP_HOURS;
 use update_case::UpdateCase;
 use extract_fields::ExtractFields;
 use record_timesheet::RecordTimesheet;
+use compose_reply::ComposeReply;
 use label_email::LabelEmail;
 use save_to_gmail_drafts::SaveToGmailDrafts;
 use send_email::SendEmail;
@@ -235,6 +237,7 @@ static REGISTRY: LazyLock<Registry> = LazyLock::new(|| Registry {
         Box::new(UpdateCase),
         Box::new(ExtractFields),
         Box::new(RecordTimesheet),
+        Box::new(ComposeReply),
         Box::new(LabelEmail),
         Box::new(SaveToGmailDrafts),
         Box::new(SendEmail),
@@ -418,7 +421,7 @@ mod tests {
         let expected = [
             "search_mail", "read_email", "read_thread", "find_candidates", "find_requirements", "recall_memory", "draft_email", "create_task",
             "schedule_check", "update_case", "extract_fields", "record_timesheet", "label_email", "save_to_gmail_drafts", "send_email", "submit_candidate",
-            "propose_automation", "send_message", "notify_owner",
+            "propose_automation", "send_message", "notify_owner", "compose_reply",
         ];
         assert_eq!(names, expected.into_iter().collect());
         let specs = reg.specs();

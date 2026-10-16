@@ -259,6 +259,7 @@ async fn simulate_workflow(state: &AppState, ws: &str, spec: &AgentSpec, message
             WfStep::StartCase => ex.step("Would start a case for this email", "simulated"),
             WfStep::SaveDraft => ex.step("Would save the draft to Gmail Drafts", "simulated"),
             WfStep::RecordTimesheet => ex.step("Would record the timesheet", "simulated"),
+            WfStep::Compose => ex.step("Would write the reply the experts asked for", "simulated"),
         }
     }
     Ok(ex)
@@ -292,6 +293,7 @@ fn stand_in_case(ws: &str, message_id: &str, thread_id: &str, title: &str, spec:
         trigger: None,
         outcome_detail: None,
         shadow: true,
+        job: "main".into(),
         created_at: now_ms(),
         updated_at: now_ms(),
     }

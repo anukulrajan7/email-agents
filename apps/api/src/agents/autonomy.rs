@@ -57,15 +57,15 @@ pub fn effective_level(i: LevelInputs) -> Effective {
     Effective { level: level.clamp(0, 3), limited_by }
 }
 
-/// Money, rates, rejections, legal, security and attachments: never sent without a person.
+/// Money, rates, rejections, legal and security: never sent without a person.
 static SENSITIVE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-        r"(?i)(₹|\$|€|£|\b(inr|usd|eur|rs)\.?\s?\d|\b\d+(\.\d+)?\s?k\b|\b(inr|usd|eur|rs\.?|lakhs?|lpa|ctc|salary|salaries|rates?|payments?|pay(ing|able)?|paid|owe[sd]?|amounts?|bank(ing)?|wire( transfer)?|iban|ifsc|invoice|budget|refunds?|prices?|pricing|quote[ds]?|discount|fees?|costs?|rupees?|dollars?|payslips?|pay slips?|reimburs\w*|tax(es)?|tds|form[\s-]?16|pf|provident fund|uan|bonus(es)?|increments?|hikes?|apprais\w*|deductions?|credited|debited|upi|pan (card|number|no)|aadhaar|aadhar|account (number|no)|a/c|resign\w*|notice period|full and final|f&f|sick|medical|illness|surgery|hospital|diagnos\w*|legal|lawyers?|attorneys?|lawsuit|sue|contracts?|agreements?|nda|confidential|visa|gdpr|harassment|terminat\w*|security|password|passcode|otp|credentials?|attach(ed|ments?)|offer letter|unfortunately|regret|reject(ed|ion)?|not (been )?(selected|shortlisted)|decline[ds]?)\b|(?-i:\bPAN\b))",
+        r"(?i)(₹|\$|€|£|\b(inr|usd|eur|rs)\.?\s?\d|\b\d+(\.\d+)?\s?k\b|\b(inr|usd|eur|rs\.?|lakhs?|lpa|ctc|salary|salaries|rates?|payments?|pay(ing|able)?|paid|owe[sd]?|amounts?|bank(ing)?|wire( transfer)?|iban|ifsc|invoice|budget|refunds?|prices?|pricing|quote[ds]?|discount|fees?|costs?|rupees?|dollars?|payslips?|pay slips?|reimburs\w*|tax(es)?|tds|form[\s-]?16|pf|provident fund|uan|bonus(es)?|increments?|hikes?|apprais\w*|deductions?|credited|debited|upi|pan (card|number|no)|aadhaar|aadhar|account (number|no)|a/c|resign\w*|notice period|full and final|f&f|sick|medical|illness|surgery|hospital|diagnos\w*|legal|lawyers?|attorneys?|lawsuit|sue|contracts?|agreements?|nda|confidential|visa|gdpr|harassment|terminat\w*|security|password|passcode|otp|credentials?|offer letter|unfortunately|regret|reject(ed|ion)?|not (been )?(selected|shortlisted)|decline[ds]?)\b|(?-i:\bPAN\b))",
     )
     .expect("valid regex")
 });
 
-/// Does this text touch money, legal, security or attachments?
+/// Does this text touch money, legal or security matters?
 pub fn is_sensitive(text: &str) -> bool {
     SENSITIVE.is_match(text)
 }
@@ -133,6 +133,8 @@ pub struct SendFacts<'a> {
     pub payroll_label: bool,
     /// Template the agent was made from.
     pub template_key: Option<&'a str>,
+    /// The words are a fixed template over typed facts: the inbound mail is not word-scanned (injection, recipient and body checks stay).
+    pub template_body: bool,
 }
 
 const LEAK_REASON: &str = "it mentions an address or number that is not from this conversation";
@@ -184,10 +186,10 @@ pub fn blocker(f: &SendFacts<'_>) -> Option<&'static str> {
     if SENSITIVE.is_match(f.body) {
         return Some("it mentions money, rates or a decision about someone");
     }
-    if SENSITIVE.is_match(f.inbound_text) {
+    if !f.template_body && SENSITIVE.is_match(f.inbound_text) {
         return Some("the conversation is about money, legal or security matters");
     }
-    if LONG_NUMBER.is_match(f.inbound_text) {
+    if !f.template_body && LONG_NUMBER.is_match(f.inbound_text) {
         return Some("the conversation contains a bank or account number");
     }
     if leaks(f.body, f.known_addresses) {
@@ -260,6 +262,24 @@ pub async fn may_send_on_its_own(state: &AppState, case: &Case, ctx: &AgentConte
         tracing::info!(case_id = %case.id, "a reply a person wrote or edited never goes out on its own");
         return Ok(false);
     }
+    let template_body: bool = match preview.draft_id.as_deref() {
+        Some(id) => sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM drafts WHERE id = ?1 AND workspace_id = ?2 AND model_id = ?3 AND substr(origin_key, 1, 6) = 'reply:')")
+            .bind(id)
+            .bind(&case.workspace_id)
+            .bind(crate::replies::compose::TEMPLATE_MODEL)
+            .fetch_one(&state.db)
+            .await?,
+        None => false,
+    };
+    // A payroll expert's request makes the reply payroll mail, whoever writes it.
+    let asked_by_payroll: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM message_requests r JOIN agents a ON a.id = r.from_agent_id
+                        WHERE r.workspace_id = ?1 AND r.message_id = ?2 AND r.status IN ('pending', 'composed') AND a.template_key = 'hrms.payroll')",
+    )
+    .bind(&case.workspace_id)
+    .bind(&case.message_id)
+    .fetch_one(&state.db)
+    .await?;
     let unconfirmed: String = match preview.draft_id.as_deref() {
         Some(id) => sqlx::query_scalar("SELECT unanswered_json FROM drafts WHERE id = ?1 AND workspace_id = ?2")
             .bind(id)
@@ -339,8 +359,9 @@ pub async fn may_send_on_its_own(state: &AppState, case: &Case, ctx: &AgentConte
         injected,
         known_addresses: &known_addresses,
         inbound_text: &inbound_text,
-        payroll_label,
+        payroll_label: payroll_label || asked_by_payroll,
         template_key: agent.row.template_key.as_deref(),
+        template_body,
     };
     let blocked = blocker(&facts);
     if let Some(why) = injected {
@@ -424,7 +445,7 @@ pub async fn automated_send_stopped(state: &AppState, ws: &str, draft_id: &str) 
         Some(owner) => crate::agents::profiles::user_profile(&state.db, ws, &owner).await?.is_none_or(|p| p.routine_ok()),
         None => false,
     };
-    let level = effective_level(LevelInputs {
+    let mut level = effective_level(LevelInputs {
         earned: row.autonomy_level,
         cap: row.autonomy_cap,
         spec_max: i64::from(spec.permissions.max_autonomy),
@@ -432,6 +453,17 @@ pub async fn automated_send_stopped(state: &AppState, ws: &str, draft_id: &str) 
         profile_asks_first: !routine_ok,
         active: true,
     });
+    // A reply the experts asked for runs at their level, checked again now: nobody who vouched for it may have been demoted.
+    let reply_of: Option<String> = sqlx::query_scalar("SELECT message_id FROM drafts WHERE id = ?1 AND workspace_id = ?2 AND substr(origin_key, 1, 6) = 'reply:'")
+        .bind(draft_id)
+        .bind(ws)
+        .fetch_optional(&state.db)
+        .await?;
+    if let Some(message_id) = reply_of
+        && let Some(governing) = crate::agents::handoff::store::governing_now(state, ws, &message_id).await?
+    {
+        level = Effective { level: governing, limited_by: "handoff" };
+    }
     let workspace = crate::agents::profiles::agent(&state.db, &state.config, ws).await?;
     let send = if row.kind == "lead" {
         workspace.permissions.send.clone()
@@ -464,6 +496,7 @@ mod tests {
             inbound_text: "",
             payroll_label: false,
             template_key: None,
+            template_body: false,
         }
     }
 
@@ -592,5 +625,25 @@ mod tests {
         assert!(never_do_hit("This is guaranteed to work", &rules).is_some());
         assert!(never_do_hit("Thanks for your note", &rules).is_none());
         assert!(never_do_hit("Anything", &[]).is_none());
+    }
+
+    #[test]
+    fn attached_no_longer_marks_mail_sensitive() {
+        assert!(!is_sensitive("Please find the timesheet attached."));
+        assert!(!is_sensitive("The attachments are in the next mail."));
+        assert!(is_sensitive("The invoice is attached."), "money words still count");
+    }
+
+    #[test]
+    fn template_ack_skips_the_word_scan_but_not_injection() {
+        let ack = "Hello,\n\nThank you. We have received your timesheet for September 2026 (23.5 h) and recorded it.\n\nBest regards,\nHR Operations";
+        let busy = "Please wire the refund and sign the NDA. Employee 1234 5678 9012 3456";
+        let asks = SendFacts { inbound_text: busy, ..facts("ravi@client.com", ack) };
+        assert!(blocker(&asks).is_some(), "words written by a model still meet the inbound scan");
+        assert_eq!(blocker(&SendFacts { template_body: true, ..asks.clone() }), None, "a template over typed facts does not echo the inbound mail");
+        assert!(blocker(&SendFacts { template_body: true, injected: Some("it names a tool"), ..asks.clone() }).is_some(), "injection still stops it");
+        assert!(blocker(&SendFacts { template_body: true, payroll_label: true, ..asks.clone() }).is_some(), "payroll still asks");
+        assert!(blocker(&SendFacts { template_body: true, to: "x@evil.org", ..asks.clone() }).is_some(), "the recipient rule stays");
+        assert!(blocker(&SendFacts { template_body: true, level: 1, ..asks }).is_some(), "and so does the level");
     }
 }

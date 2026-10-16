@@ -67,7 +67,8 @@ const WAIT_MS: i64 = 15 * 60_000;
 /// The timesheet desk's run under the `handoff` flag: the records are checked against the owner's rules, the decision is
 /// kept in the case for the sender's reply, and the manager is told once. Nothing is sent to the sender.
 async fn desk_run(ctx: &ToolCtx<'_>, message_id: &str, run: crate::hr::staffing::timesheet_records::Run) -> Result<ToolOutput, ToolError> {
-    use crate::hr::staffing::timesheet_records::{desk, rules::{MessageKind, Outcome}, summary};
+    use crate::agents::handoff::{Asker, Filed, MessageKind, Outcome};
+    use crate::hr::staffing::timesheet_records::{desk, summary};
     let waits = ctx.case.state().get("record_waits").and_then(Value::as_i64).unwrap_or(0);
     if run.records.is_empty() && (run.waiting_for_files || run.deferred) && waits < MAX_WAITS {
         return Ok(ToolOutput {
@@ -91,6 +92,12 @@ async fn desk_run(ctx: &ToolCtx<'_>, message_id: &str, run: crate::hr::staffing:
     drop(conn);
     let told = summary::summarize(ctx.state, ctx.ws(), ctx.case.agent_id.as_deref(), &review.rows, &review.decision).await?;
     let clean = !review.rows.is_empty() && statuses.iter().all(|s| s == "recorded") && review.all_matched();
+    // What the sender is to be told is Meera's to write: the desk only files the request.
+    let filed = match ctx.case.agent_id.as_deref() {
+        Some(agent_id) => desk::hand_off(ctx.state, ctx.ws(), &Asker { agent_id, case_id: Some(&ctx.case.id), job: &ctx.case.job }, message_id, &review.decision, clean).await?,
+        None => None,
+    };
+    let asked_meera = matches!(filed, Some(Filed::Requested { .. } | Filed::Replaced { .. } | Filed::Unchanged));
     // The manager's summary is the ask only when the manager is the one to decide (a portal question); a "recorded"
     // summary never replaces the review item for a sheet that needs a look.
     let manager_decides = told > 0 && review.decision.message.as_ref().is_some_and(|m| m.kind == MessageKind::Question);
@@ -102,9 +109,15 @@ async fn desk_run(ctx: &ToolCtx<'_>, message_id: &str, run: crate::hr::staffing:
         (_, _) => "Recorded, but the sheet and the portal differ".to_string(),
     };
     Ok(ToolOutput {
-        summary: if told > 0 { format!("{verdict}. The manager was told") } else { verdict },
+        summary: {
+            let mut summary = if told > 0 { format!("{verdict}. The manager was told") } else { verdict };
+            if asked_meera {
+                summary.push_str(". Asked Meera to write the reply to the sender");
+            }
+            summary
+        },
         value: json!({"records": run.records, "decision": review.decision}),
-        state: Some(json!({"decision": review.decision, "record_ids": review.record_ids(), "timesheet_clean": clean, "manager_notified": told > 0, "manager_decides": manager_decides})),
+        state: Some(json!({"decision": review.decision, "record_ids": review.record_ids(), "timesheet_clean": clean, "manager_notified": told > 0, "manager_decides": manager_decides, "asked_meera": asked_meera})),
         ..Default::default()
     })
 }
