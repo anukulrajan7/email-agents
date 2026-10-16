@@ -706,7 +706,7 @@ Shapes are as in the contract, with these details:
   `status_note` and `failure_reason` (plain sentence, e.g. "used this case's AI budget of $0.10 without finishing").
 - `Approval` adds `step_seq: number | null` (the timeline step that asked for it). `decided_by` is the person's email.
   `handoff` is `{ line, from: [{ agent_id, name, kind, job }] } | null`: set when an expert asked Meera for the reply
-  (`line` reads "Rohan asked Meera to tell the sender the timesheet is recorded"). `newer` is set when the expert has a newer request that could not be merged into the reply that stands (a person is working on it, or it is being sent); that request stays open and goes out as its own mail.| null` (the timeline step that asked for it). `decided_by` is the person's email.
+  (`line` reads "Rohan asked Meera to tell the sender the timesheet is recorded"). `newer` is set when the expert has a newer request that could not be merged into the reply that stands (a person is working on it, or it is being sent); that request stays open. When the reply is already being sent it goes out afterwards as its own mail; when a person is working on the reply (or another draft stands) it waits for that person and is not sent by the desk.| null` (the timeline step that asked for it). `decided_by` is the person's email.
 - `POST /cases` is idempotent: one case per requirement and per (kind, message); an existing case is returned.
   409 `conflict` when no planner model is configured; 404 for an unknown requirement or message.
 - Step and approval `summary` strings are plain sentences; no API string names a model.

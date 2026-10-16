@@ -131,6 +131,10 @@ pub async fn compose_message(state: &AppState, ws: &str, message_id: &str, meera
         .flatten();
     let first = first_name(sender_name.as_deref());
     let Some(body) = render::render_template(&m, first.as_deref(), &sign_off(state, ws, message_id).await?) else {
+        // Set aside for a person: the note keeps it from being tried again by every follow-up.
+        let ids: Vec<String> = m.asked.iter().map(|a| a.request_id.clone()).collect();
+        let mut conn = state.db.acquire().await?;
+        store::not_merged(&mut conn, ws, message_id, &ids, "the words are not all template", None).await?;
         return Ok(Composed::Nothing("the words are not all template"));
     };
     let askers = asker_names(state, ws, &m).await?;

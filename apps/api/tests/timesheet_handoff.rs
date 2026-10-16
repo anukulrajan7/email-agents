@@ -629,3 +629,97 @@ async fn a_request_filed_while_the_reply_waits_is_not_stranded_when_that_case_en
     let requests = w.env.requests(&id).await;
     assert!(requests.iter().all(|r| r.2 != "pending"), "{requests:?}");
 }
+
+async fn refile_stored(w: &World, id: &str, job: &str) -> Filed {
+    let (kind, facts, issues): (String, String, String) =
+        sqlx::query_as("SELECT kind, facts_json, issues_json FROM message_requests WHERE message_id = ?1 AND job = ?2").bind(id).bind(job).fetch_one(&w.env.state.db).await.unwrap();
+    let req = MessageRequest::template(MessageKind::parse(&kind).unwrap(), serde_json::from_str(&facts).unwrap(), serde_json::from_str(&issues).unwrap());
+    let rohan = w.rohan.clone();
+    handoff::hand_to_meera(&w.env.state, &w.env.ws, &Asker { agent_id: &rohan, case_id: None, job }, id, &req).await.unwrap()
+}
+
+#[tokio::test]
+async fn a_superseded_request_is_not_revived_by_a_late_rerun_of_the_desk() {
+    let w = world(Mbox::Personal, Some(Mode::On), 1).await;
+    let first = w.receive("gm-1", "th-1", 2, RAVI).await;
+    sqlx::query("UPDATE email_messages SET received_at = received_at - 600000 WHERE id = ?1").bind(&first).execute(&w.env.state.db).await.unwrap();
+    let second = w.receive("gm-2", "th-1", 1, RAVI).await;
+    assert_eq!(w.env.requests(&first).await[0].2, "superseded");
+    let filed = refile_stored(&w, &first, "desk:timesheet").await;
+    worker::drain(&w.env.state).await;
+    assert_eq!(filed, Filed::Unchanged);
+    assert_eq!(w.env.requests(&first).await[0].2, "superseded", "still closed");
+    assert!(w.env.live_drafts(&first).await.is_empty(), "the old correction does not come back next to the newer reply");
+    assert_eq!(w.env.live_drafts(&second).await.len(), 1);
+    assert_eq!(w.pending().await.len(), 1);
+}
+
+#[tokio::test]
+async fn a_request_closed_because_someone_else_answered_is_not_revived() {
+    let w = world(Mbox::Personal, Some(Mode::On), 3).await;
+    let id = sheet_with_a_draft_already_there(&w, "sent", "manual:sent", "Hello,\n\nAlready answered.\n\nPriya").await;
+    assert_eq!(w.env.requests(&id).await[0].2, "cancelled");
+    let cases_before = w.env.cases_by_job(&id).await.len();
+    let filed = refile_stored(&w, &id, "desk:timesheet").await;
+    worker::drain(&w.env.state).await;
+    assert_eq!(filed, Filed::Unchanged);
+    assert_eq!(w.env.requests(&id).await[0].2, "cancelled");
+    assert_eq!(w.env.cases_by_job(&id).await.len(), cases_before, "no new reply case, so nothing is cancelled again on every rerun");
+    assert_eq!(w.audits("handoff.cancelled").await.len(), 1);
+}
+
+#[tokio::test]
+async fn a_request_the_template_cannot_write_is_set_aside_and_does_not_spawn_reply_cases() {
+    let w = world(Mbox::Personal, Some(Mode::On), 1).await;
+    let id = w.receive("gm-1", "th-1", 1, RAVI).await;
+    let rohan = w.rohan.clone();
+    let custom = MessageRequest { kind: MessageKind::Answer, body: Some("Here is the answer.".into()), ..MessageRequest::template(MessageKind::Answer, vec![], vec![]) };
+    handoff::hand_to_meera(&w.env.state, &w.env.ws, &Asker { agent_id: &rohan, case_id: None, job: "other:job" }, &id, &custom).await.unwrap();
+    let pending = w.pending().await;
+    let (s, v) = w.env.req("POST", &format!("/approvals/{}", pending[0]["id"].as_str().unwrap()), w.token(), Some(json!({"decision": "approve"}))).await;
+    assert_eq!(s, axum::http::StatusCode::OK, "{v}");
+    worker::drain(&w.env.state).await;
+    for _ in 0..4 {
+        handoff::store::follow_up(&w.env.state, &w.env.ws, &id).await.unwrap();
+        worker::drain(&w.env.state).await;
+    }
+    let reply_cases = w.env.cases_by_job(&id).await.into_iter().filter(|(j, _)| j.starts_with("reply")).count();
+    assert!(reply_cases <= 2, "the first reply and at most one follow-up: {reply_cases}");
+    let note: Option<String> = sqlx::query_scalar("SELECT status_note FROM message_requests WHERE message_id = ?1 AND job = 'other:job'").bind(&id).fetch_one(&w.env.state.db).await.unwrap();
+    assert_eq!(note.as_deref(), Some("the words are not all template"));
+}
+
+#[tokio::test]
+async fn withdrawing_never_cancels_a_send_a_person_asked_for() {
+    let w = world(Mbox::Personal, Some(Mode::On), 3).await;
+    let id = w.receive("gm-1", "th-1", 1, RAVI).await;
+    sqlx::query("UPDATE drafts SET send_requested_by = ?1 WHERE message_id = ?2").bind(&w.env.op_id).bind(&id).execute(&w.env.state.db).await.unwrap();
+    let rohan = w.rohan.clone();
+    let none = email_ai_api::agents::handoff::Decision { outcome: email_ai_api::agents::handoff::Outcome::NothingToDo, message: None, manager_summary: None, waits: vec![], parked: None };
+    email_ai_api::hr::staffing::timesheet_records::desk::hand_off(&w.env.state, &w.env.ws, &Asker { agent_id: &rohan, case_id: None, job: "desk:timesheet" }, &id, &none, false).await.unwrap();
+    assert_eq!(w.env.live_drafts(&id).await.len(), 1, "the person's own send stays");
+    assert!(w.audits("handoff.hold_stopped").await.is_empty());
+    assert_eq!(w.audits("handoff.not_merged").await.len(), 1);
+}
+
+#[tokio::test]
+async fn turning_the_flag_off_stops_follow_up_cases() {
+    let w = world(Mbox::Personal, Some(Mode::On), 3).await;
+    let id = w.receive("gm-1", "th-1", 1, RAVI).await;
+    w.release_hold(&id).await;
+    sqlx::query(
+        "INSERT INTO message_requests (id, workspace_id, message_id, from_agent_id, job, kind, digest, status, created_at, updated_at) VALUES ('mrq_x', ?1, ?2, ?3, 'x:job', 'ack', 'd', 'pending', 1, 1)",
+    )
+    .bind(&w.env.ws)
+    .bind(&id)
+    .bind(&w.rohan)
+    .execute(&w.env.state.db)
+    .await
+    .unwrap();
+    w.env.flag(Key::Handoff, Mode::Off).await;
+    handoff::store::follow_up(&w.env.state, &w.env.ws, &id).await.unwrap();
+    assert!(!w.env.cases_by_job(&id).await.iter().any(|(j, _)| j == "reply#2"), "off: no new reply case");
+    w.env.flag(Key::Handoff, Mode::On).await;
+    handoff::store::follow_up(&w.env.state, &w.env.ws, &id).await.unwrap();
+    assert!(w.env.cases_by_job(&id).await.iter().any(|(j, _)| j == "reply#2"), "on: the follow-up starts");
+}

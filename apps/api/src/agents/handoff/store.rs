@@ -65,6 +65,12 @@ impl Stored {
 
 const COLUMNS: &str = "id, message_id, from_agent_id, job, kind, recipient_json, facts_json, issues_json, instructions, body, requester_level, status, draft_id, reply_case_id";
 
+/// The note of a request the desk took back; only such a request is revived when the same words are filed again.
+pub const WITHDRAWN_NOTE: &str = "the desk no longer asks for this";
+
+/// Most reply cases (the first and its follow-ups) one message may have: a request that cannot be written never loops.
+pub const MAX_REPLY_CASES: usize = 5;
+
 /// What filing did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Filed {
@@ -135,8 +141,8 @@ pub async fn hand_to_meera(state: &AppState, ws: &str, asker: &Asker<'_>, messag
     let digest = digest(req);
     let now = now_ms();
     let mut tx = db.begin_with("BEGIN IMMEDIATE").await?;
-    let existing: Option<(String, String, String)> =
-        sqlx::query_as("SELECT id, digest, status FROM message_requests WHERE workspace_id = ?1 AND message_id = ?2 AND from_agent_id = ?3 AND job = ?4")
+    let existing: Option<(String, String, String, Option<String>)> =
+        sqlx::query_as("SELECT id, digest, status, status_note FROM message_requests WHERE workspace_id = ?1 AND message_id = ?2 AND from_agent_id = ?3 AND job = ?4")
             .bind(ws)
             .bind(message_id)
             .bind(asker.agent_id)
@@ -145,8 +151,11 @@ pub async fn hand_to_meera(state: &AppState, ws: &str, asker: &Asker<'_>, messag
             .await?;
     let status = if refusal.is_some() { "dropped" } else { "pending" };
     let (id, outcome) = match existing {
-        // The same words filed again for a request that was withdrawn, superseded or refused: it asks again.
-        Some((id, old, was)) if old == digest && matches!(was.as_str(), "cancelled" | "superseded" | "dropped") && refusal.is_none() => {
+        // The same words filed again for a request the desk withdrew, or one that was refused and no longer is: it asks again.
+        // A superseded request (a newer reply replaced it) and one closed because someone else answered stay closed.
+        Some((id, old, was, note))
+            if old == digest && refusal.is_none() && (was == "dropped" || (was == "cancelled" && note.as_deref() == Some(WITHDRAWN_NOTE))) =>
+        {
             sqlx::query("UPDATE message_requests SET status = 'pending', status_note = NULL, draft_id = NULL, reply_case_id = NULL, from_case_id = ?2, requester_level = ?3, updated_at = ?4 WHERE id = ?1")
                 .bind(&id)
                 .bind(asker.case_id)
@@ -158,11 +167,11 @@ pub async fn hand_to_meera(state: &AppState, ws: &str, asker: &Asker<'_>, messag
             tx.commit().await?;
             return finish(state, ws, message_id, &id, Filed::Requested { case_id: None }, refusal, true).await;
         }
-        Some((id, old, _)) if old == digest => {
+        Some((id, old, ..)) if old == digest => {
             tx.commit().await?;
             return finish(state, ws, message_id, &id, Filed::Unchanged, refusal, false).await;
         }
-        Some((id, _, was)) => {
+        Some((id, _, was, _)) => {
             sqlx::query(
                 "UPDATE message_requests SET from_case_id = ?2, kind = ?3, recipient_json = ?4, facts_json = ?5, issues_json = ?6, instructions = ?7, never_do_json = ?8,
                         body = ?9, requester_level = ?10, digest = ?11, status = CASE WHEN status = 'sent' THEN status ELSE ?12 END, status_note = ?13, updated_at = ?14
@@ -327,6 +336,9 @@ async fn reply_job_for(db: &SqlitePool, ws: &str, message_id: &str, revived: boo
     .fetch_all(db)
     .await?;
     let Some((latest, status)) = cases.first() else { return Ok(REPLY_JOB.to_string()) };
+    if cases.len() >= MAX_REPLY_CASES {
+        return Ok(latest.clone());
+    }
     // A request that was withdrawn and asked again needs a case of its own: the earlier one was closed by the system.
     if (status == "done" || (revived && status == "cancelled")) && open_for_message(db, ws, message_id).await?.iter().any(|r| r.status == "pending") {
         return Ok(format!("reply#{}", cases.len() + 1));
@@ -406,6 +418,10 @@ pub const BEING_SENT_NOTE: &str = "the reply is already being sent";
 /// follow-up mail through the same gate, written by the next reply case. Requests that were set aside for a person (a note other
 /// than "being sent") are not followed up, and nothing starts while a send is still held (its own send brings it back here).
 pub async fn follow_up(state: &AppState, ws: &str, message_id: &str) -> sqlx::Result<()> {
+    // An admin who turned the flag off stops new reply cases.
+    if !crate::platform::flags::mode(&state.db, &state.config, ws, crate::platform::flags::Key::Handoff).await?.acts() {
+        return Ok(());
+    }
     let open: Option<String> = sqlx::query_scalar(
         "SELECT r.id FROM message_requests r WHERE r.workspace_id = ?1 AND r.message_id = ?2 AND r.status = 'pending' AND (r.status_note IS NULL OR r.status_note = ?3)
            AND NOT EXISTS (SELECT 1 FROM drafts d WHERE d.message_id = r.message_id AND d.status != 'sent' AND d.send_at IS NOT NULL)
@@ -478,7 +494,7 @@ pub async fn not_merged(conn: &mut SqliteConnection, ws: &str, message_id: &str,
 pub async fn withdraw(state: &AppState, ws: &str, asker: &Asker<'_>, message_id: &str) -> sqlx::Result<()> {
     let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     let gone: Vec<(String, Option<String>, Option<String>)> = sqlx::query_as(
-        "UPDATE message_requests SET status = 'cancelled', status_note = 'the desk no longer asks for this', updated_at = ?5
+        "UPDATE message_requests SET status = 'cancelled', status_note = ?6, updated_at = ?5
          WHERE workspace_id = ?1 AND message_id = ?2 AND from_agent_id = ?3 AND job = ?4 AND status IN ('pending', 'composed') RETURNING id, draft_id, reply_case_id",
     )
     .bind(ws)
@@ -486,6 +502,7 @@ pub async fn withdraw(state: &AppState, ws: &str, asker: &Asker<'_>, message_id:
     .bind(asker.agent_id)
     .bind(asker.job)
     .bind(now_ms())
+    .bind(WITHDRAWN_NOTE)
     .fetch_all(&mut *tx)
     .await?;
     for (id, ..) in &gone {
@@ -503,13 +520,13 @@ pub async fn withdraw(state: &AppState, ws: &str, asker: &Asker<'_>, message_id:
                 // A draft that is only waiting out its hold is taken back too: deleting it stops the send (the due job finds nothing).
                 let provider: Option<ProviderCopy> = sqlx::query_as(
                     "SELECT d.provider_draft_id, s.external_connection_id, s.provider_config_key, d.send_at FROM drafts d JOIN email_messages m ON m.id = d.message_id JOIN email_sources s ON s.id = m.source_id
-                     WHERE d.id = ?1 AND d.workspace_id = ?2 AND d.status = 'suggested' AND d.send_attempt_id IS NULL",
+                     WHERE d.id = ?1 AND d.workspace_id = ?2 AND d.status = 'suggested' AND d.send_attempt_id IS NULL AND d.send_requested_by IS NULL",
                 )
                 .bind(draft_id)
                 .bind(ws)
                 .fetch_optional(&mut *tx)
                 .await?;
-                let deleted = sqlx::query("DELETE FROM drafts WHERE id = ?1 AND workspace_id = ?2 AND status = 'suggested' AND send_attempt_id IS NULL")
+                let deleted = sqlx::query("DELETE FROM drafts WHERE id = ?1 AND workspace_id = ?2 AND status = 'suggested' AND send_attempt_id IS NULL AND send_requested_by IS NULL")
                     .bind(draft_id)
                     .bind(ws)
                     .execute(&mut *tx)
