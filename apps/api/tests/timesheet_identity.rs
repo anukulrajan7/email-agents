@@ -115,6 +115,53 @@ async fn an_alias_owned_by_another_person_is_a_conflict() {
     assert_eq!(env.record_rows().await[0].0, None, "and the sheet stays unresolved");
 }
 
+#[tokio::test]
+async fn the_owner_can_forget_a_wrong_link_and_the_conflict_says_so() {
+    let env = env().await;
+    let ravi = env.person("Ravi Kumar", Some("E1024"), "ravi@client.test", None).await;
+    let priya = env.person("Priya Shah", Some("E2000"), "priya@client.test", None).await;
+    let (_, saved) = env.sheet_mail("1", HR, "D. Rao", Some("X-77")).await;
+    sqlx::query("INSERT INTO timesheet_aliases (workspace_id, kind, value, person_id, created_at) VALUES (?1, 'code', 'x-77', ?2, 1)").bind(&env.ws).bind(&ravi).execute(&env.state.db).await.unwrap();
+    let link = format!("/staffing/timesheet-records/{}/link", saved[0].id);
+    let (s, body) = env.req("POST", &link, ADMIN, Some(json!({"person_id": priya}))).await;
+    assert_eq!(s, StatusCode::CONFLICT);
+    assert!(body.to_string().contains("Ravi Kumar") && body.to_string().contains("forget"), "names the owner and offers the way out: {body}");
+    let (s, _) = env.req("POST", "/staffing/identity-links/forget", OPERATOR, Some(json!({"employee_id": "X-77"}))).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "only the owner");
+    let (s, _) = env.req("POST", "/staffing/identity-links/forget", ADMIN, Some(json!({"employee_id": "NOPE"}))).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+    env.ok("POST", "/staffing/identity-links/forget", ADMIN, Some(json!({"employee_id": " x-77 "}))).await;
+    assert_eq!(env.count("SELECT COUNT(*) FROM timesheet_aliases").await, 0);
+    let logged: Vec<(String, Option<String>, String)> = sqlx::query_as("SELECT kind, person_id, before_json FROM identity_changes WHERE workspace_id = ?1").bind(&env.ws).fetch_all(&env.state.db).await.unwrap();
+    assert_eq!(logged, [("alias".to_string(), Some(ravi.clone()), "{\"kind\":\"code\"}".to_string())], "audited, and the value itself is not copied");
+    env.ok("POST", &link, ADMIN, Some(json!({"person_id": priya}))).await;
+    let owner: String = sqlx::query_scalar("SELECT person_id FROM timesheet_aliases WHERE value = 'x-77'").fetch_one(&env.state.db).await.unwrap();
+    assert_eq!(owner, priya, "linked again, to the right person");
+}
+
+#[tokio::test]
+async fn a_partial_name_from_the_persons_own_mailbox_is_not_theirs() {
+    let env = env().await;
+    env.person("Rahul Verma", Some("E500"), "rahul@client.test", None).await;
+    let (_, saved) = env.sheet_mail("1", "rahul@client.test", "Rahul", None).await;
+    assert_eq!(saved[0].person_id, None, "\"Rahul\" sent from Rahul Verma's address is still only a suggestion");
+    let (_, exact) = env.sheet_mail("2", "rahul@client.test", "Verma, Rahul", None).await;
+    assert!(exact[0].person_id.is_some(), "the exact name from his own address is his");
+}
+
+#[tokio::test]
+async fn sheets_linked_by_a_partial_name_can_be_listed_for_review() {
+    let env = env().await;
+    let ravi = env.person("Ravi Kumar", Some("E1024"), "ravi@client.test", None).await;
+    let (_, saved) = env.sheet_mail("1", HR, "Dinesh Rao", None).await;
+    sqlx::query("UPDATE timesheet_records SET person_id = ?1, match_method = 'name', match_confidence = 0.7 WHERE id = ?2").bind(&ravi).bind(&saved[0].id).execute(&env.state.db).await.unwrap();
+    let list = env.ok("GET", "/staffing/timesheet-records/weak-links", ADMIN, None).await;
+    assert_eq!(list["items"].as_array().unwrap().len(), 1, "{list}");
+    assert_eq!(list["items"][0]["id"], json!(saved[0].id));
+    let (s, _) = env.req("GET", "/staffing/timesheet-records/weak-links", OPERATOR, None).await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+}
+
 async fn on() -> Env {
     let env = env().await;
     env.flag(Key::Handoff, Mode::On).await;

@@ -292,6 +292,7 @@ fn body_for(method: &str, template: &str, fx: &Fixture) -> Option<Value> {
         (_, "/sources/nango-session") => json!({"provider": "google-mail"}),
         (_, "/staffing/portal/hours") | (_, "/staffing/portal/submissions") | (_, "/team/people/import") => json!({"csv": "a", "dry_run": true}),
         (_, "/staffing/timesheet-records/{id}/link") | (_, "/staffing/identities/{id}/link") => json!({"person_id": id("people")}),
+        (_, "/staffing/identity-links/forget") => json!({"employee_id": "X-77"}),
         (_, "/team/ownership") => json!({"email": "nobody@x.test"}),
         (_, "/packs") => json!({"packs": ["general"]}),
         (_, "/alert-settings") => json!({"enabled": true, "recipients": [], "escalate_to": [], "unanswered_hours": 4, "escalate_after_hours": 24, "daily_digest": false, "digest_hour": 9}),

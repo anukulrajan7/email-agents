@@ -147,3 +147,15 @@ pub async fn suppresses_auto_reply(db: &SqlitePool, ws: &str, message_id: &str) 
     .fetch_one(db)
     .await
 }
+
+/// Records matched by a partial name (`name` at 0.7), a link the system used to make by itself. A person confirms each (link
+/// it again by hand) or unlinks it; newest period first.
+pub async fn weakly_linked(db: &SqlitePool, ws: &str) -> sqlx::Result<Vec<Value>> {
+    let rows: Vec<RecordRow> = sqlx::query_as(&format!(
+        "{SELECT} WHERE r.workspace_id = ?1 AND r.match_method = 'name' AND r.match_confidence = 0.7 AND r.status != 'replaced' ORDER BY r.period_start DESC, r.created_at DESC LIMIT 500"
+    ))
+    .bind(ws)
+    .fetch_all(db)
+    .await?;
+    Ok(rows.iter().map(|r| r.json(false)).collect())
+}

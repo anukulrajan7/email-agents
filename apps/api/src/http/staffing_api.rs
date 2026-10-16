@@ -32,6 +32,8 @@ pub fn routes() -> Router<AppState> {
         .route("/workspaces/{ws}/staffing/timesheet-records/{id}", get(timesheet_record))
         .route("/workspaces/{ws}/staffing/timesheet-records/{id}/link", post(link_timesheet_record))
         .route("/workspaces/{ws}/staffing/timesheet-records/{id}/approve", post(approve_timesheet_record))
+        .route("/workspaces/{ws}/staffing/identity-links/forget", post(forget_identity_link))
+        .route("/workspaces/{ws}/staffing/timesheet-records/weak-links", get(weak_links))
         .route("/workspaces/{ws}/staffing/portal/hours", post(import_hours))
         .route("/workspaces/{ws}/staffing/portal/submissions", post(import_submissions))
         .route("/workspaces/{ws}/staffing/portal/reconcile", post(reconcile))
@@ -276,6 +278,34 @@ pub async fn link_timesheet_record(State(state): State<AppState>, user: AuthUser
     }
     let row = records::get(&state.db, &ws, &id).await?.ok_or(AppError::NotFound)?;
     Ok(Json(row.json(true)))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ForgetBody {
+    /// The employee ID to forget.
+    employee_id: Option<String>,
+    /// The name to forget.
+    name: Option<String>,
+}
+
+/// "Forget this link": the workspace owner removes a remembered employee ID or name, so a wrong link can be fixed and the
+/// sheet linked again. Logged in `identity_changes`.
+pub async fn forget_identity_link(State(state): State<AppState>, user: AuthUser, Path(ws): Path<String>, Json(body): Json<ForgetBody>) -> AppResult<Json<Value>> {
+    gate(&state, &ws, &user).await?.require_owner()?;
+    let (kind, value) = match (&body.employee_id, &body.name) {
+        (Some(v), None) => ("code", v),
+        (None, Some(v)) => ("name", v),
+        _ => return Err(AppError::BadRequest("give either employee_id or name".into())),
+    };
+    let change = resolve::forget_link(&state, &ws, Actor::User(&user.id), kind, value).await?;
+    Ok(Json(json!({ "change_id": change })))
+}
+
+/// Sheets that were linked by a partial name (confidence 0.7) before that was stopped: the owner looks at each once.
+pub async fn weak_links(State(state): State<AppState>, user: AuthUser, Path(ws): Path<String>) -> AppResult<Json<Value>> {
+    gate(&state, &ws, &user).await?.require_owner()?;
+    Ok(Json(json!({ "items": records::weakly_linked(&state.db, &ws).await? })))
 }
 
 /// "This sheet is right." The person's manager or an admin approves it; the first approval stays.

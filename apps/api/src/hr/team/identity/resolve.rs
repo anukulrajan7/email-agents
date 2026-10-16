@@ -377,6 +377,24 @@ pub async fn undo(state: &AppState, ws: &str, actor: Actor<'_>, change_id: &str)
     Ok(undone)
 }
 
+/// The workspace owner forgets a remembered employee ID (`code`) or name (`name`), so a wrong link can be fixed. Logged as an
+/// `alias` change (the kind of link only, never the value: a name is personal data).
+pub async fn forget_link(state: &AppState, ws: &str, actor: Actor<'_>, kind: &str, raw_value: &str) -> Result<String, IdentityError> {
+    if !matches!(kind, "code" | "name") {
+        return Err(IdentityError::Invalid("kind must be code or name".into()));
+    }
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
+    let Some((person_id, _)) = records::forget_alias(&mut tx, ws, kind, raw_value).await? else { return Err(IdentityError::NotFound) };
+    let change = changes::record(
+        &mut tx,
+        NewChange { ws, kind: "alias", person_id: Some(&person_id), identity_id: None, record_ids: &[], before: json!({"kind": kind}), after: json!({"forgotten": true}), actor, evidence: json!({}) },
+    )
+    .await?;
+    audit_change(&mut tx, ws, actor, "identity.link_forgotten", &change, json!({"kind": kind, "person_id": person_id})).await?;
+    tx.commit().await?;
+    Ok(change)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -45,14 +45,16 @@ fn tokens(name: &str) -> Vec<String> {
     name_key(name).split(' ').filter(|t| !t.is_empty()).map(str::to_string).collect()
 }
 
-/// One name contains the other's words ("Ravi Kumar" and "Ravi Kumar Singh", "Kumar, Ravi").
+/// The same name, whatever the order, case, punctuation or initials ("Ravi Kumar", "Kumar, Ravi"). A longer or shorter name
+/// ("Ravi Kumar Singh", "Ravi") is another name.
 pub fn names_agree(a: &str, b: &str) -> bool {
-    let (ta, tb) = (tokens(a), tokens(b));
-    !ta.is_empty() && !tb.is_empty() && (ta.iter().all(|t| tb.contains(t)) || tb.iter().all(|t| ta.contains(t)))
+    let key = name_key(a);
+    !key.is_empty() && key == name_key(b)
 }
 
 /// Who a timesheet is for. What the sheet says about the employee wins over who sent the mail, so a manager or the
-/// HR mailbox forwarding a sheet never becomes its owner: the sender counts only when it agrees with the name written.
+/// HR mailbox forwarding a sheet never becomes its owner: the sender counts only when the name written is exactly theirs, or
+/// when the sheet names nobody and was sent from the person's own mailbox (it was not forwarded).
 pub fn match_person(people: &[Candidate], aliases: &Aliases, id: &Identity, sender: &str, original_sender: Option<&str>) -> Match {
     let by_email = |addr: &str| people.iter().find(|p| p.emails.iter().any(|e| e.eq_ignore_ascii_case(addr)));
     if let Some(code) = id.code.as_deref().map(str::to_lowercase) {
@@ -74,7 +76,10 @@ pub fn match_person(people: &[Candidate], aliases: &Aliases, id: &Identity, send
     let written = id.name.as_deref().filter(|n| !tokens(n).is_empty());
     for (addr, confidence) in original_sender.map(|a| (a, 0.9)).into_iter().chain(std::iter::once((sender, 0.88))) {
         if let Some(p) = by_email(addr)
-            && written.is_none_or(|w| names_agree(&p.name, w))
+            && match written {
+                Some(w) => names_agree(&p.name, w),
+                None => original_sender.is_none(),
+            }
         {
             return Match::found(&p.id, "email", confidence);
         }
@@ -158,6 +163,31 @@ mod tests {
         assert_eq!((m.person_id.as_deref(), m.method), (Some("p_dev"), "alias"));
         let m = match_person(&people(), &a, &who(Some("D. Pat"), None, None), "hr@acme.test", None);
         assert_eq!((m.person_id.as_deref(), m.method), (Some("p_dev2"), "alias"));
+    }
+
+    #[test]
+    fn the_senders_address_confirms_only_an_exactly_written_name() {
+        let mut roster = people();
+        roster.push(Candidate { id: "p_rahul".into(), name: "Rahul Verma".into(), code: None, emails: vec!["rahul@acme.test".into()] });
+        roster.push(Candidate { id: "p_ravi_k".into(), name: "Ravi Kumar".into(), code: None, emails: vec!["ravi.k@acme.test".into()] });
+        let none = Aliases::default();
+        let from_rahul = match_person(&roster, &none, &who(Some("Rahul"), None, None), "rahul@acme.test", None);
+        assert_eq!(from_rahul.person_id, None, "\"Rahul\" is not \"Rahul Verma\"");
+        let singh = match_person(&roster, &none, &who(Some("Ravi Kumar Singh"), None, None), "ravi.k@acme.test", None);
+        assert_eq!(singh.person_id, None, "a longer name is someone else, even from Ravi Kumar's mailbox");
+        let exact = match_person(&roster, &none, &who(Some("Kumar, Ravi"), None, None), "ravi.k@acme.test", None);
+        assert_eq!(exact.person_id.as_deref(), Some("p_ravi_k"));
+    }
+
+    #[test]
+    fn a_nameless_sheet_belongs_to_the_sender_only_when_it_was_not_forwarded() {
+        let none = Aliases::default();
+        let own = match_person(&people(), &none, &Identity::default(), "ravi@acme.test", None);
+        assert_eq!(own.person_id.as_deref(), Some("p_ravi"), "sent from their own mailbox");
+        let forwarded = match_person(&people(), &none, &Identity::default(), "ravi@acme.test", Some("priya@acme.test"));
+        assert_eq!(forwarded.person_id, None, "a forwarded nameless sheet is nobody's until a person says");
+        let by_forwarder = match_person(&people(), &none, &Identity::default(), "hr@acme.test", Some("ravi@acme.test"));
+        assert_eq!(by_forwarder.person_id, None);
     }
 
     #[test]
