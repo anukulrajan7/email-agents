@@ -99,6 +99,8 @@ export type Escalations = {
   can_edit: boolean;
 };
 
+export type TimesheetCadence = 'monthly' | 'weekly' | 'daily';
+
 export type TeamSettings = {
   tz_offset_minutes: number;
   manager_after_hours: number | null;
@@ -112,5 +114,8 @@ export type TeamSettings = {
   client_domains?: string[];
   timesheet_grace_days?: number;
   hours_tolerance?: number;
+  timesheet_cadence?: TimesheetCadence;
+  max_hours_per_day?: number | null;
+  require_signature?: boolean;
   sources?: { id: string; kind: string; mailbox: string | null }[];
 };

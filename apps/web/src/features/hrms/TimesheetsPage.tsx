@@ -7,6 +7,7 @@ import { useSaveTeamSettings, useTeamAccess, useTeamSettings } from '../team/hoo
 import type { TeamSettings } from '../team/types';
 import { RecordById } from './RecordDetail';
 import { TimesheetGridView } from './TimesheetGridView';
+import { TimesheetRulesForm } from './TimesheetRulesForm';
 import { TimesheetRecordsView } from './TimesheetRecordsView';
 import type { GridRow } from './types';
 
@@ -108,6 +109,7 @@ export function TimesheetsPage() {
         </Dialog>
       )}
       {owner && settings.data && <PolicyForm key={JSON.stringify(settings.data)} ws={ws} settings={settings.data} />}
+      {owner && settings.data && <TimesheetRulesForm key={JSON.stringify(settings.data)} ws={ws} settings={settings.data} />}
     </Page>
   );
 }

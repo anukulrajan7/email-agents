@@ -203,6 +203,43 @@ describe('TimesheetsPage', () => {
     // The API rejects unknown fields; `sources` is read-only and must not be sent back.
     expect(body).not.toHaveProperty('sources');
   });
+
+  it('lets the super admin set the timesheet rules, and clearing the daily limit sends null', async () => {
+    const withRules = { ...settings, timesheet_cadence: 'monthly', max_hours_per_day: 10, require_signature: false };
+    const fetchMock = mockApi({
+      '/team/access': access('super_admin'),
+      '/team/settings': (init?: RequestInit) => (init?.body ? JSON.parse(init.body as string) : withRules),
+      '/staffing/timesheet-grid': { ...grid, rows: [], days: [], summary: { recorded: 0, needs_check: 0, missing: 0 } },
+    });
+    renderAt('/w/w1/timesheets', '/w/:ws/timesheets', <TimesheetsPage />);
+    const limit = await screen.findByLabelText('Most hours in one day');
+    expect(limit).toHaveValue(10);
+    expect(screen.getByLabelText('How often a timesheet is expected')).toHaveValue('monthly');
+    expect(screen.getByLabelText('Hours a sheet may differ from the portal')).toHaveValue(0.5);
+    await userEvent.selectOptions(screen.getByLabelText('How often a timesheet is expected'), 'weekly');
+    await userEvent.clear(limit);
+    await userEvent.click(screen.getByRole('switch', { name: "Timesheets need an approver's signature" }));
+    await userEvent.click(screen.getByRole('button', { name: 'Save rules' }));
+    await waitFor(() => expect(fetchMock.mock.calls.some(([, init]) => init?.method === 'PUT')).toBe(true));
+    const body = JSON.parse(fetchMock.mock.calls.find(([, init]) => init?.method === 'PUT')?.[1]?.body as string);
+    expect(body).toMatchObject({ timesheet_cadence: 'weekly', max_hours_per_day: null, require_signature: true, hours_tolerance: 0.5, timesheet_grace_days: 3 });
+    expect(body).not.toHaveProperty('sources');
+  });
+
+  it('starts from monthly, no limit and no signature when the settings do not have the rules yet, and only the super admin sees them', async () => {
+    mockApi({ '/team/access': access('super_admin'), '/team/settings': settings, '/staffing/timesheet-grid': { ...grid, rows: [], days: [], summary: { recorded: 0, needs_check: 0, missing: 0 } } });
+    renderAt('/w/w1/timesheets', '/w/:ws/timesheets', <TimesheetsPage />);
+    expect(await screen.findByLabelText('Most hours in one day')).toHaveValue(null);
+    expect(screen.getByLabelText('How often a timesheet is expected')).toHaveValue('monthly');
+    expect(screen.getByRole('switch', { name: "Timesheets need an approver's signature" })).toHaveAttribute('aria-checked', 'false');
+  });
+
+  it('hides the rules from people who cannot edit them', async () => {
+    mockApi({ '/team/access': access('operator'), '/team/settings': settings, '/staffing/timesheet-grid': grid });
+    renderAt('/w/w1/timesheets', '/w/:ws/timesheets', <TimesheetsPage />);
+    await screen.findByText('Ravi Kumar');
+    expect(screen.queryByText('Timesheet rules')).not.toBeInTheDocument();
+  });
 });
 
 describe('PortalPage', () => {
