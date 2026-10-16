@@ -21,6 +21,17 @@ use crate::platform::db::{new_id, now_ms};
 
 pub const LEASE_MS: i64 = 120_000;
 
+/// Kinds that cannot work in resumable batches: one run may legitimately take this long. Every other
+/// kind (knowledge backfill, text clean-up, HTML refetch, source purge) does a bounded batch or time
+/// budget per run and chains its own next run, so it keeps the global limit.
+const LONG_RUNTIME_SECS: u64 = 1_800;
+
+/// How long a handler of `kind` may run before it is cut off and retried; `default_secs` is `JOB_MAX_RUNTIME_SECS`.
+pub fn max_runtime(kind: &str, default_secs: u64) -> std::time::Duration {
+    let long = matches!(kind, kind::SYNC_NANGO_SOURCE | kind::RUN_EVAL | kind::BACKUP_DATABASE);
+    std::time::Duration::from_secs(if long { default_secs.max(LONG_RUNTIME_SECS) } else { default_secs })
+}
+
 pub mod kind {
     pub const FETCH_FORWARDED_EMAIL: &str = "fetch_forwarded_email";
     pub const CLASSIFY_EMAIL: &str = "classify_email";
@@ -313,5 +324,21 @@ mod tests {
         assert!((2_000..3_000).contains(&backoff_ms(1)));
         assert!((8_000..9_000).contains(&backoff_ms(3)));
         assert!((300_000..301_000).contains(&backoff_ms(30)));
+    }
+}
+
+#[cfg(test)]
+mod runtime_tests {
+    use super::*;
+
+    #[test]
+    fn long_kinds_get_half_an_hour_and_the_rest_the_global_limit() {
+        let secs = |kind, default| max_runtime(kind, default).as_secs();
+        assert_eq!(secs(kind::ANALYZE_MESSAGE, 600), 600);
+        assert_eq!(secs(kind::BACKFILL_KNOWLEDGE, 600), 600, "chains its own batches");
+        assert_eq!(secs(kind::PURGE_SOURCE, 600), 600, "works in time-budgeted runs");
+        assert_eq!(secs(kind::SYNC_NANGO_SOURCE, 600), 1_800);
+        assert_eq!(secs(kind::RUN_EVAL, 600), 1_800);
+        assert_eq!(secs(kind::SYNC_NANGO_SOURCE, 7_200), 7_200, "a higher global limit still wins");
     }
 }

@@ -216,7 +216,14 @@ impl Config {
             openrouter_safety_fallback_model_id: var("OPENROUTER_SAFETY_FALLBACK_MODEL_ID", "deepseek/deepseek-v4-flash"),
             ai_retry_backoff_ms: var("AI_RETRY_BACKOFF_MS", "1000").parse().context("AI_RETRY_BACKOFF_MS")?,
             ai_person_check_secs: var("AI_PERSON_CHECK_SECS", "15").parse::<u64>().context("AI_PERSON_CHECK_SECS")?.max(1),
-            ai_attempt_timeout_secs: var("AI_ATTEMPT_TIMEOUT_SECS", "20").parse::<u64>().context("AI_ATTEMPT_TIMEOUT_SECS")?.max(1),
+            ai_attempt_timeout_secs: {
+                let configured = var("AI_ATTEMPT_TIMEOUT_SECS", "20").parse::<u64>().context("AI_ATTEMPT_TIMEOUT_SECS")?;
+                let (secs, clamped) = crate::ai::defer::clamp_attempt_timeout(configured);
+                if clamped {
+                    tracing::warn!(configured, effective = secs, "AI_ATTEMPT_TIMEOUT_SECS is too long for the safety-check ladder to reach its fallback; using the shorter value");
+                }
+                secs
+            },
             agent_max_steps: var("AGENT_MAX_STEPS", "15").parse().context("AGENT_MAX_STEPS")?,
             agent_budget_usd: var("AGENT_BUDGET_USD", "0.10").parse().context("AGENT_BUDGET_USD")?,
             agent_fast_model_id: var("AGENT_FAST_MODEL_ID", "qwen/qwen3.8-flash"),
@@ -235,7 +242,7 @@ impl Config {
             email_retention_days: var("EMAIL_RETENTION_DAYS", "30").parse().context("EMAIL_RETENTION_DAYS")?,
             job_worker_concurrency: var("JOB_WORKER_CONCURRENCY", "2").parse().context("JOB_WORKER_CONCURRENCY")?,
             job_lease_ms: var("JOB_LEASE_MS", "120000").parse::<i64>().context("JOB_LEASE_MS")?.max(5_000),
-            job_max_runtime_secs: var("JOB_MAX_RUNTIME_SECS", "600").parse::<u64>().context("JOB_MAX_RUNTIME_SECS")?.max(1),
+            job_max_runtime_secs: var("JOB_MAX_RUNTIME_SECS", "600").parse::<u64>().context("JOB_MAX_RUNTIME_SECS")?.max(60),
             allow_test_emails: var("ALLOW_TEST_EMAILS", "false") == "true",
             max_body_chars: var("MAX_BODY_CHARS", "200000").parse().context("MAX_BODY_CHARS")?,
             web_dist_dir: var("WEB_DIST_DIR", ""),

@@ -19,11 +19,11 @@ pub const MAX_GAPS_PER_WORKSPACE: i64 = 200;
 const MAX_NAME_CHARS: usize = 60;
 
 /// Counts one more request for `gap.tool` (the first one creates the row). Past the cap, names already
-/// recorded still count and new names are dropped.
-pub async fn record(conn: &mut SqliteConnection, ws: &str, gap: NewGap<'_>) -> sqlx::Result<()> {
+/// recorded still count and new names are dropped (`false`, with a warning).
+pub async fn record(conn: &mut SqliteConnection, ws: &str, gap: NewGap<'_>) -> sqlx::Result<bool> {
     let now = now_ms();
     let tool: String = gap.tool.chars().take(MAX_NAME_CHARS).collect();
-    sqlx::query(
+    let result = sqlx::query(
         "INSERT INTO tool_gaps (id, workspace_id, tool, why, agent_id, message_id, source, first_seen_at, last_seen_at)
          SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8
          WHERE (SELECT COUNT(*) FROM tool_gaps WHERE workspace_id = ?2) < ?9
@@ -42,7 +42,11 @@ pub async fn record(conn: &mut SqliteConnection, ws: &str, gap: NewGap<'_>) -> s
     .bind(MAX_GAPS_PER_WORKSPACE)
     .execute(conn)
     .await?;
-    Ok(())
+    let recorded = result.rows_affected() > 0;
+    if !recorded {
+        tracing::warn!(workspace_id = ws, tool = %tool, cap = MAX_GAPS_PER_WORKSPACE, "tool gap not recorded: the workspace is at its cap of distinct tool names");
+    }
+    Ok(recorded)
 }
 
 #[cfg(test)]
@@ -66,10 +70,11 @@ mod tests {
     #[tokio::test]
     async fn the_table_is_capped_per_workspace_but_known_names_keep_counting() {
         let mut c = conn().await;
-        for n in 0..MAX_GAPS_PER_WORKSPACE + 25 {
-            record(&mut c, "ws1", gap(&format!("tool_{n}"))).await.unwrap();
+        for n in 0..MAX_GAPS_PER_WORKSPACE {
+            assert!(record(&mut c, "ws1", gap(&format!("tool_{n}"))).await.unwrap());
         }
-        record(&mut c, "ws1", gap("tool_0")).await.unwrap();
+        assert!(!record(&mut c, "ws1", gap("one_too_many")).await.unwrap(), "a new name past the cap is dropped (and warned about)");
+        assert!(record(&mut c, "ws1", gap("tool_0")).await.unwrap(), "a known name still counts");
         record(&mut c, "ws2", gap("tool_new")).await.unwrap();
         let rows = |ws: &'static str| sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM tool_gaps WHERE workspace_id = ?1").bind(ws);
         assert_eq!(rows("ws1").fetch_one(&mut c).await.unwrap(), MAX_GAPS_PER_WORKSPACE);

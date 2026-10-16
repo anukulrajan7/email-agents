@@ -250,7 +250,8 @@ pub async fn record_signature_gap(conn: &mut SqliteConnection, ws: &str, agent_i
         return Ok(());
     }
     let why = "The owner asks for signed timesheets, but a signature cannot be read from a sheet yet.";
-    crate::agents::gaps::record(conn, ws, crate::agents::gaps::NewGap { tool: "read_signature", why, agent_id, message_id: Some(message_id), source: "rule" }).await
+    crate::agents::gaps::record(conn, ws, crate::agents::gaps::NewGap { tool: "read_signature", why, agent_id, message_id: Some(message_id), source: "rule" }).await?;
+    Ok(())
 }
 
 /// A recent sheet whose records appeared after the desk's case had finished or never started (the files took longer than

@@ -35,6 +35,13 @@ const DEFER_MINUTES: [i64; 3] = [5, 10, 20];
 /// All in-call rungs together stop here; the job's lease heartbeat keeps a long turn from being claimed twice.
 const DEADLINE: Duration = Duration::from_secs(90);
 
+/// The longest one call may take and still leave room for the usual model's retries and the fallback inside `DEADLINE`.
+pub fn clamp_attempt_timeout(configured_secs: u64) -> (u64, bool) {
+    let most = (DEADLINE.as_secs() / (u64::from(RETRIES) + 2)).max(1);
+    let secs = configured_secs.clamp(1, most);
+    (secs, secs != configured_secs)
+}
+
 /// What to do after attempt number `attempt` (counted from 0 across the whole ladder) failed with a
 /// retryable error. `base_ms` is the first pause (the second is 3x); 0 means no pauses.
 pub fn next(attempt: u32, base_ms: u64) -> Step {
@@ -273,6 +280,14 @@ mod tests {
         .await;
         assert_eq!(out.unwrap(), 5);
         assert_eq!(seen.into_inner().unwrap(), [None, None, None, Some("fb".to_string())]);
+    }
+
+    #[test]
+    fn a_configured_attempt_timeout_never_makes_the_fallback_unreachable() {
+        assert_eq!(clamp_attempt_timeout(20), (20, false));
+        assert_eq!(clamp_attempt_timeout(22), (22, false));
+        assert_eq!(clamp_attempt_timeout(60), (22, true), "90 s / (2 retries + 2) = 22 s");
+        assert_eq!(clamp_attempt_timeout(0), (1, true));
     }
 
     #[test]
