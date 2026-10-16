@@ -51,7 +51,8 @@ test.describe('as an admin', () => {
     await page.getByRole('button', { name: `Move ${before[0]} down` }).click();
     await expect.poll(async () => (await names())[0]).toBe(`Edit ${before[1]}`);
     await page.reload();
-    expect((await names())[0]).toBe(`Edit ${before[1]}`);
+    // The list renders after its fetch; read it only once it is there (a bare read raced the reload).
+    await expect.poll(async () => (await names())[0]).toBe(`Edit ${before[1]}`);
     await page.getByRole('button', { name: `Move ${before[0]} up` }).click();
     await expect.poll(async () => (await names())[0]).toBe(`Edit ${before[0]}`);
   });
