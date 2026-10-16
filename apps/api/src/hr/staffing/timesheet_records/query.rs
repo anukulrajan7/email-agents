@@ -2,7 +2,7 @@ use super::*;
 
 pub(super) const SELECT: &str = "SELECT r.id, r.person_id, p.name AS linked_name, r.employee_code, r.person_name, r.sender_address, r.identity_json, r.match_method,
         r.match_confidence, r.message_id, r.source, r.email_subject, r.email_received_at, r.attachment_filename, r.attachment_kind,
-        r.period_start, r.period_end, r.total_hours, r.entries_json, r.client, r.status, r.replaces_id, r.issues_json, r.approved_by, r.approved_at, r.created_at, r.updated_at
+        r.period_start, r.period_end, r.total_hours, r.entries_json, r.client, r.status, r.replaces_id, r.issues_json, r.approved_by, r.approved_at, r.created_at, r.updated_at, r.identity_id
     FROM timesheet_records r LEFT JOIN people p ON p.id = r.person_id";
 
 impl RecordRow {
@@ -44,6 +44,7 @@ impl RecordRow {
             "match_method": self.match_method,
             "match_confidence": self.match_confidence,
             "needs_person": self.person_id.is_none(),
+            "identity_id": self.identity_id,
             "issues": issues,
             "replaces_id": self.replaces_id,
             "email": {

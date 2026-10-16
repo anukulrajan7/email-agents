@@ -16,6 +16,26 @@ pub(super) async fn insert_record(db: &SqlitePool, d: Draft<'_>, person_name: Op
         return Ok(existing);
     }
     let mut issues = d.issues.clone();
+    let mut identity_id: Option<String> = None;
+    if d.person_id.is_none() && d.group {
+        identity_id = unresolved::attach(&mut tx, d.ws, &d.sheet.identity, &address_of(&d.msg.sender_address), d.roster).await?;
+        if let Some(group) = &identity_id {
+            let twin: Option<String> = sqlx::query_scalar(
+                "SELECT id FROM timesheet_records WHERE workspace_id = ?1 AND identity_id = ?2 AND person_id IS NULL AND status != 'replaced'
+                   AND period_start = ?3 AND period_end = ?4 AND COALESCE(total_hours, -1) = COALESCE(?5, -1) LIMIT 1",
+            )
+            .bind(d.ws)
+            .bind(group)
+            .bind(&d.period.0)
+            .bind(&d.period.1)
+            .bind(d.total)
+            .fetch_optional(&mut *tx)
+            .await?;
+            if twin.is_some() {
+                issues.push(note("possible_duplicate", "This looks like the same sheet as one already received for this name."));
+            }
+        }
+    }
     let mut status = d.status;
     let mut replaces: Option<String> = None;
     if let Some(person) = &d.person_id {
@@ -33,8 +53,8 @@ pub(super) async fn insert_record(db: &SqlitePool, d: Draft<'_>, person_name: Op
         "INSERT INTO timesheet_records
            (id, workspace_id, person_id, employee_code, person_name, sender_address, identity_json, match_method, match_confidence,
             message_id, attachment_id, source_key, source, email_subject, email_received_at, attachment_filename, attachment_kind,
-            period_start, period_end, total_hours, entries_json, client, status, replaces_id, issues_json, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?26)",
+            period_start, period_end, total_hours, entries_json, client, status, replaces_id, issues_json, created_at, updated_at, identity_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?26, ?27)",
     )
     .bind(&id)
     .bind(d.ws)
@@ -62,8 +82,12 @@ pub(super) async fn insert_record(db: &SqlitePool, d: Draft<'_>, person_name: Op
     .bind(&replaces)
     .bind(serde_json::to_string(&issues).unwrap_or_else(|_| "[]".into()))
     .bind(now)
+    .bind(&identity_id)
     .execute(&mut *tx)
     .await?;
+    if let Some(group) = &identity_id {
+        unresolved::recount(&mut tx, d.ws, group).await?;
+    }
     tx.commit().await?;
     Ok(Saved {
         id,

@@ -28,7 +28,7 @@ use crate::{
     platform::db::{iso, new_id, now_ms},
     http::AppState,
     platform::packs,
-    hr::team::{access::Access, clock, settings},
+    hr::team::{access::Access, clock, identity::unresolved, settings},
 };
 
 mod source;
@@ -63,6 +63,7 @@ pub use query::for_message;
 pub use query::attention;
 pub use query::suppresses_auto_reply;
 pub use link::{Linked, link_person};
+pub(crate) use link::{Plan as LinkPlan, apply as apply_plan, plan_identity, plan_record, undo_link};
 pub use grid::grid;
 pub use backfill::backfill;
 pub use backfill::erase_sender;
@@ -185,6 +186,10 @@ struct MessageRow {
 }
 
 struct Draft<'a> {
+    /// The roster, for working out who an unknown name might be.
+    roster: &'a [Candidate],
+    /// Group an unmatched sheet under the name it was written with (the `handoff` flag acts).
+    group: bool,
     ws: &'a str,
     message_id: &'a str,
     unit: &'a Unit,
@@ -251,6 +256,7 @@ pub struct RecordRow {
     approved_at: Option<i64>,
     created_at: i64,
     updated_at: i64,
+    identity_id: Option<String>,
 }
 
 #[cfg(test)]

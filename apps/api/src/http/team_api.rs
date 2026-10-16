@@ -50,7 +50,7 @@ fn bad(e: people::FieldError) -> AppError {
     AppError::BadRequest(format!("{}: {}", e.field, e.message))
 }
 
-async fn context(state: &AppState, ws: &str) -> AppResult<Context> {
+pub(super) async fn context(state: &AppState, ws: &str) -> AppResult<Context> {
     let staffing = packs::enabled(&state.db, ws, packs::STAFFING).await?;
     let hr_source_id = settings::load(&state.db, ws).await?.hr_source_id;
     let hr_connected = match &hr_source_id {

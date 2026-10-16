@@ -57,5 +57,9 @@ pub async fn erase_sender(conn: &mut SqliteConnection, ws: &str, sender: &str) -
             sqlx::query("DELETE FROM timesheet_aliases WHERE workspace_id = ?1 AND kind = 'name' AND value = ?2").bind(ws).bind(key).execute(&mut *conn).await?;
         }
     }
-    Ok(sqlx::query("DELETE FROM timesheet_records WHERE workspace_id = ?1 AND lower(sender_address) = lower(?2)").bind(ws).bind(&address).execute(conn).await?.rows_affected())
+    let erased = sqlx::query("DELETE FROM timesheet_records WHERE workspace_id = ?1 AND lower(sender_address) = lower(?2)").bind(ws).bind(&address).execute(&mut *conn).await?.rows_affected();
+    // The unknown names they brought go too, unless another sender's sheets still stand under the card (then only the address goes).
+    sqlx::query("DELETE FROM unresolved_identities WHERE workspace_id = ?1 AND NOT EXISTS (SELECT 1 FROM timesheet_records r WHERE r.identity_id = unresolved_identities.id)").bind(ws).execute(&mut *conn).await?;
+    sqlx::query("UPDATE unresolved_identities SET sender_address = NULL WHERE workspace_id = ?1 AND lower(sender_address) = lower(?2)").bind(ws).bind(&address).execute(conn).await?;
+    Ok(erased)
 }

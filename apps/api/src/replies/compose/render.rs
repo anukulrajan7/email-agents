@@ -12,7 +12,7 @@ fn section_text(s: &Section) -> Option<String> {
         MessageKind::Ack => templates::ack(&s.facts),
         MessageKind::Correction => templates::correction(&s.issues),
         MessageKind::Question => templates::question(&s.issues),
-        MessageKind::Holding => templates::holding(),
+        MessageKind::Holding => templates::holding(&s.facts),
         MessageKind::Answer | MessageKind::Custom => return None,
     })
 }

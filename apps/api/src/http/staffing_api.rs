@@ -16,7 +16,8 @@ use crate::{
     platform::db::{new_id, now_ms},
     platform::error::{AppError, AppResult},
     hr::staffing::{self, SUBMISSION_UPDATE_LABEL, portal, submissions, timesheet_records as records},
-    hr::team::{access, clock, settings},
+    hr::team::{access, clock, identity::resolve, settings},
+    platform::flags,
 };
 
 pub fn routes() -> Router<AppState> {
@@ -37,7 +38,7 @@ pub fn routes() -> Router<AppState> {
         .route("/workspaces/{ws}/staffing/portal/mismatches", get(mismatches))
 }
 
-async fn gate(state: &AppState, ws: &str, user: &AuthUser) -> AppResult<access::Access> {
+pub(super) async fn gate(state: &AppState, ws: &str, user: &AuthUser) -> AppResult<access::Access> {
     let a = access::resolve(&state.db, ws, user).await?;
     staffing::require(&state.db, ws).await?;
     Ok(a)
@@ -264,10 +265,14 @@ pub async fn link_timesheet_record(State(state): State<AppState>, user: AuthUser
     if known.is_none() {
         return Err(AppError::BadRequest("person_id: unknown person".into()));
     }
-    match records::link_person(&state.db, &ws, &id, &body.person_id, body.remember_name).await? {
-        records::Linked::Done => {}
-        records::Linked::NotFound => return Err(AppError::NotFound),
-        records::Linked::Conflict(why) => return Err(AppError::Conflict(why)),
+    if flags::mode(&state.db, &state.config, &ws, flags::Key::Handoff).await?.acts() {
+        resolve::link_record(&state, &ws, Actor::User(&user.id), &id, &body.person_id, body.remember_name).await?;
+    } else {
+        match records::link_person(&state.db, &ws, &id, &body.person_id, body.remember_name).await? {
+            records::Linked::Done => {}
+            records::Linked::NotFound => return Err(AppError::NotFound),
+            records::Linked::Conflict(why) => return Err(AppError::Conflict(why)),
+        }
     }
     let row = records::get(&state.db, &ws, &id).await?.ok_or(AppError::NotFound)?;
     Ok(Json(row.json(true)))

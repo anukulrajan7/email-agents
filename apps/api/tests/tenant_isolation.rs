@@ -99,6 +99,8 @@ fn table_for(segment: &str) -> Option<&'static str> {
         "sessions" => "designer_sessions",
         "submissions" => "submissions",
         "timesheet-records" => "timesheet_records",
+        "identities" => "unresolved_identities",
+        "identity-changes" => "identity_changes",
         "ai-incidents" => "ai_incidents",
         "teams" => "teams",
         "conversations" => "watches",
@@ -143,12 +145,14 @@ async fn fixture(env: &Env) -> Fixture {
         ("agent_approvals", "apr_a"),
         ("submissions", "sub_a"),
         ("timesheet_records", "tsr_a"),
+        ("unresolved_identities", "idn_a"),
     ] {
         let have: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table} WHERE workspace_id = ?1")).bind(&env.ws).fetch_one(&env.state.db).await.unwrap();
         if have == 0 {
             seed_row(env, table, "id", id, &[]).await;
         }
     }
+    seed_row(env, "identity_changes", "id", "idc_a", &[("kind", "'link'"), ("actor_class", "'user'")]).await;
     let have: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM cases WHERE workspace_id = ?1").bind(&env.ws).fetch_one(&env.state.db).await.unwrap();
     if have == 0 {
         seed_row(env, "cases", "id", "cas_a", &[("title", "'A-CONFIDENTIAL-SENTINEL case'")]).await;
@@ -163,7 +167,7 @@ async fn fixture(env: &Env) -> Fixture {
 
     let mut ids = HashMap::new();
     let mut empty = vec![];
-    for table in ["email_messages", "drafts", "labels", "email_sources", "memories", "workflows", "review_items", "alerts", "jobs", "agents", "eval_runs", "agent_preferences", "requirements", "matches", "automations", "people", "cases", "agent_approvals", "designer_sessions", "submissions", "timesheet_records", "ai_incidents", "teams", "watches", "support_tickets", "in_app_messages"] {
+    for table in ["email_messages", "drafts", "labels", "email_sources", "memories", "workflows", "review_items", "alerts", "jobs", "agents", "eval_runs", "agent_preferences", "requirements", "matches", "automations", "people", "cases", "agent_approvals", "designer_sessions", "submissions", "timesheet_records", "unresolved_identities", "identity_changes", "ai_incidents", "teams", "watches", "support_tickets", "in_app_messages"] {
         let id: Option<String> = sqlx::query_scalar(&format!("SELECT id FROM {table} WHERE workspace_id = ?1 ORDER BY id LIMIT 1")).bind(&env.ws).fetch_optional(&env.state.db).await.unwrap();
         match id {
             Some(id) => {
@@ -287,7 +291,7 @@ fn body_for(method: &str, template: &str, fx: &Fixture) -> Option<Value> {
         (_, "/sources/nango-connections") => json!({"connection_id": "c", "provider_config_key": "google-mail"}),
         (_, "/sources/nango-session") => json!({"provider": "google-mail"}),
         (_, "/staffing/portal/hours") | (_, "/staffing/portal/submissions") | (_, "/team/people/import") => json!({"csv": "a", "dry_run": true}),
-        (_, "/staffing/timesheet-records/{id}/link") => json!({"person_id": id("people")}),
+        (_, "/staffing/timesheet-records/{id}/link") | (_, "/staffing/identities/{id}/link") => json!({"person_id": id("people")}),
         (_, "/team/ownership") => json!({"email": "nobody@x.test"}),
         (_, "/packs") => json!({"packs": ["general"]}),
         (_, "/alert-settings") => json!({"enabled": true, "recipients": [], "escalate_to": [], "unanswered_hours": 4, "escalate_after_hours": 24, "daily_digest": false, "digest_hour": 9}),

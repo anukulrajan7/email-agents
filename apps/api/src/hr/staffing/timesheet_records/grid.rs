@@ -48,6 +48,8 @@ pub async fn grid(db: &SqlitePool, ws: &str, month: &str, now: i64, a: &Access) 
         undated: f64,
         records: Vec<String>,
         check: bool,
+        /// A sheet nobody on the roster owns: reported on its own, never counted for anyone.
+        identity_id: Option<String>,
     }
     let mut rows: Vec<Row> = vec![];
     let mut index: HashMap<String, usize> = HashMap::new();
@@ -70,11 +72,25 @@ pub async fn grid(db: &SqlitePool, ws: &str, month: &str, now: i64, a: &Access) 
         let i = match r.person_id.as_ref().and_then(|p| index.get(p)) {
             Some(i) => *i,
             None => {
-                rows.push(Row { person_id: r.person_id.clone(), name: r.linked_name.clone().or_else(|| r.person_name.clone()).unwrap_or_else(|| "Unknown".into()), code: r.employee_code.clone(), client: r.client.clone(), ..Default::default() });
-                if let Some(p) = &r.person_id {
-                    index.insert(p.clone(), rows.len() - 1);
+                // One row per unknown name (its card), not per sheet; a sheet nobody could place keeps a row of its own.
+                let card = if r.person_id.is_none() { r.identity_id.as_ref().and_then(|g| rows.iter().position(|x| x.identity_id.as_ref() == Some(g))) } else { None };
+                match card {
+                    Some(i) => i,
+                    None => {
+                        rows.push(Row {
+                            person_id: r.person_id.clone(),
+                            name: r.linked_name.clone().or_else(|| r.person_name.clone()).unwrap_or_else(|| "Unknown".into()),
+                            code: r.employee_code.clone(),
+                            client: r.client.clone(),
+                            identity_id: r.person_id.is_none().then(|| r.identity_id.clone()).flatten(),
+                            ..Default::default()
+                        });
+                        if let Some(p) = &r.person_id {
+                            index.insert(p.clone(), rows.len() - 1);
+                        }
+                        rows.len() - 1
+                    }
                 }
-                rows.len() - 1
             }
         };
         let row = &mut rows[i];
@@ -97,9 +113,11 @@ pub async fn grid(db: &SqlitePool, ws: &str, month: &str, now: i64, a: &Access) 
         }
     }
     let (mut recorded, mut needs_check, mut missing) = (0, 0, 0);
+    let mut unresolved: Vec<Value> = vec![];
     let out: Vec<Value> = rows
         .into_iter()
         .map(|r| {
+            let loose = r.person_id.is_none();
             let status = if r.records.is_empty() {
                 if now >= due_at { "missing" } else { "pending" }
             } else if r.check {
@@ -107,22 +125,28 @@ pub async fn grid(db: &SqlitePool, ws: &str, month: &str, now: i64, a: &Access) 
             } else {
                 "recorded"
             };
-            match status {
-                "recorded" => recorded += 1,
-                "needs_check" => needs_check += 1,
-                "missing" => missing += 1,
-                _ => {}
+            if loose {
+                unresolved.push(json!({ "identity_id": r.identity_id, "name": r.name, "employee_code": r.code, "record_ids": r.records }));
+            } else {
+                match status {
+                    "recorded" => recorded += 1,
+                    "needs_check" => needs_check += 1,
+                    "missing" => missing += 1,
+                    _ => {}
+                }
             }
             let day_sum: f64 = r.cells.values().sum();
             let total = (day_sum + r.undated) * 100.0;
             json!({
                 "person_id": r.person_id, "name": r.name, "employee_code": r.code, "client": r.client,
-                "cells": r.cells, "total": (total.round() / 100.0), "status": status, "record_ids": r.records,
+                "cells": r.cells, "total": (total.round() / 100.0), "status": status, "record_ids": r.records, "unresolved": loose,
             })
         })
         .collect();
     Ok(json!({
         "month": month, "days": days, "rows": out, "due_at": iso(due_at.min(i64::MAX / 2)),
-        "summary": { "recorded": recorded, "needs_check": needs_check, "missing": missing },
+        "summary": { "recorded": recorded, "needs_check": needs_check, "missing": missing, "unresolved": unresolved.len() },
+        "unresolved": unresolved,
+        "roster_empty": people.is_empty(),
     }))
 }

@@ -12,7 +12,13 @@ pub mod store;
 /// The job key of Meera's reply case (one per message).
 pub const REPLY_JOB: &str = "reply";
 
-pub use store::{Asker, Filed, Stored, hand_to_meera};
+/// Meera's reply case, or a follow-up to a reply that already went out (`reply#2`): a sheet acknowledged after a first
+/// receipt is a second mail on the same message, written by a second case.
+pub fn is_reply_job_key(job: &str) -> bool {
+    job == REPLY_JOB || job.starts_with("reply#")
+}
+
+pub use store::{Asker, Filed, Stored, hand_to_meera, park, unpark};
 
 /// What a message says. Higher priority wins when several requests share a reply.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -111,11 +117,7 @@ impl MessageRequest {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
-#[serde(tag = "on", rename_all = "snake_case")]
-pub enum Wait {
-    PersonLinked { record_id: String },
-}
+pub use super::plan::wait::Wait;
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -139,6 +141,9 @@ pub struct Decision {
     pub message: Option<MessageRequest>,
     pub manager_summary: Option<ManagerSummary>,
     pub waits: Vec<Wait>,
+    /// What to say once the waits are over (the acknowledgement of a sheet whose person is not on the roster yet). It is
+    /// kept, not sent: `store::park` files it as `waiting` and the desk releases it when the person is linked.
+    pub parked: Option<MessageRequest>,
 }
 
 /// Who wrote the words of a reply, which decides whose level governs the send.
@@ -228,6 +233,12 @@ mod tests {
         assert!(no_reply_reason("ravi@client.test", &s(&["list_unsubscribe"])).is_some());
         assert!(no_reply_reason("noreply@client.test", &[]).is_some());
         assert_eq!(no_reply_reason("ravi@client.test", &s(&["gmail_category_none"])), None);
+    }
+
+    #[test]
+    fn a_follow_up_reply_case_is_a_reply_job_too() {
+        assert!(is_reply_job_key("reply") && is_reply_job_key("reply#2"));
+        assert!(!is_reply_job_key("desk:timesheet") && !is_reply_job_key("main") && !is_reply_job_key("replying"));
     }
 
     #[test]

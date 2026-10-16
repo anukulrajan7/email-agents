@@ -112,6 +112,11 @@ pub async fn review(db: &SqlitePool, ws: &str, message_id: &str) -> sqlx::Result
             period: (row.period_start.clone(), row.period_end.clone()),
             total: row.total_hours,
             issues: found.clone(),
+            identity: row
+                .person_name
+                .clone()
+                .filter(|n| !n.trim().is_empty())
+                .filter(|_| row.person_id.is_none() && row.employee_code.as_deref().is_some_and(|c| !c.trim().is_empty())),
         });
         all.push(found);
     }
@@ -201,11 +206,73 @@ fn fingerprint(s: &str) -> u64 {
 }
 
 /// Files what the desk wants said to the sender with Meera. A "recorded" acknowledgement is only filed when every sheet is
-/// recorded and matched to a person, the same rule the manager summary follows.
+/// recorded and matched to a person, the same rule the manager summary follows. A receipt for a sheet whose person is not on
+/// the roster is its own request (`desk:timesheet:receipt`), and the acknowledgement that waits for the link is parked.
 pub async fn hand_off(state: &AppState, ws: &str, asker: &crate::agents::handoff::Asker<'_>, message_id: &str, decision: &Decision, clean: bool) -> sqlx::Result<Option<crate::agents::handoff::Filed>> {
-    use crate::agents::handoff::MessageKind;
-    let Some(message) = decision.message.as_ref().filter(|m| m.kind != MessageKind::Ack || clean) else { return Ok(None) };
-    crate::agents::handoff::hand_to_meera(state, ws, asker, message_id, message).await.map(Some)
+    use crate::agents::handoff::{self, Asker, MessageKind};
+    let mut filed = None;
+    if let Some(message) = decision.message.as_ref().filter(|m| m.kind != MessageKind::Ack || clean) {
+        let receipt_job = format!("{}:receipt", asker.job);
+        let by = if message.kind == MessageKind::Holding { Asker { job: &receipt_job, ..*asker } } else { *asker };
+        filed = Some(handoff::hand_to_meera(state, ws, &by, message_id, message).await?);
+    }
+    if let Some(parked) = &decision.parked {
+        handoff::park(state, ws, asker, message_id, parked).await?;
+    }
+    Ok(filed)
+}
+
+/// A person was linked to sheets of this email: the desk looks at the email again. What was parked for the link is now
+/// decided on the facts as they are (clean: the acknowledgement; a rule that needed the person: a correction or a question),
+/// the manager is told once, and the "check this timesheet" item closes when nothing is left to check. Looking again at an
+/// email whose reply already went out files nothing new.
+pub async fn resume(state: &AppState, ws: &str, message_id: &str) -> sqlx::Result<()> {
+    let mut review = review(&state.db, ws, message_id).await?;
+    if review.rows.is_empty() {
+        return Ok(());
+    }
+    let parked_by: Option<String> = sqlx::query_scalar("SELECT from_agent_id FROM message_requests WHERE workspace_id = ?1 AND message_id = ?2 AND job = ?3 AND status = 'waiting' LIMIT 1")
+        .bind(ws)
+        .bind(message_id)
+        .bind(crate::agents::ownership::DESK_JOB)
+        .fetch_optional(&state.db)
+        .await?;
+    let agent = match parked_by {
+        Some(agent) => agent,
+        None => match crate::agents::ownership::decide(state, ws, message_id).await? {
+            crate::agents::ownership::Owner::Assigned(jobs) => match jobs.first() {
+                Some(job) => job.agent_id.clone(),
+                None => return Ok(()),
+            },
+            _ => return Ok(()),
+        },
+    };
+    let statuses = apply(&state.db, ws, &mut review).await?;
+    let mut conn = state.db.acquire().await?;
+    audit::record(
+        &mut conn,
+        Entry { workspace_id: ws, actor: Actor::System, action: "handoff.resumed", entity_type: "message", entity_id: message_id, message_id: Some(message_id), metadata: json!({ "decision": review.decision, "records": review.record_ids() }) },
+    )
+    .await?;
+    drop(conn);
+    summary::summarize(state, ws, Some(&agent), &review.rows, &review.decision).await?;
+    let clean = review.all_matched() && statuses.iter().all(|s| s == "recorded");
+    if clean {
+        sqlx::query(
+            "UPDATE review_items SET status = 'closed' WHERE workspace_id = ?1 AND message_id = ?2 AND status = 'open' AND ((kind = 'agent_task' AND title = 'Check: Timesheet') OR kind = 'check_timesheet')",
+        )
+        .bind(ws)
+        .bind(message_id)
+        .execute(&state.db)
+        .await?;
+    }
+    let asker = crate::agents::handoff::Asker { agent_id: &agent, case_id: None, job: crate::agents::ownership::DESK_JOB };
+    let ready = review.decision.message.as_ref().is_some_and(|m| m.kind != crate::agents::handoff::MessageKind::Ack || clean);
+    if ready {
+        crate::agents::handoff::unpark(state, ws, message_id, crate::agents::ownership::DESK_JOB).await?;
+    }
+    hand_off(state, ws, &asker, message_id, &review.decision, clean).await?;
+    Ok(())
 }
 
 pub async fn audit_decision(conn: &mut SqliteConnection, ws: &str, message_id: &str, case_id: &str, review: &Review) -> sqlx::Result<()> {

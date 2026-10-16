@@ -66,7 +66,12 @@ pub fn question(issues: &[IssueText]) -> String {
     }
 }
 
-pub fn holding() -> String {
+/// A receipt that confirms nothing about the sender or the hours: "we have it", and what happens next. A request that names
+/// the timesheet (`About` = `timesheet`) says so.
+pub fn holding(facts: &[Fact]) -> String {
+    if fact(facts, "About") == Some("timesheet") {
+        return "Thank you for sending your timesheet. We have received it and are matching it to your record. We will confirm once that is done.".to_string();
+    }
     "Thank you for your message. We have it and are looking into it, and we will get back to you.".to_string()
 }
 
@@ -105,6 +110,13 @@ mod tests {
         let two = vec![one[0].clone(), IssueText { code: "over_max_per_day".into(), text: "The sheet has more than 12 hours on 2 Sep.".into() }];
         let text = correction(&two);
         assert!(text.contains("- Your timesheet is for August 2026") && text.contains("- The sheet has more than 12 hours on 2 Sep."), "{text}");
+    }
+
+    #[test]
+    fn a_timesheet_receipt_says_nothing_about_hours_or_who_it_is() {
+        let text = holding(&[f("About", "timesheet")]);
+        assert!(text.contains("received it") && !text.contains("recorded") && !text.chars().any(|c| c.is_ascii_digit()), "{text}");
+        assert!(holding(&[]).starts_with("Thank you for your message."));
     }
 
     #[test]

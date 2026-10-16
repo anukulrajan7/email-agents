@@ -18,6 +18,7 @@ pub async fn record_message(state: &AppState, ws: &str, message_id: &str) -> sql
     let received_at = msg.received_at;
     let cfg = settings::load(db, ws).await?;
     let (people, aliases) = load_people(db, ws).await?;
+    let group = crate::platform::flags::mode(db, &state.config, ws, crate::platform::flags::Key::Handoff).await?.acts();
     let hint_year: i64 = clock::month_of(received_at, cfg.tz_offset_minutes)[..4].parse().unwrap_or(2026);
     let (units, waiting) = load_units(db, message_id, &msg).await?;
     // Files still being read: the run happens again when they are, and no model is paid for in the meantime.
@@ -90,6 +91,8 @@ pub async fn record_message(state: &AppState, ws: &str, message_id: &str) -> sql
             }
             let status = if issues.iter().any(|i| i.severity == CHECK) { "needs_check" } else { "recorded" };
             let draft = Draft {
+                roster: &people,
+                group,
                 ws,
                 message_id,
                 unit,

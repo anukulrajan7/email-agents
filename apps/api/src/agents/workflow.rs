@@ -87,7 +87,7 @@ pub fn steps_for_case(spec: &AgentSpec, case: &Case) -> Vec<WfStep> {
 }
 
 pub fn is_reply_job(case: &Case) -> bool {
-    case.job == super::handoff::REPLY_JOB && case.kind == "inbox"
+    super::handoff::is_reply_job_key(&case.job) && case.kind == "inbox"
 }
 
 /// Does this case run as a fixed workflow? A reply job always does; otherwise it needs a workflow-mode spec, one email and steps to run.

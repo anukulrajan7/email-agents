@@ -531,3 +531,55 @@ impl Env {
         .unwrap()
     }
 }
+
+impl Env {
+    /// A person on the roster, made the way an admin makes one. Returns their id.
+    pub async fn person(&self, name: &str, code: Option<&str>, email: &str, manager_id: Option<&str>) -> String {
+        let (s, p) = self.req("POST", "/team/people", ADMIN, Some(json!({"name": name, "emails": [email], "employee_code": code, "manager_id": manager_id}))).await;
+        assert_eq!(s, StatusCode::CREATED, "{p}");
+        p["id"].as_str().unwrap().to_string()
+    }
+
+    /// An email whose files carry the given texts (read already), labelled and run through the pipeline.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn receive_files(&self, src: &str, gmail_id: &str, thread: &str, from: &str, subject: &str, files: &[(&str, String)], label: &str) -> String {
+        let email = NormalizedEmail {
+            source_message_id: gmail_id.into(),
+            rfc_message_id: Some(format!("<{gmail_id}@mail.example>")),
+            sender_address: from.into(),
+            recipients: vec!["team@acme.com".into()],
+            subject: subject.into(),
+            body_text: "Please find the timesheets attached.".into(),
+            received_at: db::now_ms() - 3_600_000,
+            attachments: files
+                .iter()
+                .map(|(name, _)| email_ai_api::platform::domain::AttachmentMeta { filename: (*name).into(), media_type: Some("application/pdf".into()), size_bytes: Some(1000), provider_ref: None })
+                .collect(),
+            ..Default::default()
+        };
+        let mut tx = self.state.db.begin().await.unwrap();
+        let id = ingest::persist_message(&mut tx, src, &self.ws, &email, Some(thread), json!({})).await.unwrap().unwrap();
+        tx.commit().await.unwrap();
+        for (name, text) in files {
+            sqlx::query("UPDATE attachments SET text_content = ?3, text_status = 'extracted', extract_status = 'done', extract_kind = 'sheet' WHERE message_id = ?1 AND filename = ?2")
+                .bind(&id)
+                .bind(name)
+                .bind(text)
+                .execute(&self.state.db)
+                .await
+                .unwrap();
+        }
+        worker::drain(&self.state).await;
+        self.set_understanding(&id, label, true, json!([])).await;
+        id
+    }
+
+    /// (name as written, employee ID, status, sheets waiting) of every unknown-name card in the workspace.
+    pub async fn identities(&self) -> Vec<(Option<String>, Option<String>, String, i64)> {
+        sqlx::query_as("SELECT name_as_written, employee_code, status, record_count FROM unresolved_identities WHERE workspace_id = ?1 ORDER BY created_at, rowid")
+            .bind(&self.ws)
+            .fetch_all(&self.state.db)
+            .await
+            .unwrap()
+    }
+}

@@ -218,7 +218,7 @@ async fn finish(state: &AppState, ws: &str, message_id: &str, id: &str, outcome:
     match outcome {
         Filed::Requested { .. } => Ok(Filed::Requested { case_id }),
         Filed::Replaced { .. } => {
-            let composed: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM message_requests WHERE workspace_id = ?1 AND message_id = ?2 AND draft_id IS NOT NULL AND status = 'pending')")
+            let composed: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM message_requests WHERE workspace_id = ?1 AND message_id = ?2 AND draft_id IS NOT NULL AND status IN ('pending', 'composed'))")
                 .bind(ws)
                 .bind(message_id)
                 .fetch_one(&state.db)
@@ -258,6 +258,7 @@ async fn ensure_reply_case(state: &AppState, ws: &str, message_id: &str, request
         return Ok(None);
     };
     let title = if m.subject.trim().is_empty() { "(no subject)".to_string() } else { m.subject.clone() };
+    let job = reply_job_for(&state.db, ws, message_id).await?;
     let mut conn = state.db.acquire().await?;
     let (case_id, _) = case::create(
         &mut conn,
@@ -278,7 +279,7 @@ async fn ensure_reply_case(state: &AppState, ws: &str, message_id: &str, request
             agent_version: Some(meera.active_version.unwrap_or(0)),
             trigger: Some("handoff"),
             shadow: false,
-            job: REPLY_JOB,
+            job: &job,
         },
     )
     .await?;
@@ -291,6 +292,25 @@ async fn ensure_reply_case(state: &AppState, ws: &str, message_id: &str, request
     drop(conn);
     state.jobs_notify.notify_one();
     Ok(Some(case_id))
+}
+
+/// The job key of the reply case to use for a message: the first one is `reply`; once it is done (a first mail went out) and
+/// a request still has no words written, a follow-up case `reply#N` writes the next mail. A reply case that was cancelled or
+/// failed is never reopened this way.
+async fn reply_job_for(db: &SqlitePool, ws: &str, message_id: &str) -> sqlx::Result<String> {
+    let cases: Vec<(String, String)> = sqlx::query_as(
+        "SELECT job, status FROM cases WHERE workspace_id = ?1 AND message_id = ?2 AND shadow = 0 AND (job = ?3 OR job LIKE 'reply#%') ORDER BY created_at DESC, rowid DESC",
+    )
+    .bind(ws)
+    .bind(message_id)
+    .bind(REPLY_JOB)
+    .fetch_all(db)
+    .await?;
+    let Some((latest, status)) = cases.first() else { return Ok(REPLY_JOB.to_string()) };
+    if status == "done" && open_for_message(db, ws, message_id).await?.iter().any(|r| r.draft_id.is_none()) {
+        return Ok(format!("reply#{}", cases.len() + 1));
+    }
+    Ok(latest.clone())
 }
 
 /// The requests Meera still has to write for a message, oldest first.
@@ -395,4 +415,85 @@ pub async fn names(db: &SqlitePool, ws: &str, agent_ids: &[String]) -> sqlx::Res
         out.push(name.unwrap_or_else(|| "An agent".into()));
     }
     Ok(out)
+}
+
+/// Keeps a request that must not go out yet: a `waiting` row with no reply case and no draft. Filing the same request again
+/// changes nothing; a changed one replaces the parked words; a request that was released or sent is left alone.
+pub async fn park(state: &AppState, ws: &str, asker: &Asker<'_>, message_id: &str, req: &MessageRequest) -> sqlx::Result<bool> {
+    let level = runtime::level_of(&state.db, &state.config, ws, asker.agent_id, message_id).await?;
+    let (digest, now) = (digest(req), now_ms());
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
+    let existing: Option<(String, String, String)> =
+        sqlx::query_as("SELECT id, digest, status FROM message_requests WHERE workspace_id = ?1 AND message_id = ?2 AND from_agent_id = ?3 AND job = ?4")
+            .bind(ws)
+            .bind(message_id)
+            .bind(asker.agent_id)
+            .bind(asker.job)
+            .fetch_optional(&mut *tx)
+            .await?;
+    let id = match existing {
+        Some((_, old, status)) if old == digest || status != "waiting" => {
+            tx.commit().await?;
+            return Ok(false);
+        }
+        Some((id, ..)) => {
+            sqlx::query("UPDATE message_requests SET kind = ?2, facts_json = ?3, issues_json = ?4, requester_level = ?5, digest = ?6, updated_at = ?7 WHERE id = ?1")
+                .bind(&id)
+                .bind(req.kind.as_str())
+                .bind(json!(req.facts).to_string())
+                .bind(json!(req.issues).to_string())
+                .bind(level)
+                .bind(&digest)
+                .bind(now)
+                .execute(&mut *tx)
+                .await?;
+            id
+        }
+        None => {
+            let id = new_id("mrq");
+            sqlx::query(
+                "INSERT INTO message_requests (id, workspace_id, message_id, from_agent_id, job, kind, recipient_json, facts_json, issues_json, never_do_json, requester_level, digest,
+                                               status, status_note, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, '[]', ?10, ?11, 'waiting', 'waiting for the person to be linked', ?12, ?12)",
+            )
+            .bind(&id)
+            .bind(ws)
+            .bind(message_id)
+            .bind(asker.agent_id)
+            .bind(asker.job)
+            .bind(req.kind.as_str())
+            .bind(json!(req.to).to_string())
+            .bind(json!(req.facts).to_string())
+            .bind(json!(req.issues).to_string())
+            .bind(level)
+            .bind(&digest)
+            .bind(now)
+            .execute(&mut *tx)
+            .await?;
+            id
+        }
+    };
+    audit_request(&mut tx, ws, &id, message_id, "handoff.parked", json!({"kind": req.kind, "from_agent_id": asker.agent_id, "job": asker.job})).await?;
+    tx.commit().await?;
+    Ok(true)
+}
+
+/// A parked request is ready: it becomes a normal pending request whose words the next filing replaces. `true` when one was waiting.
+pub async fn unpark(state: &AppState, ws: &str, message_id: &str, job: &str) -> sqlx::Result<bool> {
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
+    let released: Option<String> = sqlx::query_scalar(
+        "UPDATE message_requests SET status = 'pending', digest = '', status_note = NULL, updated_at = ?4
+         WHERE workspace_id = ?1 AND message_id = ?2 AND job = ?3 AND status = 'waiting' RETURNING id",
+    )
+    .bind(ws)
+    .bind(message_id)
+    .bind(job)
+    .bind(now_ms())
+    .fetch_optional(&mut *tx)
+    .await?;
+    if let Some(id) = &released {
+        audit_request(&mut tx, ws, id, message_id, "handoff.released", json!({"job": job})).await?;
+    }
+    tx.commit().await?;
+    Ok(released.is_some())
 }

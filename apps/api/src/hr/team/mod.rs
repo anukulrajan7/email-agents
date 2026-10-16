@@ -6,6 +6,7 @@
 pub mod access;
 pub mod clock;
 pub mod escalation;
+pub mod identity;
 pub mod metrics;
 pub mod people;
 pub mod scope;

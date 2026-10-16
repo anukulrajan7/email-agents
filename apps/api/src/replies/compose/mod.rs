@@ -135,7 +135,9 @@ pub async fn compose_message(state: &AppState, ws: &str, message_id: &str, meera
     let line = handoff_line(&askers, &meera.name, first.as_deref().unwrap_or("the sender"));
     let level = m.governing_level(0);
     let requested_by = json!(askers.iter().zip(&m.asked).map(|(a, q)| json!({"agent_id": a.agent_id, "name": a.name, "kind": a.kind, "job": a.job, "level": q.level})).collect::<Vec<_>>());
-    let origin = format!("reply:{message_id}");
+    // A reply after one that already went out (a receipt, then the acknowledgement) is a second draft with its own origin.
+    let sent: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM drafts WHERE message_id = ?1 AND status = 'sent' AND origin_key LIKE 'reply:%'").bind(message_id).fetch_one(&state.db).await?;
+    let origin = if sent == 0 { format!("reply:{message_id}") } else { format!("reply:{message_id}:{}", sent + 1) };
     let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     let written = live_draft::write(
         &mut tx,
@@ -194,7 +196,9 @@ pub async fn compose_message(state: &AppState, ws: &str, message_id: &str, meera
 /// A request changed after its reply was written and before it was sent: merge again into the same draft, and show the
 /// new text on the approval that is waiting for it.
 pub async fn refresh(state: &AppState, ws: &str, message_id: &str) -> sqlx::Result<()> {
-    let case: Option<(String, Option<String>)> = sqlx::query_as("SELECT id, agent_id FROM cases WHERE workspace_id = ?1 AND message_id = ?2 AND job = ?3 AND shadow = 0")
+    let case: Option<(String, Option<String>)> = sqlx::query_as(
+        "SELECT id, agent_id FROM cases WHERE workspace_id = ?1 AND message_id = ?2 AND (job = ?3 OR job LIKE 'reply#%') AND shadow = 0 ORDER BY created_at DESC, rowid DESC LIMIT 1",
+    )
         .bind(ws)
         .bind(message_id)
         .bind(handoff::REPLY_JOB)

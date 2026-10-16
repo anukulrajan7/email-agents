@@ -9,45 +9,22 @@ pub enum Linked {
     Conflict(String),
 }
 
-/// A person says "this sheet is that person". The other unmatched sheets that carry the same employee ID join it (the ID
-/// is the evidence), and so do the ones with the same name, but only when the person confirmed the name (`remember_name`)
-/// and only if they do not name a different ID. A remembered ID or name that belongs to someone else is never re-pointed.
-pub async fn link_person(db: &SqlitePool, ws: &str, record_id: &str, person_id: &str, remember_name: bool) -> sqlx::Result<Linked> {
-    let mut tx = db.begin_with("BEGIN IMMEDIATE").await?;
-    let person: Option<String> = sqlx::query_scalar("SELECT name FROM people WHERE id = ?1 AND workspace_id = ?2").bind(person_id).bind(ws).fetch_optional(&mut *tx).await?;
-    let rec: Option<(Option<String>, Option<String>)> =
-        sqlx::query_as("SELECT employee_code, person_name FROM timesheet_records WHERE id = ?1 AND workspace_id = ?2").bind(record_id).bind(ws).fetch_optional(&mut *tx).await?;
-    let (Some(_), Some((code, name))) = (person, rec) else { return Ok(Linked::NotFound) };
-    let now = now_ms();
-    let code = code.map(|c| c.to_lowercase());
-    let key = name.as_deref().map(name_key).filter(|k| !k.is_empty());
-    if let Some(code) = &code
-        && let Some(owner) = remember(&mut tx, ws, "code", code, person_id, now).await?
-    {
-        return Ok(Linked::Conflict(format!("The employee ID {} already belongs to {owner}.", code.to_uppercase())));
-    }
-    if remember_name
-        && let Some(key) = &key
-        && let Some(owner) = remember(&mut tx, ws, "name", key, person_id, now).await?
-    {
-        return Ok(Linked::Conflict(format!("The name {} already belongs to {owner}.", name.as_deref().unwrap_or(key))));
-    }
-    let others: Vec<(String, Option<String>, Option<String>)> =
-        sqlx::query_as("SELECT id, employee_code, person_name FROM timesheet_records WHERE workspace_id = ?1 AND person_id IS NULL ORDER BY created_at, id").bind(ws).fetch_all(&mut *tx).await?;
-    for (id, other_code, other_name) in others {
-        let other_code = other_code.map(|c| c.to_lowercase());
-        let same_id = code.is_some() && other_code == code;
-        let same_name = remember_name && key.is_some() && other_name.as_deref().map(name_key) == key && (other_code.is_none() || other_code == code);
-        if id == record_id || same_id || same_name {
-            attach_person(&mut tx, ws, &id, person_id, now).await?;
-        }
-    }
-    tx.commit().await?;
-    Ok(Linked::Done)
+/// What a link is about to do: the sheets that join the person, and the ID / name links to remember.
+pub(crate) struct Plan {
+    pub record_ids: Vec<String>,
+    pub aliases: Vec<(&'static str, String)>,
 }
 
-/// Remembers that `value` means this person. `Some(name)` when it already means someone else: never re-pointed.
-async fn remember(conn: &mut SqliteConnection, ws: &str, kind: &str, value: &str, person_id: &str, now: i64) -> sqlx::Result<Option<String>> {
+/// What a link did, enough to put everything back: each sheet as it was, the person's other sheets as they were, and the
+/// links that were new.
+pub(crate) struct Applied {
+    pub before: Vec<Value>,
+    pub person_before: Vec<Value>,
+    pub new_aliases: Vec<Value>,
+}
+
+/// Who a remembered ID or name already belongs to, if it is someone other than `person_id`.
+async fn alias_owner(conn: &mut SqliteConnection, ws: &str, kind: &str, value: &str, person_id: &str) -> sqlx::Result<Option<String>> {
     let owner: Option<(String, String)> = sqlx::query_as(
         "SELECT a.person_id, COALESCE(p.name, 'another person') FROM timesheet_aliases a LEFT JOIN people p ON p.id = a.person_id
          WHERE a.workspace_id = ?1 AND a.kind = ?2 AND a.value = ?3",
@@ -55,22 +32,183 @@ async fn remember(conn: &mut SqliteConnection, ws: &str, kind: &str, value: &str
     .bind(ws)
     .bind(kind)
     .bind(value)
-    .fetch_optional(&mut *conn)
+    .fetch_optional(conn)
     .await?;
-    match owner {
-        Some((owner, name)) if owner != person_id => return Ok(Some(name)),
-        Some(_) => return Ok(None),
-        None => {}
+    Ok(owner.filter(|(owner, _)| owner != person_id).map(|(_, name)| name))
+}
+
+/// An employee ID, or a name, to remember for a person: `(kind, value kept, value shown to people)`.
+type Wanted = Vec<(&'static str, String, String)>;
+
+fn wanted_aliases(code: Option<&str>, name: Option<&str>, remember_name: bool) -> Wanted {
+    let mut out: Wanted = vec![];
+    if let Some(code) = code {
+        out.push(("code", code.to_lowercase(), code.to_uppercase()));
     }
-    sqlx::query("INSERT INTO timesheet_aliases (workspace_id, kind, value, person_id, created_at) VALUES (?1, ?2, ?3, ?4, ?5)")
-        .bind(ws)
-        .bind(kind)
-        .bind(value)
-        .bind(person_id)
-        .bind(now)
-        .execute(conn)
-        .await?;
+    if remember_name && let Some(name) = name && let key = name_key(name) && !key.is_empty() {
+        out.push(("name", key, name.to_string()));
+    }
+    out
+}
+
+async fn refuse_taken(conn: &mut SqliteConnection, ws: &str, wanted: &Wanted, person_id: &str) -> sqlx::Result<Option<Linked>> {
+    for (kind, value, shown) in wanted {
+        if let Some(owner) = alias_owner(conn, ws, kind, value, person_id).await? {
+            let what = if *kind == "code" { "employee ID" } else { "name" };
+            return Ok(Some(Linked::Conflict(format!("The {what} {shown} already belongs to {owner}."))));
+        }
+    }
     Ok(None)
+}
+
+/// A person says "this sheet is that person". The other unmatched sheets that carry the same employee ID join it (the ID
+/// is the evidence), and so do the ones with the same name, but only when the person confirmed the name (`remember_name`)
+/// and only if they do not name a different ID. A remembered ID or name that belongs to someone else is never re-pointed.
+pub(crate) async fn plan_record(conn: &mut SqliteConnection, ws: &str, record_id: &str, person_id: &str, remember_name: bool) -> sqlx::Result<Result<Plan, Linked>> {
+    let known: Option<i64> = sqlx::query_scalar("SELECT 1 FROM people WHERE id = ?1 AND workspace_id = ?2").bind(person_id).bind(ws).fetch_optional(&mut *conn).await?;
+    let rec: Option<(Option<String>, Option<String>)> =
+        sqlx::query_as("SELECT employee_code, person_name FROM timesheet_records WHERE id = ?1 AND workspace_id = ?2").bind(record_id).bind(ws).fetch_optional(&mut *conn).await?;
+    let (Some(_), Some((code, name))) = (known, rec) else { return Ok(Err(Linked::NotFound)) };
+    let code = code.map(|c| c.to_lowercase());
+    let key = name.as_deref().map(name_key).filter(|k| !k.is_empty());
+    let wanted = wanted_aliases(code.as_deref(), name.as_deref(), remember_name);
+    if let Some(refusal) = refuse_taken(conn, ws, &wanted, person_id).await? {
+        return Ok(Err(refusal));
+    }
+    let others: Vec<(String, Option<String>, Option<String>)> =
+        sqlx::query_as("SELECT id, employee_code, person_name FROM timesheet_records WHERE workspace_id = ?1 AND person_id IS NULL ORDER BY created_at, id").bind(ws).fetch_all(&mut *conn).await?;
+    let mut record_ids = vec![];
+    for (id, other_code, other_name) in others {
+        let other_code = other_code.map(|c| c.to_lowercase());
+        let same_id = code.is_some() && other_code == code;
+        let same_name = remember_name && key.is_some() && other_name.as_deref().map(name_key) == key && (other_code.is_none() || other_code == code);
+        if id == record_id || same_id || same_name {
+            record_ids.push(id);
+        }
+    }
+    Ok(Ok(Plan { record_ids, aliases: wanted.into_iter().map(|(kind, value, _)| (kind, value)).collect() }))
+}
+
+/// An admin says "this card is that person": every sheet waiting under the card joins the person, and the card's employee ID
+/// is remembered (and its name, when the admin asked).
+pub(crate) async fn plan_identity(conn: &mut SqliteConnection, ws: &str, identity_id: &str, person_id: &str, remember_name: bool) -> sqlx::Result<Result<Plan, Linked>> {
+    let known: Option<i64> = sqlx::query_scalar("SELECT 1 FROM people WHERE id = ?1 AND workspace_id = ?2").bind(person_id).bind(ws).fetch_optional(&mut *conn).await?;
+    let group: Option<(Option<String>, Option<String>)> =
+        sqlx::query_as("SELECT employee_code, name_as_written FROM unresolved_identities WHERE id = ?1 AND workspace_id = ?2").bind(identity_id).bind(ws).fetch_optional(&mut *conn).await?;
+    let (Some(_), Some((code, name))) = (known, group) else { return Ok(Err(Linked::NotFound)) };
+    let wanted = wanted_aliases(code.as_deref(), name.as_deref(), remember_name);
+    if let Some(refusal) = refuse_taken(conn, ws, &wanted, person_id).await? {
+        return Ok(Err(refusal));
+    }
+    let record_ids: Vec<String> = sqlx::query_scalar(
+        "SELECT id FROM timesheet_records WHERE workspace_id = ?1 AND identity_id = ?2 AND person_id IS NULL AND status != 'replaced' ORDER BY created_at, id",
+    )
+    .bind(ws)
+    .bind(identity_id)
+    .fetch_all(conn)
+    .await?;
+    Ok(Ok(Plan { record_ids, aliases: wanted.into_iter().map(|(kind, value, _)| (kind, value)).collect() }))
+}
+
+/// Does the plan: remembers the new links and gives each sheet its person. Everything it changed is returned for undo.
+pub(crate) async fn apply(conn: &mut SqliteConnection, ws: &str, person_id: &str, plan: &Plan) -> sqlx::Result<Applied> {
+    let now = now_ms();
+    let snapshot = |r: (String, Option<String>, String, String, String, Option<String>)| json!({"id": r.0, "person_id": r.1, "match_method": r.2, "status": r.3, "issues_json": r.4, "replaces_id": r.5});
+    type Snap = (String, Option<String>, String, String, String, Option<String>);
+    let person_before: Vec<Snap> = sqlx::query_as("SELECT id, person_id, match_method, status, issues_json, replaces_id FROM timesheet_records WHERE workspace_id = ?1 AND person_id = ?2")
+        .bind(ws)
+        .bind(person_id)
+        .fetch_all(&mut *conn)
+        .await?;
+    let mut before = vec![];
+    for id in &plan.record_ids {
+        let row: Option<Snap> = sqlx::query_as("SELECT id, person_id, match_method, status, issues_json, replaces_id FROM timesheet_records WHERE id = ?1 AND workspace_id = ?2").bind(id).bind(ws).fetch_optional(&mut *conn).await?;
+        before.extend(row.map(snapshot));
+    }
+    let mut new_aliases = vec![];
+    for (kind, value) in &plan.aliases {
+        let done = sqlx::query("INSERT OR IGNORE INTO timesheet_aliases (workspace_id, kind, value, person_id, created_at) VALUES (?1, ?2, ?3, ?4, ?5)")
+            .bind(ws)
+            .bind(kind)
+            .bind(value)
+            .bind(person_id)
+            .bind(now)
+            .execute(&mut *conn)
+            .await?
+            .rows_affected();
+        if done == 1 {
+            new_aliases.push(json!({"kind": kind, "value": value}));
+        }
+    }
+    for id in &plan.record_ids {
+        attach_person(conn, ws, id, person_id, now).await?;
+    }
+    Ok(Applied { before, person_before: person_before.into_iter().map(snapshot).collect(), new_aliases })
+}
+
+/// Puts back what `apply` changed. The sheets go back to "who is this" and are marked `needs_check`: an undo is never a
+/// silent edit, a person looks again. Sheets of the person that the link had replaced come back, and the links it
+/// remembered are forgotten (only while they still point at this person).
+pub(crate) async fn undo_link(conn: &mut SqliteConnection, ws: &str, person_id: &str, before: &[Value], person_before: &[Value], new_aliases: &[Value]) -> sqlx::Result<Vec<String>> {
+    let now = now_ms();
+    let mut restored = vec![];
+    for snap in before {
+        let Some(id) = snap["id"].as_str() else { continue };
+        let moved = sqlx::query(
+            "UPDATE timesheet_records SET person_id = NULL, match_method = ?1, match_confidence = NULL, status = 'needs_check', issues_json = ?2, replaces_id = ?3, updated_at = ?4
+             WHERE id = ?5 AND workspace_id = ?6 AND person_id = ?7",
+        )
+        .bind(snap["match_method"].as_str().unwrap_or("none"))
+        .bind(snap["issues_json"].as_str().unwrap_or("[]"))
+        .bind(snap["replaces_id"].as_str())
+        .bind(now)
+        .bind(id)
+        .bind(ws)
+        .bind(person_id)
+        .execute(&mut *conn)
+        .await?
+        .rows_affected();
+        if moved == 1 {
+            restored.push(id.to_string());
+        }
+    }
+    for snap in person_before {
+        let Some(id) = snap["id"].as_str() else { continue };
+        let was = snap["status"].as_str().unwrap_or("recorded");
+        sqlx::query("UPDATE timesheet_records SET status = ?1, updated_at = ?2 WHERE id = ?3 AND workspace_id = ?4 AND status = 'replaced' AND ?1 != 'replaced'").bind(was).bind(now).bind(id).bind(ws).execute(&mut *conn).await?;
+        let before_issues: Vec<Value> = serde_json::from_str(snap["issues_json"].as_str().unwrap_or("[]")).unwrap_or_default();
+        if !before_issues.iter().any(|i| i["code"] == "possible_duplicate") {
+            let now_issues: Option<String> = sqlx::query_scalar("SELECT issues_json FROM timesheet_records WHERE id = ?1 AND workspace_id = ?2").bind(id).bind(ws).fetch_optional(&mut *conn).await?;
+            let mut issues: Vec<Value> = serde_json::from_str(&now_issues.unwrap_or_default()).unwrap_or_default();
+            let len = issues.len();
+            issues.retain(|i| i["code"] != "possible_duplicate");
+            if issues.len() != len {
+                sqlx::query("UPDATE timesheet_records SET issues_json = ?1 WHERE id = ?2 AND workspace_id = ?3").bind(Value::Array(issues).to_string()).bind(id).bind(ws).execute(&mut *conn).await?;
+            }
+        }
+    }
+    for alias in new_aliases {
+        sqlx::query("DELETE FROM timesheet_aliases WHERE workspace_id = ?1 AND kind = ?2 AND value = ?3 AND person_id = ?4")
+            .bind(ws)
+            .bind(alias["kind"].as_str().unwrap_or_default())
+            .bind(alias["value"].as_str().unwrap_or_default())
+            .bind(person_id)
+            .execute(&mut *conn)
+            .await?;
+    }
+    Ok(restored)
+}
+
+/// The older, per-sheet way to link (before the "people we don't know yet" cards): used while that feature is off.
+pub async fn link_person(db: &SqlitePool, ws: &str, record_id: &str, person_id: &str, remember_name: bool) -> sqlx::Result<Linked> {
+    let mut tx = db.begin_with("BEGIN IMMEDIATE").await?;
+    let plan = match plan_record(&mut tx, ws, record_id, person_id, remember_name).await? {
+        Ok(plan) => plan,
+        Err(refusal) => return Ok(refusal),
+    };
+    apply(&mut tx, ws, person_id, &plan).await?;
+    tx.commit().await?;
+    Ok(Linked::Done)
 }
 
 /// Gives an unmatched record its person: clears "who is this", settles the status and applies the replace rule.

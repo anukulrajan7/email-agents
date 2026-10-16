@@ -11,6 +11,7 @@ pub mod handoff;
 pub mod injection;
 pub mod ownership;
 pub mod persona;
+pub mod plan;
 pub mod planner;
 pub mod runner;
 pub mod tools;

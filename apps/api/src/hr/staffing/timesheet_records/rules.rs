@@ -308,6 +308,9 @@ pub struct Checked {
     pub period: (String, String),
     pub total: Option<f64>,
     pub issues: Vec<RuleIssue>,
+    /// The name as written, when the sheet gives both a name and an employee ID: a complete identity that is not on the
+    /// roster is an unknown person to be added, not a sheet with a missing field.
+    pub identity: Option<String>,
 }
 
 fn who(c: &Checked) -> String {
@@ -328,7 +331,7 @@ fn joined(values: impl Iterator<Item = String>) -> String {
 /// find: nothing to the sender, a wait for the link. Notes go to the manager and nowhere else.
 pub fn decision(checked: &[Checked]) -> Decision {
     if checked.is_empty() {
-        return Decision { outcome: Outcome::NothingToDo, message: None, manager_summary: None, waits: vec![] };
+        return Decision { outcome: Outcome::NothingToDo, message: None, manager_summary: None, waits: vec![], parked: None };
     }
     let with = |sev: Severity| -> Vec<&RuleIssue> { checked.iter().flat_map(|c| c.issues.iter()).filter(|i| i.severity == sev).collect() };
     let (corrections, questions, persons, notes) = (with(Severity::Correction), with(Severity::Question), with(Severity::Person), with(Severity::Note));
@@ -350,7 +353,7 @@ pub fn decision(checked: &[Checked]) -> Decision {
     if !corrections.is_empty() {
         let all: Vec<&RuleIssue> = corrections.iter().chain(questions.iter()).copied().collect();
         let message = MessageRequest::template(MessageKind::Correction, vec![], texts(&all));
-        return Decision { outcome: Outcome::Done, message: Some(message), manager_summary: None, waits };
+        return Decision { outcome: Outcome::Done, message: Some(message), manager_summary: None, waits, parked: None };
     }
     if !questions.is_empty() {
         let message = MessageRequest::template(MessageKind::Question, vec![], texts(&questions));
@@ -358,18 +361,36 @@ pub fn decision(checked: &[Checked]) -> Decision {
             let ask = c.issues.iter().filter(|i| i.severity == Severity::Question).map(|i| i.for_manager.clone()).collect::<Vec<_>>().join(" ");
             format!("{}'s timesheet for {}: {ask}", who(c), period_label(&c.period.0, &c.period.1))
         }));
-        return Decision { outcome: Outcome::Done, message: Some(message), manager_summary: Some(ManagerSummary { headline, notes: note_lines }), waits };
-    }
-    if !persons.is_empty() {
-        let why = joined(persons.iter().map(|p| p.for_manager.clone()));
-        return Decision { outcome: Outcome::NeedsPerson { why }, message: None, manager_summary: None, waits };
+        return Decision { outcome: Outcome::Done, message: Some(message), manager_summary: Some(ManagerSummary { headline, notes: note_lines }), waits, parked: None };
     }
     let fact = |label: &str, value: String| Fact { label: label.into(), value };
-    // One Name, Period, Hours run per sheet, so a reply can say which sheet is which.
+    if !persons.is_empty() {
+        let why = joined(persons.iter().map(|p| p.for_manager.clone()));
+        let unknown: Vec<&Checked> = checked.iter().filter(|c| c.issues.iter().any(|i| i.severity == Severity::Person)).collect();
+        if unknown.iter().all(|c| c.identity.is_some()) {
+            // A complete identity nobody has registered: the sender hears at once that it arrived (and nothing about hours), and the
+            // acknowledgement that names the sheets waits for the person to be linked.
+            let receipt = MessageRequest::template(MessageKind::Holding, vec![fact("About", "timesheet".into())], vec![]);
+            let parked = ack_request(checked, |c| c.person.clone().or_else(|| c.identity.clone()).unwrap_or_default());
+            return Decision { outcome: Outcome::NeedsPerson { why }, message: Some(receipt), manager_summary: None, waits, parked: Some(parked) };
+        }
+        return Decision { outcome: Outcome::NeedsPerson { why }, message: None, manager_summary: None, waits, parked: None };
+    }
+    let headline = joined(checked.iter().map(|c| {
+        let total = c.total.map_or_else(|| "no total".to_string(), |t| format!("{} h", hours(t)));
+        format!("{}'s timesheet is recorded: {}, {total}", who(c), range_short(&c.period.0, &c.period.1))
+    }));
+    let message = ack_request(checked, who);
+    Decision { outcome: Outcome::Done, message: Some(message), manager_summary: Some(ManagerSummary { headline, notes: note_lines }), waits, parked: None }
+}
+
+/// The acknowledgement of every sheet: one Name, Period, Hours run per sheet, so a reply can say which sheet is which.
+fn ack_request(checked: &[Checked], name: impl Fn(&Checked) -> String) -> MessageRequest {
+    let fact = |label: &str, value: String| Fact { label: label.into(), value };
     let mut rows: Vec<[Fact; 3]> = vec![];
     for c in checked {
         let row = [
-            fact("Name", who(c)),
+            fact("Name", name(c)),
             fact("Period", period_label(&c.period.0, &c.period.1)),
             fact("Hours", c.total.map_or_else(|| "no total".to_string(), |t| format!("{} h", hours(t)))),
         ];
@@ -377,13 +398,7 @@ pub fn decision(checked: &[Checked]) -> Decision {
             rows.push(row);
         }
     }
-    let facts: Vec<Fact> = rows.into_iter().flatten().collect();
-    let headline = joined(checked.iter().map(|c| {
-        let total = c.total.map_or_else(|| "no total".to_string(), |t| format!("{} h", hours(t)));
-        format!("{}'s timesheet is recorded: {}, {total}", who(c), range_short(&c.period.0, &c.period.1))
-    }));
-    let message = MessageRequest::template(MessageKind::Ack, facts, vec![]);
-    Decision { outcome: Outcome::Done, message: Some(message), manager_summary: Some(ManagerSummary { headline, notes: note_lines }), waits }
+    MessageRequest::template(MessageKind::Ack, rows.into_iter().flatten().collect(), vec![])
 }
 
 #[cfg(test)]
@@ -459,7 +474,7 @@ mod tests {
     }
 
     fn checked(issues: Vec<RuleIssue>) -> Vec<Checked> {
-        vec![Checked { record_id: "r1".into(), person: Some("Ravi Kumar".into()), period: ("2026-09-01".into(), "2026-09-30".into()), total: Some(168.0), issues }]
+        vec![Checked { record_id: "r1".into(), person: Some("Ravi Kumar".into()), period: ("2026-09-01".into(), "2026-09-30".into()), total: Some(168.0), issues, identity: None }]
     }
 
     fn issue(code: &'static str, severity: Severity, sender: &str) -> RuleIssue {
@@ -627,10 +642,49 @@ mod tests {
         let mut c = checked(issues);
         c[0].person = None;
         let d = decision(&c);
-        assert!(d.message.is_none());
+        assert!(d.message.is_none(), "no identity written, so S9 will ask");
         assert!(matches!(d.outcome, Outcome::NeedsPerson { .. }));
         assert_eq!(d.waits, [Wait::PersonLinked { record_id: "r1".into() }]);
         assert!(d.manager_summary.is_none());
+    }
+
+    fn unknown(identity: Option<&str>) -> Vec<Checked> {
+        let mut c = checked(vec![issue("person_unmatched", Severity::Person, "")]);
+        c[0].person = None;
+        c[0].identity = identity.map(str::to_string);
+        c
+    }
+
+    #[test]
+    fn a_complete_unknown_identity_gets_a_receipt_now_and_the_ack_parked() {
+        let d = decision(&unknown(Some("Dinesh Rao")));
+        let receipt = d.message.expect("the sender hears at once");
+        assert_eq!(receipt.kind, MessageKind::Holding);
+        assert_eq!(receipt.facts, [Fact { label: "About".into(), value: "timesheet".into() }]);
+        assert!(receipt.issues.is_empty(), "no hours and no issue in a receipt");
+        assert!(matches!(d.outcome, Outcome::NeedsPerson { .. }));
+        assert_eq!(d.waits, [Wait::PersonLinked { record_id: "r1".into() }]);
+        let parked = d.parked.expect("the ack waits for the link");
+        assert_eq!(parked.kind, MessageKind::Ack);
+        assert!(parked.facts.iter().any(|f| f.label == "Name" && f.value == "Dinesh Rao"), "{:?}", parked.facts);
+        assert!(d.manager_summary.is_none());
+    }
+
+    #[test]
+    fn an_identity_with_a_missing_field_gets_no_receipt_yet() {
+        let d = decision(&unknown(None));
+        assert!(d.message.is_none() && d.parked.is_none(), "asking for the missing field is S9's");
+        assert!(matches!(d.outcome, Outcome::NeedsPerson { .. }));
+    }
+
+    #[test]
+    fn a_correction_goes_now_even_when_the_person_is_unknown() {
+        let mut c = unknown(Some("Dinesh Rao"));
+        c[0].issues.push(issue("wrong_period", Severity::Correction, "Wrong month."));
+        let d = decision(&c);
+        assert_eq!(d.message.map(|m| m.kind), Some(MessageKind::Correction));
+        assert!(d.parked.is_none(), "the corrected sheet is read again, so nothing is parked");
+        assert_eq!(d.waits, [Wait::PersonLinked { record_id: "r1".into() }]);
     }
 
     #[test]

@@ -273,7 +273,7 @@ async fn the_grid_has_a_row_per_expected_person_with_hours_per_day_and_marks_who
     assert_eq!((ravi["cells"]["2026-09-02"].as_f64(), ravi["total"].as_f64(), ravi["status"].as_str(), ravi["employee_code"].as_str()), (Some(7.5), Some(23.5), Some("recorded"), Some("E1024")));
     let priya = rows.iter().find(|r| r["name"] == "Priya Shah").unwrap();
     assert_eq!(priya["status"], "missing");
-    assert_eq!(g["summary"], json!({"recorded": 1, "needs_check": 0, "missing": 1}));
+    assert_eq!(g["summary"], json!({"recorded": 1, "needs_check": 0, "missing": 1, "unresolved": 0}));
     let (_, d) = f.h.get(OWNER, &format!("{}/messages/{id}", api(&f.ws))).await;
     assert_eq!(d["timesheet_records"][0]["total_hours"], 23.5);
 }

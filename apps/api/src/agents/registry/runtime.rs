@@ -62,7 +62,7 @@ pub async fn load(db: &SqlitePool, config: &Config, case: &Case, owner: Option<&
     let (spec, version) = versions::active_spec_in(db, &row).await?;
     let mut level = level_for(&row, &spec, config, owner);
     // Meera's reply job runs at the level of the experts who asked for the words, not at her own.
-    if case.job == crate::agents::handoff::REPLY_JOB
+    if crate::agents::handoff::is_reply_job_key(&case.job)
         && row.status == "active"
         && let Some(governing) = crate::agents::handoff::store::governing_for_message(db, &case.workspace_id, case.message_id.as_deref()).await?
     {
