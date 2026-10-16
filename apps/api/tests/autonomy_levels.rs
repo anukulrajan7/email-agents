@@ -870,3 +870,29 @@ async fn a_judge_outage_at_send_time_defers_the_step_too() {
     assert_eq!(env.case(ADMIN, &case_id).await["status"], "done");
     assert_eq!(env.sends().len(), 1);
 }
+
+#[tokio::test]
+async fn an_outage_never_uses_up_a_cases_budget() {
+    let mut env = Env::new(
+        Opts::packs(&["general"])
+            .planner(ScriptedPlanner::new().script("inbox", resend_script(8)).with_cost(0.04))
+            .config(|c| c.agent_auto_send_delay_secs = 0),
+    )
+    .await;
+    env.ok("PUT", "/agent", ADMIN, Some(json!({"permissions": {"send": "auto"}}))).await;
+    earn_level_two(&env).await;
+    env.ok("PUT", "/me/agent-profile", OPERATOR, Some(json!({"display_name": "Priya", "approvals": {"send_email": "routine_ok"}}))).await;
+    known_contact(&env).await;
+    env.flaky_critic(&[Hit::E429]);
+    let msg = env.receive(&env.op_src, "m1", "t1", CLIENT, "Status update", "Hi Priya, the interview went well. Will update you.", "general").await;
+    to_lead(&env, &msg).await;
+    let case_id = env.start(&msg).await;
+    for wait in [301_000, 601_000, 1_201_000] {
+        assert_eq!(env.case(ADMIN, &case_id).await["status"], "waiting_event");
+        env.run_due_after(wait).await;
+    }
+    let case = env.case(ADMIN, &case_id).await;
+    assert_eq!(case["status"], "waiting_approval", "the outage ended in a person's approval, not a budget failure: {case}");
+    let spent: f64 = sqlx::query_scalar("SELECT spent_usd FROM cases WHERE id = ?1").bind(&case_id).fetch_one(&env.state.db).await.unwrap();
+    assert!((spent - 0.08).abs() < 1e-9, "only the two turns that were taken are charged: {spent}");
+}

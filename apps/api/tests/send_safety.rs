@@ -980,6 +980,37 @@ async fn deferrals_are_never_incidents_above_low() {
 }
 
 #[tokio::test]
+async fn an_answer_from_the_fallback_model_is_never_cached() {
+    let mut h = harness(0).await;
+    let flaky = flaky_judge(&mut h, &[Hit::E429, Hit::E429, Hit::E429, Hit::Ok]);
+    let d = h.draft(GOOD).await;
+    let cached = || async { sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM judge_cache").fetch_one(&h.state.db).await.unwrap() };
+    let ctx = replies::load(&h.state, &h.ws, &d).await.unwrap();
+    let check = || async { replies::send_safety::check(&h.state, &replies::send_safety::CheckInput { actor_user: None, workspace_id: &h.ws, reply: &ctx, body: &ctx.body_text, automated: true }).await.unwrap() };
+    let r = check().await;
+    assert!(!r.is_blocked(), "the fallback's answer was used: {r:?}");
+    assert_eq!(flaky.models().last().unwrap().as_deref(), Some("test-safety-fallback"));
+    assert_eq!(cached().await, 0, "a stand-in's verdict is not remembered");
+    // The usual model is back: its answer is asked for and remembered.
+    flaky.set(&[Hit::Ok]);
+    check().await;
+    assert_eq!(cached().await, 1);
+    assert_eq!(flaky.models().last().unwrap(), &None);
+}
+
+#[tokio::test]
+async fn an_outage_on_the_check_after_a_repair_still_defers() {
+    let mut h = harness(0).await;
+    h.judge.set("promises", Verdict::YesNo(true), "It promises a hiring company Zeta Corp and a profile fit");
+    // The first review (works) objects and the claim is repaired; the review of the repaired text finds the provider down.
+    flaky_judge(&mut h, &[Hit::Ok, Hit::E429]);
+    let d = h.draft("Hello Priya,\n\nThanks for your note about the timesheet.\n\nZeta Corp is hiring and your profile is a fit for Zeta Corp.\n\nBest regards,\nHR").await;
+    let err = replies::send_draft(&h.state, &h.ws, &d, Actor::System).await.unwrap_err();
+    assert!(matches!(err, AppError::CheckDeferred(_)), "{err:?}");
+    assert_eq!(incidents(&h, "AND kind = 'send_blocked'").await, 0);
+}
+
+#[tokio::test]
 async fn a_non_retryable_review_error_still_blocks_an_automatic_send() {
     let mut h = harness(0).await;
     let flaky = flaky_judge(&mut h, &[Hit::E404]);

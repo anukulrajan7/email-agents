@@ -13,6 +13,7 @@ use serde_json::{Value, json};
 use sqlx::SqliteConnection;
 
 use crate::{
+    platform::error::AppError,
     platform::audit::{self, Actor, Entry},
     platform::db::{new_id, now_ms},
     http::AppState,
@@ -480,8 +481,9 @@ pub async fn notify_matches(state: &AppState, ws: &str, requirement_id: &str) ->
             }
             Err(e) => {
                 tracing::warn!(watch = %t.watch_id, error = %e, "candidate watch email was not scheduled");
-                // Another reply went out in the same conversation a moment ago: try again in a later run.
-                if format!("{e:?}").contains("\"duplicate\"") {
+                // The safety check could not run, or another reply just went out in the same conversation:
+                // the candidate gets their slot back and a later run tries again.
+                if matches!(e, AppError::CheckDeferred(_)) || is_duplicate_block(&e) {
                     outcome.more = true;
                 }
                 discard(state, ws, &draft_id).await?;
@@ -503,6 +505,11 @@ pub async fn notify_job(state: &AppState, payload: &Value) -> Result<(), JobErro
     let outcome = notify_matches(state, ws, requirement_id).await?;
     schedule_more(state, ws, requirement_id, outcome).await?;
     Ok(())
+}
+
+fn is_duplicate_block(e: &AppError) -> bool {
+    let AppError::SendBlocked(_, details) = e else { return false };
+    details["blocking"].as_array().is_some_and(|issues| issues.iter().any(|i| i["code"] == "duplicate"))
 }
 
 /// Queues the next run when candidates are still waiting: in an hour, or after midnight when the daily cap stopped it.
@@ -529,6 +536,14 @@ pub async fn schedule_more(state: &AppState, ws: &str, requirement_id: &str, out
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_duplicate_block_counts_as_a_duplicate() {
+        let block = |code: &str| AppError::SendBlocked("x".into(), json!({ "blocking": [{ "code": code }], "warnings": [] }));
+        assert!(is_duplicate_block(&block("duplicate")));
+        assert!(!is_duplicate_block(&block("too_short")));
+        assert!(!is_duplicate_block(&AppError::CheckDeferred("wait".into())));
+    }
 
     #[test]
     fn aliases_of_one_address_are_the_same_candidate() {

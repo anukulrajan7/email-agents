@@ -392,6 +392,7 @@ async fn a_failed_watch_send_leaves_no_draft_and_keeps_the_weekly_slot() {
     let req = requirement(&env, "r1", CLIENT, "Java developers wanted", "Java Developer", "Pune", false).await;
     let outcome = notify(&env, &req).await;
     assert_eq!(outcome.scheduled, 0);
+    assert!(outcome.more, "a safety check that could not run queues a later run for this candidate");
     assert_eq!(drafts_of_watch(&env).await, 0, "the unsent draft is cleaned up");
     let last: Option<i64> = sqlx::query_scalar("SELECT last_notified_at FROM candidate_watch").fetch_one(&env.state.db).await.unwrap();
     assert_eq!(last, None);

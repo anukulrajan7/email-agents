@@ -213,7 +213,7 @@ pub async fn run_step(state: &AppState, ws: &str, case_id: &str, turn: i64) -> R
 
 async fn commit(state: &AppState, case: &Case, turn: i64, usage: &Usage, result: TurnResult, state_patch: Option<Value>) -> Result<(), JobError> {
     if let TurnResult::Defer { minutes, count } = result {
-        return park::defer_check(state, case, turn, minutes, count, usage).await;
+        return park::defer_check(state, case, turn, minutes, count).await;
     }
     let now = now_ms();
     let tool_cost = match &result {

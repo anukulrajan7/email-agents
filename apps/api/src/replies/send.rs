@@ -164,6 +164,9 @@ pub async fn send_draft_held(state: &AppState, ws: &str, draft_id: &str, actor: 
     if report.is_blocked() && automated && crate::replies::repair::apply(state, ws, &ctx, &report).await? {
         ctx = load(state, ws, draft_id).await?;
         report = send_safety::check(state, &CheckInput { actor_user: requested_by(actor), workspace_id: ws, reply: &ctx, body: &ctx.body_text, automated }).await?;
+        if report.check_outage() {
+            return Err(AppError::CheckDeferred("the safety check could not run; this reply waits and is checked again".into()));
+        }
     }
     if report.is_blocked() {
         if automated {

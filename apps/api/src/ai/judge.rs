@@ -123,6 +123,11 @@ pub trait Judge: Send + Sync {
     async fn judge_with(&self, context: &str, questions: &[Question], _model: Option<&str>) -> Result<Answers, AiError> {
         self.judge(context, questions).await
     }
+
+    /// Whether the answer of the call that just finished may be cached (false after a stand-in model answered).
+    fn cacheable(&self) -> bool {
+        true
+    }
 }
 
 fn validate(questions: &[Question]) -> Result<(), AiError> {
@@ -497,6 +502,9 @@ pub async fn ask_cached(
         return Ok(a);
     }
     let answers = judge.judge(context, questions).await?;
+    if !judge.cacheable() {
+        return Ok(answers);
+    }
     let stored = sqlx::query("INSERT OR REPLACE INTO judge_cache (cache_key, answers_json, created_at) VALUES (?1, ?2, ?3)")
         .bind(&key)
         .bind(serde_json::to_string(&answers).unwrap_or_else(|_| "[]".into()))

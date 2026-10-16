@@ -34,6 +34,9 @@ fn done(kind: &str, detail: impl Into<String>) -> ActionResult {
     ActionResult { kind: kind.into(), status: "done", detail: Some(detail.into()) }
 }
 
+/// A send that waits because the safety check could not run; `run_automations` re-queues the run.
+const DEFERRED: &str = "deferred";
+
 fn skipped(kind: &str, detail: impl Into<String>) -> ActionResult {
     ActionResult { kind: kind.into(), status: "skipped", detail: Some(detail.into()) }
 }
@@ -92,6 +95,8 @@ pub async fn run_automations(state: &AppState, payload: &Value) -> Result<(), Jo
         return Ok(());
     };
 
+    let deferrals = payload.get("check_deferrals").and_then(Value::as_u64).unwrap_or(0) as u32;
+    let mut wait_minutes: Option<i64> = None;
     for automation in candidates {
         if !automations::matches_all(&automation.conditions, &ctx) {
             continue;
@@ -105,8 +110,40 @@ pub async fn run_automations(state: &AppState, payload: &Value) -> Result<(), Jo
         if already.is_some() {
             continue;
         }
-        let results = execute(state, &workspace_id, &automation, &ctx).await?;
+        let mut results = execute(state, &workspace_id, &automation, &ctx).await?;
+        if results.iter().any(|r| r.status == DEFERRED) {
+            match crate::ai::defer::after_deferrals(deferrals) {
+                // The safety check could not run: this automation is not recorded yet; the whole run comes back later.
+                crate::ai::defer::Step::Defer(minutes) => {
+                    wait_minutes = Some(minutes);
+                    continue;
+                }
+                _ => {
+                    let title = format!("Read and send this reply, the safety check could not run: {}", automation.name);
+                    insert_review(state, &workspace_id, &automation.id, &message_id, "automation", &title).await?;
+                    let why = format!("the safety check could not run for {} minutes; a person should read the reply and send it (added to Reviews)", crate::ai::defer::outage_minutes());
+                    for r in results.iter_mut().filter(|r| r.status == DEFERRED) {
+                        *r = skipped(&r.kind.clone(), why.clone());
+                    }
+                }
+            }
+        }
         record_run(state, &workspace_id, &automation, &message_id, &results).await?;
+    }
+    if let Some(minutes) = wait_minutes {
+        let at = now_ms() + minutes * 60_000;
+        let mut conn = state.db.acquire().await?;
+        enqueue_at(
+            &mut conn,
+            kind::RUN_AUTOMATIONS,
+            &format!("automations:{message_id}:check:{}", deferrals + 1),
+            Some(&workspace_id),
+            &json!({ "message_id": message_id, "check_deferrals": deferrals + 1 }),
+            DEFAULT_MAX_ATTEMPTS,
+            at,
+        )
+        .await?;
+        tracing::info!(message_id, deferrals = deferrals + 1, minutes, "safety check could not run; automations wait");
     }
     Ok(())
 }
@@ -391,7 +428,8 @@ async fn send_reply(
             .await?;
             Ok(done(K, "reply checked and scheduled to send"))
         }
-        Err(AppError::DraftIncomplete(m)) | Err(AppError::SendBlocked(m, _)) | Err(AppError::CheckDeferred(m)) => Ok(skipped(K, m)),
+        Err(AppError::CheckDeferred(m)) => Ok(ActionResult { kind: K.into(), status: DEFERRED, detail: Some(m) }),
+        Err(AppError::DraftIncomplete(m)) | Err(AppError::SendBlocked(m, _)) => Ok(skipped(K, m)),
         Err(e) => Ok(failed(K, app_error_detail(&e))),
     }
 }

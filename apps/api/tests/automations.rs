@@ -398,3 +398,90 @@ async fn with_automatic_drafts_off_only_a_person_gets_a_draft() {
     let (_, detail) = call(&env.app, "GET", &format!("{}/messages/{id}", env.base), ADMIN, None).await;
     assert!(detail["draft"]["id"].is_string());
 }
+
+/// A connected mailbox, a sender we have answered before, a confident label, and an automation that drafts and sends.
+async fn auto_send_ready() -> (crate::common::Env, String, String) {
+    use crate::common::{ADMIN as C_ADMIN, CLIENT as C_CLIENT, Env as CommonEnv, Opts};
+    let env = CommonEnv::new(Opts::packs(&["general"])).await;
+    env.ok("PUT", "/reply-settings", C_ADMIN, Some(json!({"auto_reply": true, "reply_instructions": "", "signature": null}))).await;
+    env.ok("PUT", "/agent", C_ADMIN, Some(json!({"permissions": {"send": "ask"}}))).await;
+    let msg = env.receive(&env.op_src, "au1", "t-au1", C_CLIENT, "Question", "Can you confirm the schedule please?", "general").await;
+    let mut conn = env.state.db.acquire().await.unwrap();
+    email_ai_api::platform::audit::record(
+        &mut conn,
+        email_ai_api::platform::audit::Entry {
+            workspace_id: &env.ws,
+            actor: email_ai_api::platform::audit::Actor::User(&env.admin_id),
+            action: "draft.sent",
+            entity_type: "draft",
+            entity_id: "drf_earlier",
+            message_id: Some(&msg),
+            metadata: json!({}),
+        },
+    )
+    .await
+    .unwrap();
+    drop(conn);
+    sqlx::query("UPDATE classifications SET confidence = 0.95, source = 'llm' WHERE message_id = ?1").bind(&msg).execute(&env.state.db).await.unwrap();
+    let (status, a) = env
+        .req(
+            "POST",
+            "/automations",
+            C_ADMIN,
+            Some(json!({"name": "Answer and send", "enabled": true, "conditions": [{"field": "needs_reply", "op": "is", "value": true}],
+                        "actions": [{"type": "draft_reply"}, {"type": "send_reply", "daily_cap": 5, "allowed_domains": ["client.com"]}]})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{a}");
+    let aid = a["id"].as_str().unwrap().to_string();
+    (env, msg, aid)
+}
+
+async fn automation_runs_of(env: &crate::common::Env, aid: &str) -> Vec<(String, String)> {
+    sqlx::query_as("SELECT status, actions_json FROM automation_runs WHERE automation_id = ?1").bind(aid).fetch_all(&env.state.db).await.unwrap()
+}
+
+#[tokio::test]
+async fn an_automatic_send_whose_check_cannot_run_is_queued_again_not_dropped() {
+    use crate::common::Hit;
+    let (mut env, msg, aid) = auto_send_ready().await;
+    let flaky = env.flaky_judge(&[Hit::E429]);
+    email_ai_api::jobs::automation_jobs::run_automations(&env.state, &json!({"message_id": msg})).await.unwrap();
+    assert!(automation_runs_of(&env, &aid).await.is_empty(), "not recorded as run yet: {:?}", automation_runs_of(&env, &aid).await);
+    assert!(env.sends().is_empty());
+    assert!(flaky.calls() >= 1);
+    let (run_at, n): (i64, i64) = sqlx::query_as(
+        "SELECT run_at, json_extract(payload_json, '$.check_deferrals') FROM jobs WHERE kind = 'run_automations' AND status = 'pending' AND dedupe_key LIKE '%:check:%'",
+    )
+    .fetch_one(&env.state.db)
+    .await
+    .expect("the run comes back");
+    assert_eq!(n, 1);
+    assert!((290_000..=305_000).contains(&(run_at - db::now_ms())), "about five minutes later");
+
+    // The check is back: the run completes and the reply is scheduled once.
+    flaky.set(&[Hit::Ok]);
+    env.run_due_after(301_000).await;
+    let runs = automation_runs_of(&env, &aid).await;
+    assert_eq!(runs.len(), 1);
+    assert_eq!(env.count("SELECT COUNT(*) FROM audit_events WHERE workspace_id = ?1 AND action = 'automation.sent_reply'").await, 1, "{runs:?}");
+    assert!(runs[0].1.contains("reply checked and scheduled to send"), "{runs:?}");
+    assert_eq!(env.count("SELECT COUNT(*) FROM jobs WHERE kind = 'run_automations' AND status = 'pending'").await, 0, "no further wait");
+}
+
+#[tokio::test]
+async fn an_automatic_send_asks_a_person_after_three_deferrals() {
+    use crate::common::Hit;
+    let (mut env, msg, aid) = auto_send_ready().await;
+    env.flaky_judge(&[Hit::E429]);
+    email_ai_api::jobs::automation_jobs::run_automations(&env.state, &json!({"message_id": msg})).await.unwrap();
+    for wait in [301_000, 601_000, 1_201_000] {
+        assert!(automation_runs_of(&env, &aid).await.is_empty(), "still waiting");
+        env.run_due_after(wait).await;
+    }
+    let runs = automation_runs_of(&env, &aid).await;
+    assert_eq!(runs.len(), 1, "recorded once the ladder is used up");
+    assert!(runs[0].1.contains("the safety check could not run for 35 minutes"), "{}", runs[0].1);
+    assert_eq!(env.count("SELECT COUNT(*) FROM review_items WHERE workspace_id = ?1 AND kind = 'automation' AND title LIKE '%safety check could not run%'").await, 1);
+    assert!(env.sends().is_empty());
+}

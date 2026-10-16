@@ -1,6 +1,5 @@
 use super::super::{
     case::{self, Case},
-    planner::Usage,
     sentence,
 };
 use crate::{
@@ -67,18 +66,18 @@ const CHECK_WAIT_NOTE: &str = "Waiting to run the safety check again";
 pub(super) const CHECK_WAIT_NOTE_LIKE: &str = "Waiting to run the safety check again%";
 
 /// The safety check could not run: the case waits and takes the same turn again in `minutes`. Nothing is
-/// recorded as a step, so nothing here counts against the agent; the planner's cost is still kept.
-pub(super) async fn defer_check(state: &AppState, case: &Case, turn: i64, minutes: i64, count: u32, usage: &Usage) -> Result<(), JobError> {
+/// recorded as a step, so nothing here counts against the agent, and the turn's planner cost is not added to
+/// the case's spend: an outage can never use up a case's budget.
+pub(super) async fn defer_check(state: &AppState, case: &Case, turn: i64, minutes: i64, count: u32) -> Result<(), JobError> {
     let now = crate::platform::db::now_ms();
     let resume_at = now + minutes * 60_000;
     let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     let waiting = sqlx::query(
-        "UPDATE cases SET status = 'waiting_event', next_wake_at = ?1, updated_at = ?2, spent_usd = spent_usd + ?3, status_note = ?4
-         WHERE id = ?5 AND workspace_id = ?6 AND step_count = ?7 - 1 AND status IN ('running', 'waiting_event')",
+        "UPDATE cases SET status = 'waiting_event', next_wake_at = ?1, updated_at = ?2, status_note = ?3
+         WHERE id = ?4 AND workspace_id = ?5 AND step_count = ?6 - 1 AND status IN ('running', 'waiting_event')",
     )
     .bind(resume_at)
     .bind(now)
-    .bind(usage.cost_usd)
     .bind(format!("{CHECK_WAIT_NOTE}: {minutes} minutes"))
     .bind(&case.id)
     .bind(&case.workspace_id)

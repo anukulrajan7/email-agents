@@ -138,6 +138,11 @@ fn verdict_tool() -> Value {
 
 /// Reads the `verdict` call. Anything unusable, including no call at all, blocks (fail safe).
 pub fn parse_verdict(message: &Value) -> (bool, String) {
+    read_verdict(message).unwrap_or_else(|| (false, "The safety check gave no clear answer.".into()))
+}
+
+/// The `verdict` call's answer, or `None` when there is no usable call.
+fn read_verdict(message: &Value) -> Option<(bool, String)> {
     let args = message
         .pointer("/tool_calls/0/function/arguments")
         .and_then(|a| match a {
@@ -145,10 +150,8 @@ pub fn parse_verdict(message: &Value) -> (bool, String) {
             other => Some(other.clone()),
         })
         .unwrap_or(Value::Null);
-    match (args.get("ok").and_then(Value::as_bool), args.get("reason").and_then(Value::as_str)) {
-        (Some(ok), reason) => (ok, super::sentence(reason.unwrap_or_default(), 200)),
-        _ => (false, "The safety check gave no clear answer.".into()),
-    }
+    let ok = args.get("ok").and_then(Value::as_bool)?;
+    Some((ok, super::sentence(args.get("reason").and_then(Value::as_str).unwrap_or_default(), 200)))
 }
 
 pub struct OpenRouterCritic {
@@ -187,7 +190,12 @@ impl Critic for OpenRouterCritic {
             // `require_parameters` (OpenRouter 404). No verdict call still blocks (fail safe).
             .chat_tools(model.unwrap_or(&self.model), CRITIC_PROMPT, user, verdict_tool(), json!("auto"), 150)
             .await?;
-        let (ok, reason) = parse_verdict(&reply.message);
+        let (ok, reason) = match (read_verdict(&reply.message), model) {
+            (Some(verdict), _) => verdict,
+            // A stand-in model that gave no usable verdict is an outage of the check, not an objection.
+            (None, Some(_)) => return Err(AiError::Retryable("the fallback model gave no verdict".into())),
+            (None, None) => parse_verdict(&reply.message),
+        };
         Ok(Verdict { ok, reason, usage: Usage::from_chat(&reply.usage, &reply.model_id) })
     }
 }
@@ -247,6 +255,13 @@ mod tests {
         p.candidates = (0..4).map(|i| Pick { id: format!("c{i}"), name: "x".into(), score: 50 }).collect();
         assert!(blocked("submit_candidate", p, ctx()), "too many");
         assert!(hard_rules("send_email", None, &ctx()).is_some(), "no preview");
+    }
+
+    #[test]
+    fn no_verdict_call_is_not_a_verdict() {
+        assert_eq!(read_verdict(&json!({"content": "sure"})), None);
+        assert_eq!(read_verdict(&json!({"tool_calls": [{"function": {"name": "verdict", "arguments": "{\"reason\":\"x\"}"}}]})), None);
+        assert_eq!(read_verdict(&json!({"tool_calls": [{"function": {"name": "verdict", "arguments": "{\"ok\":true,\"reason\":\"Fine\"}"}}]})), Some((true, "Fine".into())));
     }
 
     #[test]
