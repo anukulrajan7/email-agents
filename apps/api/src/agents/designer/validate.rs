@@ -263,8 +263,9 @@ pub fn validate(spec: &AgentSpec, ctx: &WsCtx) -> Vec<Issue> {
         let path = format!("steps[{i}]");
         if let Some(missing) = step.required_tools().iter().find(|t| !spec.has_tool(t)) {
             out.push(issue(&path, "step_needs_tool", format!("the step \"{}\" needs the {missing} tool in the tool list", step.describe())));
-        } else if let Some(t) = step.required_tools().iter().find(|t| !spec.has_scope(spec::scope_of_tool(t))) {
-            out.push(issue(&path, "step_outside_scopes", format!("the step \"{}\" needs the {} scope", step.describe(), spec::scope_of_tool(t).as_str())));
+        } else if let Some(t) = step.required_tools().iter().find(|t| !spec.covers(t)) {
+            let scope = spec::scope_of_tool(t).map_or("right", spec::Scope::as_str);
+            out.push(issue(&path, "step_outside_scopes", format!("the step \"{}\" needs the {scope} scope", step.describe())));
         }
         match step {
             Step::DraftReply { .. } => {
@@ -367,7 +368,7 @@ pub fn normalise(mut spec: AgentSpec, ctx: &WsCtx) -> AgentSpec {
     spec.scopes.dedup();
     let scopes = spec.scopes.clone();
     let before = spec.tools.len();
-    spec.tools.retain(|t| crate::agents::tools::registry().get(t).is_none() || scopes.contains(&spec::scope_of_tool(t)));
+    spec.tools.retain(|t| crate::agents::tools::registry().get(t).is_none() || spec::scope_of_tool(t).is_some_and(|s| scopes.contains(&s)));
     if spec.tools.len() < before {
         notes.push("Dropped tools that its permissions do not cover.".into());
     }

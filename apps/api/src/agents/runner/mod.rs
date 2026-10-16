@@ -21,7 +21,8 @@ use super::{
 };
 use crate::{
     agents::profiles,
-    agents::registry::spec::scope_of_tool,
+    agents::gaps::NewGap,
+    agents::registry::spec::{Scope, scope_of_tool},
     agents::registry::runtime,
     ai::AiError,
     platform::audit::{self, Actor, Entry},
@@ -45,6 +46,8 @@ enum TurnResult {
     Ran { tool: String, input: Value, out: ToolOutput, auto_sent: bool },
     Error { tool: Option<String>, input: Value, summary: String, error: String },
     Blocked { tool: String, input: Value, reason: String },
+    /// The planner asked for a tool that does not exist: counted as a gap, the case carries on.
+    Gap { tool: String, input: Value },
     Approval { tool: String, input: Value, preview: Preview },
     Finish { outcome: Option<String>, summary: String },
     /// The safety check could not run: the same turn is taken again in `minutes` (`count` = deferrals used).
@@ -62,7 +65,7 @@ fn audited_call(result: &TurnResult) -> Option<(&str, &'static str, &Value)> {
             Some((tool, if simulated { "simulated" } else { "ok" }, input))
         }
         TurnResult::Error { tool: Some(tool), input, .. } => Some((tool, "error", input)),
-        TurnResult::Blocked { tool, input, .. } => Some((tool, "blocked", input)),
+        TurnResult::Blocked { tool, input, .. } | TurnResult::Gap { tool, input } => Some((tool, "blocked", input)),
         TurnResult::Approval { tool, input, .. } => Some((tool, "waiting_approval", input)),
         TurnResult::Error { tool: None, .. } | TurnResult::Finish { .. } | TurnResult::Defer { .. } => None,
     }
@@ -195,7 +198,7 @@ pub async fn run_step(state: &AppState, ws: &str, case_id: &str, turn: i64) -> R
     if fixed.is_some() {
         let progress = match &result {
             TurnResult::Ran { .. } | TurnResult::Approval { .. } => Some(json!({workflow::POS_KEY: workflow::position(&case) + 1})),
-            TurnResult::Error { .. } | TurnResult::Blocked { .. } => {
+            TurnResult::Error { .. } | TurnResult::Blocked { .. } | TurnResult::Gap { .. } => {
                 Some(json!({workflow::MODE_KEY: "planner", workflow::WHY_KEY: "a step failed or was stopped"}))
             }
             TurnResult::Finish { .. } | TurnResult::Defer { .. } => None,
@@ -269,7 +272,7 @@ async fn commit(state: &AppState, case: &Case, turn: i64, usage: &Usage, result:
                 entity_id: &case.id,
                 message_id: case.message_id.as_deref(),
                 metadata: json!({
-                    "tool": tool, "scope": scope_of_tool(tool).as_str(), "status": status, "turn": turn,
+                    "tool": tool, "scope": scope_of_tool(tool).map(Scope::as_str), "status": status, "turn": turn,
                     "agent_id": case.agent_id, "agent_version": case.agent_version, "shadow": case.shadow, "refs": call_refs(input),
                 }),
             },
@@ -318,6 +321,17 @@ async fn commit(state: &AppState, case: &Case, turn: i64, usage: &Usage, result:
         TurnResult::Blocked { tool, input, reason } => {
             let summary = format!("Check stopped {tool}: {reason}");
             case::insert_step(&mut tx, case, step("critic", static_name(&tool), summary, input, json!({"reason": reason}), "blocked")).await?;
+            error_streak = case.error_streak;
+        }
+        TurnResult::Gap { tool, input } => {
+            let reason = format!("{tool} is not something this assistant can do yet. It has been noted for the team; create a task for a person instead.");
+            crate::agents::gaps::record(
+                &mut tx,
+                &case.workspace_id,
+                NewGap { tool: &tool, why: &reason, agent_id: case.agent_id.as_deref(), message_id: case.message_id.as_deref(), source: "planner" },
+            )
+            .await?;
+            case::insert_step(&mut tx, case, step("critic", None, format!("Stopped: {reason}"), input, json!({"reason": reason}), "blocked")).await?;
             error_streak = case.error_streak;
         }
         TurnResult::Approval { tool, input, preview } => {

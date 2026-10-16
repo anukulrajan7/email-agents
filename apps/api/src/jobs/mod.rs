@@ -185,6 +185,10 @@ pub fn priority_of(kind: &str, dedupe_key: &str) -> i64 {
 /// Atomically claims one due job (or one whose lease expired) in a single statement,
 /// so two workers can never both own the same live job.
 pub async fn claim(pool: &SqlitePool, worker_id: &str) -> sqlx::Result<Option<Job>> {
+    claim_with_lease(pool, worker_id, LEASE_MS).await
+}
+
+pub async fn claim_with_lease(pool: &SqlitePool, worker_id: &str, lease_ms: i64) -> sqlx::Result<Option<Job>> {
     let now = now_ms();
     sqlx::query_as::<_, Job>(&format!(
         "UPDATE jobs
@@ -201,10 +205,22 @@ pub async fn claim(pool: &SqlitePool, worker_id: &str) -> sqlx::Result<Option<Jo
          RETURNING {JOB_COLUMNS}"
     ))
     .bind(worker_id)
-    .bind(now + LEASE_MS)
+    .bind(now + lease_ms)
     .bind(now)
     .fetch_optional(pool)
     .await
+}
+
+/// Pushes a running job's lock forward; false once the claim is no longer ours (re-claimed, finished or dead).
+pub async fn extend_lease(pool: &SqlitePool, job: &Job, worker_id: &str, lease_ms: i64) -> sqlx::Result<bool> {
+    let res = sqlx::query("UPDATE jobs SET locked_until = ?1 WHERE id = ?2 AND locked_by = ?3 AND attempts = ?4 AND status = 'running'")
+        .bind(now_ms() + lease_ms)
+        .bind(&job.id)
+        .bind(worker_id)
+        .bind(job.attempts)
+        .execute(pool)
+        .await?;
+    Ok(res.rows_affected() == 1)
 }
 
 /// `(locked_by, attempts)` is the claim token: it fences out a stale task whose lease

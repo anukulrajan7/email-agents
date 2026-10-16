@@ -366,16 +366,78 @@ async fn step_limit_and_repeated_errors_stop_a_case() {
 
     let bad = vec![
         Scripted::Invalid("not json".into()),
-        tool("launch_rocket", json!({})),
         tool("find_candidates", json!({"limit": 3})),
+        Scripted::Invalid("still not json".into()),
         tool("search_mail", json!({"query": "never reached"})),
     ];
     let env = env_with(ScriptedPlanner::new().script("requirement", bad), |_| {}).await;
     let detail = requirement_only(&env).await;
     assert_eq!(detail["status"], "failed");
     assert!(detail["failure_reason"].as_str().unwrap().contains("3 steps in a row failed"));
-    assert_eq!(kinds(&detail), ["note:error", "note:error", "tool:error", "note:error"]);
+    assert_eq!(kinds(&detail), ["note:error", "tool:error", "note:error", "note:error"]);
     assert!(env.planner.prompts()[1].contains("unusable choice"), "the planner sees its own error");
+}
+
+async fn gap_count(env: &Env, tool: &str) -> Option<i64> {
+    sqlx::query_scalar("SELECT count FROM tool_gaps WHERE workspace_id = ?1 AND tool = ?2")
+        .bind(&env.ws)
+        .bind(tool)
+        .fetch_optional(&env.state.db)
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn an_unknown_tool_blocks_the_case_and_counts_one_gap() {
+    let script = vec![
+        tool("launch_rocket", json!({"target": "moon"})),
+        finish(None, "Could not launch."),
+        tool("Launch Rocket", json!({})),
+        finish(None, "Could not launch."),
+    ];
+    let env = env(ScriptedPlanner::new().script("requirement", script)).await;
+    let detail = requirement_only(&env).await;
+    assert_eq!(detail["status"], "done", "an unknown tool does not fail the case");
+    assert_eq!(kinds(&detail), ["critic:blocked", "finish:ok"]);
+    let blocked = &detail["steps"][0];
+    assert!(blocked["summary"].as_str().unwrap().contains("launch_rocket"), "{blocked}");
+    assert_eq!(gap_count(&env, "launch_rocket").await, Some(1));
+    let (source, status, agent): (String, String, Option<String>) =
+        sqlx::query_as("SELECT source, status, agent_id FROM tool_gaps WHERE tool = 'launch_rocket'").fetch_one(&env.state.db).await.unwrap();
+    assert_eq!((source.as_str(), status.as_str()), ("planner", "open"));
+    assert!(agent.is_some());
+
+    env.receive("r2", "t-req2", CLIENT, "Requirement: Python Developer", "Need 2 developers with Python. Location Pune.", 1).await;
+    assert_eq!(env.cases("requirement").await.len(), 2);
+    assert_eq!(gap_count(&env, "launch_rocket").await, Some(2), "the same wish counts again, under one name");
+    let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tool_gaps").fetch_one(&env.state.db).await.unwrap();
+    assert_eq!(rows, 1);
+}
+
+#[tokio::test]
+async fn repeated_unknown_tools_never_fail_the_case() {
+    let script = vec![
+        tool("launch_rocket", json!({})),
+        tool("launch_rocket", json!({})),
+        tool("launch_rocket", json!({})),
+        finish(None, "Gave up on the rocket."),
+    ];
+    let env = env(ScriptedPlanner::new().script("requirement", script)).await;
+    let detail = requirement_only(&env).await;
+    assert_eq!(detail["status"], "done");
+    assert_eq!(kinds(&detail), ["critic:blocked", "critic:blocked", "critic:blocked", "finish:ok"]);
+    assert_eq!(gap_count(&env, "launch_rocket").await, Some(3));
+}
+
+#[test]
+fn an_unknown_tool_never_gets_read_scope() {
+    use email_ai_api::agents::registry::spec::{Scope, scope_of_tool};
+    assert_eq!(scope_of_tool("launch_rocket"), None);
+    assert_eq!(scope_of_tool(""), None);
+    assert_eq!(scope_of_tool("read_email"), Some(Scope::ReadMail));
+    for tool in email_ai_api::agents::tools::registry().all() {
+        assert!(scope_of_tool(tool.name()).is_some(), "{} needs an explicit scope", tool.name());
+    }
 }
 
 #[tokio::test]

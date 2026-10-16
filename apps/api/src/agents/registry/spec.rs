@@ -48,21 +48,21 @@ impl Scope {
     }
 }
 
-/// The scope a tool needs.
-pub fn scope_of_tool(tool: &str) -> Scope {
-    match tool {
-        "draft_email" => Scope::Draft,
+/// The scope a tool needs. A name that is not listed here needs none that exists: it gets no scope.
+pub fn scope_of_tool(tool: &str) -> Option<Scope> {
+    Some(match tool {
+        "search_mail" | "read_email" | "read_thread" | "find_candidates" | "find_requirements" | "recall_memory" | "extract_fields" => Scope::ReadMail,
+        "draft_email" | "save_to_gmail_drafts" => Scope::Draft,
         "send_email" | "submit_candidate" | "send_message" => Scope::Send,
-        "save_to_gmail_drafts" => Scope::Draft,
         "create_task" | "update_case" | "label_email" | "notify_owner" | "record_timesheet" => Scope::Label,
         "schedule_check" | "propose_automation" => Scope::Schedule,
-        _ => Scope::ReadMail,
-    }
+        _ => return None,
+    })
 }
 
 /// The scopes that exactly cover these tools (sorted, no repeats).
 pub fn scopes_for_tools(tools: &[String]) -> Vec<Scope> {
-    let mut scopes: Vec<Scope> = tools.iter().map(|t| scope_of_tool(t)).collect();
+    let mut scopes: Vec<Scope> = tools.iter().filter_map(|t| scope_of_tool(t)).collect();
     scopes.sort();
     scopes.dedup();
     scopes
@@ -348,7 +348,12 @@ impl AgentSpec {
 
     /// Tools the agent may call: listed in `tools` and covered by a scope.
     pub fn usable_tools(&self) -> Vec<String> {
-        self.tools.iter().filter(|t| self.has_scope(scope_of_tool(t))).cloned().collect()
+        self.tools.iter().filter(|t| self.covers(t)).cloned().collect()
+    }
+
+    /// True when the tool exists in the scope table and one of the agent's scopes covers it.
+    pub fn covers(&self, tool: &str) -> bool {
+        scope_of_tool(tool).is_some_and(|scope| self.has_scope(scope))
     }
 }
 
@@ -485,8 +490,9 @@ pub fn validate_basic(spec: &AgentSpec) -> Vec<Issue> {
         }
     }
     for (i, tool) in spec.tools.iter().enumerate() {
-        let needed = scope_of_tool(tool);
-        if !spec.has_scope(needed) && crate::agents::tools::registry().get(tool).is_some() {
+        if let Some(needed) = scope_of_tool(tool)
+            && !spec.has_scope(needed)
+        {
             out.push(issue(format!("tools[{i}]"), "tool_outside_scopes", format!("{tool} needs the {} scope", needed.as_str())));
         }
     }
@@ -604,8 +610,9 @@ mod tests {
         let read_only = AgentSpec { scopes: vec![Scope::ReadMail], ..spec.clone() };
         assert_eq!(read_only.usable_tools(), ["read_email", "read_thread", "recall_memory", "search_mail"]);
         assert_eq!(scopes_for_tools(&spec.tools), spec.scopes);
-        assert_eq!(scope_of_tool("submit_candidate"), Scope::Send);
-        assert_eq!(scope_of_tool("find_candidates"), Scope::ReadMail);
+        assert_eq!(scope_of_tool("submit_candidate"), Some(Scope::Send));
+        assert_eq!(scope_of_tool("find_candidates"), Some(Scope::ReadMail));
+        assert_eq!(scope_of_tool("rm_rf"), None);
     }
 
     #[test]

@@ -32,7 +32,7 @@ pub async fn run(state: AppState, mut shutdown: watch::Receiver<bool>) {
             _ = shutdown.changed() => break,
         };
 
-        match jobs::claim(&state.db, &worker_id).await {
+        match jobs::claim_with_lease(&state.db, &worker_id, state.config.job_lease_ms).await {
             Ok(Some(job)) => {
                 let state = state.clone();
                 let worker_id = worker_id.clone();
@@ -70,7 +70,10 @@ pub async fn process(state: &AppState, worker_id: &str, job: Job) {
 async fn process_inner(state: &AppState, worker_id: &str, job: Job) {
     let started = std::time::Instant::now();
     let ctx = crate::ai::ledger::AiContext::for_job(job.workspace_id.as_deref(), &job.payload(), job.attempts);
-    match crate::ai::ledger::with_context(ctx, handlers::handle(state, &job)).await {
+    let heartbeat = Heartbeat::start(state, worker_id, &job);
+    let outcome = crate::ai::ledger::with_context(ctx, handlers::handle(state, &job)).await;
+    drop(heartbeat);
+    match outcome {
         Ok(()) => {
             if let Err(e) = jobs::complete(&state.db, &job, worker_id).await {
                 tracing::warn!(job_id = %job.id, error = %e, "failed to mark job succeeded");
@@ -92,10 +95,38 @@ async fn process_inner(state: &AppState, worker_id: &str, job: Job) {
     }
 }
 
+/// Renews a running job's lease every quarter of the lease (30 s for the default 120 s) so a long
+/// handler is not claimed again while it still runs. Dropping it, even on a panic, stops the renewals.
+struct Heartbeat(tokio::task::JoinHandle<()>);
+
+impl Heartbeat {
+    fn start(state: &AppState, worker_id: &str, job: &Job) -> Self {
+        let (pool, worker_id, job) = (state.db.clone(), worker_id.to_string(), job.clone());
+        let lease_ms = state.config.job_lease_ms;
+        Self(tokio::spawn(async move {
+            let every = Duration::from_millis((lease_ms / 4).max(1) as u64);
+            loop {
+                tokio::time::sleep(every).await;
+                match jobs::extend_lease(&pool, &job, &worker_id, lease_ms).await {
+                    Ok(true) => {}
+                    Ok(false) => break,
+                    Err(e) => tracing::warn!(job_id = %job.id, error = %e, "could not renew the job lease"),
+                }
+            }
+        }))
+    }
+}
+
+impl Drop for Heartbeat {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 /// Test/CLI helper: process due jobs sequentially until none are claimable.
 pub async fn drain(state: &AppState) -> usize {
     let mut n = 0;
-    while let Ok(Some(job)) = jobs::claim(&state.db, "drain").await {
+    while let Ok(Some(job)) = jobs::claim_with_lease(&state.db, "drain", state.config.job_lease_ms).await {
         process(state, "drain", job).await;
         n += 1;
     }

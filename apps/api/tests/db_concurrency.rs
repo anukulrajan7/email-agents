@@ -1,7 +1,10 @@
 //! Concurrency stress: API writes, draft requests and several job workers share one SQLite file.
 //! Nothing may surface "database is locked" (an HTTP 500 or a job error).
 
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
 
 use async_trait::async_trait;
 use axum::{
@@ -24,6 +27,17 @@ use tower::ServiceExt;
 const ADMIN: &str = "dev:admin@acme.test";
 
 struct SlowAnalyst;
+
+struct CountingSlowAnalyst(Arc<AtomicUsize>);
+
+#[async_trait]
+impl Analyst for CountingSlowAnalyst {
+    async fn analyze(&self, subject: &str, _sender: &str, _body: &str) -> Result<(Insight, String), AiError> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        Ok((Insight { summary: format!("About {subject}"), ..Default::default() }, "test".into()))
+    }
+}
 
 #[async_trait]
 impl Analyst for SlowAnalyst {
@@ -111,4 +125,36 @@ async fn concurrent_writers_never_see_database_is_locked() {
             .unwrap();
     assert!(failures.is_empty(), "server errors: {failures:#?}");
     assert!(job_errors.is_empty(), "jobs hit the lock: {job_errors:#?}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_1s_lease_with_a_3s_handler_runs_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = Config::for_tests(&format!("sqlite://{}", dir.path().join("t.db").display()));
+    config.job_lease_ms = 1_000;
+    let mut state = build_state(config).await.unwrap();
+    db::migrate(&state.db).await.unwrap();
+    let calls = Arc::new(AtomicUsize::new(0));
+    state.analyst = Arc::new(CountingSlowAnalyst(calls.clone()));
+    let app = router(state.clone());
+    let (_, ws) = call(&app, "POST", "/api/v1/workspaces", Some(json!({"name":"Acme","template":"hr"}))).await;
+    let base = format!("/api/v1/workspaces/{}", ws["id"].as_str().unwrap());
+    let (_, src) = call(&app, "POST", &format!("{base}/sources/forwarding"), None).await;
+    let source = src["id"].as_str().unwrap();
+    let (s, _) = call(&app, "POST", &format!("{base}/sources/{source}/test-email"), Some(json!({"subject": "Slow one", "body_text": "Please confirm my timesheet."}))).await;
+    assert!(s.is_success());
+
+    let first = {
+        let state = state.clone();
+        tokio::spawn(async move { worker::drain(&state).await })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(1_500)).await;
+    worker::drain(&state).await;
+    first.await.unwrap();
+
+    assert_eq!(calls.load(Ordering::SeqCst), 1, "the 3 s handler ran once, not once per lease");
+    let most_attempts: i64 = sqlx::query_scalar("SELECT MAX(attempts) FROM jobs").fetch_one(&state.db).await.unwrap();
+    assert_eq!(most_attempts, 1, "no job was claimed a second time");
+    let running: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM jobs WHERE status = 'running'").fetch_one(&state.db).await.unwrap();
+    assert_eq!(running, 0);
 }

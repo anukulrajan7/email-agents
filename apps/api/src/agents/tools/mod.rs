@@ -247,6 +247,25 @@ pub fn registry() -> &'static Registry {
     &REGISTRY
 }
 
+/// Other names planners use for tools we have.
+const ALIASES: &[(&str, &str)] = &[
+    ("send_mail", "send_email"),
+    ("draft_mail", "draft_email"),
+    ("draft_reply", "draft_email"),
+    ("read_mail", "read_email"),
+    ("search_email", "search_mail"),
+    ("search_emails", "search_mail"),
+    ("find_candidate", "find_candidates"),
+    ("find_requirement", "find_requirements"),
+];
+
+/// A tool name the way we store it: trimmed, lower case, words joined by `_`, aliases resolved.
+/// Gaps are recorded under this name so one wish is one row.
+pub fn canonical_name(raw: &str) -> String {
+    let flat = raw.trim().to_lowercase().split(|c: char| c == '-' || c.is_whitespace() || c == '_').filter(|w| !w.is_empty()).collect::<Vec<_>>().join("_");
+    ALIASES.iter().find(|(alias, _)| *alias == flat).map_or(flat, |(_, real)| (*real).to_string())
+}
+
 /// Approvals name what a person decides; a tool's name can differ.
 pub fn approval_action(tool: &str) -> &str {
     if tool == "propose_automation" { "create_automation" } else { tool }
@@ -408,6 +427,18 @@ mod tests {
             assert_valid_object_schema(f["name"].as_str().unwrap(), &f["parameters"]);
         }
         assert_eq!(specs.last().unwrap()["function"]["name"], "finish");
+    }
+
+    #[test]
+    fn tool_names_are_normalised_and_aliases_resolve() {
+        assert_eq!(canonical_name("  Launch-Rocket "), "launch_rocket");
+        assert_eq!(canonical_name("Launch   rocket"), "launch_rocket");
+        assert_eq!(canonical_name("send_mail"), "send_email");
+        assert_eq!(canonical_name("Search Emails"), "search_mail");
+        assert_eq!(canonical_name("read_email"), "read_email");
+        for (_, real) in ALIASES {
+            assert!(registry().get(real).is_some(), "{real}");
+        }
     }
 
     #[test]

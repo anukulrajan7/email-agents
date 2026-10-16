@@ -120,6 +120,8 @@ pub struct Config {
     pub evals_live_max_usd: f64,
     pub email_retention_days: i64,
     pub job_worker_concurrency: usize,
+    /// How long a claimed job stays locked without a heartbeat, in ms (`JOB_LEASE_MS`); the worker renews it every quarter.
+    pub job_lease_ms: i64,
     pub allow_test_emails: bool,
     pub max_body_chars: usize,
     /// Built web app to serve (SPA fallback to index.html). Unset in dev: Vite serves it.
@@ -224,6 +226,7 @@ impl Config {
             agent_auto_send_delay_secs: var("AGENT_AUTO_SEND_DELAY_SECS", "600").parse::<i64>().context("AGENT_AUTO_SEND_DELAY_SECS")?.clamp(0, 86_400),
             email_retention_days: var("EMAIL_RETENTION_DAYS", "30").parse().context("EMAIL_RETENTION_DAYS")?,
             job_worker_concurrency: var("JOB_WORKER_CONCURRENCY", "2").parse().context("JOB_WORKER_CONCURRENCY")?,
+            job_lease_ms: var("JOB_LEASE_MS", "120000").parse::<i64>().context("JOB_LEASE_MS")?.max(100),
             allow_test_emails: var("ALLOW_TEST_EMAILS", "false") == "true",
             max_body_chars: var("MAX_BODY_CHARS", "200000").parse().context("MAX_BODY_CHARS")?,
             web_dist_dir: var("WEB_DIST_DIR", ""),
@@ -317,6 +320,7 @@ impl Config {
             evals_live_max_usd: 0.50,
             email_retention_days: 30,
             job_worker_concurrency: 2,
+            job_lease_ms: 120_000,
             allow_test_emails: true,
             max_body_chars: 200_000,
             web_dist_dir: String::new(),

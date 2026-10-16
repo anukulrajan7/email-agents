@@ -50,13 +50,10 @@ pub(super) async fn evaluate(
     workflow: bool,
     usage: &mut Usage,
 ) -> Result<TurnResult, JobError> {
-    let Some(tool) = tools::registry().get(name) else {
-        return Ok(TurnResult::Error {
-            tool: None,
-            input: json!({"tool": sentence(name, 60), "args": args}),
-            summary: "The assistant asked for an action that does not exist and will try again".into(),
-            error: format!("unknown tool {}", sentence(name, 60)),
-        });
+    let name = tools::canonical_name(name);
+    let Some(tool) = tools::registry().get(&name) else {
+        let shown = sentence(&name, 60);
+        return Ok(TurnResult::Gap { input: json!({"tool": shown, "args": args}), tool: shown });
     };
     let tool_name = tool.name().to_string();
     if let Err(e) = tools::validate_args(&tool.schema(), &args) {

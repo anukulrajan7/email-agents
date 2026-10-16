@@ -6,6 +6,7 @@ pub mod approvals;
 pub mod autonomy;
 pub mod case;
 pub mod critic;
+pub mod gaps;
 pub mod injection;
 pub mod persona;
 pub mod planner;
