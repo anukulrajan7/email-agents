@@ -133,8 +133,11 @@ pub(super) async fn finalize_sent(state: &AppState, ws: &str, ctx: &ReplyContext
     if ctx.body_text.to_lowercase().contains(&crate::replies::gap_resolver::NONE_PHRASE.to_lowercase()) {
         crate::hr::candidate_watch::queue_enrol(&mut tx, ws, &ctx.message_id, &ctx.draft_id).await?;
     }
-    crate::agents::handoff::store::mark_sent(&mut tx, ws, &ctx.message_id).await?;
+    crate::agents::handoff::store::mark_sent(&mut tx, ws, &ctx.draft_id).await?;
     tx.commit().await?;
+    if let Err(e) = crate::agents::handoff::store::follow_up(state, ws, &ctx.message_id).await {
+        tracing::warn!(error = %e, "could not queue the follow-up for a request filed after the reply was written");
+    }
     if let Err(e) = jobs::learning_jobs::enqueue_reply_learning(&state.db, &ctx.draft_id).await {
         tracing::warn!(error = %e, "could not schedule learning from the sent reply");
     }

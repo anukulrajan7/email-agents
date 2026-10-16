@@ -117,10 +117,17 @@ pub async fn hand_to_meera(state: &AppState, ws: &str, asker: &Asker<'_>, messag
         .bind(&m.thread_id)
         .fetch_all(db)
         .await?;
+    let own: Vec<String> = sqlx::query_scalar(
+        "SELECT lower(s.mailbox_address) FROM email_messages m JOIN email_sources s ON s.id = m.source_id WHERE m.id = ?1 AND s.mailbox_address IS NOT NULL
+         UNION SELECT lower(u.email) FROM email_messages m JOIN email_sources s ON s.id = m.source_id JOIN users u ON u.id = s.connected_by_user_id WHERE m.id = ?1",
+    )
+    .bind(message_id)
+    .fetch_all(db)
+    .await?;
     let refusal = if m.direction != "inbound" {
         Some("it is not an email we received")
     } else {
-        no_reply_reason(&m.sender_address, &signals)
+        no_reply_reason(&m.sender_address, &signals, &own)
             .or_else(|| recipient_refusal(&req.to, &thread_senders, &[]))
             .or((req.to != Recipient::Sender).then_some("only the sender is written to for now"))
     };
@@ -307,7 +314,7 @@ async fn reply_job_for(db: &SqlitePool, ws: &str, message_id: &str) -> sqlx::Res
     .fetch_all(db)
     .await?;
     let Some((latest, status)) = cases.first() else { return Ok(REPLY_JOB.to_string()) };
-    if status == "done" && open_for_message(db, ws, message_id).await?.iter().any(|r| r.draft_id.is_none()) {
+    if status == "done" && open_for_message(db, ws, message_id).await?.iter().any(|r| r.status == "pending") {
         return Ok(format!("reply#{}", cases.len() + 1));
     }
     Ok(latest.clone())
@@ -336,18 +343,18 @@ pub async fn governing_for_message(db: &SqlitePool, ws: &str, message_id: Option
 
 /// The same rule as `governing_for_message` but with each asking agent's level as of now: a held send that comes due
 /// checks that nobody who vouched for the words has been demoted or paused since.
-pub async fn governing_now(state: &AppState, ws: &str, message_id: &str) -> sqlx::Result<Option<i64>> {
+pub async fn governing_now(db: &SqlitePool, config: &crate::platform::config::Config, ws: &str, message_id: &str) -> sqlx::Result<Option<i64>> {
     let agents: Vec<String> = sqlx::query_scalar("SELECT DISTINCT from_agent_id FROM message_requests WHERE workspace_id = ?1 AND message_id = ?2 AND status IN ('pending', 'composed', 'sent')")
         .bind(ws)
         .bind(message_id)
-        .fetch_all(&state.db)
+        .fetch_all(db)
         .await?;
     if agents.is_empty() {
         return Ok(None);
     }
     let mut levels = vec![];
     for agent in &agents {
-        levels.push(runtime::level_of(&state.db, &state.config, ws, agent, message_id).await?);
+        levels.push(runtime::level_of(db, config, ws, agent, message_id).await?);
     }
     Ok(Some(super::governing_level(&levels, super::Author::Template, 3)))
 }
@@ -366,14 +373,118 @@ pub async fn mark_composed(conn: &mut SqliteConnection, ws: &str, ids: &[String]
     Ok(())
 }
 
-/// The reply was sent or scheduled: its requests are done.
-pub async fn mark_sent(conn: &mut SqliteConnection, ws: &str, message_id: &str) -> sqlx::Result<()> {
-    sqlx::query("UPDATE message_requests SET status = 'sent', updated_at = ?3 WHERE workspace_id = ?1 AND message_id = ?2 AND status IN ('pending', 'composed')")
+/// A reply went out: the requests whose words are in that draft are done. A request that changed after the words were written
+/// (it is `pending` again) or was never merged stays open: the mail that went out does not say what it now asks.
+pub async fn mark_sent(conn: &mut SqliteConnection, ws: &str, draft_id: &str) -> sqlx::Result<()> {
+    sqlx::query("UPDATE message_requests SET status = 'sent', status_note = NULL, updated_at = ?3 WHERE workspace_id = ?1 AND draft_id = ?2 AND status = 'composed'")
         .bind(ws)
-        .bind(message_id)
+        .bind(draft_id)
         .bind(now_ms())
         .execute(conn)
         .await?;
+    Ok(())
+}
+
+/// After a send: a request that is still open (changed or filed after its words were written) gets a follow-up mail through
+/// the same gate, written by the next reply case.
+pub async fn follow_up(state: &AppState, ws: &str, message_id: &str) -> sqlx::Result<()> {
+    let open: Option<String> = sqlx::query_scalar("SELECT id FROM message_requests WHERE workspace_id = ?1 AND message_id = ?2 AND status = 'pending' ORDER BY created_at LIMIT 1")
+        .bind(ws)
+        .bind(message_id)
+        .fetch_optional(&state.db)
+        .await?;
+    if let Some(id) = open {
+        ensure_reply_case(state, ws, message_id, &id).await?;
+    }
+    Ok(())
+}
+
+/// A request that could not be merged into the reply that stands (a person is working on it, it is being sent, or it went out):
+/// it stays pending with a note for the person, and the trail says so.
+pub async fn not_merged(conn: &mut SqliteConnection, ws: &str, message_id: &str, ids: &[String], why: &str, case_id: Option<&str>) -> sqlx::Result<()> {
+    let mut first_changed: Option<&String> = None;
+    for id in ids {
+        let changed = sqlx::query("UPDATE message_requests SET status_note = ?3 WHERE id = ?1 AND workspace_id = ?2 AND status = 'pending' AND COALESCE(status_note, '') != ?3")
+            .bind(id)
+            .bind(ws)
+            .bind(why)
+            .execute(&mut *conn)
+            .await?
+            .rows_affected()
+            == 1;
+        if changed {
+            first_changed.get_or_insert(id);
+            audit_request(&mut *conn, ws, id, message_id, "handoff.not_merged", json!({"why": why})).await?;
+        }
+    }
+    if let (Some(case_id), Some(first)) = (case_id, first_changed) {
+        let asker: Option<String> =
+            sqlx::query_scalar("SELECT a.name FROM message_requests r JOIN agents a ON a.id = r.from_agent_id WHERE r.id = ?1").bind(first).fetch_optional(&mut *conn).await?;
+        let note = format!("{} has a newer request that is not in this reply", asker.unwrap_or_else(|| "An expert".into()));
+        sqlx::query("UPDATE agent_approvals SET input_json = json_set(input_json, '$.handoff.newer', ?2) WHERE case_id = ?1 AND workspace_id = ?3 AND status = 'pending'")
+            .bind(case_id)
+            .bind(note)
+            .bind(ws)
+            .execute(&mut *conn)
+            .await?;
+    }
+    Ok(())
+}
+
+/// The asking agent no longer wants anything said (its decision has no message now): its open request is cancelled. When no
+/// other request is open, the unsent reply that carried it goes away with its case and approval; otherwise the rest is merged again.
+pub async fn withdraw(state: &AppState, ws: &str, asker: &Asker<'_>, message_id: &str) -> sqlx::Result<()> {
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
+    let gone: Vec<(String, Option<String>, Option<String>)> = sqlx::query_as(
+        "UPDATE message_requests SET status = 'cancelled', status_note = 'the desk no longer asks for this', updated_at = ?5
+         WHERE workspace_id = ?1 AND message_id = ?2 AND from_agent_id = ?3 AND job = ?4 AND status IN ('pending', 'composed') RETURNING id, draft_id, reply_case_id",
+    )
+    .bind(ws)
+    .bind(message_id)
+    .bind(asker.agent_id)
+    .bind(asker.job)
+    .bind(now_ms())
+    .fetch_all(&mut *tx)
+    .await?;
+    for (id, ..) in &gone {
+        audit_request(&mut tx, ws, id, message_id, "handoff.withdrawn", json!({"from_agent_id": asker.agent_id, "job": asker.job})).await?;
+    }
+    let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM message_requests WHERE workspace_id = ?1 AND message_id = ?2 AND status IN ('pending', 'composed')")
+        .bind(ws)
+        .bind(message_id)
+        .fetch_one(&mut *tx)
+        .await?;
+    if remaining == 0 {
+        for (_, draft_id, case_id) in &gone {
+            if let Some(draft_id) = draft_id {
+                sqlx::query("DELETE FROM drafts WHERE id = ?1 AND workspace_id = ?2 AND status = 'suggested' AND send_at IS NULL AND send_attempt_id IS NULL")
+                    .bind(draft_id)
+                    .bind(ws)
+                    .execute(&mut *tx)
+                    .await?;
+            }
+            if let Some(case_id) = case_id {
+                close_case(&mut tx, ws, case_id, "Withdrawn: the desk no longer asks for this reply").await?;
+            }
+        }
+    }
+    tx.commit().await?;
+    if remaining > 0 && !gone.is_empty() {
+        crate::replies::compose::refresh(state, ws, message_id).await?;
+    }
+    Ok(())
+}
+
+/// Cancels a reply case that has not finished and declines the approval waiting on it (not as a mark against anyone).
+async fn close_case(conn: &mut SqliteConnection, ws: &str, case_id: &str, note: &str) -> sqlx::Result<()> {
+    sqlx::query("UPDATE agent_approvals SET status = 'declined', decided_at = ?2, note = ?3 WHERE case_id = ?1 AND workspace_id = ?4 AND status = 'pending'")
+        .bind(case_id)
+        .bind(now_ms())
+        .bind(note)
+        .bind(ws)
+        .execute(&mut *conn)
+        .await?;
+    case::set_status(&mut *conn, ws, case_id, "cancelled").await?;
     Ok(())
 }
 
@@ -394,12 +505,7 @@ pub async fn supersede_drafts(conn: &mut SqliteConnection, ws: &str, draft_ids: 
                 .execute(&mut *conn)
                 .await?;
             if let Some(case_id) = case_id {
-                sqlx::query("UPDATE agent_approvals SET status = 'declined', decided_at = ?2, note = 'Replaced by a newer reply' WHERE case_id = ?1 AND status = 'pending'")
-                    .bind(&case_id)
-                    .bind(now_ms())
-                    .execute(&mut *conn)
-                    .await?;
-                case::set_status(&mut *conn, ws, &case_id, "cancelled").await?;
+                close_case(&mut *conn, ws, &case_id, "Replaced by a newer reply").await?;
             }
             audit_request(&mut *conn, ws, &id, &message_id, "handoff.superseded", json!({"by_message_id": by_message_id, "draft_id": draft_id})).await?;
         }

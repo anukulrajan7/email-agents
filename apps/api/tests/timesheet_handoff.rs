@@ -392,3 +392,145 @@ async fn a_declined_reply_ends_the_case_and_sends_nothing() {
     assert!(!state.contains("\"wf\":\"planner\""), "the planner never takes a reply job over: {state}");
     assert!(w.env.sends().is_empty());
 }
+
+/// A timesheet email that arrives with a draft already standing on it: the draft is put there before the desk looks.
+async fn sheet_with_a_draft_already_there(w: &World, status: &str, origin: &str, body: &str) -> String {
+    let email = NormalizedEmail {
+        source_message_id: "pre-1".into(),
+        rfc_message_id: Some("<pre-1@mail.example>".into()),
+        sender_address: RAVI.into(),
+        sender_name: Some("Ravi Kumar".into()),
+        recipients: vec!["team@acme.com".into()],
+        subject: "Monthly hours".into(),
+        body_text: sheet(&month_back(1).1),
+        received_at: now_ms() - 3_600_000,
+        ..Default::default()
+    };
+    let mut tx = w.env.state.db.begin().await.unwrap();
+    let id = email_ai_api::mail::ingest::persist_message(&mut tx, &w.source(), &w.env.ws, &email, Some("th-pre"), json!({})).await.unwrap().unwrap();
+    tx.commit().await.unwrap();
+    worker::drain(&w.env.state).await;
+    sqlx::query("INSERT INTO drafts (id, workspace_id, message_id, body_text, original_body_text, status, model_id, origin_key, created_at, updated_at) VALUES ('drf_pre', ?1, ?2, ?3, ?3, ?4, 'some-model', ?5, ?6, ?6)")
+        .bind(&w.env.ws)
+        .bind(&id)
+        .bind(body)
+        .bind(status)
+        .bind(origin)
+        .bind(now_ms())
+        .execute(&w.env.state.db)
+        .await
+        .unwrap();
+    w.env.set_understanding(&id, "timesheet", false, json!([])).await;
+    email_ai_api::agents::triggers::start_timesheet_case(&w.env.state, &w.env.ws, &id).await.unwrap();
+    worker::drain(&w.env.state).await;
+    id
+}
+
+#[tokio::test]
+async fn another_writer_retiring_meeras_draft_closes_its_request_case_and_approval() {
+    use email_ai_api::replies::live_draft::{self, NewDraft};
+    let w = world(Mbox::Personal, Some(Mode::On), 1).await;
+    let first = w.receive("gm-1", "th-1", 1, RAVI).await;
+    assert_eq!((w.env.live_drafts(&first).await.len(), w.pending().await.len()), (1, 1));
+    sqlx::query("UPDATE email_messages SET received_at = received_at - 600000 WHERE id = ?1").bind(&first).execute(&w.env.state.db).await.unwrap();
+    // A different writer (an agent's own draft step) writes the reply of a later message on the same thread.
+    let later = w.env.receive(&w.source(), "gm-2", "th-1", RAVI, "Re: timesheet", "Any news?", "general").await;
+    let mut tx = w.env.state.db.begin_with("BEGIN IMMEDIATE").await.unwrap();
+    live_draft::write(
+        &mut tx,
+        live_draft::Mode::Replace { allow_person_edited: false },
+        &NewDraft { workspace_id: &w.env.ws, message_id: &later, origin_key: "agent:other:1", body_text: "Hello,\n\nWe are on it.\n\nPriya", model_id: "m", memory_ids_json: "[]".into(), unanswered_json: "[]".into(), audit: json!({}) },
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    assert!(w.env.live_drafts(&first).await.is_empty(), "retired");
+    assert_eq!(w.env.requests(&first).await[0].2, "superseded", "its request closes with it");
+    assert!(w.pending().await.is_empty(), "no approval is left pointing at nothing");
+    let status: String = sqlx::query_scalar("SELECT status FROM cases WHERE workspace_id = ?1 AND message_id = ?2 AND job = 'reply'").bind(&w.env.ws).bind(&first).fetch_one(&w.env.state.db).await.unwrap();
+    assert_eq!(status, "cancelled");
+}
+
+#[tokio::test]
+async fn a_changed_request_during_a_held_send_is_not_merged_and_the_sent_mail_does_not_cover_it() {
+    let w = world(Mbox::Personal, Some(Mode::On), 3).await;
+    let id = w.receive("gm-1", "th-1", 1, RAVI).await;
+    assert!(w.env.sends().is_empty(), "held");
+    let rohan = w.rohan.clone();
+    let question = MessageRequest::template(MessageKind::Correction, vec![], vec![handoff::IssueText { code: "wrong_period".into(), text: "Please send the sheet for the right month.".into() }]);
+    let filed = handoff::hand_to_meera(&w.env.state, &w.env.ws, &Asker { agent_id: &rohan, case_id: None, job: "desk:timesheet" }, &id, &question).await.unwrap();
+    assert!(matches!(filed, Filed::Replaced { .. }), "{filed:?}");
+    assert_eq!(w.audits("handoff.not_merged").await.len(), 1, "the trail says the new words did not reach the held mail");
+    assert!(w.env.live_drafts(&id).await[0].2.contains("recorded it"), "the held text is untouched");
+    assert_eq!(w.env.requests(&id).await, [("rohan".to_string(), "correction".to_string(), "pending".to_string())]);
+    w.release_hold(&id).await;
+    let (_, raw) = w.sent_raw();
+    assert!(raw.contains("recorded it") && !raw.contains("right month"), "{raw}");
+    // The request the sent mail did not cover is not marked sent: it goes out as its own mail, through the same gate.
+    let requests = w.env.requests(&id).await;
+    assert_ne!(requests[0].2, "sent", "{requests:?}");
+    let drafts = w.env.live_drafts(&id).await;
+    assert_eq!(drafts.len(), 1, "the follow-up is the one live draft: {drafts:?}");
+    assert!(drafts[0].2.contains("Please send the sheet for the right month."), "{}", drafts[0].2);
+    assert_eq!(w.env.sends().len(), 1, "and it waits out its own hold");
+}
+
+#[tokio::test]
+async fn a_draft_a_person_edited_is_never_rewritten_or_sent_on_its_own_and_the_request_waits() {
+    let w = world(Mbox::Personal, Some(Mode::On), 3).await;
+    let id = sheet_with_a_draft_already_there(&w, "edited", "manual:abc", "Hello,\n\nMy own words.\n\nPriya").await;
+    let drafts = w.env.live_drafts(&id).await;
+    assert_eq!((drafts.len(), drafts[0].2.as_str()), (1, "Hello,\n\nMy own words.\n\nPriya"));
+    assert!(w.env.sends().is_empty(), "a person's edited draft never goes on its own, whatever Rohan's level");
+    assert_eq!(w.pending().await.len(), 1);
+    assert_eq!(w.env.requests(&id).await, [("rohan".to_string(), "ack".to_string(), "pending".to_string())], "not marked composed");
+    assert_eq!(w.audits("handoff.not_merged").await.len(), 1);
+    let note: Option<String> = sqlx::query_scalar("SELECT status_note FROM message_requests WHERE message_id = ?1").bind(&id).fetch_one(&w.env.state.db).await.unwrap();
+    assert!(note.unwrap().contains("person is working"));
+}
+
+#[tokio::test]
+async fn a_machine_draft_that_is_not_the_replys_keeps_its_origin_and_is_not_rewritten_as_the_experts_words() {
+    let w = world(Mbox::Personal, Some(Mode::On), 3).await;
+    let meera = w.env.personal_id(OPERATOR).await;
+    sqlx::query("UPDATE agents SET autonomy_level = 0 WHERE id = ?1").bind(&meera).execute(&w.env.state.db).await.unwrap();
+    let id = sheet_with_a_draft_already_there(&w, "suggested", "agent:c1:1", "Hello,\n\nAnother agent wrote this.\n\nPriya").await;
+    assert_eq!(w.pending().await.len(), 1, "words that are not the template are judged at Meera's own level too, not Rohan's");
+    let drafts = w.env.live_drafts(&id).await;
+    assert_eq!(drafts[0].2, "Hello,\n\nAnother agent wrote this.\n\nPriya", "left as it was");
+    let (origin, model): (String, String) = sqlx::query_as("SELECT origin_key, model_id FROM drafts WHERE id = ?1").bind(&drafts[0].0).fetch_one(&w.env.state.db).await.unwrap();
+    assert_eq!((origin.as_str(), model.as_str()), ("agent:c1:1", "some-model"));
+    assert_eq!(w.env.requests(&id).await[0].2, "pending");
+}
+
+#[tokio::test]
+async fn a_reply_a_person_already_sent_is_not_followed_by_a_second_mail_from_the_desk() {
+    let w = world(Mbox::Personal, Some(Mode::On), 3).await;
+    let id = sheet_with_a_draft_already_there(&w, "sent", "manual:sent", "Hello,\n\nAlready answered.\n\nPriya").await;
+    assert!(w.env.live_drafts(&id).await.is_empty(), "no second draft after the person's reply");
+    assert!(w.env.sends().is_empty());
+    assert_eq!(w.env.requests(&id).await[0].2, "pending");
+}
+
+#[tokio::test]
+async fn a_request_the_desk_withdraws_takes_its_unsent_reply_with_it() {
+    let w = world(Mbox::Personal, Some(Mode::On), 1).await;
+    let id = w.receive("gm-1", "th-1", 2, RAVI).await;
+    assert_eq!((w.env.live_drafts(&id).await.len(), w.pending().await.len()), (1, 1));
+    let rohan = w.rohan.clone();
+    let decision = email_ai_api::agents::handoff::Decision { outcome: email_ai_api::agents::handoff::Outcome::NothingToDo, message: None, manager_summary: None, waits: vec![], parked: None };
+    email_ai_api::hr::staffing::timesheet_records::desk::hand_off(&w.env.state, &w.env.ws, &Asker { agent_id: &rohan, case_id: None, job: "desk:timesheet" }, &id, &decision, false).await.unwrap();
+    assert_eq!(w.env.requests(&id).await[0].2, "cancelled");
+    assert!(w.env.live_drafts(&id).await.is_empty());
+    assert!(w.pending().await.is_empty());
+    assert_eq!(w.audits("handoff.withdrawn").await.len(), 1);
+}
+
+#[tokio::test]
+async fn mail_from_one_of_our_own_addresses_is_never_written_to() {
+    let w = world(Mbox::Personal, Some(Mode::On), 3).await;
+    let id = w.receive("gm-1", "th-1", 1, "priya@acme.com").await;
+    let requests = w.env.requests(&id).await;
+    assert!(requests.iter().all(|r| r.2 == "dropped"), "{requests:?}");
+    assert!(w.env.live_drafts(&id).await.is_empty() && w.env.sends().is_empty());
+}

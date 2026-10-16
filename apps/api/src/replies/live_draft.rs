@@ -259,6 +259,9 @@ pub async fn retire_thread(tx: &mut SqliteConnection, ws: &str, thread_id: &str,
         )
         .await?;
     }
+    // A reply Meera wrote for an expert's request must not vanish silently: its request, case and approval close with it.
+    let ids: Vec<String> = doomed.iter().map(|(r, _)| r.draft_id.clone()).collect();
+    crate::agents::handoff::store::supersede_drafts(tx, ws, &ids, except).await?;
     Ok(doomed.into_iter().map(|(r, _)| r).collect())
 }
 

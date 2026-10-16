@@ -57,15 +57,15 @@ pub fn effective_level(i: LevelInputs) -> Effective {
     Effective { level: level.clamp(0, 3), limited_by }
 }
 
-/// Money, rates, rejections, legal and security: never sent without a person.
+/// Money, rates, rejections, legal, security and attachments: never sent without a person.
 static SENSITIVE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-        r"(?i)(₹|\$|€|£|\b(inr|usd|eur|rs)\.?\s?\d|\b\d+(\.\d+)?\s?k\b|\b(inr|usd|eur|rs\.?|lakhs?|lpa|ctc|salary|salaries|rates?|payments?|pay(ing|able)?|paid|owe[sd]?|amounts?|bank(ing)?|wire( transfer)?|iban|ifsc|invoice|budget|refunds?|prices?|pricing|quote[ds]?|discount|fees?|costs?|rupees?|dollars?|payslips?|pay slips?|reimburs\w*|tax(es)?|tds|form[\s-]?16|pf|provident fund|uan|bonus(es)?|increments?|hikes?|apprais\w*|deductions?|credited|debited|upi|pan (card|number|no)|aadhaar|aadhar|account (number|no)|a/c|resign\w*|notice period|full and final|f&f|sick|medical|illness|surgery|hospital|diagnos\w*|legal|lawyers?|attorneys?|lawsuit|sue|contracts?|agreements?|nda|confidential|visa|gdpr|harassment|terminat\w*|security|password|passcode|otp|credentials?|offer letter|unfortunately|regret|reject(ed|ion)?|not (been )?(selected|shortlisted)|decline[ds]?)\b|(?-i:\bPAN\b))",
+        r"(?i)(₹|\$|€|£|\b(inr|usd|eur|rs)\.?\s?\d|\b\d+(\.\d+)?\s?k\b|\b(inr|usd|eur|rs\.?|lakhs?|lpa|ctc|salary|salaries|rates?|payments?|pay(ing|able)?|paid|owe[sd]?|amounts?|bank(ing)?|wire( transfer)?|iban|ifsc|invoice|budget|refunds?|prices?|pricing|quote[ds]?|discount|fees?|costs?|rupees?|dollars?|payslips?|pay slips?|reimburs\w*|tax(es)?|tds|form[\s-]?16|pf|provident fund|uan|bonus(es)?|increments?|hikes?|apprais\w*|deductions?|credited|debited|upi|pan (card|number|no)|aadhaar|aadhar|account (number|no)|a/c|resign\w*|notice period|full and final|f&f|sick|medical|illness|surgery|hospital|diagnos\w*|legal|lawyers?|attorneys?|lawsuit|sue|contracts?|agreements?|nda|confidential|visa|gdpr|harassment|terminat\w*|security|password|passcode|otp|credentials?|attach(ed|ments?)|offer letter|unfortunately|regret|reject(ed|ion)?|not (been )?(selected|shortlisted)|decline[ds]?)\b|(?-i:\bPAN\b))",
     )
     .expect("valid regex")
 });
 
-/// Does this text touch money, legal or security matters?
+/// Does this text touch money, legal, security or attachments?
 pub fn is_sensitive(text: &str) -> bool {
     SENSITIVE.is_match(text)
 }
@@ -354,7 +354,8 @@ pub async fn may_send_on_its_own(state: &AppState, case: &Case, ctx: &AgentConte
         draft_thread: preview.thread_id.as_deref(),
         body: &preview.body,
         known_contact,
-        level: agent.level.level,
+        // The experts vouch only for the template's words; any other draft is judged at Meera's own level too.
+        level: if template_body { agent.level.level } else { agent.level.level.min(agent.own_level) },
         never_do: &agent.spec.drafting.never_do,
         injected,
         known_addresses: &known_addresses,
@@ -454,13 +455,16 @@ pub async fn automated_send_stopped(state: &AppState, ws: &str, draft_id: &str) 
         active: true,
     });
     // A reply the experts asked for runs at their level, checked again now: nobody who vouched for it may have been demoted.
-    let reply_of: Option<String> = sqlx::query_scalar("SELECT message_id FROM drafts WHERE id = ?1 AND workspace_id = ?2 AND substr(origin_key, 1, 6) = 'reply:'")
-        .bind(draft_id)
-        .bind(ws)
-        .fetch_optional(&state.db)
-        .await?;
+    // Only words the experts' template wrote count as theirs; any other draft on the message is judged at the agent's own level.
+    let reply_of: Option<String> =
+        sqlx::query_scalar("SELECT message_id FROM drafts WHERE id = ?1 AND workspace_id = ?2 AND substr(origin_key, 1, 6) = 'reply:' AND model_id = ?3")
+            .bind(draft_id)
+            .bind(ws)
+            .bind(crate::replies::compose::TEMPLATE_MODEL)
+            .fetch_optional(&state.db)
+            .await?;
     if let Some(message_id) = reply_of
-        && let Some(governing) = crate::agents::handoff::store::governing_now(state, ws, &message_id).await?
+        && let Some(governing) = crate::agents::handoff::store::governing_now(&state.db, &state.config, ws, &message_id).await?
     {
         level = Effective { level: governing, limited_by: "handoff" };
     }
@@ -628,10 +632,14 @@ mod tests {
     }
 
     #[test]
-    fn attached_no_longer_marks_mail_sensitive() {
-        assert!(!is_sensitive("Please find the timesheet attached."));
-        assert!(!is_sensitive("The attachments are in the next mail."));
-        assert!(is_sensitive("The invoice is attached."), "money words still count");
+    fn attachments_still_ask_except_that_a_template_ignores_the_inbound_mention() {
+        let ack = "Hello,\n\nThank you. We have received your timesheet for September 2026 (23.5 h) and recorded it.\n\nBest regards,\nHR Operations";
+        let sheet_mail = "Please find my timesheet attached.";
+        let model = SendFacts { inbound_text: sheet_mail, ..facts("ravi@client.com", ack) };
+        assert!(blocker(&model).is_some(), "a model-written reply to mail that mentions an attachment asks");
+        assert_eq!(blocker(&SendFacts { template_body: true, ..model.clone() }), None, "a template ack to an attached sheet is not stopped by the word");
+        let says_attached = SendFacts { template_body: true, ..facts("ravi@client.com", "Hello,\n\nThe form is attached.\n\nBest regards,\nHR") };
+        assert!(blocker(&says_attached).is_some(), "a body that says attached always asks (we never attach files)");
     }
 
     #[test]

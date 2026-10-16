@@ -28,6 +28,8 @@ pub struct CaseAgent {
     pub spec: AgentSpec,
     pub version: i64,
     pub level: Effective,
+    /// The agent's own level, before a reply job's governing level replaced `level`.
+    pub own_level: i64,
 }
 
 impl CaseAgent {
@@ -61,14 +63,20 @@ pub async fn load(db: &SqlitePool, config: &Config, case: &Case, owner: Option<&
     let row = row.ok_or(sqlx::Error::RowNotFound)?;
     let (spec, version) = versions::active_spec_in(db, &row).await?;
     let mut level = level_for(&row, &spec, config, owner);
+    let own_level = level.level;
     // Meera's reply job runs at the level of the experts who asked for the words, not at her own.
-    if crate::agents::handoff::is_reply_job_key(&case.job)
+    if crate::agents::workflow::is_reply_job(case)
         && row.status == "active"
-        && let Some(governing) = crate::agents::handoff::store::governing_for_message(db, &case.workspace_id, case.message_id.as_deref()).await?
+        && let Some(stored) = crate::agents::handoff::store::governing_for_message(db, &case.workspace_id, case.message_id.as_deref()).await?
     {
-        level = Effective { level: governing, limited_by: "handoff" };
+        // What was captured when the request was filed, lowered by whoever has been demoted or paused since.
+        let now = match case.message_id.as_deref() {
+            Some(m) => crate::agents::handoff::store::governing_now(db, config, &case.workspace_id, m).await?.unwrap_or(stored),
+            None => stored,
+        };
+        level = Effective { level: stored.min(now), limited_by: "handoff" };
     }
-    Ok(CaseAgent { row, spec, version, level })
+    Ok(CaseAgent { row, spec, version, level, own_level })
 }
 
 /// The effective level of an agent working for this mailbox owner (an owner who wants to be asked first caps it at 1).

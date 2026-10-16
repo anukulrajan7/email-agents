@@ -96,6 +96,7 @@ async fn sensitive_mail_still_asks_at_level_three() {
         ("legal", "Hello Ravi,\n\nOur lawyer reviewed the contract.\n\nPriya"),
         ("termination", "Hello Ravi,\n\nWe are discussing the termination of your role.\n\nPriya"),
         ("security", "Hello Ravi,\n\nYour password and OTP are below.\n\nPriya"),
+        ("an attachment", "Hello Ravi,\n\nThe report is attached.\n\nPriya"),
     ] {
         let env = fresh(0).await;
         env.drafter.set(body);

@@ -211,7 +211,12 @@ fn fingerprint(s: &str) -> u64 {
 pub async fn hand_off(state: &AppState, ws: &str, asker: &crate::agents::handoff::Asker<'_>, message_id: &str, decision: &Decision, clean: bool) -> sqlx::Result<Option<crate::agents::handoff::Filed>> {
     use crate::agents::handoff::{self, Asker, MessageKind};
     let mut filed = None;
-    if let Some(message) = decision.message.as_ref().filter(|m| m.kind != MessageKind::Ack || clean) {
+    let wanted = decision.message.as_ref().filter(|m| m.kind != MessageKind::Ack || clean);
+    if wanted.is_none() {
+        // What the desk asked before no longer stands (the sheet changed, or its person is unknown again): withdraw it.
+        handoff::store::withdraw(state, ws, asker, message_id).await?;
+    }
+    if let Some(message) = wanted {
         let receipt_job = format!("{}:receipt", asker.job);
         let by = if message.kind == MessageKind::Holding { Asker { job: &receipt_job, ..*asker } } else { *asker };
         filed = Some(handoff::hand_to_meera(state, ws, &by, message_id, message).await?);

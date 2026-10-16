@@ -96,7 +96,7 @@ pub fn handoff_line(askers: &[Asker], meera: &str, who: &str) -> String {
 /// "Ravi" from "Ravi Kumar"; nothing when the sender has no name we can trust.
 fn first_name(sender_name: Option<&str>) -> Option<String> {
     let first = sender_name?.split_whitespace().next()?.trim_matches(|c: char| !c.is_alphabetic() && c != '\'' && c != '-');
-    (first.chars().count() >= 2 && first.chars().all(|c| c.is_alphabetic() || c == '\'' || c == '-')).then(|| first.to_string())
+    ((2..=30).contains(&first.chars().count()) && first.chars().all(|c| c.is_alphabetic() || c == '\'' || c == '-')).then(|| first.to_string())
 }
 
 async fn asker_names(state: &AppState, ws: &str, merged: &merge::Merged) -> sqlx::Result<Vec<Asker>> {
@@ -138,10 +138,30 @@ pub async fn compose_message(state: &AppState, ws: &str, message_id: &str, meera
     // A reply after one that already went out (a receipt, then the acknowledgement) is a second draft with its own origin.
     let sent: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM drafts WHERE message_id = ?1 AND status = 'sent' AND origin_key LIKE 'reply:%'").bind(message_id).fetch_one(&state.db).await?;
     let origin = if sent == 0 { format!("reply:{message_id}") } else { format!("reply:{message_id}:{}", sent + 1) };
+    let ids: Vec<String> = m.asked.iter().map(|a| a.request_id.clone()).collect();
+    // Someone else already answered this email (a person, or an agent's own reply): a second mail from the desk would be a duplicate.
+    let answered: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM drafts WHERE message_id = ?1 AND status = 'sent' AND (origin_key IS NULL OR substr(origin_key, 1, 6) NOT IN ('watch:', 'reply:')))",
+    )
+    .bind(message_id)
+    .fetch_one(&state.db)
+    .await?;
+    if answered {
+        return not_merged(state, ws, message_id, &ids, "the email was already answered by someone else", Composed::Sent).await;
+    }
     let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
+    // A draft that is not Meera's reply (a person's, or another agent's) is never rewritten here: it would keep its origin and
+    // be mistaken for the experts' words.
+    let foreign: bool = match live_draft::live(&mut tx, message_id).await? {
+        Some(d) => {
+            let origin: Option<String> = sqlx::query_scalar("SELECT origin_key FROM drafts WHERE id = ?1").bind(&d.id).fetch_one(&mut *tx).await?;
+            !origin.as_deref().is_some_and(|o| o.starts_with("reply:"))
+        }
+        None => false,
+    };
     let written = live_draft::write(
         &mut tx,
-        Mode::Replace { allow_person_edited: false },
+        if foreign { Mode::KeepExisting } else { Mode::Replace { allow_person_edited: false } },
         &NewDraft {
             workspace_id: ws,
             message_id,
@@ -154,9 +174,8 @@ pub async fn compose_message(state: &AppState, ws: &str, message_id: &str, meera
         },
     )
     .await?;
-    let ids: Vec<String> = m.asked.iter().map(|a| a.request_id.clone()).collect();
     let result = match &written {
-        Written::Inserted { id, retired } | Written::Replaced { id, retired, .. } => {
+        Written::Inserted { id, .. } | Written::Replaced { id, .. } => {
             sqlx::query("UPDATE drafts SET agent_id = ?1, requested_by_json = ?2 WHERE id = ?3 AND workspace_id = ?4")
                 .bind(&meera.id)
                 .bind(requested_by.to_string())
@@ -165,8 +184,6 @@ pub async fn compose_message(state: &AppState, ws: &str, message_id: &str, meera
                 .execute(&mut *tx)
                 .await?;
             store::mark_composed(&mut tx, ws, &ids, id).await?;
-            let doomed: Vec<String> = retired.iter().map(|r| r.draft_id.clone()).collect();
-            store::supersede_drafts(&mut tx, ws, &doomed, message_id).await?;
             audit::record(
                 &mut tx,
                 Entry {
@@ -182,29 +199,43 @@ pub async fn compose_message(state: &AppState, ws: &str, message_id: &str, meera
             .await?;
             Composed::Written { draft_id: id.clone(), line: line.clone(), askers: askers.clone(), level, kind: m.kind }
         }
-        Written::Existing(d) => {
-            store::mark_composed(&mut tx, ws, &ids, &d.id).await?;
-            Composed::Existing { draft_id: d.id.clone() }
-        }
+        Written::Existing(d) => Composed::Existing { draft_id: d.id.clone() },
         Written::Busy(_) | Written::AlreadySent(_) => Composed::Sent,
     };
     tx.commit().await?;
     live_draft::settle(state, &written).await;
+    match &result {
+        Composed::Existing { .. } => not_merged(state, ws, message_id, &ids, "a person is working on the reply that stands", result).await,
+        Composed::Sent => not_merged(state, ws, message_id, &ids, "the reply is already being sent", result).await,
+        _ => Ok(result),
+    }
+}
+
+/// The requests could not be merged into the reply that stands: they stay pending with a note (shown on the approval waiting
+/// for that reply), and a send that goes out later does not mark them done.
+async fn not_merged(state: &AppState, ws: &str, message_id: &str, ids: &[String], why: &str, result: Composed) -> sqlx::Result<Composed> {
+    let case = latest_reply_case(state, ws, message_id).await?;
+    let mut conn = state.db.acquire().await?;
+    store::not_merged(&mut conn, ws, message_id, ids, why, case.as_ref().map(|c| c.0.as_str())).await?;
     Ok(result)
+}
+
+/// The newest reply case of a message (the first, or a follow-up) and its agent.
+async fn latest_reply_case(state: &AppState, ws: &str, message_id: &str) -> sqlx::Result<Option<(String, Option<String>)>> {
+    sqlx::query_as(
+        "SELECT id, agent_id FROM cases WHERE workspace_id = ?1 AND message_id = ?2 AND (job = ?3 OR job LIKE 'reply#%') AND shadow = 0 ORDER BY created_at DESC, rowid DESC LIMIT 1",
+    )
+    .bind(ws)
+    .bind(message_id)
+    .bind(handoff::REPLY_JOB)
+    .fetch_optional(&state.db)
+    .await
 }
 
 /// A request changed after its reply was written and before it was sent: merge again into the same draft, and show the
 /// new text on the approval that is waiting for it.
 pub async fn refresh(state: &AppState, ws: &str, message_id: &str) -> sqlx::Result<()> {
-    let case: Option<(String, Option<String>)> = sqlx::query_as(
-        "SELECT id, agent_id FROM cases WHERE workspace_id = ?1 AND message_id = ?2 AND (job = ?3 OR job LIKE 'reply#%') AND shadow = 0 ORDER BY created_at DESC, rowid DESC LIMIT 1",
-    )
-        .bind(ws)
-        .bind(message_id)
-        .bind(handoff::REPLY_JOB)
-        .fetch_optional(&state.db)
-        .await?;
-    let Some((case_id, Some(agent_id))) = case else { return Ok(()) };
+    let Some((case_id, Some(agent_id))) = latest_reply_case(state, ws, message_id).await? else { return Ok(()) };
     let name: String = sqlx::query_scalar("SELECT name FROM agents WHERE id = ?1 AND workspace_id = ?2").bind(&agent_id).bind(ws).fetch_one(&state.db).await?;
     if let Composed::Written { draft_id, line, .. } = compose_message(state, ws, message_id, &Meera { id: agent_id, name }).await? {
         sqlx::query(
@@ -245,6 +276,8 @@ mod tests {
         assert_eq!(first_name(Some("  priya  ")).as_deref(), Some("priya"));
         assert_eq!(first_name(Some("hr-team@acme.com")), None, "an address is not a name");
         assert_eq!(first_name(Some("")), None);
+        assert_eq!(first_name(Some(&"a".repeat(31))), None, "a very long first word is not a name");
+        assert!(first_name(Some(&"a".repeat(30))).is_some());
         assert_eq!(first_name(None), None);
     }
 }

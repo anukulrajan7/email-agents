@@ -184,8 +184,13 @@ pub fn recipient_refusal(to: &Recipient, thread_senders: &[String], roster_peopl
 /// Mail signals that mean no human is waiting for a reply.
 const MACHINE_SIGNALS: [&str; 7] = ["list_unsubscribe", "precedence", "auto_submitted", "auto_reply", "delivery_status", "no_reply_sender", "postroom"];
 
-/// Why nobody should be written to for this inbound message, if so: our own mail, bulk or automatic mail, a no-reply sender.
-pub fn no_reply_reason(sender: &str, signals: &[String]) -> Option<&'static str> {
+/// Why nobody should be written to for this inbound message, if so: our own mail, bulk or automatic mail, a no-reply sender,
+/// or a sender that is one of our own addresses (`own`: the connected mailbox and whoever connected it).
+pub fn no_reply_reason(sender: &str, signals: &[String], own: &[String]) -> Option<&'static str> {
+    let bare = crate::replies::send_safety::bare_address(sender).to_lowercase();
+    if own.iter().any(|o| crate::replies::send_safety::bare_address(o).to_lowercase() == bare) {
+        return Some("the sender is one of our own addresses");
+    }
     if crate::mail::system_mail::is_own(signals) {
         return Some("it is Post Room's own mail");
     }
@@ -229,10 +234,11 @@ mod tests {
 
     #[test]
     fn nobody_is_written_to_for_own_bulk_or_no_reply_mail() {
-        assert!(no_reply_reason("ravi@client.test", &s(&["postroom"])).is_some());
-        assert!(no_reply_reason("ravi@client.test", &s(&["list_unsubscribe"])).is_some());
-        assert!(no_reply_reason("noreply@client.test", &[]).is_some());
-        assert_eq!(no_reply_reason("ravi@client.test", &s(&["gmail_category_none"])), None);
+        assert!(no_reply_reason("ravi@client.test", &s(&["postroom"]), &[]).is_some());
+        assert!(no_reply_reason("ravi@client.test", &s(&["list_unsubscribe"]), &[]).is_some());
+        assert!(no_reply_reason("noreply@client.test", &[], &[]).is_some());
+        assert_eq!(no_reply_reason("ravi@client.test", &s(&["gmail_category_none"]), &[]), None);
+        assert!(no_reply_reason("Priya <Priya@Acme.com>", &[], &s(&["priya@acme.com"])).is_some(), "our own address is never written to");
     }
 
     #[test]
