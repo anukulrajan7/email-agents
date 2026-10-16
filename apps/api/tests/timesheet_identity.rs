@@ -309,7 +309,7 @@ async fn two_workspaces_never_share_identities() {
     let ws2 = ws2["id"].as_str().unwrap().to_string();
     let mut conn = env.state.db.acquire().await.unwrap();
     let identity = email_ai_api::hr::staffing::timesheet_parse::Identity { name: Some("Dinesh Rao".into()), code: Some("X-9".into()), ..Default::default() };
-    let theirs = unresolved::attach(&mut conn, &ws2, &identity, HR, &[]).await.unwrap().unwrap();
+    let theirs = unresolved::attach(&mut conn, &ws2, &identity, HR, &[], &[]).await.unwrap().unwrap();
     drop(conn);
     let mine = cards(&env).await[0]["id"].as_str().unwrap().to_string();
     assert_ne!(theirs, mine, "the same name and ID in another workspace is another identity");
@@ -362,19 +362,27 @@ async fn pending_counts_only_roster_people_and_lists_unresolved_apart() {
 
 struct World {
     env: Env,
+    mail: Arc<Recorder>,
 }
 
 async fn world(rohan_level: i64) -> World {
+    world_with(rohan_level, true).await
+}
+
+async fn world_with(rohan_level: i64, flag_on: bool) -> World {
     let mut env = Env::new(Opts::packs(&["general", "staffing"]).config(|c| c.agent_auto_send_delay_secs = 600)).await;
-    env.state.alert_mailer = Some(Arc::new(Recorder::default()));
+    let mail = Arc::new(Recorder::default());
+    env.state.alert_mailer = Some(mail.clone());
     let hema = env.person("Hema Rao", None, "priya@acme.test", None).await;
     env.person("Ravi Kumar", Some("E1024"), "ravi@client.test", Some(&hema)).await;
     env.ok("PUT", "/agent", ADMIN, Some(json!({"permissions": {"send": "auto"}}))).await;
     env.ok("PUT", "/me/agent-profile", OPERATOR, Some(json!({"display_name": "Priya", "approvals": {"send_email": "routine_ok"}}))).await;
-    env.flag(Key::Handoff, Mode::On).await;
+    if flag_on {
+        env.flag(Key::Handoff, Mode::On).await;
+    }
     let rohan = env.agent_id(ADMIN, "hrms.timesheets").await;
     sqlx::query("UPDATE agents SET autonomy_level = ?2, autonomy_cap = 3 WHERE id = ?1").bind(&rohan).bind(rohan_level).execute(&env.state.db).await.unwrap();
-    World { env }
+    World { env, mail }
 }
 
 impl World {
@@ -523,4 +531,222 @@ async fn forgetting_a_sender_erases_the_unknown_names_they_brought() {
     assert_eq!(records::erase_sender(&mut conn, &env.ws, "Dinesh <dinesh@client.test>").await.unwrap(), 1);
     drop(conn);
     assert_eq!(env.identities().await, [(Some("Mohan Das".to_string()), Some("X-10".to_string()), "open".to_string(), 1)], "their card is gone, the other sender's stays");
+}
+
+// ---------------------------------------------------------------- review fixes
+
+impl World {
+    async fn receive_two(&self, gmail_id: &str, from: &str) -> String {
+        let (month_name, _) = last_month();
+        let files = [("dinesh.xlsx", sheet("Dinesh Rao", Some("X-9"))), ("mohan.xlsx", sheet("Mohan Das", Some("X-10")))];
+        let id = self.env.receive_files(&self.env.op_src, gmail_id, &format!("th-{gmail_id}"), from, &format!("{month_name} timesheets"), &files, "timesheet").await;
+        self.env.set_understanding(&id, "timesheet", false, json!([])).await;
+        worker::drain(&self.env.state).await;
+        id
+    }
+
+    async fn card(&self, name: &str) -> String {
+        cards(&self.env).await.iter().find(|c| c["name"] == name).unwrap_or_else(|| panic!("no card for {name}"))["id"].as_str().unwrap().to_string()
+    }
+}
+
+#[tokio::test]
+async fn linking_one_of_two_unknown_people_in_a_mail_keeps_the_ack_waiting_for_the_other() {
+    let w = world(3).await;
+    let id = w.receive_two("gm-1", "dinesh@client.test").await;
+    assert_eq!(w.env.requests(&id).await, [("rohan".to_string(), "holding".to_string(), "composed".to_string()), ("rohan".to_string(), "ack".to_string(), "waiting".to_string())]);
+    w.release_hold(&id).await;
+    w.age_replies(&id).await;
+    let dinesh = w.env.person("Dinesh Rao", Some("X-9"), "dinesh@client.test", None).await;
+    w.env.ok("POST", &identities_path(&w.card("Dinesh Rao").await, "link"), ADMIN, Some(json!({"person_id": dinesh}))).await;
+    worker::drain(&w.env.state).await;
+    assert_eq!(w.env.requests(&id).await[1].2, "waiting", "Mohan is still unknown, so nothing is confirmed");
+    assert!(w.env.live_drafts(&id).await.is_empty(), "no acknowledgement naming both");
+    assert_eq!(w.sent_texts().len(), 1, "only the receipt went");
+
+    let mohan = w.env.person("Mohan Das", Some("X-10"), "mohan@client.test", None).await;
+    w.env.ok("POST", &identities_path(&w.card("Mohan Das").await, "link"), ADMIN, Some(json!({"person_id": mohan}))).await;
+    worker::drain(&w.env.state).await;
+    let drafts = w.env.live_drafts(&id).await;
+    assert_eq!(drafts.len(), 1);
+    assert!(drafts[0].2.contains("Dinesh Rao") && drafts[0].2.contains("Mohan Das"), "{}", drafts[0].2);
+    w.release_hold(&id).await;
+    assert_eq!(w.sent_texts().len(), 2, "one acknowledgement, after the last person was linked");
+}
+
+#[tokio::test]
+async fn linking_a_card_the_desk_never_parked_sends_nothing_and_tells_nobody() {
+    let w = world_with(3, false).await;
+    let id = w.receive("gm-1", "Dinesh Rao", Some("X-9"), "dinesh@client.test").await;
+    assert!(w.env.requests(&id).await.is_empty(), "the flag was off: the desk did nothing");
+    w.env.flag(Key::Handoff, Mode::On).await;
+    assert_eq!(w.env.count("SELECT COUNT(*) FROM unresolved_identities").await, 0, "turning the flag on writes no card by itself");
+    worker::drain(&w.env.state).await;
+    assert_eq!(w.env.identities().await.len(), 1, "the refresh job grouped the old sheet");
+    let dinesh = w.env.person("Dinesh Rao", Some("X-9"), "dinesh@client.test", None).await;
+    w.mail.take();
+    w.env.ok("POST", &identities_path(&w.card("Dinesh Rao").await, "link"), ADMIN, Some(json!({"person_id": dinesh}))).await;
+    worker::drain(&w.env.state).await;
+    assert!(w.env.record_rows().await.iter().all(|r| r.0.as_deref() == Some(dinesh.as_str())), "the sheet got its person");
+    assert!(w.env.requests(&id).await.is_empty(), "no request");
+    assert!(w.env.live_drafts(&id).await.is_empty(), "no draft");
+    assert!(w.sent_texts().is_empty());
+    assert!(w.mail.take().is_empty(), "no manager summary either");
+}
+
+#[tokio::test]
+async fn listing_the_cards_writes_nothing_and_a_refresh_next_to_a_link_never_reopens_it() {
+    let w = world_with(3, false).await;
+    w.receive("gm-1", "Dinesh Rao", Some("X-9"), "dinesh@client.test").await;
+    w.env.flag(Key::Handoff, Mode::On).await;
+    let before: (i64, i64) = sqlx::query_as("SELECT (SELECT COUNT(*) FROM unresolved_identities), (SELECT COALESCE(SUM(updated_at), 0) FROM timesheet_records)").fetch_one(&w.env.state.db).await.unwrap();
+    for _ in 0..2 {
+        assert!(cards(&w.env).await.is_empty(), "nothing is grouped by a read");
+    }
+    let after: (i64, i64) = sqlx::query_as("SELECT (SELECT COUNT(*) FROM unresolved_identities), (SELECT COALESCE(SUM(updated_at), 0) FROM timesheet_records)").fetch_one(&w.env.state.db).await.unwrap();
+    assert_eq!(before, after, "GET /identities is read-only");
+    let grouped = w.env.ok("POST", "/staffing/identities/refresh", ADMIN, None).await;
+    assert_eq!(grouped["grouped"], 1);
+    let stamp: i64 = sqlx::query_scalar("SELECT updated_at FROM unresolved_identities").fetch_one(&w.env.state.db).await.unwrap();
+    assert_eq!(cards(&w.env).await.len(), 1);
+    assert_eq!(sqlx::query_scalar::<_, i64>("SELECT updated_at FROM unresolved_identities").fetch_one(&w.env.state.db).await.unwrap(), stamp, "and listing does not touch the card");
+    let dinesh = w.env.person("Dinesh Rao", Some("X-9"), "dinesh@client.test", None).await;
+    w.env.ok("POST", &identities_path(&w.card("Dinesh Rao").await, "link"), ADMIN, Some(json!({"person_id": dinesh}))).await;
+    assert_eq!(w.env.ok("POST", "/staffing/identities/refresh", ADMIN, None).await["grouped"], 0);
+    assert_eq!(w.env.identities().await[0].2, "linked", "a refresh after the link leaves it linked");
+    assert!(w.env.record_rows().await.iter().all(|r| r.0.is_some()));
+}
+
+#[tokio::test]
+async fn the_link_writes_a_wake_up_job_in_its_own_transaction_and_the_worker_does_the_rest() {
+    let w = world(3).await;
+    let id = w.receive("gm-1", "Dinesh Rao", Some("X-9"), "dinesh@client.test").await;
+    let dinesh = w.env.person("Dinesh Rao", Some("X-9"), "dinesh@client.test", None).await;
+    w.env.ok("POST", &identities_path(&w.card("Dinesh Rao").await, "link"), ADMIN, Some(json!({"person_id": dinesh}))).await;
+    let jobs: Vec<(String, String)> = sqlx::query_as("SELECT kind, status FROM jobs WHERE kind = 'person_linked'").fetch_all(&w.env.state.db).await.unwrap();
+    assert_eq!(jobs, [("person_linked".to_string(), "pending".to_string())], "queued by the link itself");
+    assert_eq!(w.env.requests(&id).await[1].2, "waiting", "the request did no desk work");
+    worker::drain(&w.env.state).await;
+    assert_eq!(w.env.requests(&id).await[1].2, "pending", "the worker released it; the receipt is still held, so the ack follows it");
+    assert_eq!(w.env.count("SELECT COUNT(*) FROM audit_events WHERE action = 'handoff.released'").await, 1);
+}
+
+#[tokio::test]
+async fn a_parked_ack_older_than_manager_after_hours_reminds_the_final_contacts_once() {
+    let w = world(3).await;
+    w.receive("gm-1", "Dinesh Rao", Some("X-9"), "dinesh@client.test").await;
+    let mut settings = w.env.ok("GET", "/team/settings", ADMIN, None).await;
+    settings.as_object_mut().unwrap().remove("sources");
+    settings["manager_after_hours"] = json!(4);
+    settings["final_emails"] = json!(["boss@acme.test"]);
+    w.env.ok("PUT", "/team/settings", ADMIN, Some(settings)).await;
+    w.mail.take();
+    assert_eq!(plan::remind_waiting(&w.env.state, &w.env.ws).await.unwrap(), 0, "not old enough yet");
+    sqlx::query("UPDATE message_requests SET created_at = created_at - 5 * 3600000 WHERE status = 'waiting'").execute(&w.env.state.db).await.unwrap();
+    assert_eq!(plan::remind_waiting(&w.env.state, &w.env.ws).await.unwrap(), 1);
+    let sent = w.mail.take();
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert_eq!(sent[0].0, "boss@acme.test");
+    assert!(!sent[0].2.contains("Dinesh"), "no name in the note: {}", sent[0].2);
+    assert_eq!(plan::remind_waiting(&w.env.state, &w.env.ws).await.unwrap(), 0, "once");
+}
+
+#[tokio::test]
+async fn a_stranger_gets_no_receipt_and_nobody_gets_more_than_three_a_day() {
+    let w = world(3).await;
+    let id = w.receive("gm-1", "Dinesh Rao", Some("X-9"), "dinesh@nowhere-we-know.test").await;
+    assert_eq!(w.env.requests(&id).await, [("rohan".to_string(), "ack".to_string(), "waiting".to_string())], "no receipt for someone we have never heard of; the ack is still parked");
+    assert_eq!(w.env.count("SELECT COUNT(*) FROM audit_events WHERE action = 'handoff.receipt_skipped'").await, 1);
+
+    let mut receipts = 0;
+    for (n, first) in ["Anil", "Bina", "Charu", "Deep"].iter().enumerate() {
+        let id = w.receive(&format!("gm-k{n}"), &format!("{first} Kumar"), Some(&format!("X-{n}")), "dinesh@client.test").await;
+        receipts += w.env.requests(&id).await.iter().filter(|r| r.1 == "holding").count();
+    }
+    assert_eq!(receipts, 3, "a sender known by their company's domain gets three receipts a day, not four");
+}
+
+#[tokio::test]
+async fn a_card_set_aside_gets_no_receipt_and_stays_out_of_the_grid_list() {
+    let w = world(3).await;
+    w.receive("gm-1", "Dinesh Rao", Some("X-9"), "dinesh@client.test").await;
+    w.env.ok("POST", &identities_path(&w.card("Dinesh Rao").await, "external"), ADMIN, None).await;
+    let again = w.receive("gm-2", "Dinesh Rao", Some("X-9"), "dinesh@client.test").await;
+    assert!(w.env.requests(&again).await.is_empty(), "outside staff is not an unknown person to be added: no receipt, nothing parked");
+    let (_, month) = last_month();
+    let grid = w.env.ok("GET", &format!("/staffing/timesheet-grid?month={month}"), ADMIN, None).await;
+    assert_eq!(grid["summary"]["unresolved"], 0);
+    assert!(grid["unresolved"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn forgetting_a_sender_also_scrubs_the_change_log_and_the_log_holds_no_names() {
+    let env = on().await;
+    let dinesh = env.person("Dinesh Rao", Some("X-9"), "dinesh@client.test", None).await;
+    env.sheet_mail("1", "dinesh@client.test", "Mohan Das", Some("X-10")).await;
+    env.sheet_mail("2", "hema@client.test", "Hema Rao", Some("X-11")).await;
+    let card = cards(&env).await.iter().find(|c| c["name"] == "Mohan Das").unwrap()["id"].as_str().unwrap().to_string();
+    env.ok("POST", &identities_path(&card, "link"), ADMIN, Some(json!({"person_id": dinesh}))).await;
+    let hema_card = cards(&env).await[0]["id"].as_str().unwrap().to_string();
+    env.ok("POST", &identities_path(&hema_card, "external"), ADMIN, None).await;
+    let log: Vec<String> = sqlx::query_scalar("SELECT before_json || after_json || evidence_json FROM identity_changes WHERE workspace_id = ?1").bind(&env.ws).fetch_all(&env.state.db).await.unwrap();
+    assert_eq!(log.len(), 2);
+    assert!(log.iter().all(|l| !l.contains("Mohan") && !l.contains("Hema") && !l.contains("Who is this") && !l.contains("Acme")), "ids and statuses only: {log:?}");
+    let mut conn = env.state.db.acquire().await.unwrap();
+    records::erase_sender(&mut conn, &env.ws, "dinesh@client.test").await.unwrap();
+    drop(conn);
+    let left: Vec<(String, Option<String>)> = sqlx::query_as("SELECT kind, identity_id FROM identity_changes WHERE workspace_id = ?1").bind(&env.ws).fetch_all(&env.state.db).await.unwrap();
+    assert_eq!(left.iter().map(|l| l.0.as_str()).collect::<Vec<_>>(), ["mark_external"], "the link that touched the erased sheet is gone, the other sender's change stays");
+}
+
+#[tokio::test]
+async fn undo_never_brings_back_a_sheet_a_newer_sheet_stands_in_for() {
+    let env = on().await;
+    let ravi = env.person("Ravi Kumar", Some("E1024"), "ravi@client.test", None).await;
+    env.sheet_mail("1", "ravi@client.test", "Ravi Kumar", Some("E1024")).await;
+    env.sheet_mail("2", HR, "Mohan Das", None).await;
+    let card = cards(&env).await[0]["id"].as_str().unwrap().to_string();
+    let status_of = |name: &'static str| {
+        let db = env.state.db.clone();
+        async move { sqlx::query_scalar::<_, String>("SELECT status FROM timesheet_records WHERE person_name = ?1 ORDER BY created_at DESC LIMIT 1").bind(name).fetch_one(&db).await.unwrap() }
+    };
+    let first = env.ok("POST", &identities_path(&card, "link"), ADMIN, Some(json!({"person_id": ravi}))).await;
+    assert_eq!(status_of("Ravi Kumar").await, "replaced", "the linked sheet is the newer version of Ravi's month");
+    env.ok("POST", &format!("/staffing/identity-changes/{}/undo", first["change_id"].as_str().unwrap()), ADMIN, None).await;
+    assert_eq!(status_of("Ravi Kumar").await, "recorded", "undo with nothing newer brings Ravi's own sheet back");
+
+    let second = env.ok("POST", &identities_path(&card, "link"), ADMIN, Some(json!({"person_id": ravi}))).await;
+    env.sheet_mail("3", "ravi@client.test", "Ravi Kumar", Some("E1024")).await;
+    env.ok("POST", &format!("/staffing/identity-changes/{}/undo", second["change_id"].as_str().unwrap()), ADMIN, None).await;
+    let live: i64 = env.count("SELECT COUNT(*) FROM timesheet_records WHERE person_name = 'Ravi Kumar' AND status != 'replaced'").await;
+    assert_eq!(live, 1, "only the newest sheet of Ravi's month stands; the old one is not resurrected beside it");
+    let issue: String = sqlx::query_scalar("SELECT issues_json FROM timesheet_records WHERE person_name = 'Mohan Das'").fetch_one(&env.state.db).await.unwrap();
+    assert!(issue.contains("Who is this? (Mohan Das)"), "the question is rebuilt from the sheet, not copied into the log: {issue}");
+}
+
+#[tokio::test]
+async fn an_archived_person_cannot_be_linked_to() {
+    let env = on().await;
+    let ravi = env.person("Ravi Kumar", Some("E1024"), "ravi@client.test", None).await;
+    env.sheet_mail("1", HR, "Mohan Das", None).await;
+    let card = cards(&env).await[0]["id"].as_str().unwrap().to_string();
+    let (s, _) = env.req("DELETE", &format!("/team/people/{ravi}"), ADMIN, None).await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+    let (s, body) = env.req("POST", &identities_path(&card, "link"), ADMIN, Some(json!({"person_id": ravi}))).await;
+    assert_eq!(s, StatusCode::NOT_FOUND, "{body}");
+    assert!(env.record_rows().await.iter().all(|r| r.0.is_none()));
+}
+
+#[tokio::test]
+async fn withdrawing_an_unsent_reply_also_removes_its_gmail_draft() {
+    let w = world(1).await;
+    let id = w.receive("gm-1", "Ravi Kumar", Some("E1024"), "ravi@client.test").await;
+    let draft = w.env.live_drafts(&id).await;
+    assert_eq!(draft.len(), 1, "the ack waits for an approval");
+    sqlx::query("UPDATE drafts SET provider_draft_id = 'gd9' WHERE id = ?1").bind(&draft[0].0).execute(&w.env.state.db).await.unwrap();
+    let rohan = w.env.agent_id(ADMIN, "hrms.timesheets").await;
+    let asker = email_ai_api::agents::handoff::Asker { agent_id: &rohan, case_id: None, job: "desk:timesheet" };
+    email_ai_api::agents::handoff::store::withdraw(&w.env.state, &w.env.ws, &asker, &id).await.unwrap();
+    assert!(w.env.live_drafts(&id).await.is_empty());
+    assert!(w.env.calls.lock().unwrap().iter().any(|(k, _)| k == "delete_draft:gd9"), "{:?}", w.env.calls.lock().unwrap());
 }

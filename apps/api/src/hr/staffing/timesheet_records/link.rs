@@ -166,7 +166,7 @@ pub(crate) async fn apply(conn: &mut SqliteConnection, ws: &str, person_id: &str
 
 /// Puts back what `apply` changed. The sheets go back to "who is this" and are marked `needs_check`: an undo is never a
 /// silent edit, a person looks again. A sheet of the person that the link had replaced comes back only while nothing newer
-/// than this link replaced it too. The links it remembered are forgotten (only while they still point at this person).
+/// stands for the same days. The links it remembered are forgotten (only while they still point at this person).
 pub(crate) async fn undo_link(conn: &mut SqliteConnection, ws: &str, person_id: &str, before: &[Value], person_before: &[Value], new_aliases: &[Value]) -> sqlx::Result<Vec<String>> {
     let now = now_ms();
     let linked: Vec<String> = before.iter().filter_map(|s| s["id"].as_str().map(str::to_string)).collect();
@@ -232,9 +232,12 @@ pub(crate) async fn undo_link(conn: &mut SqliteConnection, ws: &str, person_id: 
         let cleared_dup = snap["cleared"].as_array().is_some_and(|a| a.iter().any(|c| c == "possible_duplicate"));
         let mine = replaced_here.iter().any(|r| r == id);
         if mine && was != "replaced" {
+            // Only while no other sheet of the person (not one of the linked ones) covers any of those days: a newer sheet that
+            // replaced the linked one already stands for this period, and the old sheet stays replaced.
             sqlx::query(
                 "UPDATE timesheet_records SET status = ?1, updated_at = ?2 WHERE id = ?3 AND workspace_id = ?4 AND status = 'replaced'
-                   AND NOT EXISTS (SELECT 1 FROM timesheet_records n WHERE n.workspace_id = ?4 AND n.replaces_id = ?3 AND n.status != 'replaced' AND n.id NOT IN (SELECT value FROM json_each(?5)))",
+                   AND NOT EXISTS (SELECT 1 FROM timesheet_records n WHERE n.workspace_id = ?4 AND n.person_id = timesheet_records.person_id AND n.id != timesheet_records.id AND n.status != 'replaced'
+                                     AND n.id NOT IN (SELECT value FROM json_each(?5)) AND n.period_start <= timesheet_records.period_end AND n.period_end >= timesheet_records.period_start)",
             )
             .bind(was)
             .bind(now)

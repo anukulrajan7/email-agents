@@ -73,6 +73,8 @@ pub mod kind {
     pub const PURGE_SOURCE: &str = "purge_source";
     pub const ENROL_CANDIDATE_WATCH: &str = "enrol_candidate_watch";
     pub const NOTIFY_CANDIDATE_WATCH: &str = "notify_candidate_watch";
+    pub const PERSON_LINKED: &str = "person_linked";
+    pub const REFRESH_IDENTITIES: &str = "refresh_identities";
 }
 
 #[derive(Debug, Clone, FromRow)]

@@ -17,11 +17,22 @@ pub async fn roster(db: &SqlitePool, ws: &str) -> sqlx::Result<Vec<Candidate>> {
     Ok(rows.into_iter().map(|(id, name)| Candidate { id, name, code: None, emails: vec![] }).collect())
 }
 
+/// The domains that are a company's own: the roster's email domains and the client domains the owner named.
+pub async fn company_domains(conn: &mut SqliteConnection, ws: &str) -> sqlx::Result<Vec<String>> {
+    let mut out: Vec<String> = sqlx::query_scalar("SELECT DISTINCT lower(substr(email, instr(email, '@') + 1)) FROM person_emails WHERE workspace_id = ?1 AND instr(email, '@') > 0")
+        .bind(ws)
+        .fetch_all(&mut *conn)
+        .await?;
+    let clients: Option<String> = sqlx::query_scalar("SELECT client_domains_json FROM team_settings WHERE workspace_id = ?1").bind(ws).fetch_optional(conn).await?;
+    out.extend(serde_json::from_str::<Vec<String>>(&clients.unwrap_or_default()).unwrap_or_default().into_iter().map(|d| d.to_lowercase()));
+    Ok(out)
+}
+
 /// The group a sheet's identity belongs to, created on first sight. `None` when the sheet names nobody. A group that was
 /// linked to a person reopens when a new unmatched sheet arrives under it: that sheet needs a decision of its own.
-pub async fn attach(conn: &mut SqliteConnection, ws: &str, identity: &Identity, sender: &str, roster: &[Candidate]) -> sqlx::Result<Option<String>> {
-    let Some(key) = resolve::group_key(identity.code.as_deref(), identity.name.as_deref(), sender) else { return Ok(None) };
-    let (domain, _) = resolve::sender_hint(sender);
+pub async fn attach(conn: &mut SqliteConnection, ws: &str, identity: &Identity, sender: &str, roster: &[Candidate], company: &[String]) -> sqlx::Result<Option<String>> {
+    let Some(key) = resolve::group_key(identity.code.as_deref(), identity.name.as_deref(), sender, company) else { return Ok(None) };
+    let (domain, _) = resolve::sender_hint(sender, company);
     let suggestions = serde_json::to_string(&resolve::suggest(identity.name.as_deref(), roster)).unwrap_or_else(|_| "[]".into());
     let now = now_ms();
     let id: String = sqlx::query_scalar(
@@ -66,29 +77,42 @@ pub async fn recount(conn: &mut SqliteConnection, ws: &str, identity_id: &str) -
     Ok(())
 }
 
-/// Sheets kept before groups existed (or while the feature was off) get their group now. Safe to repeat.
+/// Sheets kept before groups existed (or while the feature was off) get their group now. Safe to repeat and safe next to a
+/// link: nothing is done when nothing waits, the sheets are read again inside the transaction, and a sheet is only given a
+/// group while it is still unmatched and has none.
 pub async fn ensure_groups(db: &SqlitePool, ws: &str) -> sqlx::Result<usize> {
+    let waiting: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM timesheet_records WHERE workspace_id = ?1 AND person_id IS NULL AND identity_id IS NULL AND status != 'replaced'")
+        .bind(ws)
+        .fetch_one(db)
+        .await?;
+    if waiting == 0 {
+        return Ok(0);
+    }
+    let roster = roster(db, ws).await?;
+    let mut tx = db.begin_with("BEGIN IMMEDIATE").await?;
     let rows: Vec<(String, String, Option<String>)> = sqlx::query_as(
         "SELECT id, identity_json, sender_address FROM timesheet_records WHERE workspace_id = ?1 AND person_id IS NULL AND identity_id IS NULL AND status != 'replaced'",
     )
     .bind(ws)
-    .fetch_all(db)
+    .fetch_all(&mut *tx)
     .await?;
-    if rows.is_empty() {
-        return Ok(0);
-    }
-    let roster = roster(db, ws).await?;
+    let company = company_domains(&mut tx, ws).await?;
     let mut made = 0;
-    let mut tx = db.begin_with("BEGIN IMMEDIATE").await?;
     let mut touched: Vec<String> = vec![];
     for (id, identity_json, sender) in rows {
         let identity: Identity = serde_json::from_str(&identity_json).unwrap_or_default();
-        let Some(group) = attach(&mut tx, ws, &identity, sender.as_deref().unwrap_or_default(), &roster).await? else { continue };
-        sqlx::query("UPDATE timesheet_records SET identity_id = ?1 WHERE id = ?2 AND workspace_id = ?3").bind(&group).bind(&id).bind(ws).execute(&mut *tx).await?;
+        let Some(group) = attach(&mut tx, ws, &identity, sender.as_deref().unwrap_or_default(), &roster, &company).await? else { continue };
+        let joined = sqlx::query("UPDATE timesheet_records SET identity_id = ?1 WHERE id = ?2 AND workspace_id = ?3 AND identity_id IS NULL AND person_id IS NULL")
+            .bind(&group)
+            .bind(&id)
+            .bind(ws)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+        made += joined as usize;
         if !touched.contains(&group) {
             touched.push(group);
         }
-        made += 1;
     }
     for group in &touched {
         recount(&mut tx, ws, group).await?;
@@ -162,18 +186,14 @@ async fn waiting(db: &SqlitePool, ws: &str, identity_id: &str) -> sqlx::Result<V
         .collect())
 }
 
-/// The cards for the admin: groups still waiting (`open`), with their sheets, and who each might be. The suggestions are
-/// worked out again against today's roster, so a person added a minute ago shows up.
+/// The cards for the admin: groups still waiting (`open`), with their sheets, and who each might be. Read-only: the
+/// suggestions are worked out in memory against today's roster (so a person added a minute ago shows up), and sheets that
+/// still have no group are grouped by `ensure_groups` (a job, or the refresh button), never by a read.
 pub async fn open(db: &SqlitePool, ws: &str) -> sqlx::Result<Vec<Value>> {
-    ensure_groups(db, ws).await?;
     let groups: Vec<Group> = sqlx::query_as(&format!("{SELECT} WHERE g.workspace_id = ?1 AND g.status = 'open' AND g.record_count > 0 ORDER BY g.updated_at DESC, g.id")).bind(ws).fetch_all(db).await?;
     let roster = roster(db, ws).await?;
     let mut out = vec![];
     for g in groups {
-        let fresh = resolve::suggest(g.name_as_written.as_deref(), &roster);
-        if fresh != g.suggestions() {
-            sqlx::query("UPDATE unresolved_identities SET suggestions_json = ?1 WHERE id = ?2 AND workspace_id = ?3").bind(serde_json::to_string(&fresh).unwrap_or_else(|_| "[]".into())).bind(&g.id).bind(ws).execute(db).await?;
-        }
         out.push(json!({
             "id": g.id,
             "name": g.name_as_written,
@@ -182,9 +202,18 @@ pub async fn open(db: &SqlitePool, ws: &str) -> sqlx::Result<Vec<Value>> {
             "sender_domain": g.sender_domain,
             "record_count": g.record_count,
             "records": waiting(db, ws, &g.id).await?,
-            "suggestions": fresh,
+            "suggestions": resolve::suggest(g.name_as_written.as_deref(), &roster),
             "updated_at": iso(g.updated_at),
         }));
     }
     Ok(out)
+}
+
+/// The `refresh_identities` job: groups the sheets kept before groups existed, once the feature is on.
+pub async fn refresh_job(state: &crate::http::AppState, payload: &Value) -> Result<(), crate::jobs::handlers::JobError> {
+    let ws = payload.get("workspace_id").and_then(Value::as_str).ok_or_else(|| crate::jobs::handlers::JobError::Permanent("payload missing workspace_id".into()))?;
+    if crate::platform::flags::mode(&state.db, &state.config, ws, crate::platform::flags::Key::Handoff).await?.acts() {
+        ensure_groups(&state.db, ws).await?;
+    }
+    Ok(())
 }

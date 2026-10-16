@@ -43,13 +43,19 @@ pub async fn backfill(state: &AppState, ws: &str, limit: i64) -> sqlx::Result<us
     Ok(recorded)
 }
 
-/// Forgetting a sender erases what was kept of their timesheets: the records and the code / name links a person
-/// made for them. (Deleting an email or disconnecting a mailbox does not call this: the records are kept on purpose.)
+/// Forgetting a sender erases what was kept of their timesheets: the records, the code / name links a person made for them,
+/// the unknown-name cards they brought and every identity-change row about those sheets or cards. (Deleting an email or
+/// disconnecting a mailbox does not call this: the records are kept on purpose.)
+///
+/// Not wired to any flow yet: there is no "forget a sender" action in the product today (`mail::deletion` keeps records on
+/// purpose). It is tested and ready for the day there is one; until then a sender's sheets are removed only by deleting
+/// the workspace.
 pub async fn erase_sender(conn: &mut SqliteConnection, ws: &str, sender: &str) -> sqlx::Result<u64> {
     let address = address_of(sender);
-    let who: Vec<(Option<String>, Option<String>)> =
-        sqlx::query_as("SELECT employee_code, person_name FROM timesheet_records WHERE workspace_id = ?1 AND lower(sender_address) = lower(?2)").bind(ws).bind(&address).fetch_all(&mut *conn).await?;
-    for (code, name) in who {
+    let who: Vec<(String, Option<String>, Option<String>)> =
+        sqlx::query_as("SELECT id, employee_code, person_name FROM timesheet_records WHERE workspace_id = ?1 AND lower(sender_address) = lower(?2)").bind(ws).bind(&address).fetch_all(&mut *conn).await?;
+    let erased_ids: Vec<String> = who.iter().map(|w| w.0.clone()).collect();
+    for (_, code, name) in who {
         if let Some(code) = code.map(|c| c.to_lowercase()) {
             sqlx::query("DELETE FROM timesheet_aliases WHERE workspace_id = ?1 AND kind = 'code' AND value = ?2").bind(ws).bind(code).execute(&mut *conn).await?;
         }
@@ -58,8 +64,23 @@ pub async fn erase_sender(conn: &mut SqliteConnection, ws: &str, sender: &str) -
         }
     }
     let erased = sqlx::query("DELETE FROM timesheet_records WHERE workspace_id = ?1 AND lower(sender_address) = lower(?2)").bind(ws).bind(&address).execute(&mut *conn).await?.rows_affected();
-    // The unknown names they brought go too, unless another sender's sheets still stand under the card (then only the address goes).
-    sqlx::query("DELETE FROM unresolved_identities WHERE workspace_id = ?1 AND NOT EXISTS (SELECT 1 FROM timesheet_records r WHERE r.identity_id = unresolved_identities.id)").bind(ws).execute(&mut *conn).await?;
+    // The cards they brought go, unless another sender's sheets still stand under one (then only the address goes), and so does every
+    // change that touched an erased sheet or a removed card.
+    let gone_cards: Vec<String> = sqlx::query_scalar(
+        "DELETE FROM unresolved_identities WHERE workspace_id = ?1 AND NOT EXISTS (SELECT 1 FROM timesheet_records r WHERE r.identity_id = unresolved_identities.id) RETURNING id",
+    )
+    .bind(ws)
+    .fetch_all(&mut *conn)
+    .await?;
+    sqlx::query(
+        "DELETE FROM identity_changes WHERE workspace_id = ?1
+           AND (identity_id IN (SELECT value FROM json_each(?2)) OR EXISTS (SELECT 1 FROM json_each(identity_changes.record_ids_json) j WHERE j.value IN (SELECT value FROM json_each(?3))))",
+    )
+    .bind(ws)
+    .bind(serde_json::json!(gone_cards).to_string())
+    .bind(serde_json::json!(erased_ids).to_string())
+    .execute(&mut *conn)
+    .await?;
     sqlx::query("UPDATE unresolved_identities SET sender_address = NULL WHERE workspace_id = ?1 AND lower(sender_address) = lower(?2)").bind(ws).bind(&address).execute(conn).await?;
     Ok(erased)
 }

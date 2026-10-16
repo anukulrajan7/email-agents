@@ -184,6 +184,8 @@ pub async fn handle(state: &AppState, job: &Job) -> Result<(), JobError> {
         kind::PURGE_SOURCE => crate::mail::deletion::purge_source_job(state, &payload).await,
         kind::STAFFING_SCAN => crate::hr::staffing::scan_job(state, &payload).await,
         kind::RECORD_TIMESHEET => crate::hr::staffing::record_job(state, &payload).await,
+        kind::PERSON_LINKED => crate::agents::plan::person_linked_job(state, &payload).await,
+        kind::REFRESH_IDENTITIES => crate::hr::team::identity::unresolved::refresh_job(state, &payload).await,
         kind::RUN_EVAL => super::eval_jobs::run_eval(state, &payload).await,
         kind::ROLLUP_AGENT_METRICS => super::eval_jobs::rollup_agent_metrics(state).await,
         kind::DESIGNER_DRY_RUN => super::designer_jobs::designer_dry_run(state, job, &payload).await,

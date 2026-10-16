@@ -12,7 +12,6 @@ use super::{
     unresolved::{self, Group},
 };
 use crate::{
-    agents::plan::{self, Wake},
     hr::{
         staffing::{
             timesheet_parse::Candidate,
@@ -21,32 +20,32 @@ use crate::{
         team::people::{self, Context, Fields},
     },
     http::AppState,
+    jobs::{self, kind},
     platform::{
         audit::{self, Actor, Entry},
         db::now_ms,
     },
 };
 
-/// Mail domains many unrelated people share: grouping by them would put two different people together.
-const FREE_MAIL: [&str; 9] = ["gmail.com", "googlemail.com", "yahoo.com", "yahoo.in", "outlook.com", "hotmail.com", "icloud.com", "proton.me", "rediffmail.com"];
-
-/// Where a sheet came from, as a grouping hint: the domain, or the whole address for a free mail domain.
-pub fn sender_hint(sender: &str) -> (String, String) {
+/// Where a sheet came from, as a grouping hint: the domain when it is a company's own (the roster's, or a client's the owner
+/// named), else the whole address. A domain many unrelated people share (gmail, an agency) says nothing about who.
+pub fn sender_hint(sender: &str, company_domains: &[String]) -> (String, String) {
     let address = sender.trim().trim_matches(['<', '>']).to_lowercase();
     let domain = address.rsplit_once('@').map(|(_, d)| d.to_string()).unwrap_or_default();
-    let hint = if FREE_MAIL.contains(&domain.as_str()) || domain.is_empty() { address.clone() } else { domain.clone() };
+    let known = !domain.is_empty() && company_domains.iter().any(|d| d.eq_ignore_ascii_case(&domain));
+    let hint = if known { domain.clone() } else { address.clone() };
     (domain, hint)
 }
 
 /// The group a sheet's identity belongs to: its employee ID, else its normalised name together with where it came from.
 /// Two sheets with the same name from different places, or with different IDs, are never one group. `None` when the sheet
 /// names nobody.
-pub fn group_key(code: Option<&str>, name: Option<&str>, sender: &str) -> Option<String> {
+pub fn group_key(code: Option<&str>, name: Option<&str>, sender: &str, company_domains: &[String]) -> Option<String> {
     if let Some(code) = code.map(str::trim).filter(|c| !c.is_empty()) {
         return Some(format!("code:{}", code.to_lowercase()));
     }
     let key = crate::hr::staffing::name_key(name?);
-    (!key.is_empty()).then(|| format!("name:{key}@{}", sender_hint(sender).1))
+    (!key.is_empty()).then(|| format!("name:{key}@{}", sender_hint(sender, company_domains).1))
 }
 
 /// One person the name might be. Evidence only.
@@ -55,6 +54,9 @@ pub struct Suggestion {
     pub person_id: String,
     pub name: String,
     pub reason: String,
+    /// Only a first or last name in common: worth a second look before linking several sheets.
+    #[serde(default)]
+    pub weak: bool,
 }
 
 fn words(name: &str) -> Vec<String> {
@@ -115,7 +117,7 @@ pub fn suggest(written: Option<&str>, roster: &[Candidate]) -> Vec<Suggestion> {
         .iter()
         .filter_map(|p| {
             let (strength, reason) = why(&written, &words(&p.name))?;
-            Some((strength, Suggestion { person_id: p.id.clone(), name: p.name.clone(), reason }))
+            Some((strength, Suggestion { person_id: p.id.clone(), name: p.name.clone(), reason, weak: strength < 6 }))
         })
         .collect();
     found.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.name.to_lowercase().cmp(&b.1.name.to_lowercase())));
@@ -211,12 +213,10 @@ async fn link_in(
     .await?;
     settle_groups(tx, ws, person_id, &plan.record_ids).await?;
     audit_change(tx, ws, actor, "identity.linked", &change, json!({"person_id": person_id, "records": plan.record_ids.len()})).await?;
+    // The desk is woken by a job written in this same transaction: the link and the wake-up stand or fall together, and the
+    // worker retries the wake-up, not this request.
+    jobs::enqueue(tx, kind::PERSON_LINKED, &format!("person_linked:{change}"), Some(ws), &json!({"workspace_id": ws, "record_ids": plan.record_ids})).await?;
     Ok((change, plan.record_ids.clone()))
-}
-
-async fn woke(state: &AppState, ws: &str, record_ids: &[String]) -> Result<(), IdentityError> {
-    plan::poke(state, ws, &Wake::PersonLinked { record_ids: record_ids.to_vec() }).await?;
-    Ok(())
 }
 
 /// "This card is that person": every sheet waiting under the card joins them.
@@ -226,7 +226,7 @@ pub async fn link_identity(state: &AppState, ws: &str, actor: Actor<'_>, identit
     let plan = records::plan_identity(&mut tx, ws, identity_id, person_id, remember_name).await?.map_err(refusal)?;
     let (change_id, record_ids) = link_in(&mut tx, ws, actor, person_id, Some(identity_id), &plan, remember_name).await?;
     tx.commit().await?;
-    woke(state, ws, &record_ids).await?;
+    state.jobs_notify.notify_one();
     Ok(Resolved { person_id: person_id.into(), record_ids, change_id })
 }
 
@@ -238,7 +238,7 @@ pub async fn link_record(state: &AppState, ws: &str, actor: Actor<'_>, record_id
     let plan = records::plan_record(&mut tx, ws, record_id, person_id, remember_name).await?.map_err(refusal)?;
     let (change_id, record_ids) = link_in(&mut tx, ws, actor, person_id, identity_id.as_deref(), &plan, remember_name).await?;
     tx.commit().await?;
-    woke(state, ws, &record_ids).await?;
+    state.jobs_notify.notify_one();
     Ok(Resolved { person_id: person_id.into(), record_ids, change_id })
 }
 
@@ -272,9 +272,9 @@ pub async fn add_person(state: &AppState, ws: &str, actor: Actor<'_>, identity_i
             identity_id: Some(identity_id),
             record_ids: &[],
             before: json!({}),
-            after: json!({"name": draft.name, "employee_code": draft.employee_code}),
+            after: json!({}),
             actor,
-            evidence: json!({"name_as_written": group.name_as_written, "employee_code": group.employee_code}),
+            evidence: json!({}),
         },
     )
     .await?;
@@ -282,17 +282,17 @@ pub async fn add_person(state: &AppState, ws: &str, actor: Actor<'_>, identity_i
     let plan = records::plan_identity(&mut tx, ws, identity_id, &person_id, false).await?.map_err(refusal)?;
     let (change_id, record_ids) = link_in(&mut tx, ws, actor, &person_id, Some(identity_id), &plan, false).await?;
     tx.commit().await?;
-    woke(state, ws, &record_ids).await?;
+    state.jobs_notify.notify_one();
     Ok(Resolved { person_id, record_ids, change_id })
 }
 
 async fn set_group(state: &AppState, ws: &str, actor: Actor<'_>, identity_id: &str, kind: &str, status: &str) -> Result<String, IdentityError> {
     let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
-    let group = open_group(&mut tx, ws, identity_id).await?;
+    open_group(&mut tx, ws, identity_id).await?;
     sqlx::query("UPDATE unresolved_identities SET status = ?1, updated_at = ?2 WHERE id = ?3 AND workspace_id = ?4").bind(status).bind(now_ms()).bind(identity_id).bind(ws).execute(&mut *tx).await?;
     let change = changes::record(
         &mut tx,
-        NewChange { ws, kind, person_id: None, identity_id: Some(identity_id), record_ids: &[], before: json!({"status": "open"}), after: json!({"status": status}), actor, evidence: json!({"name_as_written": group.name_as_written}) },
+        NewChange { ws, kind, person_id: None, identity_id: Some(identity_id), record_ids: &[], before: json!({"status": "open"}), after: json!({"status": status}), actor, evidence: json!({}) },
     )
     .await?;
     audit_change(&mut tx, ws, actor, &format!("identity.{kind}"), &change, json!({"identity_id": identity_id})).await?;
@@ -324,7 +324,7 @@ pub async fn undo(state: &AppState, ws: &str, actor: Actor<'_>, change_id: &str)
             let ids = change.record_ids();
             let live: i64 = sqlx::query_scalar(
                 "SELECT COUNT(*) FROM message_requests r JOIN timesheet_records t ON t.message_id = r.message_id
-                 WHERE t.workspace_id = ?1 AND t.id IN (SELECT value FROM json_each(?2)) AND r.status IN ('pending', 'composed') AND r.kind = 'ack'",
+                 WHERE t.workspace_id = ?1 AND t.id IN (SELECT value FROM json_each(?2)) AND r.status IN ('pending', 'composed')",
             )
             .bind(ws)
             .bind(json!(ids).to_string())
@@ -431,13 +431,15 @@ mod tests {
 
     #[test]
     fn groups_split_by_id_and_by_where_the_sheet_came_from() {
-        assert_eq!(group_key(Some("X-77"), Some("D. Rao"), "hr@a.test"), Some("code:x-77".into()));
-        assert_eq!(group_key(Some(" x-77 "), None, "hr@b.test"), Some("code:x-77".into()), "the ID alone is the key");
-        let a = group_key(None, Some("Amit Kumar"), "hr@a.test");
-        assert_eq!(a, group_key(None, Some("Kumar, Amit"), "other@a.test"), "same name, same company");
-        assert_ne!(a, group_key(None, Some("Amit Kumar"), "hr@b.test"), "another company is another Amit");
-        assert_ne!(group_key(None, Some("Amit Kumar"), "x@gmail.com"), group_key(None, Some("Amit Kumar"), "y@gmail.com"), "free mail says nothing about who");
-        assert_eq!(group_key(None, None, "hr@a.test"), None);
-        assert_eq!(group_key(None, Some("S."), "hr@a.test"), None, "an initial alone is not a name");
+        let company = vec!["a.test".to_string()];
+        assert_eq!(group_key(Some("X-77"), Some("D. Rao"), "hr@a.test", &company), Some("code:x-77".into()));
+        assert_eq!(group_key(Some(" x-77 "), None, "hr@b.test", &company), Some("code:x-77".into()), "the ID alone is the key");
+        let a = group_key(None, Some("Amit Kumar"), "hr@a.test", &company);
+        assert_eq!(a, group_key(None, Some("Kumar, Amit"), "other@a.test", &company), "same name, same company");
+        assert_ne!(a, group_key(None, Some("Amit Kumar"), "hr@b.test", &company), "another sender is another Amit");
+        assert_ne!(group_key(None, Some("Amit Kumar"), "x@gmail.com", &company), group_key(None, Some("Amit Kumar"), "y@gmail.com", &company), "an unknown domain says nothing about who");
+        assert_ne!(group_key(None, Some("Amit Kumar"), "x@agency.test", &company), group_key(None, Some("Amit Kumar"), "y@agency.test", &company), "an agency's domain is not a company's");
+        assert_eq!(group_key(None, None, "hr@a.test", &company), None);
+        assert_eq!(group_key(None, Some("S."), "hr@a.test", &company), None, "an initial alone is not a name");
     }
 }

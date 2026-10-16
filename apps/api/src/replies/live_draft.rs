@@ -281,6 +281,11 @@ pub async fn settle(state: &AppState, written: &Written) {
             tracing::warn!(draft_id = id, error = %e, "the regenerated draft could not be refreshed in the mailbox");
         }
     }
+    delete_provider_copies(state, retired).await;
+}
+
+/// Deletes the Gmail Drafts copies of drafts that were removed here. Best effort: Gmail trouble is logged, never an error.
+pub async fn delete_provider_copies(state: &AppState, retired: &[Retired]) {
     for r in retired {
         if let (Some(gmail_id), Some(conn), Some(pck)) = (&r.provider_draft_id, &r.connection_id, &r.provider_config_key)
             && let Err(e) = state.nango.gmail_call(Method::DELETE, conn, pck, &format!("drafts/{gmail_id}"), None).await

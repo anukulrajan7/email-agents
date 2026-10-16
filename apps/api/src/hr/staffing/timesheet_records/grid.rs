@@ -112,6 +112,8 @@ pub async fn grid(db: &SqlitePool, ws: &str, month: &str, now: i64, a: &Access) 
             }
         }
     }
+    // Cards the admin set aside (outside staff, not a person) are not names waiting to be sorted out.
+    let set_aside: HashSet<String> = sqlx::query_scalar("SELECT id FROM unresolved_identities WHERE workspace_id = ?1 AND status IN ('external', 'dismissed')").bind(ws).fetch_all(db).await?.into_iter().collect();
     let (mut recorded, mut needs_check, mut missing) = (0, 0, 0);
     let mut unresolved: Vec<Value> = vec![];
     let out: Vec<Value> = rows
@@ -126,7 +128,9 @@ pub async fn grid(db: &SqlitePool, ws: &str, month: &str, now: i64, a: &Access) 
                 "recorded"
             };
             if loose {
-                unresolved.push(json!({ "identity_id": r.identity_id, "name": r.name, "employee_code": r.code, "record_ids": r.records }));
+                if !r.identity_id.as_ref().is_some_and(|g| set_aside.contains(g)) {
+                    unresolved.push(json!({ "identity_id": r.identity_id, "name": r.name, "employee_code": r.code, "record_ids": r.records }));
+                }
             } else {
                 match status {
                     "recorded" => recorded += 1,

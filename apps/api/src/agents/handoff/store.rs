@@ -454,14 +454,28 @@ pub async fn withdraw(state: &AppState, ws: &str, asker: &Asker<'_>, message_id:
         .bind(message_id)
         .fetch_one(&mut *tx)
         .await?;
+    let mut copies: Vec<crate::replies::live_draft::Retired> = vec![];
     if remaining == 0 {
         for (_, draft_id, case_id) in &gone {
             if let Some(draft_id) = draft_id {
-                sqlx::query("DELETE FROM drafts WHERE id = ?1 AND workspace_id = ?2 AND status = 'suggested' AND send_at IS NULL AND send_attempt_id IS NULL")
+                let provider: Option<(Option<String>, Option<String>, Option<String>)> = sqlx::query_as(
+                    "SELECT d.provider_draft_id, s.external_connection_id, s.provider_config_key FROM drafts d JOIN email_messages m ON m.id = d.message_id JOIN email_sources s ON s.id = m.source_id
+                     WHERE d.id = ?1 AND d.workspace_id = ?2 AND d.status = 'suggested' AND d.send_at IS NULL AND d.send_attempt_id IS NULL",
+                )
+                .bind(draft_id)
+                .bind(ws)
+                .fetch_optional(&mut *tx)
+                .await?;
+                let deleted = sqlx::query("DELETE FROM drafts WHERE id = ?1 AND workspace_id = ?2 AND status = 'suggested' AND send_at IS NULL AND send_attempt_id IS NULL")
                     .bind(draft_id)
                     .bind(ws)
                     .execute(&mut *tx)
-                    .await?;
+                    .await?
+                    .rows_affected()
+                    == 1;
+                if let (true, Some((provider_draft_id, connection_id, provider_config_key))) = (deleted, provider) {
+                    copies.push(crate::replies::live_draft::Retired { draft_id: draft_id.clone(), provider_draft_id, connection_id, provider_config_key });
+                }
             }
             if let Some(case_id) = case_id {
                 close_case(&mut tx, ws, case_id, "Withdrawn: the desk no longer asks for this reply").await?;
@@ -469,6 +483,7 @@ pub async fn withdraw(state: &AppState, ws: &str, asker: &Asker<'_>, message_id:
         }
     }
     tx.commit().await?;
+    crate::replies::live_draft::delete_provider_copies(state, &copies).await;
     if remaining > 0 && !gone.is_empty() {
         crate::replies::compose::refresh(state, ws, message_id).await?;
     }
@@ -529,21 +544,23 @@ pub async fn park(state: &AppState, ws: &str, asker: &Asker<'_>, message_id: &st
     let level = runtime::level_of(&state.db, &state.config, ws, asker.agent_id, message_id).await?;
     let (digest, now) = (digest(req), now_ms());
     let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
-    let existing: Option<(String, String, String)> =
-        sqlx::query_as("SELECT id, digest, status FROM message_requests WHERE workspace_id = ?1 AND message_id = ?2 AND from_agent_id = ?3 AND job = ?4")
+    let existing: Option<(String, String, String, Option<String>)> =
+        sqlx::query_as("SELECT id, digest, status, draft_id FROM message_requests WHERE workspace_id = ?1 AND message_id = ?2 AND from_agent_id = ?3 AND job = ?4")
             .bind(ws)
             .bind(message_id)
             .bind(asker.agent_id)
             .bind(asker.job)
             .fetch_optional(&mut *tx)
             .await?;
+    // A request that was released but never written (still `pending`, no draft) goes back to waiting when the person is unknown again.
+    let parkable = |status: &str, draft: &Option<String>| status == "waiting" || (status == "pending" && draft.is_none());
     let id = match existing {
-        Some((_, old, status)) if old == digest || status != "waiting" => {
+        Some((_, old, status, draft)) if !parkable(&status, &draft) || (status == "waiting" && old == digest) => {
             tx.commit().await?;
             return Ok(false);
         }
         Some((id, ..)) => {
-            sqlx::query("UPDATE message_requests SET kind = ?2, facts_json = ?3, issues_json = ?4, requester_level = ?5, digest = ?6, updated_at = ?7 WHERE id = ?1")
+            sqlx::query("UPDATE message_requests SET kind = ?2, facts_json = ?3, issues_json = ?4, requester_level = ?5, digest = ?6, status = 'waiting', status_note = 'waiting for the person to be linked', updated_at = ?7 WHERE id = ?1")
                 .bind(&id)
                 .bind(req.kind.as_str())
                 .bind(json!(req.facts).to_string())

@@ -103,8 +103,15 @@ pub async fn recent(db: &SqlitePool, ws: &str, limit: i64) -> sqlx::Result<Vec<V
             Some(i) => sqlx::query_scalar("SELECT name_as_written FROM unresolved_identities WHERE id = ?1 AND workspace_id = ?2").bind(i).bind(ws).fetch_optional(db).await?.flatten(),
             None => None,
         };
+        // A link that came with "add as a person": undoing it moves the sheets back, the person stays on People.
+        let added_person: bool = match (&c.person_id, &c.identity_id) {
+            (Some(p), Some(i)) if c.kind == "link" => {
+                sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM identity_changes WHERE workspace_id = ?1 AND kind = 'create_person' AND person_id = ?2 AND identity_id = ?3)").bind(ws).bind(p).bind(i).fetch_one(db).await?
+            }
+            _ => false,
+        };
         out.push(json!({
-            "id": c.id, "kind": c.kind, "person_id": c.person_id, "person_name": person, "name": name,
+            "id": c.id, "kind": c.kind, "person_id": c.person_id, "person_name": person, "name": name, "added_person": added_person,
             "record_count": c.record_ids().len(), "by": c.actor_class, "undone": c.undone_by.is_some(), "can_undo": c.undoable(), "at": iso(c.created_at),
         }));
     }

@@ -190,6 +190,9 @@ pub async fn set(db: &SqlitePool, config: &Config, ws: &str, user_id: &str, key:
         )
         .await?;
     }
+    if key == Key::Handoff && to.acts() && from != to {
+        crate::jobs::enqueue(&mut tx, crate::jobs::kind::REFRESH_IDENTITIES, &format!("refresh_identities:{ws}:{}", now_ms()), Some(ws), &json!({ "workspace_id": ws })).await?;
+    }
     tx.commit().await?;
     Ok(Flag { key, description: key.description(), mode: to, default: default_mode(config, key) })
 }

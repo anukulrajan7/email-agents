@@ -28,6 +28,7 @@ use crate::{
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/workspaces/{ws}/staffing/identities", get(list))
+        .route("/workspaces/{ws}/staffing/identities/refresh", post(refresh))
         .route("/workspaces/{ws}/staffing/identities/{id}/link", post(link))
         .route("/workspaces/{ws}/staffing/identities/{id}/add-person", post(add_person))
         .route("/workspaces/{ws}/staffing/identities/{id}/external", post(external))
@@ -58,6 +59,12 @@ pub async fn list(State(state): State<AppState>, user: AuthUser, Path(ws): Path<
         return Ok(Json(json!({ "enabled": false, "items": [], "recent": [] })));
     }
     Ok(Json(json!({ "enabled": true, "items": unresolved::open(&state.db, &ws).await?, "recent": changes::recent(&state.db, &ws, 10).await? })))
+}
+
+/// Groups the sheets kept before groups existed. The list itself never writes.
+pub async fn refresh(State(state): State<AppState>, user: AuthUser, Path(ws): Path<String>) -> AppResult<Json<Value>> {
+    admin(&state, &ws, &user).await?;
+    Ok(Json(json!({ "grouped": unresolved::ensure_groups(&state.db, &ws).await? })))
 }
 
 #[derive(Deserialize)]

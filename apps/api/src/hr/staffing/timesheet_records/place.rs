@@ -18,7 +18,8 @@ pub(super) async fn insert_record(db: &SqlitePool, d: Draft<'_>, person_name: Op
     let mut issues = d.issues.clone();
     let mut identity_id: Option<String> = None;
     if d.person_id.is_none() && d.group {
-        identity_id = unresolved::attach(&mut tx, d.ws, &d.sheet.identity, &address_of(&d.msg.sender_address), d.roster).await?;
+        let company = unresolved::company_domains(&mut tx, d.ws).await?;
+        identity_id = unresolved::attach(&mut tx, d.ws, &d.sheet.identity, &address_of(&d.msg.sender_address), d.roster, &company).await?;
         if let Some(group) = &identity_id {
             let twin: Option<String> = sqlx::query_scalar(
                 "SELECT id FROM timesheet_records WHERE workspace_id = ?1 AND identity_id = ?2 AND person_id IS NULL AND status != 'replaced'

@@ -107,6 +107,10 @@ pub async fn scan_job(state: &AppState, payload: &Value) -> Result<(), JobError>
     if report.created > 0 || updated > 0 {
         tracing::info!(workspace_id = %ws, created = report.created, outcomes = updated, "submissions scanned");
     }
+    if crate::platform::flags::mode(&state.db, &state.config, ws, crate::platform::flags::Key::Handoff).await?.acts() {
+        crate::hr::team::identity::unresolved::ensure_groups(&state.db, ws).await?;
+        crate::agents::plan::remind_waiting(state, ws).await?;
+    }
     Ok(())
 }
 

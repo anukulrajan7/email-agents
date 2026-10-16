@@ -88,6 +88,14 @@ pub async fn review(db: &SqlitePool, ws: &str, message_id: &str) -> sqlx::Result
         .fetch_all(db)
         .await?;
     let rules = Rules::from_settings(&settings::load(db, ws).await?);
+    // A card the admin set aside (outside staff, not a person) is not an unknown person to be added: no receipt, nothing parked.
+    let set_aside: Vec<String> = sqlx::query_scalar(
+        "SELECT id FROM unresolved_identities WHERE workspace_id = ?1 AND status IN ('external', 'dismissed') AND id IN (SELECT value FROM json_each(?2))",
+    )
+    .bind(ws)
+    .bind(json!(rows.iter().filter_map(|r| r.identity_id.clone()).collect::<Vec<_>>()).to_string())
+    .fetch_all(db)
+    .await?;
     let (mut all, mut checked) = (vec![], vec![]);
     for row in &rows {
         let (entries, issues) = (row.entries(), reader_issues(row));
@@ -116,7 +124,8 @@ pub async fn review(db: &SqlitePool, ws: &str, message_id: &str) -> sqlx::Result
                 .person_name
                 .clone()
                 .filter(|n| !n.trim().is_empty())
-                .filter(|_| row.person_id.is_none() && row.employee_code.as_deref().is_some_and(|c| !c.trim().is_empty())),
+                .filter(|_| row.person_id.is_none() && row.employee_code.as_deref().is_some_and(|c| !c.trim().is_empty()))
+                .filter(|_| !row.identity_id.as_ref().is_some_and(|g| set_aside.contains(g))),
         });
         all.push(found);
     }
@@ -205,6 +214,50 @@ fn fingerprint(s: &str) -> u64 {
     s.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |h, b| (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3))
 }
 
+/// Most receipts one address gets in a day: a receipt is a free answer to anyone who mails a sheet, so it is capped.
+pub const RECEIPTS_PER_SENDER_PER_DAY: i64 = 3;
+
+/// May this sender get a receipt? Only someone we know: on the roster, from a company's own domain, or someone who already
+/// wrote on this thread or earlier; and at most `RECEIPTS_PER_SENDER_PER_DAY` a day. The request already filed for this
+/// email never counts against it.
+async fn receipt_allowed(state: &AppState, ws: &str, message_id: &str) -> sqlx::Result<bool> {
+    let Some((sender, thread, received_at)): Option<(String, String, i64)> =
+        sqlx::query_as("SELECT sender_address, thread_id, received_at FROM email_messages WHERE id = ?1 AND workspace_id = ?2").bind(message_id).bind(ws).fetch_optional(&state.db).await?
+    else {
+        return Ok(false);
+    };
+    let address = crate::replies::send_safety::bare_address(&sender).to_lowercase();
+    let today: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM message_requests r JOIN email_messages m ON m.id = r.message_id
+         WHERE r.workspace_id = ?1 AND r.job LIKE '%:receipt' AND r.status != 'dropped' AND r.message_id != ?2 AND lower(m.sender_address) = ?3 AND r.created_at > ?4",
+    )
+    .bind(ws)
+    .bind(message_id)
+    .bind(&address)
+    .bind(now_ms() - clock::DAY_MS)
+    .fetch_one(&state.db)
+    .await?;
+    if today >= RECEIPTS_PER_SENDER_PER_DAY {
+        return Ok(false);
+    }
+    let mut conn = state.db.acquire().await?;
+    let domain = address.rsplit_once('@').map(|(_, d)| d.to_string()).unwrap_or_default();
+    let company = crate::hr::team::identity::unresolved::company_domains(&mut conn, ws).await?;
+    if !domain.is_empty() && company.contains(&domain) {
+        return Ok(true);
+    }
+    sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM email_messages WHERE workspace_id = ?1 AND id != ?2 AND received_at < ?3 AND (thread_id = ?4 OR lower(sender_address) = ?5))",
+    )
+    .bind(ws)
+    .bind(message_id)
+    .bind(received_at)
+    .bind(thread)
+    .bind(address)
+    .fetch_one(&mut *conn)
+    .await
+}
+
 /// Files what the desk wants said to the sender with Meera. A "recorded" acknowledgement is only filed when every sheet is
 /// recorded and matched to a person, the same rule the manager summary follows. A receipt for a sheet whose person is not on
 /// the roster is its own request (`desk:timesheet:receipt`), and the acknowledgement that waits for the link is parked.
@@ -218,8 +271,14 @@ pub async fn hand_off(state: &AppState, ws: &str, asker: &crate::agents::handoff
     }
     if let Some(message) = wanted {
         let receipt_job = format!("{}:receipt", asker.job);
-        let by = if message.kind == MessageKind::Holding { Asker { job: &receipt_job, ..*asker } } else { *asker };
-        filed = Some(handoff::hand_to_meera(state, ws, &by, message_id, message).await?);
+        let receipt = message.kind == MessageKind::Holding;
+        let by = if receipt { Asker { job: &receipt_job, ..*asker } } else { *asker };
+        if receipt && !receipt_allowed(state, ws, message_id).await? {
+            let mut conn = state.db.acquire().await?;
+            audit::record(&mut conn, Entry { workspace_id: ws, actor: Actor::System, action: "handoff.receipt_skipped", entity_type: "message", entity_id: message_id, message_id: Some(message_id), metadata: json!({}) }).await?;
+        } else {
+            filed = Some(handoff::hand_to_meera(state, ws, &by, message_id, message).await?);
+        }
     }
     if let Some(parked) = &decision.parked {
         handoff::park(state, ws, asker, message_id, parked).await?;
@@ -242,17 +301,10 @@ pub async fn resume(state: &AppState, ws: &str, message_id: &str) -> sqlx::Resul
         .bind(crate::agents::ownership::DESK_JOB)
         .fetch_optional(&state.db)
         .await?;
-    let agent = match parked_by {
-        Some(agent) => agent,
-        None => match crate::agents::ownership::decide(state, ws, message_id).await? {
-            crate::agents::ownership::Owner::Assigned(jobs) => match jobs.first() {
-                Some(job) => job.agent_id.clone(),
-                None => return Ok(()),
-            },
-            _ => return Ok(()),
-        },
-    };
     let statuses = apply(&state.db, ws, &mut review).await?;
+    // Only an email the desk itself parked an acknowledgement for is looked at again. Sheets recorded before the desk acted on
+    // them (the flag was off, or an old card) get their person and nothing more: no mail, no summary, no surprise.
+    let Some(agent) = parked_by else { return Ok(()) };
     let mut conn = state.db.acquire().await?;
     audit::record(
         &mut conn,
@@ -272,7 +324,9 @@ pub async fn resume(state: &AppState, ws: &str, message_id: &str) -> sqlx::Resul
         .await?;
     }
     let asker = crate::agents::handoff::Asker { agent_id: &agent, case_id: None, job: crate::agents::ownership::DESK_JOB };
-    let ready = review.decision.message.as_ref().is_some_and(|m| m.kind != crate::agents::handoff::MessageKind::Ack || clean);
+    // The parked acknowledgement is released only when nothing is parked any more: a sheet in the same email whose person is still
+    // unknown keeps it waiting (the receipt is not an answer).
+    let ready = review.decision.parked.is_none() && review.decision.message.as_ref().is_some_and(|m| m.kind != crate::agents::handoff::MessageKind::Ack || clean);
     if ready {
         crate::agents::handoff::unpark(state, ws, message_id, crate::agents::ownership::DESK_JOB).await?;
     }

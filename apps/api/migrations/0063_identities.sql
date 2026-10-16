@@ -43,3 +43,6 @@ CREATE INDEX idx_identity_changes_identity ON identity_changes(identity_id) WHER
 
 ALTER TABLE timesheet_records ADD COLUMN identity_id TEXT REFERENCES unresolved_identities(id) ON DELETE SET NULL;
 CREATE INDEX idx_timesheet_records_identity ON timesheet_records(identity_id) WHERE identity_id IS NOT NULL;
+
+-- D38: a parked acknowledgement older than manager_after_hours reminds the final contacts once.
+ALTER TABLE message_requests ADD COLUMN reminded_at INTEGER;
