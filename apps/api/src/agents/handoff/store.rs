@@ -145,9 +145,22 @@ pub async fn hand_to_meera(state: &AppState, ws: &str, asker: &Asker<'_>, messag
             .await?;
     let status = if refusal.is_some() { "dropped" } else { "pending" };
     let (id, outcome) = match existing {
+        // The same words filed again for a request that was withdrawn, superseded or refused: it asks again.
+        Some((id, old, was)) if old == digest && matches!(was.as_str(), "cancelled" | "superseded" | "dropped") && refusal.is_none() => {
+            sqlx::query("UPDATE message_requests SET status = 'pending', status_note = NULL, draft_id = NULL, reply_case_id = NULL, from_case_id = ?2, requester_level = ?3, updated_at = ?4 WHERE id = ?1")
+                .bind(&id)
+                .bind(asker.case_id)
+                .bind(level)
+                .bind(now)
+                .execute(&mut *tx)
+                .await?;
+            audit_request(&mut tx, ws, &id, message_id, "handoff.requested", json!({"kind": req.kind, "was": was, "from_agent_id": asker.agent_id, "job": asker.job, "level": level, "revived": true})).await?;
+            tx.commit().await?;
+            return finish(state, ws, message_id, &id, Filed::Requested { case_id: None }, refusal, true).await;
+        }
         Some((id, old, _)) if old == digest => {
             tx.commit().await?;
-            return finish(state, ws, message_id, &id, Filed::Unchanged, refusal).await;
+            return finish(state, ws, message_id, &id, Filed::Unchanged, refusal, false).await;
         }
         Some((id, _, was)) => {
             sqlx::query(
@@ -209,19 +222,19 @@ pub async fn hand_to_meera(state: &AppState, ws: &str, asker: &Asker<'_>, messag
         }
     };
     tx.commit().await?;
-    finish(state, ws, message_id, &id, outcome, refusal).await
+    finish(state, ws, message_id, &id, outcome, refusal, false).await
 }
 
 /// After filing: a dropped request ends here; otherwise Meera's reply case exists, and a changed request whose reply was
 /// already written is merged into that unsent reply again.
-async fn finish(state: &AppState, ws: &str, message_id: &str, id: &str, outcome: Filed, refusal: Option<&'static str>) -> sqlx::Result<Filed> {
+async fn finish(state: &AppState, ws: &str, message_id: &str, id: &str, outcome: Filed, refusal: Option<&'static str>, revived: bool) -> sqlx::Result<Filed> {
     if let Some(why) = refusal {
         return Ok(Filed::Dropped(why));
     }
     if outcome == Filed::Late {
         return Ok(Filed::Late);
     }
-    let case_id = ensure_reply_case(state, ws, message_id, id).await?;
+    let case_id = ensure_reply_case(state, ws, message_id, id, revived).await?;
     match outcome {
         Filed::Requested { .. } => Ok(Filed::Requested { case_id }),
         Filed::Replaced { .. } => {
@@ -241,7 +254,7 @@ async fn finish(state: &AppState, ws: &str, message_id: &str, id: &str, outcome:
 
 /// Meera's reply case for this message: her personal agent when the mail arrived in a member's own mailbox, else the lead.
 /// One case per message; `None` when no Meera is active (the request then waits and is audited).
-async fn ensure_reply_case(state: &AppState, ws: &str, message_id: &str, request_id: &str) -> sqlx::Result<Option<String>> {
+async fn ensure_reply_case(state: &AppState, ws: &str, message_id: &str, request_id: &str, revived: bool) -> sqlx::Result<Option<String>> {
     let ctx = crate::agents::profiles::context_for_message(&state.db, &state.config, ws, message_id).await?;
     let personal = match ctx.owner.as_ref() {
         Some(o) => agents::personal_of(&state.db, ws, &o.user_id).await?.filter(|a| a.status == "active"),
@@ -265,7 +278,7 @@ async fn ensure_reply_case(state: &AppState, ws: &str, message_id: &str, request
         return Ok(None);
     };
     let title = if m.subject.trim().is_empty() { "(no subject)".to_string() } else { m.subject.clone() };
-    let job = reply_job_for(&state.db, ws, message_id).await?;
+    let job = reply_job_for(&state.db, ws, message_id, revived).await?;
     let mut conn = state.db.acquire().await?;
     let (case_id, _) = case::create(
         &mut conn,
@@ -304,7 +317,7 @@ async fn ensure_reply_case(state: &AppState, ws: &str, message_id: &str, request
 /// The job key of the reply case to use for a message: the first one is `reply`; once it is done (a first mail went out) and
 /// a request still has no words written, a follow-up case `reply#N` writes the next mail. A reply case that was cancelled or
 /// failed is never reopened this way.
-async fn reply_job_for(db: &SqlitePool, ws: &str, message_id: &str) -> sqlx::Result<String> {
+async fn reply_job_for(db: &SqlitePool, ws: &str, message_id: &str, revived: bool) -> sqlx::Result<String> {
     let cases: Vec<(String, String)> = sqlx::query_as(
         "SELECT job, status FROM cases WHERE workspace_id = ?1 AND message_id = ?2 AND shadow = 0 AND (job = ?3 OR job LIKE 'reply#%') ORDER BY created_at DESC, rowid DESC",
     )
@@ -314,7 +327,8 @@ async fn reply_job_for(db: &SqlitePool, ws: &str, message_id: &str) -> sqlx::Res
     .fetch_all(db)
     .await?;
     let Some((latest, status)) = cases.first() else { return Ok(REPLY_JOB.to_string()) };
-    if status == "done" && open_for_message(db, ws, message_id).await?.iter().any(|r| r.status == "pending") {
+    // A request that was withdrawn and asked again needs a case of its own: the earlier one was closed by the system.
+    if (status == "done" || (revived && status == "cancelled")) && open_for_message(db, ws, message_id).await?.iter().any(|r| r.status == "pending") {
         return Ok(format!("reply#{}", cases.len() + 1));
     }
     Ok(latest.clone())
@@ -362,7 +376,7 @@ pub async fn governing_now(db: &SqlitePool, config: &crate::platform::config::Co
 /// Marks the requests behind a written reply as composed and remembers the draft.
 pub async fn mark_composed(conn: &mut SqliteConnection, ws: &str, ids: &[String], draft_id: &str) -> sqlx::Result<()> {
     for id in ids {
-        sqlx::query("UPDATE message_requests SET status = 'composed', draft_id = ?3, updated_at = ?4 WHERE id = ?1 AND workspace_id = ?2 AND status IN ('pending', 'composed')")
+        sqlx::query("UPDATE message_requests SET status = 'composed', draft_id = ?3, status_note = NULL, updated_at = ?4 WHERE id = ?1 AND workspace_id = ?2 AND status IN ('pending', 'composed')")
             .bind(id)
             .bind(ws)
             .bind(draft_id)
@@ -385,16 +399,44 @@ pub async fn mark_sent(conn: &mut SqliteConnection, ws: &str, draft_id: &str) ->
     Ok(())
 }
 
-/// After a send: a request that is still open (changed or filed after its words were written) gets a follow-up mail through
-/// the same gate, written by the next reply case.
+/// The note on a request that waits for a reply that is already on its way out; it is resolved when that mail is sent.
+pub const BEING_SENT_NOTE: &str = "the reply is already being sent";
+
+/// After a send, or when a reply case ends: a request that is still open (changed or filed after its words were written) gets a
+/// follow-up mail through the same gate, written by the next reply case. Requests that were set aside for a person (a note other
+/// than "being sent") are not followed up, and nothing starts while a send is still held (its own send brings it back here).
 pub async fn follow_up(state: &AppState, ws: &str, message_id: &str) -> sqlx::Result<()> {
-    let open: Option<String> = sqlx::query_scalar("SELECT id FROM message_requests WHERE workspace_id = ?1 AND message_id = ?2 AND status = 'pending' ORDER BY created_at LIMIT 1")
-        .bind(ws)
-        .bind(message_id)
-        .fetch_optional(&state.db)
-        .await?;
+    let open: Option<String> = sqlx::query_scalar(
+        "SELECT r.id FROM message_requests r WHERE r.workspace_id = ?1 AND r.message_id = ?2 AND r.status = 'pending' AND (r.status_note IS NULL OR r.status_note = ?3)
+           AND NOT EXISTS (SELECT 1 FROM drafts d WHERE d.message_id = r.message_id AND d.status != 'sent' AND d.send_at IS NOT NULL)
+         ORDER BY r.created_at LIMIT 1",
+    )
+    .bind(ws)
+    .bind(message_id)
+    .bind(BEING_SENT_NOTE)
+    .fetch_optional(&state.db)
+    .await?;
     if let Some(id) = open {
-        ensure_reply_case(state, ws, message_id, &id).await?;
+        ensure_reply_case(state, ws, message_id, &id, false).await?;
+    }
+    Ok(())
+}
+
+/// Closes requests that will never be written (someone else answered): they stop counting for levels and payroll.
+pub async fn cancel_pending(conn: &mut SqliteConnection, ws: &str, message_id: &str, ids: &[String], why: &str) -> sqlx::Result<()> {
+    for id in ids {
+        let closed = sqlx::query("UPDATE message_requests SET status = 'cancelled', status_note = ?3, updated_at = ?4 WHERE id = ?1 AND workspace_id = ?2 AND status IN ('pending', 'composed')")
+            .bind(id)
+            .bind(ws)
+            .bind(why)
+            .bind(now_ms())
+            .execute(&mut *conn)
+            .await?
+            .rows_affected()
+            == 1;
+        if closed {
+            audit_request(&mut *conn, ws, id, message_id, "handoff.cancelled", json!({"why": why})).await?;
+        }
     }
     Ok(())
 }
@@ -458,22 +500,29 @@ pub async fn withdraw(state: &AppState, ws: &str, asker: &Asker<'_>, message_id:
     if remaining == 0 {
         for (_, draft_id, case_id) in &gone {
             if let Some(draft_id) = draft_id {
-                let provider: Option<(Option<String>, Option<String>, Option<String>)> = sqlx::query_as(
-                    "SELECT d.provider_draft_id, s.external_connection_id, s.provider_config_key FROM drafts d JOIN email_messages m ON m.id = d.message_id JOIN email_sources s ON s.id = m.source_id
-                     WHERE d.id = ?1 AND d.workspace_id = ?2 AND d.status = 'suggested' AND d.send_at IS NULL AND d.send_attempt_id IS NULL",
+                // A draft that is only waiting out its hold is taken back too: deleting it stops the send (the due job finds nothing).
+                let provider: Option<ProviderCopy> = sqlx::query_as(
+                    "SELECT d.provider_draft_id, s.external_connection_id, s.provider_config_key, d.send_at FROM drafts d JOIN email_messages m ON m.id = d.message_id JOIN email_sources s ON s.id = m.source_id
+                     WHERE d.id = ?1 AND d.workspace_id = ?2 AND d.status = 'suggested' AND d.send_attempt_id IS NULL",
                 )
                 .bind(draft_id)
                 .bind(ws)
                 .fetch_optional(&mut *tx)
                 .await?;
-                let deleted = sqlx::query("DELETE FROM drafts WHERE id = ?1 AND workspace_id = ?2 AND status = 'suggested' AND send_at IS NULL AND send_attempt_id IS NULL")
+                let deleted = sqlx::query("DELETE FROM drafts WHERE id = ?1 AND workspace_id = ?2 AND status = 'suggested' AND send_attempt_id IS NULL")
                     .bind(draft_id)
                     .bind(ws)
                     .execute(&mut *tx)
                     .await?
                     .rows_affected()
                     == 1;
-                if let (true, Some((provider_draft_id, connection_id, provider_config_key))) = (deleted, provider) {
+                if deleted && provider.as_ref().is_some_and(|p| p.3.is_some()) {
+                    audit_request(&mut tx, ws, &gone[0].0, message_id, "handoff.hold_stopped", json!({"draft_id": draft_id})).await?;
+                }
+                if !deleted {
+                    audit_request(&mut tx, ws, &gone[0].0, message_id, "handoff.not_merged", json!({"why": "the reply could not be taken back", "draft_id": draft_id})).await?;
+                }
+                if let (true, Some((provider_draft_id, connection_id, provider_config_key, _))) = (deleted, provider) {
                     copies.push(crate::replies::live_draft::Retired { draft_id: draft_id.clone(), provider_draft_id, connection_id, provider_config_key });
                 }
             }
@@ -489,6 +538,9 @@ pub async fn withdraw(state: &AppState, ws: &str, asker: &Asker<'_>, message_id:
     }
     Ok(())
 }
+
+/// A draft's mailbox copy and its hold: (provider draft id, connection id, provider config key, send_at).
+type ProviderCopy = (Option<String>, Option<String>, Option<String>, Option<i64>);
 
 /// Cancels a reply case that has not finished and declines the approval waiting on it (not as a mark against anyone).
 async fn close_case(conn: &mut SqliteConnection, ws: &str, case_id: &str, note: &str) -> sqlx::Result<()> {

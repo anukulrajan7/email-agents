@@ -285,6 +285,7 @@ async fn commit(state: &AppState, case: &Case, turn: i64, usage: &Usage, result:
     }
     let mut next_at = Some(now);
     let mut error_streak = 0;
+    let finished_reply = matches!(result, TurnResult::Finish { .. }) && workflow::is_reply_job(case);
     match result {
         TurnResult::Ran { tool, input, out, auto_sent } => {
             if auto_sent {
@@ -429,6 +430,13 @@ async fn commit(state: &AppState, case: &Case, turn: i64, usage: &Usage, result:
         case::enqueue_step(&mut tx, &case.workspace_id, &case.id, turn + 1, at).await?;
     }
     tx.commit().await?;
+    // A request filed while this reply case was finishing must not be stranded: the next reply case writes it.
+    if finished_reply
+        && let Some(message_id) = case.message_id.as_deref()
+        && let Err(e) = super::handoff::store::follow_up(state, &case.workspace_id, message_id).await
+    {
+        tracing::warn!(case_id = %case.id, error = %e, "could not queue the follow-up for a request filed late");
+    }
     state.jobs_notify.notify_one();
     Ok(())
 }

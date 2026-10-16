@@ -39,8 +39,10 @@ pub struct Meera {
 pub enum Composed {
     /// The reply draft was written (or rewritten); `askers` are the experts behind it.
     Written { draft_id: String, line: String, askers: Vec<Asker>, level: i64, kind: MessageKind },
-    /// A draft already stands (a person is working on it, or it is the same text).
+    /// A reply draft of Meera's already stands (a person edited or approved it): it is kept as it is.
     Existing { draft_id: String },
+    /// Another writer's draft stands (an automatic or agent draft, or a person's own): the reply job never sends it.
+    Foreign,
     /// The email was already answered or the send is under way: nothing was written.
     Sent,
     /// Nothing to write: no open request, or the words are not all template.
@@ -147,7 +149,10 @@ pub async fn compose_message(state: &AppState, ws: &str, message_id: &str, meera
     .fetch_one(&state.db)
     .await?;
     if answered {
-        return not_merged(state, ws, message_id, &ids, "the email was already answered by someone else", Composed::Sent).await;
+        // Permanent: nothing more will be written for these requests, so they stop counting (levels, payroll) and are closed.
+        let mut conn = state.db.acquire().await?;
+        store::cancel_pending(&mut conn, ws, message_id, &ids, "the email was already answered by someone else").await?;
+        return Ok(Composed::Sent);
     }
     let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     // A draft that is not Meera's reply (a person's, or another agent's) is never rewritten here: it would keep its origin and
@@ -199,6 +204,7 @@ pub async fn compose_message(state: &AppState, ws: &str, message_id: &str, meera
             .await?;
             Composed::Written { draft_id: id.clone(), line: line.clone(), askers: askers.clone(), level, kind: m.kind }
         }
+        Written::Existing(_) if foreign => Composed::Foreign,
         Written::Existing(d) => Composed::Existing { draft_id: d.id.clone() },
         Written::Busy(_) | Written::AlreadySent(_) => Composed::Sent,
     };
@@ -206,7 +212,8 @@ pub async fn compose_message(state: &AppState, ws: &str, message_id: &str, meera
     live_draft::settle(state, &written).await;
     match &result {
         Composed::Existing { .. } => not_merged(state, ws, message_id, &ids, "a person is working on the reply that stands", result).await,
-        Composed::Sent => not_merged(state, ws, message_id, &ids, "the reply is already being sent", result).await,
+        Composed::Foreign => not_merged(state, ws, message_id, &ids, "another draft stands for this email; it is not sent by the desk", result).await,
+        Composed::Sent => not_merged(state, ws, message_id, &ids, store::BEING_SENT_NOTE, result).await,
         _ => Ok(result),
     }
 }
@@ -238,9 +245,10 @@ pub async fn refresh(state: &AppState, ws: &str, message_id: &str) -> sqlx::Resu
     let Some((case_id, Some(agent_id))) = latest_reply_case(state, ws, message_id).await? else { return Ok(()) };
     let name: String = sqlx::query_scalar("SELECT name FROM agents WHERE id = ?1 AND workspace_id = ?2").bind(&agent_id).bind(ws).fetch_one(&state.db).await?;
     if let Composed::Written { draft_id, line, .. } = compose_message(state, ws, message_id, &Meera { id: agent_id, name }).await? {
+        // The new words are in the draft now, so the "newer request" warning no longer applies.
         sqlx::query(
             "UPDATE agent_approvals SET body = (SELECT body_text FROM drafts WHERE id = ?1),
-                    input_json = json_set(input_json, '$.handoff.line', ?2) WHERE case_id = ?3 AND workspace_id = ?4 AND status = 'pending'",
+                    input_json = json_remove(json_set(input_json, '$.handoff.line', ?2), '$.handoff.newer') WHERE case_id = ?3 AND workspace_id = ?4 AND status = 'pending'",
         )
         .bind(&draft_id)
         .bind(&line)

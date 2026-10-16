@@ -36,11 +36,13 @@ impl Tool for ComposeReply {
                 ..Default::default()
             },
             Composed::Existing { draft_id } => ToolOutput {
-                summary: "A reply draft already stands for this email; it was kept".into(),
+                summary: "A reply draft of this team already stands for this email; it was kept".into(),
                 value: json!({"draft_id": draft_id}),
                 state: Some(json!({"last_draft_id": draft_id})),
                 ..Default::default()
             },
+            // Another writer's draft is never sent by this job: the reply job ends and the request waits for a person.
+            Composed::Foreign => ToolOutput { summary: "Another draft already stands for this email; the team's request waits and nothing was sent".into(), value: json!({"nothing": true}), ..Default::default() },
             Composed::Sent => ToolOutput { summary: "This email was already answered; nothing more to write".into(), value: json!({"nothing": true}), ..Default::default() },
             Composed::Nothing(why) => ToolOutput { summary: format!("Nothing to write: {why}"), value: json!({"nothing": true}), ..Default::default() },
         })
