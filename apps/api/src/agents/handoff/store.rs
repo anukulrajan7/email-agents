@@ -130,11 +130,13 @@ pub async fn hand_to_meera(state: &AppState, ws: &str, asker: &Asker<'_>, messag
     .bind(message_id)
     .fetch_all(db)
     .await?;
+    let excused = crate::agents::supervisor::sla::excused(db, ws, message_id).await?;
     let refusal = if m.direction != "inbound" {
         Some("it is not an email we received")
     } else {
         no_reply_reason(&m.sender_address, &signals, &own)
             .or_else(|| recipient_refusal(&req.to, &thread_senders, &[]))
+            .or(excused.as_deref().map(crate::agents::supervisor::sla::excuse_words))
             .or((req.to != Recipient::Sender).then_some("only the sender is written to for now"))
     };
     let level = runtime::level_of(db, &state.config, ws, asker.agent_id, message_id).await?;

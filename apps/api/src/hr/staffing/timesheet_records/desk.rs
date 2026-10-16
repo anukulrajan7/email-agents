@@ -185,7 +185,15 @@ pub async fn compare(state: &AppState, ws: &str, message_id: &str) -> sqlx::Resu
         _ => None,
     };
     let decision = json!(review.decision);
-    let digest = format!("{:x}", fingerprint(&json!({"d": decision, "t": would_tell, "a": would_assign, "s": would_send}).to_string()));
+    // Whether a reply would be owed to the sender (and why not), as the duty would decide it. Nothing is written.
+    let would_owe_reply = match &owner {
+        crate::agents::ownership::Owner::Assigned(_) => {
+            let cfg = settings::load(&state.db, ws).await?;
+            crate::agents::supervisor::sla::assess(state, ws, message_id, &cfg).await?.map(|a| json!({"excused": a.excuse}))
+        }
+        _ => None,
+    };
+    let digest = format!("{:x}", fingerprint(&json!({"d": decision, "t": would_tell, "a": would_assign, "s": would_send, "o": would_owe_reply}).to_string()));
     let seen: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM audit_events WHERE workspace_id = ?1 AND action = 'ownership.compare' AND entity_id = ?2 AND json_extract(metadata_json, '$.digest') = ?3)",
     )
@@ -204,7 +212,7 @@ pub async fn compare(state: &AppState, ws: &str, message_id: &str) -> sqlx::Resu
         message_id,
         "ownership.compare",
         &owner,
-        json!({ "decision": decision, "would_assign": would_assign, "would_tell": would_tell, "would_send": would_send, "records": review.record_ids(), "digest": digest }),
+        json!({ "decision": decision, "would_assign": would_assign, "would_tell": would_tell, "would_send": would_send, "would_owe_reply": would_owe_reply, "records": review.record_ids(), "digest": digest }),
     )
     .await
 }
@@ -224,7 +232,7 @@ pub const RECEIPTS_PER_WORKSPACE_PER_HOUR: i64 = 20;
 /// merely sent before, or a thread they claim to be in, proves nothing (any From: can be forged). And at most
 /// `RECEIPTS_PER_SENDER_PER_DAY` to one address and `RECEIPTS_PER_WORKSPACE_PER_HOUR` in all. The request already filed for this
 /// email never counts against the caps.
-async fn receipt_allowed(state: &AppState, ws: &str, message_id: &str) -> sqlx::Result<bool> {
+pub(crate) async fn receipt_allowed(state: &AppState, ws: &str, message_id: &str) -> sqlx::Result<bool> {
     let Some(sender): Option<String> = sqlx::query_scalar("SELECT sender_address FROM email_messages WHERE id = ?1 AND workspace_id = ?2").bind(message_id).bind(ws).fetch_optional(&state.db).await? else {
         return Ok(false);
     };

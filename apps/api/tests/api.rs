@@ -87,6 +87,8 @@ mod migrate_from_0033;
 mod model_body;
 #[path = "nango.rs"]
 mod nango;
+#[path = "never_silent.rs"]
+mod never_silent;
 #[path = "one_live_draft.rs"]
 mod one_live_draft;
 #[path = "packs.rs"]

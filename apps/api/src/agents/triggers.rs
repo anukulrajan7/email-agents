@@ -308,6 +308,9 @@ pub async fn start_timesheet_case(state: &AppState, ws: &str, message_id: &str) 
         ownership::audit_owner(&mut conn, ws, message_id, "ownership.decided", &owner, json!({"case_id": created.0})).await?;
     }
     drop(conn);
+    if created.1 {
+        crate::agents::supervisor::sla::open(state, ws, message_id, &agent.id, job.key).await?;
+    }
     state.jobs_notify.notify_one();
     Ok(Started::Case(created.0, created.1))
 }

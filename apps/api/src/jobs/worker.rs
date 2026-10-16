@@ -187,6 +187,9 @@ async fn maintenance(state: &AppState) {
     if let Err(e) = jobs::match_digest::schedule(state).await {
         tracing::warn!(error = %e, "failed to schedule match digest");
     }
+    if let Err(e) = crate::agents::supervisor::sla::schedule(state).await {
+        tracing::warn!(error = %e, "failed to schedule the reply-duty sweep");
+    }
     if let Err(e) = crate::hr::staffing::schedule(state).await {
         tracing::warn!(error = %e, "failed to schedule staffing scan");
     }

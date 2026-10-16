@@ -160,6 +160,9 @@ pub async fn persist_message(
         return Ok(Some(message_id));
     }
 
+    if outbound {
+        crate::agents::supervisor::sla::note_outbound(&mut *conn, workspace_id, &thread_id, email.rfc_message_id.as_deref(), email.received_at).await?;
+    }
     if !outbound {
         crate::hr::candidate_watch::opt_out_on_stop(&mut *conn, workspace_id, &email.sender_address, &body_text).await?;
         memory::record_contact(&mut *conn, workspace_id, &email.sender_address, email.sender_name.as_deref(), email.received_at)

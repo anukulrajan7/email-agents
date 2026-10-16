@@ -14,6 +14,7 @@ pub mod persona;
 pub mod plan;
 pub mod planner;
 pub mod runner;
+pub mod supervisor;
 pub mod tools;
 pub mod triggers;
 pub mod workflow;

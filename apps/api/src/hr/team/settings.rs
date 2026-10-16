@@ -53,6 +53,29 @@ pub struct TeamSettings {
     pub require_signature: bool,
     pub route_alerts_by_owner: bool,
     pub restrict_mail_to_team: bool,
+    /// IANA name of the workspace's zone; `None` = not chosen (the fixed offset, else Asia/Kolkata, applies).
+    pub timezone: Option<String>,
+    /// Working hours to answer a mail in ("never silent").
+    pub reply_sla_hours: i64,
+    pub work_start_hour: i64,
+    pub work_end_hour: i64,
+    /// Monday = 0.
+    pub work_days: Vec<i64>,
+    /// `auto`: a holding note goes out by itself when nothing was composed in time; `off`: only people are told.
+    pub holding_mode: String,
+    /// Addresses and `@domains` the owner never wants an automatic reply to.
+    pub no_reply_senders: Vec<String>,
+}
+
+impl TeamSettings {
+    /// The zone this workspace counts working time in.
+    pub fn zone(&self) -> crate::platform::time::Zone {
+        crate::platform::time::resolve(None, self.timezone.as_deref(), self.tz_offset_minutes)
+    }
+
+    pub fn work_week(&self) -> crate::platform::time::WorkWeek {
+        crate::platform::time::WorkWeek::from_days(self.work_start_hour, self.work_end_hour, &self.work_days)
+    }
 }
 
 impl Default for TeamSettings {
@@ -73,6 +96,13 @@ impl Default for TeamSettings {
             require_signature: false,
             route_alerts_by_owner: false,
             restrict_mail_to_team: false,
+            timezone: None,
+            reply_sla_hours: 4,
+            work_start_hour: 9,
+            work_end_hour: 19,
+            work_days: vec![0, 1, 2, 3, 4, 5],
+            holding_mode: "auto".into(),
+            no_reply_senders: vec![],
         }
     }
 }
@@ -94,13 +124,21 @@ struct Row {
     require_signature: bool,
     route_alerts_by_owner: bool,
     restrict_mail_to_team: bool,
+    timezone: Option<String>,
+    reply_sla_hours: i64,
+    work_start_hour: i64,
+    work_end_hour: i64,
+    work_days_json: String,
+    holding_mode: String,
+    no_reply_json: String,
 }
 
 pub async fn load(db: &SqlitePool, workspace_id: &str) -> sqlx::Result<TeamSettings> {
     let row: Option<Row> = sqlx::query_as(
         "SELECT tz_offset_minutes, manager_after_hours, final_after_hours, final_emails_json, below_target_hour,
                 weekly_check_hour, hr_source_id, client_domains_json, timesheet_grace_days, hours_tolerance,
-                timesheet_cadence, max_hours_per_day, require_signature, route_alerts_by_owner, restrict_mail_to_team
+                timesheet_cadence, max_hours_per_day, require_signature, route_alerts_by_owner, restrict_mail_to_team,
+                timezone, reply_sla_hours, work_start_hour, work_end_hour, work_days_json, holding_mode, no_reply_json
          FROM team_settings WHERE workspace_id = ?1",
     )
     .bind(workspace_id)
@@ -122,6 +160,13 @@ pub async fn load(db: &SqlitePool, workspace_id: &str) -> sqlx::Result<TeamSetti
         require_signature: r.require_signature,
         route_alerts_by_owner: r.route_alerts_by_owner,
         restrict_mail_to_team: r.restrict_mail_to_team,
+        timezone: r.timezone,
+        reply_sla_hours: r.reply_sla_hours,
+        work_start_hour: r.work_start_hour,
+        work_end_hour: r.work_end_hour,
+        work_days: serde_json::from_str(&r.work_days_json).unwrap_or_else(|_| TeamSettings::default().work_days),
+        holding_mode: r.holding_mode,
+        no_reply_senders: serde_json::from_str(&r.no_reply_json).unwrap_or_default(),
     }))
 }
 
@@ -156,6 +201,14 @@ pub struct SettingsInput {
     pub require_signature: Option<bool>,
     pub route_alerts_by_owner: Option<bool>,
     pub restrict_mail_to_team: Option<bool>,
+    #[serde(default, deserialize_with = "nullable")]
+    pub timezone: Option<Option<String>>,
+    pub reply_sla_hours: Option<i64>,
+    pub work_start_hour: Option<i64>,
+    pub work_end_hour: Option<i64>,
+    pub work_days: Option<Vec<i64>>,
+    pub holding_mode: Option<String>,
+    pub no_reply_senders: Option<Vec<String>>,
 }
 
 impl SettingsInput {
@@ -187,6 +240,50 @@ impl SettingsInput {
             restrict_mail_to_team: staffing && self.restrict_mail_to_team.unwrap_or(current.restrict_mail_to_team),
             ..current.clone()
         };
+        if let Some(tz) = &self.timezone {
+            out.timezone = match tz.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
+                None => None,
+                Some(name) if crate::platform::time::zone::is_known(name) => Some(name.to_string()),
+                Some(_) => return Err("timezone must be a name like Asia/Kolkata".into()),
+            };
+        }
+        out.reply_sla_hours = in_range(self.reply_sla_hours.unwrap_or(current.reply_sla_hours), 1, 72, "reply_sla_hours")?;
+        out.work_start_hour = in_range(self.work_start_hour.unwrap_or(current.work_start_hour), 0, 23, "work_start_hour")?;
+        out.work_end_hour = in_range(self.work_end_hour.unwrap_or(current.work_end_hour), 1, 24, "work_end_hour")?;
+        if out.work_start_hour >= out.work_end_hour {
+            return Err("work_end_hour must be after work_start_hour".into());
+        }
+        if let Some(days) = &self.work_days {
+            let mut days: Vec<i64> = days.iter().copied().filter(|d| (0..7).contains(d)).collect();
+            days.sort_unstable();
+            days.dedup();
+            if days.is_empty() {
+                return Err("work_days needs at least one day (Monday is 0)".into());
+            }
+            out.work_days = days;
+        }
+        if let Some(mode) = &self.holding_mode {
+            if !matches!(mode.as_str(), "auto" | "off") {
+                return Err("holding_mode must be auto or off".into());
+            }
+            out.holding_mode = mode.clone();
+        }
+        if let Some(list) = &self.no_reply_senders {
+            let mut clean: Vec<String> = vec![];
+            for raw in list {
+                let v = raw.trim().to_lowercase();
+                if v.is_empty() || v.contains(char::is_whitespace) || !(v.starts_with('@') && v.contains('.') || v.contains('@') && !v.starts_with('@')) {
+                    return Err(format!("no_reply_senders: '{v}' is not an address like ravi@x.com or a domain like @x.com"));
+                }
+                if !clean.contains(&v) {
+                    clean.push(v);
+                }
+            }
+            if clean.len() > 200 {
+                return Err("no_reply_senders: at most 200 entries".into());
+            }
+            out.no_reply_senders = clean;
+        }
         if staffing {
             let mut domains = vec![];
             for d in &self.client_domains {
@@ -225,8 +322,9 @@ pub async fn save(db: &SqlitePool, workspace_id: &str, s: &TeamSettings) -> sqlx
     sqlx::query(
         "INSERT INTO team_settings (workspace_id, tz_offset_minutes, manager_after_hours, final_after_hours, final_emails_json,
                 below_target_hour, weekly_check_hour, hr_source_id, client_domains_json, timesheet_grace_days, hours_tolerance, route_alerts_by_owner,
-                restrict_mail_to_team, timesheet_cadence, max_hours_per_day, require_signature, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
+                restrict_mail_to_team, timesheet_cadence, max_hours_per_day, require_signature, updated_at,
+                timezone, reply_sla_hours, work_start_hour, work_end_hour, work_days_json, holding_mode, no_reply_json)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)
          ON CONFLICT(workspace_id) DO UPDATE SET
            tz_offset_minutes = excluded.tz_offset_minutes, manager_after_hours = excluded.manager_after_hours,
            final_after_hours = excluded.final_after_hours, final_emails_json = excluded.final_emails_json,
@@ -235,7 +333,10 @@ pub async fn save(db: &SqlitePool, workspace_id: &str, s: &TeamSettings) -> sqlx
            timesheet_grace_days = excluded.timesheet_grace_days, hours_tolerance = excluded.hours_tolerance,
            route_alerts_by_owner = excluded.route_alerts_by_owner, restrict_mail_to_team = excluded.restrict_mail_to_team,
            timesheet_cadence = excluded.timesheet_cadence, max_hours_per_day = excluded.max_hours_per_day,
-           require_signature = excluded.require_signature, updated_at = excluded.updated_at",
+           require_signature = excluded.require_signature, updated_at = excluded.updated_at,
+           timezone = excluded.timezone, reply_sla_hours = excluded.reply_sla_hours, work_start_hour = excluded.work_start_hour,
+           work_end_hour = excluded.work_end_hour, work_days_json = excluded.work_days_json, holding_mode = excluded.holding_mode,
+           no_reply_json = excluded.no_reply_json",
     )
     .bind(workspace_id)
     .bind(s.tz_offset_minutes)
@@ -254,6 +355,13 @@ pub async fn save(db: &SqlitePool, workspace_id: &str, s: &TeamSettings) -> sqlx
     .bind(s.max_hours_per_day)
     .bind(s.require_signature)
     .bind(now_ms())
+    .bind(&s.timezone)
+    .bind(s.reply_sla_hours)
+    .bind(s.work_start_hour)
+    .bind(s.work_end_hour)
+    .bind(json!(s.work_days).to_string())
+    .bind(&s.holding_mode)
+    .bind(json!(s.no_reply_senders).to_string())
     .execute(db)
     .await?;
     Ok(())

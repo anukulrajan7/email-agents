@@ -583,3 +583,50 @@ impl Env {
             .unwrap()
     }
 }
+
+impl Env {
+    /// A reply from `from` in the thread of `message_id`: it answers the newest mail we sent on that thread (else the message itself) by
+    /// In-Reply-To, as a mail client does, and runs through the pipeline like any mail. Returns the new message's id.
+    pub async fn reply_to(&self, message_id: &str, from: &str, body: &str) -> String {
+        let (source, thread, provider_thread, subject, original): (String, String, String, String, Option<String>) = sqlx::query_as(
+            "SELECT m.source_id, m.thread_id, t.provider_thread_id, m.subject, m.rfc_message_id FROM email_messages m JOIN email_threads t ON t.id = m.thread_id WHERE m.id = ?1 AND m.workspace_id = ?2",
+        )
+        .bind(message_id)
+        .bind(&self.ws)
+        .fetch_one(&self.state.db)
+        .await
+        .unwrap();
+        let ours: Option<String> = sqlx::query_scalar(
+            "SELECT d.rfc_message_id FROM drafts d JOIN email_messages m ON m.id = d.message_id WHERE m.thread_id = ?1 AND d.status = 'sent' AND d.rfc_message_id IS NOT NULL ORDER BY d.updated_at DESC, d.rowid DESC LIMIT 1",
+        )
+        .bind(&thread)
+        .fetch_optional(&self.state.db)
+        .await
+        .unwrap()
+        .flatten();
+        let answered = ours.or(original).expect("a message id to answer");
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM email_messages WHERE thread_id = ?1").bind(&thread).fetch_one(&self.state.db).await.unwrap();
+        let email = NormalizedEmail {
+            source_message_id: format!("reply-{thread}-{n}"),
+            rfc_message_id: Some(format!("<reply-{thread}-{n}@mail.example>")),
+            sender_address: from.into(),
+            recipients: vec!["team@acme.com".into()],
+            subject: if subject.to_lowercase().starts_with("re:") { subject } else { format!("Re: {subject}") },
+            body_text: body.into(),
+            received_at: db::now_ms() - 1_000 * (10 - n.min(9)),
+            in_reply_to: Some(answered.clone()),
+            references: vec![answered],
+            ..Default::default()
+        };
+        let mut tx = self.state.db.begin().await.unwrap();
+        let id = ingest::persist_message(&mut tx, &source, &self.ws, &email, Some(&provider_thread), json!({})).await.unwrap().unwrap();
+        tx.commit().await.unwrap();
+        worker::drain(&self.state).await;
+        id
+    }
+
+    /// (status, excuse) of the reply duty of a message, if it has one.
+    pub async fn obligation(&self, message_id: &str) -> Option<(String, Option<String>)> {
+        sqlx::query_as("SELECT status, excuse FROM reply_obligations WHERE workspace_id = ?1 AND message_id = ?2").bind(&self.ws).bind(message_id).fetch_optional(&self.state.db).await.unwrap()
+    }
+}

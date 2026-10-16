@@ -69,6 +69,13 @@ pub fn question(issues: &[IssueText]) -> String {
 /// A receipt that confirms nothing about the sender or the hours: "we have it", and what happens next. A request that names
 /// the timesheet (`About` = `timesheet`) says so.
 pub fn holding(facts: &[Fact]) -> String {
+    if let Some(by) = fact(facts, "Reply by") {
+        return if fact(facts, "About") == Some("timesheet") {
+            format!("Thank you for sending your timesheet. We have received it and are checking it. We will confirm by {by}.")
+        } else {
+            format!("Thank you for your message. We have received it, and a person from our team will get back to you by {by}.")
+        };
+    }
     if fact(facts, "About") == Some("timesheet") {
         return "Thank you for sending your timesheet. We have received it and are matching it to your record. We will confirm once that is done.".to_string();
     }

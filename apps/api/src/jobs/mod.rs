@@ -75,6 +75,8 @@ pub mod kind {
     pub const NOTIFY_CANDIDATE_WATCH: &str = "notify_candidate_watch";
     pub const PERSON_LINKED: &str = "person_linked";
     pub const REFRESH_IDENTITIES: &str = "refresh_identities";
+    pub const REPLY_SLA: &str = "reply_sla";
+    pub const REPLY_SLA_SWEEP: &str = "reply_sla_sweep";
 }
 
 #[derive(Debug, Clone, FromRow)]

@@ -99,6 +99,13 @@ fn settings_json(s: &settings::TeamSettings, staffing: bool, owner: bool, source
         v["final_emails"] = json!([]);
         return v;
     }
+    v["timezone"] = json!(s.timezone);
+    v["reply_sla_hours"] = json!(s.reply_sla_hours);
+    v["work_start_hour"] = json!(s.work_start_hour);
+    v["work_end_hour"] = json!(s.work_end_hour);
+    v["work_days"] = json!(s.work_days);
+    v["holding_mode"] = json!(s.holding_mode);
+    v["no_reply_senders"] = json!(s.no_reply_senders);
     if staffing {
         v["restrict_mail_to_team"] = json!(s.restrict_mail_to_team);
         v["hr_source_id"] = json!(s.hr_source_id);

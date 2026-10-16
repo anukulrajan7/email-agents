@@ -139,6 +139,7 @@ pub(super) async fn finalize_sent(state: &AppState, ws: &str, ctx: &ReplyContext
         crate::hr::candidate_watch::queue_enrol(&mut tx, ws, &ctx.message_id, &ctx.draft_id).await?;
     }
     crate::agents::handoff::store::mark_sent(&mut tx, ws, &ctx.draft_id).await?;
+    crate::agents::supervisor::sla::on_sent(&mut tx, ws, &ctx.message_id, &ctx.draft_id).await?;
     tx.commit().await?;
     if let Err(e) = crate::agents::handoff::store::follow_up(state, ws, &ctx.message_id).await {
         tracing::warn!(error = %e, "could not queue the follow-up for a request filed after the reply was written");
