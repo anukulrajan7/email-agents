@@ -8,7 +8,10 @@ use anyhow::Context;
 use async_trait::async_trait;
 use lettre::{
     AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor,
-    message::{Mailbox, MultiPart},
+    message::{
+        Mailbox, MultiPart,
+        header::{HeaderName, HeaderValue},
+    },
     transport::smtp::authentication::Credentials,
 };
 use sqlx::SqlitePool;
@@ -19,6 +22,9 @@ use crate::platform::db::{new_id, now_ms};
 pub trait Mailer: Send + Sync {
     async fn send(&self, to: &str, subject: &str, text: &str, html: &str) -> anyhow::Result<()>;
 }
+
+/// Value of the `X-PostRoom` header on every message we send (the trait carries no per-mail kind).
+const SYSTEM_MAIL_KIND: &str = "notice";
 
 pub struct SmtpMailer {
     transport: AsyncSmtpTransport<Tokio1Executor>,
@@ -44,11 +50,15 @@ impl SmtpMailer {
 #[async_trait]
 impl Mailer for SmtpMailer {
     async fn send(&self, to: &str, subject: &str, text: &str, html: &str) -> anyhow::Result<()> {
-        let email = Message::builder()
+        let mut email = Message::builder()
             .from(self.from.clone())
             .to(to.parse().context("invalid recipient")?)
             .subject(subject)
             .multipart(MultiPart::alternative_plain_html(text.to_string(), html.to_string()))?;
+        // Lets the receiving Post Room recognise its own mail and never draft, case or alert on it.
+        let headers = email.headers_mut();
+        headers.insert_raw(HeaderValue::new(HeaderName::new_from_ascii_str("X-PostRoom"), SYSTEM_MAIL_KIND.to_string()));
+        headers.insert_raw(HeaderValue::new(HeaderName::new_from_ascii_str("Auto-Submitted"), "auto-generated".to_string()));
         self.transport.send(email).await.context("SMTP send failed")?;
         Ok(())
     }

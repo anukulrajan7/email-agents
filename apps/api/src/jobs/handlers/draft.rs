@@ -4,6 +4,9 @@ pub(super) async fn generate_draft(state: &AppState, job: &Job, payload: &Value)
     let message_id = str_field(payload, "message_id")?;
     let run_id = payload.get("workflow_run_id").and_then(Value::as_str).map(str::to_string);
     let msg = load_message(state, &message_id).await?;
+    if !job.dedupe_key.contains(":manual:") && crate::mail::system_mail::is_own_message(&state.db, &state.config, &msg.workspace_id, &message_id).await? {
+        return finish_without_draft(state, &msg.workspace_id, &message_id, run_id.as_deref(), "Post Room's own mail needs no reply").await;
+    }
     // Automatic drafting can be switched off: then only a person's request (`:manual:`) drafts.
     let auto_reply = crate::replies::reply_settings::load(&state.db, &state.config, &msg.workspace_id).await?.auto_reply;
     if !auto_reply && !job.dedupe_key.contains(":manual:") {
@@ -276,6 +279,9 @@ pub async fn create_draft_for_message(
         return Ok(existing);
     }
     let msg = load_message(state, message_id).await?;
+    if crate::mail::system_mail::is_own_message(&state.db, &state.config, &msg.workspace_id, message_id).await? {
+        return Ok(None);
+    }
     if crate::hr::staffing::timesheet_records::suppresses_auto_reply(&state.db, &msg.workspace_id, message_id).await? {
         return Ok(None);
     }

@@ -5,3 +5,4 @@ pub mod text_clean;
 pub mod bulk;
 pub mod deletion;
 pub mod attachments;
+pub mod system_mail;

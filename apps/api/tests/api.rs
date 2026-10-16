@@ -121,6 +121,8 @@ mod staffing_scope;
 mod staffing_submissions;
 #[path = "summaries.rs"]
 mod summaries;
+#[path = "system_mail.rs"]
+mod system_mail;
 #[path = "tenant_isolation.rs"]
 mod tenant_isolation;
 #[path = "timesheet_records.rs"]

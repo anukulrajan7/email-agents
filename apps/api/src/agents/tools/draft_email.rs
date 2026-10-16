@@ -56,6 +56,11 @@ impl Tool for DraftEmail {
         let (draft_id, body) = match reused.clone() {
             Some(d) => d,
             None => {
+                if ctx.case.trigger.as_deref() != Some("manual")
+                    && crate::mail::system_mail::is_own_message(&ctx.state.db, &ctx.state.config, ctx.ws(), &msg.id).await?
+                {
+                    return failed("This is Post Room's own mail; no reply is needed.");
+                }
                 let (agent, _) = crate::agents::registry::runtime::context_for_case(&ctx.state.db, &ctx.state.config, ctx.case).await?;
                 let quality = match opt_str(args, "quality") {
                     _ if agent.agent.quality == "best" => Some(DraftQuality::Premium),

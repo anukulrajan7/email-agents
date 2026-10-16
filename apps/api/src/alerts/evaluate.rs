@@ -47,6 +47,7 @@ pub async fn evaluate_workspace(state: &AppState, workspace_id: &str, now: i64) 
     let mut report = EvalReport::default();
     let settings = load_settings(pool, workspace_id).await?;
     let team = team_addresses(pool, workspace_id).await?;
+    let own = crate::mail::system_mail::own_senders(&state.config);
 
     report.reopened = sqlx::query(
         "UPDATE alerts SET status = 'open', snoozed_until = NULL, level_since = ?1, updated_at = ?1,
@@ -76,7 +77,7 @@ pub async fn evaluate_workspace(state: &AppState, workspace_id: &str, now: i64) 
         }
         let ids: Vec<String> = mine.iter().map(|(_, _, m)| m.clone()).collect();
         let still: HashSet<String> =
-            firing(pool, workspace_id, rule, 0, i64::MAX, Some(&ids), &team).await?.into_iter().map(|c| c.id).collect();
+            firing(pool, workspace_id, rule, 0, i64::MAX, Some(&ids), &team, &own).await?.into_iter().map(|c| c.id).collect();
         for (id, _, message_id) in mine {
             if !still.contains(message_id) && resolve(pool, workspace_id, id, Some(message_id), now).await? {
                 report.resolved += 1;
@@ -90,9 +91,9 @@ pub async fn evaluate_workspace(state: &AppState, workspace_id: &str, now: i64) 
 
     let cutoff = now - settings.unanswered_hours * HOUR_MS;
     let from = now - LOOKBACK_MS;
-    let approvals = firing(pool, workspace_id, APPROVAL_PENDING, from, cutoff, None, &team).await?;
+    let approvals = firing(pool, workspace_id, APPROVAL_PENDING, from, cutoff, None, &team, &own).await?;
     let approval_ids: HashSet<&str> = approvals.iter().map(|c| c.id.as_str()).collect();
-    let important = firing(pool, workspace_id, IMPORTANT_UNANSWERED, from, cutoff, None, &team).await?;
+    let important = firing(pool, workspace_id, IMPORTANT_UNANSWERED, from, cutoff, None, &team, &own).await?;
     for c in &approvals {
         report.raised += raise_rule(pool, rule_alert(workspace_id, APPROVAL_PENDING, c, now), &c.id).await? as usize;
     }

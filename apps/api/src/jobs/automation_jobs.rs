@@ -70,7 +70,7 @@ pub async fn run_automations(state: &AppState, payload: &Value) -> Result<(), Jo
     let Some((workspace_id, source_status)) = info else {
         return Ok(());
     };
-    if source_status == "disconnected" {
+    if source_status == "disconnected" || crate::mail::system_mail::is_own_message(&state.db, &state.config, &workspace_id, &message_id).await? {
         return Ok(());
     }
     // Conditions read needs_reply from the insight, so make sure it exists first.

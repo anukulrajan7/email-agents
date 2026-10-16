@@ -216,6 +216,9 @@ async fn message_facts(state: &AppState, ws: &str, message_id: &str) -> sqlx::Re
 /// real one, unless a person started this case by hand.
 pub async fn start_inbox_case(state: &AppState, ws: &str, message_id: &str, created_by: Option<&str>) -> sqlx::Result<Started> {
     let Some(m) = message_facts(state, ws, message_id).await?.filter(|m| m.direction == "inbound") else { return Ok(Started::NotFound) };
+    if created_by.is_none() && crate::mail::system_mail::is_own_message(&state.db, &state.config, ws, message_id).await? {
+        return Ok(Started::NotAllowed("This is Post Room's own mail; nobody needs to answer it.".into()));
+    }
     let owner = match agent_for(state, ws, message_id, TASK_REPLY, created_by).await? {
         Ok(owner) => owner,
         Err(why) => return Ok(Started::NotAllowed(why)),

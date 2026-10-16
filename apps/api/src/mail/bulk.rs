@@ -57,6 +57,9 @@ pub fn header_signals(header: &dyn Fn(&str) -> Option<String>, label_ids: &[Stri
     }) {
         out.push(DELIVERY_STATUS.to_string());
     }
+    if header("X-PostRoom").is_some() {
+        out.push(crate::mail::system_mail::SIGNAL.to_string());
+    }
     if label_ids.iter().any(|l| GMAIL_CATEGORIES.contains(&l.as_str())) {
         out.push(GMAIL_CATEGORY.to_string());
     }
@@ -125,6 +128,9 @@ pub async fn is_known_contact(db: &SqlitePool, workspace_id: &str, sender: &str)
 
 /// Pure part of the decision: enough signals, a reply-less subject and nothing billing-like.
 pub fn qualifies(stored: &[String], sender: &str, subject: &str, new_part: &str) -> bool {
+    if stored.iter().any(|s| s == crate::mail::system_mail::SIGNAL) {
+        return false;
+    }
     let mut signals = stored.to_vec();
     if crate::learning::memory_learning::is_automated_sender(sender) {
         merge(&mut signals, vec![NO_REPLY_SENDER.to_string()]);
@@ -225,6 +231,21 @@ mod tests {
         )
         .unwrap();
         assert_eq!(forwarded.normalize(5_000).bulk_signals, [PRECEDENCE, AUTO_SUBMITTED]);
+    }
+
+    #[test]
+    fn our_own_header_becomes_a_signal() {
+        let headers = json!({"x-postroom": "notice", "Auto-Submitted": "auto-generated"});
+        assert_eq!(header_signals(&header_lookup(&headers), &[]), [AUTO_SUBMITTED, crate::mail::system_mail::SIGNAL]);
+        assert!(header_signals(&header_lookup(&json!({})), &[]).is_empty());
+    }
+
+    #[test]
+    fn the_postroom_signal_never_makes_mail_bulk() {
+        let own = crate::mail::system_mail::SIGNAL;
+        assert!(!qualifies(&s(&[own]), "someone@brand.example", "Our October picks", "Ten books you will love."), "the signal alone is not evidence");
+        assert!(!qualifies(&s(&[own]), "no-reply@brand.example", "Weekly digest", "Top stories this week."), "nor with a no-reply sender");
+        assert!(!qualifies(&s(&[own, AUTO_SUBMITTED]), "no-reply@postroom.test", "[Post Room] 2 emails need attention", "Two emails."), "our mail also carries Auto-Submitted");
     }
 
     #[test]
