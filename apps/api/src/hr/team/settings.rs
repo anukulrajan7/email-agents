@@ -65,7 +65,16 @@ pub struct TeamSettings {
     pub holding_mode: String,
     /// Addresses and `@domains` the owner never wants an automatic reply to.
     pub no_reply_senders: Vec<String>,
+    /// What a sheet must state, or the sender is asked: `identity`, `name`, `employee_code`, `email`, `period`.
+    pub timesheet_required: Vec<String>,
+    /// Hours before the one reminder, and (after it) before a person is told. Calendar hours.
+    pub missing_reminder_hours: i64,
+    pub missing_escalate_hours: i64,
+    pub missing_max_reminders: i64,
 }
+
+/// What a sheet may be required to state.
+pub const REQUIRED_KEYS: [&str; 5] = ["identity", "name", "employee_code", "email", "period"];
 
 impl TeamSettings {
     /// The zone this workspace counts working time in.
@@ -103,6 +112,10 @@ impl Default for TeamSettings {
             work_days: vec![0, 1, 2, 3, 4, 5],
             holding_mode: "auto".into(),
             no_reply_senders: vec![],
+            timesheet_required: vec!["identity".into(), "period".into()],
+            missing_reminder_hours: 24,
+            missing_escalate_hours: 48,
+            missing_max_reminders: 1,
         }
     }
 }
@@ -131,6 +144,10 @@ struct Row {
     work_days_json: String,
     holding_mode: String,
     no_reply_json: String,
+    timesheet_required_json: String,
+    missing_reminder_hours: i64,
+    missing_escalate_hours: i64,
+    missing_max_reminders: i64,
 }
 
 pub async fn load(db: &SqlitePool, workspace_id: &str) -> sqlx::Result<TeamSettings> {
@@ -138,7 +155,8 @@ pub async fn load(db: &SqlitePool, workspace_id: &str) -> sqlx::Result<TeamSetti
         "SELECT tz_offset_minutes, manager_after_hours, final_after_hours, final_emails_json, below_target_hour,
                 weekly_check_hour, hr_source_id, client_domains_json, timesheet_grace_days, hours_tolerance,
                 timesheet_cadence, max_hours_per_day, require_signature, route_alerts_by_owner, restrict_mail_to_team,
-                timezone, reply_sla_hours, work_start_hour, work_end_hour, work_days_json, holding_mode, no_reply_json
+                timezone, reply_sla_hours, work_start_hour, work_end_hour, work_days_json, holding_mode, no_reply_json,
+                timesheet_required_json, missing_reminder_hours, missing_escalate_hours, missing_max_reminders
          FROM team_settings WHERE workspace_id = ?1",
     )
     .bind(workspace_id)
@@ -167,6 +185,10 @@ pub async fn load(db: &SqlitePool, workspace_id: &str) -> sqlx::Result<TeamSetti
         work_days: serde_json::from_str(&r.work_days_json).unwrap_or_else(|_| TeamSettings::default().work_days),
         holding_mode: r.holding_mode,
         no_reply_senders: serde_json::from_str(&r.no_reply_json).unwrap_or_default(),
+        timesheet_required: serde_json::from_str(&r.timesheet_required_json).unwrap_or_else(|_| TeamSettings::default().timesheet_required),
+        missing_reminder_hours: r.missing_reminder_hours,
+        missing_escalate_hours: r.missing_escalate_hours,
+        missing_max_reminders: r.missing_max_reminders,
     }))
 }
 
@@ -209,6 +231,10 @@ pub struct SettingsInput {
     pub work_days: Option<Vec<i64>>,
     pub holding_mode: Option<String>,
     pub no_reply_senders: Option<Vec<String>>,
+    pub timesheet_required: Option<Vec<String>>,
+    pub missing_reminder_hours: Option<i64>,
+    pub missing_escalate_hours: Option<i64>,
+    pub missing_max_reminders: Option<i64>,
 }
 
 impl SettingsInput {
@@ -285,6 +311,22 @@ impl SettingsInput {
             out.no_reply_senders = clean;
         }
         if staffing {
+            if let Some(keys) = &self.timesheet_required {
+                let mut clean: Vec<String> = vec![];
+                for k in keys {
+                    let k = k.trim().to_lowercase();
+                    if !REQUIRED_KEYS.contains(&k.as_str()) {
+                        return Err(format!("timesheet_required: '{k}' is not one of {}", REQUIRED_KEYS.join(", ")));
+                    }
+                    if !clean.contains(&k) {
+                        clean.push(k);
+                    }
+                }
+                out.timesheet_required = clean;
+            }
+            out.missing_reminder_hours = in_range(self.missing_reminder_hours.unwrap_or(current.missing_reminder_hours), 1, 720, "missing_reminder_hours")?;
+            out.missing_escalate_hours = in_range(self.missing_escalate_hours.unwrap_or(current.missing_escalate_hours), 1, 720, "missing_escalate_hours")?;
+            out.missing_max_reminders = in_range(self.missing_max_reminders.unwrap_or(current.missing_max_reminders), 0, 2, "missing_max_reminders")?;
             let mut domains = vec![];
             for d in &self.client_domains {
                 let d = d.trim().trim_start_matches('@').to_lowercase();
@@ -323,8 +365,9 @@ pub async fn save(db: &SqlitePool, workspace_id: &str, s: &TeamSettings) -> sqlx
         "INSERT INTO team_settings (workspace_id, tz_offset_minutes, manager_after_hours, final_after_hours, final_emails_json,
                 below_target_hour, weekly_check_hour, hr_source_id, client_domains_json, timesheet_grace_days, hours_tolerance, route_alerts_by_owner,
                 restrict_mail_to_team, timesheet_cadence, max_hours_per_day, require_signature, updated_at,
-                timezone, reply_sla_hours, work_start_hour, work_end_hour, work_days_json, holding_mode, no_reply_json)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)
+                timezone, reply_sla_hours, work_start_hour, work_end_hour, work_days_json, holding_mode, no_reply_json,
+                timesheet_required_json, missing_reminder_hours, missing_escalate_hours, missing_max_reminders)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28)
          ON CONFLICT(workspace_id) DO UPDATE SET
            tz_offset_minutes = excluded.tz_offset_minutes, manager_after_hours = excluded.manager_after_hours,
            final_after_hours = excluded.final_after_hours, final_emails_json = excluded.final_emails_json,
@@ -336,7 +379,9 @@ pub async fn save(db: &SqlitePool, workspace_id: &str, s: &TeamSettings) -> sqlx
            require_signature = excluded.require_signature, updated_at = excluded.updated_at,
            timezone = excluded.timezone, reply_sla_hours = excluded.reply_sla_hours, work_start_hour = excluded.work_start_hour,
            work_end_hour = excluded.work_end_hour, work_days_json = excluded.work_days_json, holding_mode = excluded.holding_mode,
-           no_reply_json = excluded.no_reply_json",
+           no_reply_json = excluded.no_reply_json, timesheet_required_json = excluded.timesheet_required_json,
+           missing_reminder_hours = excluded.missing_reminder_hours, missing_escalate_hours = excluded.missing_escalate_hours,
+           missing_max_reminders = excluded.missing_max_reminders",
     )
     .bind(workspace_id)
     .bind(s.tz_offset_minutes)
@@ -362,6 +407,10 @@ pub async fn save(db: &SqlitePool, workspace_id: &str, s: &TeamSettings) -> sqlx
     .bind(json!(s.work_days).to_string())
     .bind(&s.holding_mode)
     .bind(json!(s.no_reply_senders).to_string())
+    .bind(json!(s.timesheet_required).to_string())
+    .bind(s.missing_reminder_hours)
+    .bind(s.missing_escalate_hours)
+    .bind(s.missing_max_reminders)
     .execute(db)
     .await?;
     Ok(())

@@ -8,14 +8,14 @@ use super::{
     rules::{self, Checked, PersonRules, RecordView, Rules, RuleIssue, Severity},
     *,
 };
-use crate::agents::handoff::Decision;
+use crate::agents::handoff::{Decision, MessageRequest};
 use crate::{
     hr::team::settings::Cadence,
     platform::audit::{self, Actor, Entry},
 };
 
 /// Codes the rules own on a record. Everything else in `issues_json` was found when the sheet was read.
-const RULE_CODES: [&str; 7] = ["wrong_period", "over_max_per_day", "portal_mismatch", "missing_signature", "below_target", "outside_client_domains", "replaces_earlier"];
+const RULE_CODES: [&str; 8] = ["missing_data", "wrong_period", "over_max_per_day", "portal_mismatch", "missing_signature", "below_target", "outside_client_domains", "replaces_earlier"];
 
 pub struct Review {
     pub rows: Vec<RecordRow>,
@@ -101,7 +101,25 @@ pub async fn review(db: &SqlitePool, ws: &str, message_id: &str) -> sqlx::Result
         let (entries, issues) = (row.entries(), reader_issues(row));
         let (portal, person, replaced) = (portal_hours(db, ws, row.person_id.as_deref(), (&row.period_start, &row.period_end), rules.cadence).await?, person_rules(db, ws, row.person_id.as_deref()).await?, replaced_received(db, ws, row).await?);
         let domain = domain_of(row.sender_address.as_deref());
+        let written: parse::Identity = serde_json::from_str(&row.identity_json).unwrap_or_default();
+        let filled = |v: &Option<String>| v.as_deref().is_some_and(|x| !x.trim().is_empty());
+        let (person_has_code, sender_on_roster) = match row.person_id.as_deref() {
+            Some(p) => (
+                sqlx::query_scalar::<_, Option<String>>("SELECT employee_code FROM people WHERE id = ?1 AND workspace_id = ?2").bind(p).bind(ws).fetch_optional(db).await?.flatten().is_some_and(|c| !c.trim().is_empty()),
+                sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM person_emails WHERE workspace_id = ?1 AND person_id = ?2 AND lower(email) = ?3)")
+                    .bind(ws)
+                    .bind(p)
+                    .bind(row.sender_address.as_deref().map(address_of).unwrap_or_default())
+                    .fetch_one(db)
+                    .await?,
+            ),
+            None => (false, false),
+        };
         let view = RecordView {
+            written_name: filled(&written.name),
+            written_code: filled(&written.code),
+            person_has_code,
+            sender_on_roster,
             period: (&row.period_start, &row.period_end),
             total: row.total_hours,
             entries: &entries,
@@ -113,8 +131,14 @@ pub async fn review(db: &SqlitePool, ws: &str, message_id: &str) -> sqlx::Result
             signed: None,
             replaces_received_at: replaced,
         };
-        let found = rules::check_against_rules(&view, &rules, person.as_ref());
+        let mut found = rules::check_against_rules(&view, &rules, person.as_ref());
+        let missing = rules::missing_fields(&view, &rules);
+        if !missing.is_empty() {
+            let what = missing.iter().map(|f| f.label().to_lowercase()).collect::<Vec<_>>().join(", ");
+            found.push(RuleIssue { code: "missing_data", severity: Severity::Missing, for_sender: String::new(), for_manager: format!("Waiting for the sender to supply: {what}.") });
+        }
         checked.push(Checked {
+            missing,
             record_id: row.id.clone(),
             person: row.linked_name.clone().or_else(|| row.person_name.clone()).filter(|_| row.person_id.is_some()),
             period: (row.period_start.clone(), row.period_end.clone()),
@@ -193,7 +217,8 @@ pub async fn compare(state: &AppState, ws: &str, message_id: &str) -> sqlx::Resu
         }
         _ => None,
     };
-    let digest = format!("{:x}", fingerprint(&json!({"d": decision, "t": would_tell, "a": would_assign, "s": would_send, "o": would_owe_reply}).to_string()));
+    let would_ask = (!review.decision.asks.is_empty()).then(|| json!(review.decision.asks.iter().map(|a| a.key()).collect::<Vec<_>>()));
+    let digest = format!("{:x}", fingerprint(&json!({"d": decision, "t": would_tell, "a": would_assign, "s": would_send, "o": would_owe_reply, "k": would_ask}).to_string()));
     let seen: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM audit_events WHERE workspace_id = ?1 AND action = 'ownership.compare' AND entity_id = ?2 AND json_extract(metadata_json, '$.digest') = ?3)",
     )
@@ -212,7 +237,7 @@ pub async fn compare(state: &AppState, ws: &str, message_id: &str) -> sqlx::Resu
         message_id,
         "ownership.compare",
         &owner,
-        json!({ "decision": decision, "would_assign": would_assign, "would_tell": would_tell, "would_send": would_send, "would_owe_reply": would_owe_reply, "records": review.record_ids(), "digest": digest }),
+        json!({ "decision": decision, "would_assign": would_assign, "would_tell": would_tell, "would_send": would_send, "would_owe_reply": would_owe_reply, "would_ask": would_ask, "records": review.record_ids(), "digest": digest }),
     )
     .await
 }
@@ -284,19 +309,33 @@ pub async fn hand_off(state: &AppState, ws: &str, asker: &crate::agents::handoff
     use crate::agents::handoff::{self, Asker, MessageKind};
     let mut filed = None;
     let wanted = decision.message.as_ref().filter(|m| m.kind != MessageKind::Ack || clean);
-    if wanted.is_none() {
+    // Details already asked for (or an owner's answer awaited) are not asked again, and a loop that ended without an answer never restarts.
+    let ask_blocked = wanted.is_some_and(MessageRequest::is_ask) && !crate::hr::team::info_requests::may_ask(&state.db, ws, message_id).await?;
+    let receipt_job = format!("{}:receipt", asker.job);
+    if wanted.is_none() || ask_blocked {
         // What the desk asked before no longer stands (the sheet changed, or its person is unknown again): withdraw it.
-        handoff::store::withdraw(state, ws, asker, message_id).await?;
+        if !ask_blocked {
+            handoff::store::withdraw(state, ws, asker, message_id).await?;
+            if crate::hr::team::info_requests::latest_for(&state.db, ws, message_id).await?.is_some_and(|r| matches!(r.state.as_str(), "asking" | "waiting")) {
+                handoff::store::withdraw(state, ws, &Asker { job: &receipt_job, ..*asker }, message_id).await?;
+            }
+            crate::hr::team::info_requests::settle_complete(state, ws, message_id).await?;
+        }
     }
-    if let Some(message) = wanted {
-        let receipt_job = format!("{}:receipt", asker.job);
-        let receipt = message.kind == MessageKind::Holding;
+    if let Some(message) = wanted.filter(|_| !ask_blocked) {
+        let is_ask = message.is_ask();
+        let receipt = message.kind == MessageKind::Holding || is_ask;
         let by = if receipt { Asker { job: &receipt_job, ..*asker } } else { *asker };
         if receipt && !receipt_allowed(state, ws, message_id).await? {
             let mut conn = state.db.acquire().await?;
-            audit::record(&mut conn, Entry { workspace_id: ws, actor: Actor::System, action: "handoff.receipt_skipped", entity_type: "message", entity_id: message_id, message_id: Some(message_id), metadata: json!({}) }).await?;
+            let action = if is_ask { "handoff.ask_skipped" } else { "handoff.receipt_skipped" };
+            audit::record(&mut conn, Entry { workspace_id: ws, actor: Actor::System, action, entity_type: "message", entity_id: message_id, message_id: Some(message_id), metadata: json!({}) }).await?;
         } else {
-            filed = Some(handoff::hand_to_meera(state, ws, &by, message_id, message).await?);
+            let result = handoff::hand_to_meera(state, ws, &by, message_id, message).await?;
+            if is_ask && !matches!(result, handoff::Filed::Dropped(_) | handoff::Filed::Late) {
+                crate::hr::team::info_requests::upsert_asks(state, ws, message_id, asker.agent_id, &decision.asks).await?;
+            }
+            filed = Some(result);
         }
     }
     if let Some(parked) = &decision.parked {

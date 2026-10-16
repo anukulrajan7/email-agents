@@ -414,7 +414,7 @@ async fn a_sheet_that_needs_a_check_is_never_called_recorded_to_the_manager() {
     let id = d.receive("gm-1", 2).await;
     let review = records::desk::review(&d.env.state.db, &d.env.ws, &id).await.unwrap();
     assert_eq!(d.record_rows().await[0].0, "needs_check");
-    let ack = rules::decision(&[rules::Checked { record_id: "r".into(), person: Some("Ravi Kumar".into()), period: ("2026-09-01".into(), "2026-09-30".into()), total: Some(23.5), issues: vec![], identity: None }]);
+    let ack = rules::decision(&[rules::Checked { record_id: "r".into(), person: Some("Ravi Kumar".into()), period: ("2026-09-01".into(), "2026-09-30".into()), total: Some(23.5), issues: vec![], identity: None, missing: vec![] }]);
     let told = records::summary::summarize(&d.env.state, &d.env.ws, None, &review.rows, &ack).await.unwrap();
     assert_eq!((told, d.notices(&id).await), (0, 0), "an Ack summary needs every sheet recorded");
     nothing_went_out(&d);

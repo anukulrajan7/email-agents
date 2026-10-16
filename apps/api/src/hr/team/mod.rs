@@ -7,6 +7,7 @@ pub mod access;
 pub mod clock;
 pub mod escalation;
 pub mod identity;
+pub mod info_requests;
 pub mod metrics;
 pub mod people;
 pub mod scope;

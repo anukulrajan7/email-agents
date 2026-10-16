@@ -83,6 +83,8 @@ mod messaging;
 mod metrics_evals;
 #[path = "migrate_from_0033.rs"]
 mod migrate_from_0033;
+#[path = "missing_data.rs"]
+mod missing_data;
 #[path = "model_body.rs"]
 mod model_body;
 #[path = "nango.rs"]

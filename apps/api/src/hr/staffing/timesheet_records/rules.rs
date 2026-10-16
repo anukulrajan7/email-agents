@@ -7,7 +7,7 @@
 use serde::Serialize;
 
 use super::{CHECK, Entry, Issue, parse::MONTH_NAMES};
-use crate::agents::handoff::{Decision, Fact, IssueText, ManagerSummary, MessageKind, MessageRequest, Outcome, Wait};
+use crate::agents::handoff::{Decision, Fact, Field, IssueText, MISSING_DATA, ManagerSummary, MessageKind, MessageRequest, Outcome, Wait};
 use crate::hr::{
     staffing::policy::MONTHS,
     team::{
@@ -25,6 +25,8 @@ pub struct Rules {
     pub require_signature: bool,
     pub client_domains: Vec<String>,
     pub tz_offset_minutes: i64,
+    /// What the sheet must state: `identity`, `name`, `employee_code`, `email`, `period`.
+    pub required: Vec<String>,
 }
 
 impl Rules {
@@ -37,6 +39,7 @@ impl Rules {
             require_signature: s.require_signature,
             client_domains: s.client_domains.clone(),
             tz_offset_minutes: s.tz_offset_minutes,
+            required: s.timesheet_required.clone(),
         }
     }
 }
@@ -62,6 +65,11 @@ pub struct RecordView<'a> {
     pub signed: Option<bool>,
     /// When the sheet this one replaces was received.
     pub replaces_received_at: Option<i64>,
+    /// What the sheet itself states (as written), what the matched person's profile has, and whether the sender is a roster address.
+    pub written_name: bool,
+    pub written_code: bool,
+    pub person_has_code: bool,
+    pub sender_on_roster: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -70,6 +78,8 @@ pub enum Severity {
     Correction,
     Question,
     Person,
+    /// The sender is asked for details the sheet lacks.
+    Missing,
     Note,
 }
 
@@ -185,6 +195,26 @@ fn correction(code: &'static str, for_sender: String, for_manager: String) -> Ru
 
 fn note(code: &'static str, for_manager: String) -> RuleIssue {
     RuleIssue { code, severity: Severity::Note, for_sender: String::new(), for_manager }
+}
+
+/// What the owner requires and neither the sheet nor the matched profile supplies: exactly these are asked of the sender, in a fixed order.
+pub fn missing_fields(r: &RecordView, rules: &Rules) -> Vec<Field> {
+    let want = |k: &str| rules.required.iter().any(|x| x == k);
+    let unmatched = !r.matched;
+    let mut out = vec![];
+    if (want("name") || want("identity")) && unmatched && !r.written_name {
+        out.push(Field::Name);
+    }
+    if ((want("identity") && unmatched) || want("employee_code")) && !r.written_code && !r.person_has_code {
+        out.push(Field::EmployeeCode);
+    }
+    if want("email") && r.matched && !r.sender_on_roster {
+        out.push(Field::Email);
+    }
+    if want("period") && has_issue(r, "period_assumed").is_some() {
+        out.push(Field::Period);
+    }
+    out
 }
 
 pub fn check_against_rules(r: &RecordView, rules: &Rules, person: Option<&PersonRules>) -> Vec<RuleIssue> {
@@ -311,6 +341,8 @@ pub struct Checked {
     /// The name as written, when the sheet gives both a name and an employee ID: a complete identity that is not on the
     /// roster is an unknown person to be added, not a sheet with a missing field.
     pub identity: Option<String>,
+    /// What this sheet lacks that the owner requires (`missing_fields`).
+    pub missing: Vec<Field>,
 }
 
 fn who(c: &Checked) -> String {
@@ -331,7 +363,7 @@ fn joined(values: impl Iterator<Item = String>) -> String {
 /// find: nothing to the sender, a wait for the link. Notes go to the manager and nowhere else.
 pub fn decision(checked: &[Checked]) -> Decision {
     if checked.is_empty() {
-        return Decision { outcome: Outcome::NothingToDo, message: None, manager_summary: None, waits: vec![], parked: None };
+        return Decision { outcome: Outcome::NothingToDo, message: None, manager_summary: None, waits: vec![], parked: None, asks: vec![] };
     }
     let with = |sev: Severity| -> Vec<&RuleIssue> { checked.iter().flat_map(|c| c.issues.iter()).filter(|i| i.severity == sev).collect() };
     let (corrections, questions, persons, notes) = (with(Severity::Correction), with(Severity::Question), with(Severity::Person), with(Severity::Note));
@@ -353,7 +385,12 @@ pub fn decision(checked: &[Checked]) -> Decision {
     if !corrections.is_empty() {
         let all: Vec<&RuleIssue> = corrections.iter().chain(questions.iter()).copied().collect();
         let message = MessageRequest::template(MessageKind::Correction, vec![], texts(&all));
-        return Decision { outcome: Outcome::Done, message: Some(message), manager_summary: None, waits, parked: None };
+        return Decision { outcome: Outcome::Done, message: Some(message), manager_summary: None, waits, parked: None, asks: vec![] };
+    }
+    let asks: Vec<Field> = Field::ALL.into_iter().filter(|f| checked.iter().any(|c| c.missing.contains(f))).collect();
+    if !asks.is_empty() {
+        let message = ask_request(&asks, checked);
+        return Decision { outcome: Outcome::Done, message: Some(message), manager_summary: None, waits, parked: None, asks };
     }
     if !questions.is_empty() {
         let message = MessageRequest::template(MessageKind::Question, vec![], texts(&questions));
@@ -361,7 +398,7 @@ pub fn decision(checked: &[Checked]) -> Decision {
             let ask = c.issues.iter().filter(|i| i.severity == Severity::Question).map(|i| i.for_manager.clone()).collect::<Vec<_>>().join(" ");
             format!("{}'s timesheet for {}: {ask}", who(c), period_label(&c.period.0, &c.period.1))
         }));
-        return Decision { outcome: Outcome::Done, message: Some(message), manager_summary: Some(ManagerSummary { headline, notes: note_lines }), waits, parked: None };
+        return Decision { outcome: Outcome::Done, message: Some(message), manager_summary: Some(ManagerSummary { headline, notes: note_lines }), waits, parked: None, asks: vec![] };
     }
     let fact = |label: &str, value: String| Fact { label: label.into(), value };
     if !persons.is_empty() {
@@ -372,16 +409,30 @@ pub fn decision(checked: &[Checked]) -> Decision {
             // acknowledgement that names the sheets waits for the person to be linked.
             let receipt = MessageRequest::template(MessageKind::Holding, vec![fact("About", "timesheet".into())], vec![]);
             let parked = ack_request(checked, |c| c.person.clone().or_else(|| c.identity.clone()).unwrap_or_default());
-            return Decision { outcome: Outcome::NeedsPerson { why }, message: Some(receipt), manager_summary: None, waits, parked: Some(parked) };
+            return Decision { outcome: Outcome::NeedsPerson { why }, message: Some(receipt), manager_summary: None, waits, parked: Some(parked), asks: vec![] };
         }
-        return Decision { outcome: Outcome::NeedsPerson { why }, message: None, manager_summary: None, waits, parked: None };
+        return Decision { outcome: Outcome::NeedsPerson { why }, message: None, manager_summary: None, waits, parked: None, asks: vec![] };
     }
     let headline = joined(checked.iter().map(|c| {
         let total = c.total.map_or_else(|| "no total".to_string(), |t| format!("{} h", hours(t)));
         format!("{}'s timesheet is recorded: {}, {total}", who(c), range_short(&c.period.0, &c.period.1))
     }));
     let message = ack_request(checked, who);
-    Decision { outcome: Outcome::Done, message: Some(message), manager_summary: Some(ManagerSummary { headline, notes: note_lines }), waits, parked: None }
+    Decision { outcome: Outcome::Done, message: Some(message), manager_summary: Some(ManagerSummary { headline, notes: note_lines }), waits, parked: None, asks: vec![] }
+}
+
+/// The question for missing details: one numbered line per missing item, the period when it is known (and not itself missing).
+pub fn ask_request(asks: &[Field], checked: &[Checked]) -> MessageRequest {
+    let mut facts: Vec<Fact> = asks.iter().map(|f| Fact { label: "Ask".into(), value: f.label().into() }).collect();
+    if !asks.contains(&Field::Period) {
+        let mut periods: Vec<String> = checked.iter().map(|c| period_label(&c.period.0, &c.period.1)).collect();
+        periods.dedup();
+        if let [one] = periods.as_slice() {
+            facts.push(Fact { label: "Period".into(), value: one.clone() });
+        }
+    }
+    let wanted = asks.iter().map(|f| f.label().to_lowercase()).collect::<Vec<_>>().join("; ");
+    MessageRequest::template(MessageKind::Question, facts, vec![IssueText { code: MISSING_DATA.into(), text: format!("We need: {wanted}") }])
 }
 
 /// The acknowledgement of every sheet: one Name, Period, Hours run per sheet, so a reply can say which sheet is which.
@@ -431,6 +482,10 @@ mod tests {
         signed: Option<bool>,
         domain: &'static str,
         replaces: Option<i64>,
+        /// (name written, code written) on the sheet.
+        written: (bool, bool),
+        person_has_code: bool,
+        on_roster: bool,
     }
 
     fn sept(received: &str) -> Sheet {
@@ -445,6 +500,9 @@ mod tests {
             signed: None,
             domain: "client.test",
             replaces: None,
+            written: (true, true),
+            person_has_code: true,
+            on_roster: true,
         }
     }
 
@@ -462,6 +520,10 @@ mod tests {
                     portal_hours: self.portal,
                     signed: self.signed,
                     replaces_received_at: self.replaces,
+                    written_name: self.written.0,
+                    written_code: self.written.1,
+                    person_has_code: self.person_has_code,
+                    sender_on_roster: self.on_roster,
                 },
                 rules,
                 person,
@@ -474,7 +536,7 @@ mod tests {
     }
 
     fn checked(issues: Vec<RuleIssue>) -> Vec<Checked> {
-        vec![Checked { record_id: "r1".into(), person: Some("Ravi Kumar".into()), period: ("2026-09-01".into(), "2026-09-30".into()), total: Some(168.0), issues, identity: None }]
+        vec![Checked { record_id: "r1".into(), person: Some("Ravi Kumar".into()), period: ("2026-09-01".into(), "2026-09-30".into()), total: Some(168.0), issues, identity: None, missing: vec![] }]
     }
 
     fn issue(code: &'static str, severity: Severity, sender: &str) -> RuleIssue {
@@ -685,6 +747,74 @@ mod tests {
         assert_eq!(d.message.map(|m| m.kind), Some(MessageKind::Correction));
         assert!(d.parked.is_none(), "the corrected sheet is read again, so nothing is parked");
         assert_eq!(d.waits, [Wait::PersonLinked { record_id: "r1".into() }]);
+    }
+
+    fn required(keys: &[&str]) -> Rules {
+        Rules { required: keys.iter().map(|k| (*k).to_string()).collect(), ..rules() }
+    }
+
+    #[test]
+    fn a_sheet_without_a_code_asks_only_for_the_code() {
+        let mut s = sept("2026-10-02");
+        s.matched = false;
+        s.person_has_code = false;
+        s.written = (true, false);
+        let r = RecordView { ..view(&s) };
+        assert_eq!(missing_fields(&r, &required(&["identity"])), [Field::EmployeeCode]);
+        assert_eq!(missing_fields(&r, &required(&["period"])), [], "what the owner does not require is never asked");
+        s.written = (false, false);
+        assert_eq!(missing_fields(&view(&s), &required(&["identity"])), [Field::Name, Field::EmployeeCode], "in a fixed order, both in one question");
+        s.written = (true, true);
+        assert_eq!(missing_fields(&view(&s), &required(&["identity"])), [], "a complete identity that nobody registered is a person to add, not a question");
+    }
+
+    #[test]
+    fn the_profile_supplies_what_the_sheet_does_not() {
+        let mut s = sept("2026-10-02");
+        s.written = (true, false);
+        s.person_has_code = true;
+        assert_eq!(missing_fields(&view(&s), &required(&["employee_code"])), [], "the matched profile has the code");
+        s.person_has_code = false;
+        assert_eq!(missing_fields(&view(&s), &required(&["employee_code"])), [Field::EmployeeCode]);
+        s.on_roster = false;
+        assert_eq!(missing_fields(&view(&s), &required(&["email"])), [Field::Email], "the sender's address is not on the roster");
+        s.issues.push(Issue { code: "period_assumed".into(), message: "x".into(), severity: "note" });
+        assert_eq!(missing_fields(&view(&s), &required(&["period"])), [Field::Period]);
+    }
+
+    #[test]
+    fn the_ask_names_each_missing_item_and_the_period_when_it_is_known() {
+        let mut c = checked(vec![issue("person_unmatched", Severity::Person, "")]);
+        c[0].missing = vec![Field::EmployeeCode];
+        let d = decision(&c);
+        let m = d.message.expect("an ask");
+        assert!(m.is_ask() && m.kind == MessageKind::Question);
+        assert_eq!(d.asks, [Field::EmployeeCode]);
+        assert_eq!(m.facts.iter().filter(|f| f.label == "Ask").map(|f| f.value.as_str()).collect::<Vec<_>>(), ["Your employee ID"]);
+        assert!(m.facts.iter().any(|f| f.label == "Period" && f.value == "September 2026"));
+        // A correction goes first: the missing details are asked after the sheet is fixed.
+        c[0].issues.push(issue("wrong_period", Severity::Correction, "Wrong month."));
+        let d = decision(&c);
+        assert_eq!((d.message.map(|m| m.kind), d.asks), (Some(MessageKind::Correction), vec![]));
+    }
+
+    fn view(s: &Sheet) -> RecordView<'_> {
+        RecordView {
+            period: s.period,
+            total: s.total,
+            entries: &s.entries,
+            issues: &s.issues,
+            matched: s.matched,
+            received_at: s.received,
+            sender_domain: s.domain,
+            portal_hours: s.portal,
+            signed: s.signed,
+            replaces_received_at: s.replaces,
+            written_name: s.written.0,
+            written_code: s.written.1,
+            person_has_code: s.person_has_code,
+            sender_on_roster: s.on_roster,
+        }
     }
 
     #[test]

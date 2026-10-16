@@ -582,12 +582,13 @@ pub async fn sweep(state: &AppState, ws: &str) -> sqlx::Result<usize> {
     if !flags::mode(&state.db, &state.config, ws, Key::Handoff).await?.acts() {
         return Ok(0);
     }
+    let asked = crate::hr::team::info_requests::sweep(state, ws).await?;
     let now = now_ms();
     let rows: Vec<Duty> = sqlx::query_as(&format!("SELECT {DUTY_COLUMNS} FROM reply_obligations WHERE workspace_id = ?1 AND status IN ('open', 'holding_sent') ORDER BY due_at"))
         .bind(ws)
         .fetch_all(&state.db)
         .await?;
-    let mut ran = 0;
+    let mut ran = asked;
     for d in rows {
         // A mail can owe several stages at once (the warning and the note); run them in order.
         let due = [
@@ -615,7 +616,7 @@ pub async fn sweep_job(state: &AppState, payload: &Value) -> Result<(), JobError
 /// Hourly (from the worker's maintenance pass): one sweep per workspace that has a duty still running.
 pub async fn schedule(state: &AppState) -> sqlx::Result<()> {
     let bucket = now_ms() / SWEEP_EVERY_MS;
-    let workspaces: Vec<String> = sqlx::query_scalar("SELECT DISTINCT workspace_id FROM reply_obligations WHERE status IN ('open', 'holding_sent')").fetch_all(&state.db).await?;
+    let workspaces: Vec<String> = sqlx::query_scalar("SELECT workspace_id FROM reply_obligations WHERE status IN ('open', 'holding_sent') UNION SELECT workspace_id FROM info_requests WHERE state = 'waiting'").fetch_all(&state.db).await?;
     let mut conn = state.db.acquire().await?;
     for ws in workspaces {
         jobs::enqueue_with_attempts(&mut conn, kind::REPLY_SLA_SWEEP, &format!("sla_sweep:{ws}:{bucket}"), Some(&ws), &json!({"workspace_id": ws}), 3).await?;

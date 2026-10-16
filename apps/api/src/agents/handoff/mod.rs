@@ -20,6 +20,13 @@ pub fn is_reply_job_key(job: &str) -> bool {
 
 pub use store::{Asker, Filed, Stored, hand_to_meera, park, unpark};
 
+impl MessageRequest {
+    /// Is this a request for missing details rather than a question about a sheet?
+    pub fn is_ask(&self) -> bool {
+        self.kind == MessageKind::Question && self.issues.iter().any(|i| i.code == MISSING_DATA)
+    }
+}
+
 /// What a message says. Higher priority wins when several requests share a reply.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -119,6 +126,56 @@ impl MessageRequest {
 
 pub use super::plan::wait::Wait;
 
+/// A thing a sheet may lack and the sender can supply. `key` is what is stored and counted; `label` is what the sender reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Field {
+    Name,
+    EmployeeCode,
+    Email,
+    Period,
+}
+
+impl Field {
+    pub const ALL: [Field; 4] = [Field::Name, Field::EmployeeCode, Field::Email, Field::Period];
+
+    pub fn key(self) -> &'static str {
+        match self {
+            Field::Name => "name",
+            Field::EmployeeCode => "employee_code",
+            Field::Email => "email",
+            Field::Period => "period",
+        }
+    }
+
+    pub fn parse(key: &str) -> Option<Field> {
+        Field::ALL.into_iter().find(|f| f.key() == key)
+    }
+
+    /// What a person on the team reads ("did not answer: employee ID").
+    pub fn short(self) -> &'static str {
+        match self {
+            Field::Name => "name",
+            Field::EmployeeCode => "employee ID",
+            Field::Email => "email address",
+            Field::Period => "period",
+        }
+    }
+
+    /// The words of the question, as one numbered line in the mail.
+    pub fn label(self) -> &'static str {
+        match self {
+            Field::Name => "Your full name",
+            Field::EmployeeCode => "Your employee ID",
+            Field::Email => "Is the address you are writing from the right one for us to use? Reply yes, or send the right one",
+            Field::Period => "The month or dates this timesheet is for",
+        }
+    }
+}
+
+/// The issue code that marks a question as a request for missing details.
+pub const MISSING_DATA: &str = "missing_data";
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Outcome {
@@ -144,6 +201,8 @@ pub struct Decision {
     /// What to say once the waits are over (the acknowledgement of a sheet whose person is not on the roster yet). It is
     /// kept, not sent: `store::park` files it as `waiting` and the desk releases it when the person is linked.
     pub parked: Option<MessageRequest>,
+    /// What the sender is asked for (the request is a Question whose issue is `MISSING_DATA`).
+    pub asks: Vec<Field>,
 }
 
 /// Who wrote the words of a reply, which decides whose level governs the send.

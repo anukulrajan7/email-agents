@@ -11,6 +11,7 @@ fn section_text(s: &Section) -> Option<String> {
     Some(match s.kind {
         MessageKind::Ack => templates::ack(&s.facts),
         MessageKind::Correction => templates::correction(&s.issues),
+        MessageKind::Question if s.issues.iter().any(|i| i.code == crate::agents::handoff::MISSING_DATA) => templates::ask_missing(&s.facts),
         MessageKind::Question => templates::question(&s.issues),
         MessageKind::Holding => templates::holding(&s.facts),
         MessageKind::Answer | MessageKind::Custom => return None,

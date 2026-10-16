@@ -521,7 +521,7 @@ async fn a_request_the_desk_withdraws_takes_its_unsent_reply_with_it() {
     let id = w.receive("gm-1", "th-1", 2, RAVI).await;
     assert_eq!((w.env.live_drafts(&id).await.len(), w.pending().await.len()), (1, 1));
     let rohan = w.rohan.clone();
-    let decision = email_ai_api::agents::handoff::Decision { outcome: email_ai_api::agents::handoff::Outcome::NothingToDo, message: None, manager_summary: None, waits: vec![], parked: None };
+    let decision = email_ai_api::agents::handoff::Decision { outcome: email_ai_api::agents::handoff::Outcome::NothingToDo, message: None, manager_summary: None, waits: vec![], parked: None, asks: vec![] };
     email_ai_api::hr::staffing::timesheet_records::desk::hand_off(&w.env.state, &w.env.ws, &Asker { agent_id: &rohan, case_id: None, job: "desk:timesheet" }, &id, &decision, false).await.unwrap();
     assert_eq!(w.env.requests(&id).await[0].2, "cancelled");
     assert!(w.env.live_drafts(&id).await.is_empty());
@@ -565,7 +565,7 @@ async fn a_withdrawn_request_filed_again_with_the_same_words_asks_again_and_gets
     let (facts, issues): (String, String) = sqlx::query_as("SELECT facts_json, issues_json FROM message_requests WHERE message_id = ?1").bind(&id).fetch_one(&w.env.state.db).await.unwrap();
     let rohan = w.rohan.clone();
     let asker = Asker { agent_id: &rohan, case_id: None, job: "desk:timesheet" };
-    let none = email_ai_api::agents::handoff::Decision { outcome: email_ai_api::agents::handoff::Outcome::NothingToDo, message: None, manager_summary: None, waits: vec![], parked: None };
+    let none = email_ai_api::agents::handoff::Decision { outcome: email_ai_api::agents::handoff::Outcome::NothingToDo, message: None, manager_summary: None, waits: vec![], parked: None, asks: vec![] };
     email_ai_api::hr::staffing::timesheet_records::desk::hand_off(&w.env.state, &w.env.ws, &asker, &id, &none, false).await.unwrap();
     assert_eq!(w.env.requests(&id).await[0].2, "cancelled");
     assert!(w.env.live_drafts(&id).await.is_empty() && w.pending().await.is_empty());
@@ -585,7 +585,7 @@ async fn withdrawing_a_held_reply_stops_the_hold() {
     let held: i64 = w.env.count("SELECT COUNT(*) FROM drafts WHERE workspace_id = ?1 AND send_at IS NOT NULL").await;
     assert_eq!(held, 1, "held");
     let rohan = w.rohan.clone();
-    let none = email_ai_api::agents::handoff::Decision { outcome: email_ai_api::agents::handoff::Outcome::NothingToDo, message: None, manager_summary: None, waits: vec![], parked: None };
+    let none = email_ai_api::agents::handoff::Decision { outcome: email_ai_api::agents::handoff::Outcome::NothingToDo, message: None, manager_summary: None, waits: vec![], parked: None, asks: vec![] };
     email_ai_api::hr::staffing::timesheet_records::desk::hand_off(&w.env.state, &w.env.ws, &Asker { agent_id: &rohan, case_id: None, job: "desk:timesheet" }, &id, &none, false).await.unwrap();
     assert!(w.env.live_drafts(&id).await.is_empty(), "the held reply is gone");
     assert_eq!(w.audits("handoff.hold_stopped").await.len(), 1);
@@ -695,7 +695,7 @@ async fn withdrawing_never_cancels_a_send_a_person_asked_for() {
     let id = w.receive("gm-1", "th-1", 1, RAVI).await;
     sqlx::query("UPDATE drafts SET send_requested_by = ?1 WHERE message_id = ?2").bind(&w.env.op_id).bind(&id).execute(&w.env.state.db).await.unwrap();
     let rohan = w.rohan.clone();
-    let none = email_ai_api::agents::handoff::Decision { outcome: email_ai_api::agents::handoff::Outcome::NothingToDo, message: None, manager_summary: None, waits: vec![], parked: None };
+    let none = email_ai_api::agents::handoff::Decision { outcome: email_ai_api::agents::handoff::Outcome::NothingToDo, message: None, manager_summary: None, waits: vec![], parked: None, asks: vec![] };
     email_ai_api::hr::staffing::timesheet_records::desk::hand_off(&w.env.state, &w.env.ws, &Asker { agent_id: &rohan, case_id: None, job: "desk:timesheet" }, &id, &none, false).await.unwrap();
     assert_eq!(w.env.live_drafts(&id).await.len(), 1, "the person's own send stays");
     assert!(w.audits("handoff.hold_stopped").await.is_empty());

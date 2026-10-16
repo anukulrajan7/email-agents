@@ -66,6 +66,20 @@ pub fn question(issues: &[IssueText]) -> String {
     }
 }
 
+/// The question for missing details: one numbered line per thing, to be answered in a reply. A reminder and a second round say so.
+pub fn ask_missing(facts: &[Fact]) -> String {
+    let asks: Vec<&str> = facts.iter().filter(|f| f.label == "Ask").map(|f| f.value.as_str()).collect();
+    let lines = asks.iter().enumerate().map(|(i, a)| format!("{}. {a}:", i + 1)).collect::<Vec<_>>().join("\n");
+    let period = fact(facts, "Period").map(|p| format!(" for {p}")).unwrap_or_default();
+    if fact(facts, "Reminder").is_some() {
+        return format!("A quick reminder: to record your timesheet{period} we still need:\n\n{lines}\n\nJust reply to this mail.");
+    }
+    if fact(facts, "Round").is_some() {
+        return format!("Thank you. To record your timesheet{period} we still need:\n\n{lines}\n\nPlease reply to this mail with this detail.");
+    }
+    format!("Thank you for sending your timesheet{period}. To record it we need:\n\n{lines}\n\nPlease reply to this mail with these details.")
+}
+
 /// A receipt that confirms nothing about the sender or the hours: "we have it", and what happens next. A request that names
 /// the timesheet (`About` = `timesheet`) says so.
 pub fn holding(facts: &[Fact]) -> String {
@@ -124,6 +138,16 @@ mod tests {
         let text = holding(&[f("About", "timesheet")]);
         assert!(text.contains("received it") && !text.contains("recorded") && !text.chars().any(|c| c.is_ascii_digit()), "{text}");
         assert!(holding(&[]).starts_with("Thank you for your message."));
+    }
+
+    #[test]
+    fn the_ask_numbers_exactly_what_is_missing_and_the_reminder_says_so() {
+        let asks = [f("Ask", "Your full name"), f("Ask", "Your employee ID"), f("Period", "September 2026")];
+        let text = ask_missing(&asks);
+        assert!(text.contains("for September 2026. To record it we need:\n\n1. Your full name:\n2. Your employee ID:\n\nPlease reply to this mail"), "{text}");
+        let one = ask_missing(&[f("Ask", "Your employee ID"), f("Reminder", "yes")]);
+        assert!(one.starts_with("A quick reminder") && one.contains("1. Your employee ID:") && !one.contains("2."), "{one}");
+        assert!(ask_missing(&[f("Ask", "Your employee ID"), f("Round", "2")]).starts_with("Thank you. To record your timesheet we still need"));
     }
 
     #[test]

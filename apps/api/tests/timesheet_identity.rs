@@ -165,6 +165,8 @@ async fn sheets_linked_by_a_partial_name_can_be_listed_for_review() {
 async fn on() -> Env {
     let env = env().await;
     env.flag(Key::Handoff, Mode::On).await;
+    // These tests are about grouping, linking and undoing; asking a sender for a missing field has its own tests (missing_data.rs).
+    env.ok("PUT", "/team/settings", ADMIN, Some(json!({"tz_offset_minutes": 0, "below_target_hour": 16, "weekly_check_hour": 12, "timesheet_required": []}))).await;
     env
 }
 
@@ -486,8 +488,9 @@ async fn a_correction_for_an_unknown_person_goes_now_and_a_sheet_with_a_missing_
     assert_eq!(requests, [("rohan".to_string(), "correction".to_string(), "composed".to_string())], "the correction needs no identity, so it goes now: {requests:?}");
 
     let name_only = w.receive("gm-2", "Mohan Das", None, "mohan@client.test").await;
-    assert!(w.env.requests(&name_only).await.is_empty(), "no receipt, no parked ack: asking for the missing field is the next slice's");
-    assert!(w.env.live_drafts(&name_only).await.is_empty());
+    assert_eq!(w.env.requests(&name_only).await, [("rohan".to_string(), "question".to_string(), "composed".to_string())], "no receipt and no parked ack: the sender is asked for the missing field");
+    let drafts = w.env.live_drafts(&name_only).await;
+    assert!(drafts.len() == 1 && drafts[0].2.contains("1. Your employee ID:") && !drafts[0].2.contains("recorded"), "{drafts:?}");
 }
 
 #[tokio::test]

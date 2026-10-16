@@ -185,6 +185,7 @@ pub async fn handle(state: &AppState, job: &Job) -> Result<(), JobError> {
         kind::STAFFING_SCAN => crate::hr::staffing::scan_job(state, &payload).await,
         kind::RECORD_TIMESHEET => crate::hr::staffing::record_job(state, &payload).await,
         kind::PERSON_LINKED => crate::agents::plan::person_linked_job(state, &payload).await,
+        kind::INFO_REQUEST_DUE => crate::hr::team::info_requests::due_job(state, &payload).await,
         kind::REPLY_SLA => crate::agents::supervisor::sla::stage_job(state, &payload).await,
         kind::REPLY_SLA_SWEEP => crate::agents::supervisor::sla::sweep_job(state, &payload).await,
         kind::REFRESH_IDENTITIES => crate::hr::team::identity::unresolved::refresh_job(state, &payload).await,

@@ -115,6 +115,10 @@ fn settings_json(s: &settings::TeamSettings, staffing: bool, owner: bool, source
         v["timesheet_cadence"] = json!(s.timesheet_cadence);
         v["max_hours_per_day"] = json!(s.max_hours_per_day);
         v["require_signature"] = json!(s.require_signature);
+        v["timesheet_required"] = json!(s.timesheet_required);
+        v["missing_reminder_hours"] = json!(s.missing_reminder_hours);
+        v["missing_escalate_hours"] = json!(s.missing_escalate_hours);
+        v["missing_max_reminders"] = json!(s.missing_max_reminders);
         v["sources"] = json!(sources);
     }
     v
