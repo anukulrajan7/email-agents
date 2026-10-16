@@ -7,6 +7,7 @@ pub mod security;
 pub mod audit;
 pub mod backup;
 pub mod domain;
+pub mod flags;
 pub mod mailer;
 pub mod packs;
 pub mod format;

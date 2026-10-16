@@ -11,6 +11,7 @@ mod designer_api;
 mod delete_api;
 mod dto;
 mod evals_api;
+mod flags_api;
 mod jobs_api;
 mod label_health;
 mod learning_api;
@@ -182,6 +183,7 @@ pub fn router(state: AppState) -> Router {
         .merge(agent_registry_api::routes())
         .merge(learning_api::routes())
         .merge(ai_health_api::routes())
+        .merge(flags_api::routes())
         .merge(metrics_api::routes())
         .merge(evals_api::routes())
         .merge(designer_api::routes())

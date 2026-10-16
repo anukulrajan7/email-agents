@@ -148,6 +148,8 @@ pub struct Config {
     pub ai_mock: bool,
     /// Browser E2E only: outgoing mail (verification codes, alerts) is appended here as JSON lines.
     pub mail_capture_file: String,
+    /// Workspace flag defaults (`platform::flags`). Empty in production: every flag starts off.
+    pub flag_defaults: Vec<(super::flags::Key, super::flags::Mode)>,
 }
 
 fn var(name: &str, default: &str) -> String {
@@ -241,6 +243,7 @@ impl Config {
             app_env: var("APP_ENV", "production").to_lowercase(),
             ai_mock: var("AI_MOCK", "") == "1",
             mail_capture_file: var("MAIL_CAPTURE_FILE", ""),
+            flag_defaults: vec![],
         };
         check_mock_allowed(&config.app_env, config.ai_mock, &config.mail_capture_file, &config.public_web_url, &config.openrouter_api_key)?;
         if config.auth_mode == AuthMode::Oidc
@@ -331,6 +334,7 @@ impl Config {
             app_env: "test".into(),
             ai_mock: false,
             mail_capture_file: String::new(),
+            flag_defaults: vec![],
         }
     }
 }

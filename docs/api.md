@@ -68,6 +68,8 @@ JobStatus         = "pending" | "running" | "succeeded" | "dead"
 | GET | `/api/v1/workspaces/:ws/workflow-runs` | member | – | `{items: WorkflowRun[]}` |
 | GET | `/api/v1/workspaces/:ws/jobs?status=dead` | admin | – | `{items: Job[]}` |
 | POST | `/api/v1/workspaces/:ws/jobs/:id/retry` | admin | – | `Job` |
+| GET | `/api/v1/workspaces/:ws/flags` | admin | – | `{items: WorkspaceFlag[]}` (every registered flag, effective mode) |
+| PUT | `/api/v1/workspaces/:ws/flags/:key` | admin | `{mode: "off"\|"compare"\|"on"}` | `WorkspaceFlag`; 400 on an unknown `key`, 422 on an unknown `mode` |
 | POST | `/webhooks/resend` | signature | raw Svix-signed body | `{status:"accepted"}` |
 | POST | `/webhooks/nango` | `X-Nango-Hmac-Sha256` | raw body | `{status:"accepted"\|"duplicate"\|"ignored"}` |
 
@@ -650,6 +652,27 @@ Effective automatic drafting is the workspace `auto_reply` when saved, otherwise
 workflow draft step and the `draft_reply` automation action (recorded `skipped` when off). A person clicking
 Generate draft always drafts. `reply_instructions` and `signature` reach every draft as a trusted `<reply_style>` block
 (they never override the safety rules). The drafter also receives the label's name and description.
+
+### Workspace flags
+
+Per-workspace switches for behaviour changes, each `off` (today's behaviour), `compare` (the new behaviour runs
+beside today's and only logs the difference) or `on` (the new behaviour decides). `platform/flags.rs` is the only
+place a flag is read (`mode(db, config, ws, key)`) or set.
+
+```ts
+WorkspaceFlag = {
+  key: "handoff" | "grants_v1" | "supervisor" | "earned_trust" | "handoff_all" | "owner_rules"
+     | "assistant_v2" | "voice_v2" | "files_v2" | "assistant_routing" | "relations";
+  description: string;               // one plain-English line for the admin screen
+  mode: "off" | "compare" | "on";    // the workspace's row, else the default
+  default: "off" | "compare" | "on"; // `Config::flag_defaults`; empty in production, so "off"
+}
+```
+
+Both endpoints are admin only: an operator gets 403 and so does a member of another workspace. A change that alters
+the effective mode is audited as `flag.changed` (entity `workspace_flag`, id = the key, metadata `{key, from, to}`,
+actor = the admin); setting a flag to the mode it already has writes no audit row. Nothing reads a flag yet: this
+only provides the mechanism. The admin control is the "New behaviour" section of the AI health page.
 
 ### Drafting tiers
 

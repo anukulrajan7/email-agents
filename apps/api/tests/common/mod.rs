@@ -218,6 +218,12 @@ impl Opts {
         self.tweak = Box::new(tweak);
         self
     }
+
+    /// Config-level flag defaults (workspaces without their own row get these).
+    pub fn flags(self, defaults: &[(email_ai_api::platform::flags::Key, email_ai_api::platform::flags::Mode)]) -> Self {
+        let defaults = defaults.to_vec();
+        self.config(move |c| c.flag_defaults = defaults)
+    }
 }
 
 pub struct Env {
@@ -292,6 +298,11 @@ impl Env {
             .unwrap();
         }
         Env { state, app, ws, shared_src: "src_shared".into(), op_src: "src_priya".into(), admin_id, op_id, calls, planner, designer, drafter, judge, dir }
+    }
+
+    /// Sets a flag for the test workspace as its admin.
+    pub async fn flag(&self, key: email_ai_api::platform::flags::Key, mode: email_ai_api::platform::flags::Mode) {
+        email_ai_api::platform::flags::set(&self.state.db, &self.state.config, &self.ws, &self.admin_id, key, mode).await.unwrap();
     }
 
     pub fn base(&self) -> String {

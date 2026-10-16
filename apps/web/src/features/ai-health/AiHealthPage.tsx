@@ -6,6 +6,7 @@ import { useWorkspace } from '../../app/useWorkspace';
 import { cn } from '../../lib/cn';
 import { riseStyle } from '../../lib/motion';
 import { budgetPercent, usd } from '../usage/format';
+import { FlagsPanel } from './FlagsPanel';
 import { IncidentChart } from './IncidentChart';
 import { KIND_CLASS, percent, seconds } from './format';
 import { HEALTH_DAYS, useAiHealth, useResolveIncident } from './hooks';
@@ -235,6 +236,9 @@ export function AiHealthPage() {
           </section>
         </>
       )}
+      <div className="rise" style={riseStyle(6)}>
+        <FlagsPanel />
+      </div>
     </Page>
   );
 }

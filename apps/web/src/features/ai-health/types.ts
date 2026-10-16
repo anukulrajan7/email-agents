@@ -66,3 +66,12 @@ export interface AiHealth {
   shadow: ShadowReport;
   budget: { daily_usd: number; used_usd: number; used_pct: number };
 }
+
+export type FlagMode = 'off' | 'compare' | 'on';
+
+export interface WorkspaceFlag {
+  key: string;
+  description: string;
+  mode: FlagMode;
+  default: FlagMode;
+}

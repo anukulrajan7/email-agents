@@ -41,6 +41,8 @@ mod deletion;
 mod designer;
 #[path = "experts.rs"]
 mod experts;
+#[path = "flags.rs"]
+mod flags;
 #[path = "gmail_backfill.rs"]
 mod gmail_backfill;
 #[path = "gmail_direction.rs"]

@@ -238,6 +238,7 @@ fn fill(path: &str, ws: &str, fx: &Fixture) -> (String, bool) {
                 has_id = true;
                 out.push_str("ravi@client.com");
             }
+            "{key}" if segments[i - 1] == "flags" => out.push_str("handoff"),
             "{key}" => {
                 has_id = true;
                 out.push_str("out_of_office");
@@ -294,6 +295,7 @@ fn body_for(method: &str, template: &str, fx: &Fixture) -> Option<Value> {
         (_, "/in-app/{id}/reply") => json!({"body": "hi"}),
         (_, "/support-tickets/{id}/status") => json!({"status": "open"}),
         (_, "/teams") | (_, "/teams/{id}") => json!({"name": "Zed team", "member_ids": []}),
+        (_, "/flags/{key}") => json!({"mode": "off"}),
         (_, "/reply-settings") => json!({"auto_reply": false}),
         (_, "/team/settings") => json!({"tz_offset_minutes": 0, "below_target_hour": 9, "weekly_check_hour": 9}),
         (_, "/agent/preview") => json!({"message_id": id("email_messages")}),
