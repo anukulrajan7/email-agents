@@ -162,6 +162,20 @@ pub async fn apply(state: &AppState, ws: &str, ctx: &ReplyContext, report: &Safe
     Ok(changed)
 }
 
+/// True for a draft whose only open topic is the "details" the automatic repair added: it was repaired
+/// but not sent (the check could not run again), so the retry sends it once the check answers.
+pub async fn awaiting_recheck(state: &AppState, ws: &str, draft_id: &str, unanswered_json: &str) -> sqlx::Result<bool> {
+    if crate::replies::gap_resolver::parse_unanswered(unanswered_json) != ["details"] {
+        return Ok(false);
+    }
+    let repaired: Option<i64> = sqlx::query_scalar("SELECT 1 FROM audit_events WHERE workspace_id = ?1 AND action = 'draft.auto_repaired' AND entity_id = ?2 LIMIT 1")
+        .bind(ws)
+        .bind(draft_id)
+        .fetch_optional(&state.db)
+        .await?;
+    Ok(repaired.is_some())
+}
+
 /// One open review task for an automatic send that could not be repaired. Idempotent per draft.
 pub async fn hand_off(state: &AppState, ws: &str, ctx: &ReplyContext, report: &SafetyReport) -> sqlx::Result<()> {
     if !report.blocking.iter().any(|i| i.code == "unsupported_promise") {

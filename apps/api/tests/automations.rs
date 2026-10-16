@@ -470,6 +470,27 @@ async fn an_automatic_send_whose_check_cannot_run_is_queued_again_not_dropped() 
 }
 
 #[tokio::test]
+async fn a_repaired_draft_whose_recheck_hit_an_outage_is_sent_on_the_retry_not_skipped() {
+    use crate::common::Hit;
+    let (mut env, msg, aid) = auto_send_ready().await;
+    let invented = "Hello Ravi,\n\nThanks for the update, noted.\n\nZeta Corp is hiring and your profile is a fit for Zeta Corp.\n\nBest regards,\nPriya";
+    sqlx::query("UPDATE drafts SET body_text = ?1 WHERE message_id = ?2").bind(invented).bind(&msg).execute(&env.state.db).await.unwrap();
+    env.judge.flag_unless_noted("Zeta Corp", "It promises a hiring company Zeta Corp and a fit that are not supported");
+    let flaky = env.flaky_judge(&[Hit::Ok, Hit::E429]);
+    email_ai_api::jobs::automation_jobs::run_automations(&env.state, &json!({"message_id": msg})).await.unwrap();
+    assert_eq!(env.count("SELECT COUNT(*) FROM audit_events WHERE workspace_id = ?1 AND action = 'draft.auto_repaired'").await, 1, "the claim was cut out first");
+    assert!(automation_runs_of(&env, &aid).await.is_empty(), "waiting for the check, not recorded");
+    assert!(env.sends().is_empty());
+
+    flaky.set(&[Hit::Ok]);
+    env.run_due_after(301_000).await;
+    let runs = automation_runs_of(&env, &aid).await;
+    assert_eq!(runs.len(), 1, "{runs:?}");
+    assert!(runs[0].1.contains("reply checked and scheduled to send"), "the repaired draft is checked again and goes out, never skipped: {runs:?}");
+    assert_eq!(env.count("SELECT COUNT(*) FROM audit_events WHERE workspace_id = ?1 AND action = 'automation.sent_reply'").await, 1);
+}
+
+#[tokio::test]
 async fn an_automatic_send_asks_a_person_after_three_deferrals() {
     use crate::common::Hit;
     let (mut env, msg, aid) = auto_send_ready().await;

@@ -373,7 +373,7 @@ async fn a_daily_cap_and_later_runs_reach_every_candidate() {
     let first = notify(&env, &req).await;
     assert_eq!((first.scheduled as i64, first.more), (WATCH_DAILY_CAP, true));
     assert_eq!(mails(&env).len() as i64, WATCH_DAILY_CAP);
-    candidate_watch::schedule_more(&env.state, &env.ws, &req, first).await.unwrap();
+    candidate_watch::schedule_more(&env.state, &env.ws, &req, first, 0).await.unwrap();
     let queued = env.count("SELECT COUNT(*) FROM jobs WHERE workspace_id = ?1 AND kind = 'notify_candidate_watch'").await;
     assert!(queued >= 1, "a later run is queued");
     // The next day the rest follow.
@@ -399,6 +399,32 @@ async fn a_failed_watch_send_leaves_no_draft_and_keeps_the_weekly_slot() {
     env.judge.fail(false);
     notify(&env, &req).await;
     assert_eq!(mails_to(&env, SEEKER).len(), 1, "a later run tries again");
+}
+
+#[tokio::test]
+async fn a_long_outage_stops_the_hourly_retries_and_asks_a_person() {
+    let env = watch_env().await;
+    watching(&env, "s1", SEEKER).await;
+    known_client(&env).await;
+    env.judge.fail(true);
+    let req = requirement(&env, "r1", CLIENT, "Java developers wanted", "Java Developer", "Pune", false).await;
+    let retries_queued = |n: i64| {
+        let env = &env;
+        async move { env.count(&format!("SELECT COUNT(*) FROM jobs WHERE workspace_id = ?1 AND kind = 'notify_candidate_watch' AND status = 'pending' AND json_extract(payload_json, '$.check_retries') = {n}")).await }
+    };
+    let reviews = || env.count("SELECT COUNT(*) FROM review_items WHERE workspace_id = ?1 AND kind = 'agent_task' AND title LIKE '%safety check%'");
+
+    candidate_watch::notify_job(&env.state, &json!({"workspace_id": env.ws, "requirement_id": req})).await.unwrap();
+    assert_eq!(retries_queued(1).await, 1, "the first outage queues retry 1");
+    candidate_watch::notify_job(&env.state, &json!({"workspace_id": env.ws, "requirement_id": req, "check_retries": 2})).await.unwrap();
+    assert_eq!(retries_queued(3).await, 1, "the count travels with the job");
+    assert_eq!(reviews().await, 0);
+
+    candidate_watch::notify_job(&env.state, &json!({"workspace_id": env.ws, "requirement_id": req, "check_retries": 6})).await.unwrap();
+    assert_eq!(retries_queued(7).await, 0, "no retry after about six hours");
+    assert_eq!(reviews().await, 1, "a person is asked instead");
+    candidate_watch::notify_job(&env.state, &json!({"workspace_id": env.ws, "requirement_id": req, "check_retries": 6})).await.unwrap();
+    assert_eq!(reviews().await, 1, "asked once");
 }
 
 #[tokio::test]

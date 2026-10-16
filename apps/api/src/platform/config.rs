@@ -90,6 +90,8 @@ pub struct Config {
     pub openrouter_safety_fallback_model_id: String,
     /// First pause before the safety check retries (the second is three times as long). 0 = retry at once.
     pub ai_retry_backoff_ms: u64,
+    /// Longest a person waits for the safety check in the editor, in seconds (`AI_PERSON_CHECK_SECS`).
+    pub ai_person_check_secs: u64,
     /// Speech to text for the assistant's voice input. Empty: voice input is off.
     /// Planner turns per agent case before it fails.
     pub agent_max_steps: i64,
@@ -209,6 +211,7 @@ impl Config {
             openrouter_planner_model_id: var("OPENROUTER_PLANNER_MODEL_ID", "deepseek/deepseek-v4-pro"),
             openrouter_safety_fallback_model_id: var("OPENROUTER_SAFETY_FALLBACK_MODEL_ID", "deepseek/deepseek-v4-flash"),
             ai_retry_backoff_ms: var("AI_RETRY_BACKOFF_MS", "1000").parse().context("AI_RETRY_BACKOFF_MS")?,
+            ai_person_check_secs: var("AI_PERSON_CHECK_SECS", "15").parse::<u64>().context("AI_PERSON_CHECK_SECS")?.max(1),
             agent_max_steps: var("AGENT_MAX_STEPS", "15").parse().context("AGENT_MAX_STEPS")?,
             agent_budget_usd: var("AGENT_BUDGET_USD", "0.10").parse().context("AGENT_BUDGET_USD")?,
             agent_fast_model_id: var("AGENT_FAST_MODEL_ID", "qwen/qwen3.8-flash"),
@@ -303,6 +306,7 @@ impl Config {
             openrouter_planner_model_id: String::new(),
             openrouter_safety_fallback_model_id: "test-safety-fallback".into(),
             ai_retry_backoff_ms: 0,
+            ai_person_check_secs: 15,
             agent_max_steps: 15,
             agent_budget_usd: 0.10,
             agent_fast_model_id: String::new(),

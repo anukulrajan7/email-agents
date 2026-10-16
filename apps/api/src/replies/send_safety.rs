@@ -597,7 +597,7 @@ pub async fn check(state: &AppState, input: &CheckInput<'_>) -> AppResult<Safety
     if !text_broken {
         let context = review_context(input.reply, &notes, input.body);
         let scope = format!("send_review:v1:{}", input.workspace_id);
-        let ladder = crate::ai::defer::Ladder::from_config(&state.config);
+        let ladder = if input.automated { crate::ai::defer::Ladder::from_config(&state.config) } else { crate::ai::defer::Ladder::for_person(&state.config) };
         let judge = crate::ai::defer::LadderJudge::new(state.judge.as_ref(), &ladder);
         let answers = judge::ask_cached(&state.db, &judge, &scope, &context, &review_questions(notes.contains("\nThe owner said"))).await;
         let review = match &answers {

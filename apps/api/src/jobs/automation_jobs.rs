@@ -338,7 +338,8 @@ async fn send_reply(
     if !untouched {
         return Ok(skipped(K, "a person has edited or scheduled this draft; it is not sent automatically"));
     }
-    if replies::has_open_gaps(&body) || !matches!(unanswered.trim(), "" | "[]") {
+    let open_topics = !matches!(unanswered.trim(), "" | "[]") && !replies::repair::awaiting_recheck(state, workspace_id, draft_id, &unanswered).await?;
+    if replies::has_open_gaps(&body) || open_topics {
         return Ok(skipped(K, "draft has unanswered questions ([NEEDS: ...])"));
     }
     let thread_id: Option<String> = sqlx::query_scalar("SELECT thread_id FROM email_messages WHERE id = ?1 AND workspace_id = ?2")

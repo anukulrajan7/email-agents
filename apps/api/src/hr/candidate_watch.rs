@@ -354,6 +354,8 @@ pub struct Outcome {
     pub scheduled: usize,
     pub more: bool,
     pub cap_reached: bool,
+    /// The safety check could not run for at least one candidate.
+    pub deferred: bool,
 }
 
 /// A new requirement was matched: email each watching candidate who fits, within the rules above.
@@ -485,6 +487,7 @@ pub async fn notify_matches(state: &AppState, ws: &str, requirement_id: &str) ->
                 // the candidate gets their slot back and a later run tries again.
                 if matches!(e, AppError::CheckDeferred(_)) || is_duplicate_block(&e) {
                     outcome.more = true;
+                    outcome.deferred = outcome.deferred || matches!(e, AppError::CheckDeferred(_));
                 }
                 discard(state, ws, &draft_id).await?;
             }
@@ -503,7 +506,8 @@ pub async fn notify_job(state: &AppState, payload: &Value) -> Result<(), JobErro
         return Err(JobError::Permanent("payload missing workspace_id/requirement_id".into()));
     };
     let outcome = notify_matches(state, ws, requirement_id).await?;
-    schedule_more(state, ws, requirement_id, outcome).await?;
+    let retries = payload.get("check_retries").and_then(Value::as_u64).unwrap_or(0);
+    schedule_more(state, ws, requirement_id, outcome, retries).await?;
     Ok(())
 }
 
@@ -512,24 +516,72 @@ fn is_duplicate_block(e: &AppError) -> bool {
     details["blocking"].as_array().is_some_and(|issues| issues.iter().any(|i| i["code"] == "duplicate"))
 }
 
+/// Hourly retries while the safety check is down: after this many, a person is asked instead (about six hours).
+const MAX_CHECK_RETRIES: u64 = 6;
+
 /// Queues the next run when candidates are still waiting: in an hour, or after midnight when the daily cap stopped it.
-pub async fn schedule_more(state: &AppState, ws: &str, requirement_id: &str, outcome: Outcome) -> Result<(), JobError> {
+/// `retries` is how many hourly retries the safety check outage has already cost; the count travels in the payload.
+pub async fn schedule_more(state: &AppState, ws: &str, requirement_id: &str, outcome: Outcome, retries: u64) -> Result<(), JobError> {
     if !outcome.more {
         return Ok(());
     }
+    let retries = if outcome.deferred { retries + 1 } else { 0 };
+    if retries > MAX_CHECK_RETRIES {
+        return ask_a_person(state, ws, requirement_id).await;
+    }
     let now = now_ms();
     let at = if outcome.cap_reached { (now / DAY_MS + 1) * DAY_MS + 60_000 } else { now + 3_600_000 };
+    let mut payload = json!({ "workspace_id": ws, "requirement_id": requirement_id });
+    if retries > 0 {
+        payload["check_retries"] = json!(retries);
+    }
     let mut conn = state.db.acquire().await?;
     jobs::enqueue_at(
         &mut conn,
         kind::NOTIFY_CANDIDATE_WATCH,
-        &format!("watch_notify:{requirement_id}:{}", at / 60_000),
+        &format!("watch_notify:{requirement_id}:{retries}:{}", at / 60_000),
         Some(ws),
-        &json!({ "workspace_id": ws, "requirement_id": requirement_id }),
+        &payload,
         jobs::DEFAULT_MAX_ATTEMPTS,
         at,
     )
     .await?;
+    Ok(())
+}
+
+/// The safety check stayed down through every hourly retry: one open task, so the waiting candidates are not forgotten.
+async fn ask_a_person(state: &AppState, ws: &str, requirement_id: &str) -> Result<(), JobError> {
+    let row: Option<(String, String)> = sqlx::query_as("SELECT message_id, role_title FROM requirements WHERE id = ?1 AND workspace_id = ?2")
+        .bind(requirement_id)
+        .bind(ws)
+        .fetch_optional(&state.db)
+        .await?;
+    let Some((message_id, role)) = row else { return Ok(()) };
+    let title = crate::mail::sources::normalize::truncate_chars(
+        &format!("The safety check has been down for hours, so candidates watching for {role} were not emailed. Please email them yourself."),
+        200,
+    );
+    let open: Option<i64> = sqlx::query_scalar("SELECT 1 FROM review_items WHERE workspace_id = ?1 AND message_id = ?2 AND kind = 'agent_task' AND title = ?3 AND status = 'open'")
+        .bind(ws)
+        .bind(&message_id)
+        .bind(&title)
+        .fetch_optional(&state.db)
+        .await?;
+    if open.is_some() {
+        return Ok(());
+    }
+    sqlx::query(
+        "INSERT INTO review_items (id, workspace_id, message_id, workflow_run_id, kind, title, status, assigned_user_id, created_at)
+         VALUES (?1, ?2, ?3, NULL, 'agent_task', ?4, 'open', NULL, ?5)",
+    )
+    .bind(new_id("rev"))
+    .bind(ws)
+    .bind(&message_id)
+    .bind(&title)
+    .bind(now_ms())
+    .execute(&state.db)
+    .await?;
+    tracing::warn!(requirement_id, "candidate watch gave up waiting for the safety check; a person was asked");
     Ok(())
 }
 

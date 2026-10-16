@@ -32,8 +32,11 @@ pub enum Step {
 const RETRIES: u32 = 2;
 const BACKOFF_STEPS: [u64; RETRIES as usize] = [1, 3];
 const DEFER_MINUTES: [i64; 3] = [5, 10, 20];
-/// All in-call rungs together must end well inside the job lease (120 s, no heartbeat).
+/// All in-call rungs together stop here; the job's lease heartbeat keeps a long turn from being claimed twice.
 const DEADLINE: Duration = Duration::from_secs(90);
+/// One call may take this long under the ladder, so the usual model's two retries and the fallback
+/// (4 x 20 s, plus 4 s of pauses) all fit inside `DEADLINE`.
+const ATTEMPT_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// What to do after attempt number `attempt` (counted from 0 across the whole ladder) failed with a
 /// retryable error. `base_ms` is the first pause (the second is 3x); 0 means no pauses.
@@ -65,11 +68,24 @@ pub struct Ladder {
     pub backoff_ms: u64,
     /// The whole in-call ladder gives up (as a retryable error) after this long.
     pub deadline: Duration,
+    /// One call is cut off (as a retryable error) after this long, whatever the HTTP client allows.
+    pub attempt_timeout: Duration,
 }
 
 impl Ladder {
     pub fn from_config(config: &Config) -> Self {
-        Self { fallback_model: config.openrouter_safety_fallback_model_id.clone(), backoff_ms: config.ai_retry_backoff_ms, deadline: DEADLINE }
+        Self {
+            fallback_model: config.openrouter_safety_fallback_model_id.clone(),
+            backoff_ms: config.ai_retry_backoff_ms,
+            deadline: DEADLINE,
+            attempt_timeout: ATTEMPT_TIMEOUT,
+        }
+    }
+
+    /// For a check a person is waiting on in the editor: it gives up after `AI_PERSON_CHECK_SECS` (15) and the UI shows "AI review unavailable".
+    pub fn for_person(config: &Config) -> Self {
+        let wait = Duration::from_secs(config.ai_person_check_secs);
+        Self { deadline: wait, attempt_timeout: wait, ..Self::from_config(config) }
     }
 }
 
@@ -88,7 +104,9 @@ where
         let mut model: Option<String> = None;
         let mut primary_why = String::new();
         loop {
-            let result = call(model.clone()).await;
+            let result = tokio::time::timeout(ladder.attempt_timeout, call(model.clone()))
+                .await
+                .unwrap_or_else(|_| Err(AiError::Retryable("the safety check call timed out".into())));
             if model.is_some() {
                 return match result {
                     Ok(v) => Ok(v),
@@ -170,7 +188,7 @@ mod tests {
     }
 
     fn ladder(fallback: &str) -> Ladder {
-        Ladder { fallback_model: fallback.into(), backoff_ms: 0, deadline: Duration::from_secs(5) }
+        Ladder { fallback_model: fallback.into(), backoff_ms: 0, deadline: Duration::from_secs(5), attempt_timeout: Duration::from_secs(5) }
     }
 
     async fn scripted(script: Vec<Result<u32, AiError>>, ladder: &Ladder) -> (Result<u32, AiError>, Vec<Option<String>>) {
@@ -231,7 +249,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_whole_ladder_gives_up_at_its_deadline_as_retryable() {
-        let ladder = Ladder { fallback_model: "fb".into(), backoff_ms: 0, deadline: Duration::from_millis(50) };
+        let ladder = Ladder { fallback_model: "fb".into(), backoff_ms: 0, deadline: Duration::from_millis(50), attempt_timeout: Duration::from_secs(5) };
         let started = std::time::Instant::now();
         let out: Result<u32, AiError> = run(&ladder, |_| async {
             tokio::time::sleep(Duration::from_secs(5)).await;
@@ -240,5 +258,34 @@ mod tests {
         .await;
         assert!(matches!(out, Err(AiError::Retryable(_))), "{out:?}");
         assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[tokio::test]
+    async fn a_hanging_call_times_out_per_attempt_so_the_fallback_is_reached_before_the_deadline() {
+        let ladder = Ladder { fallback_model: "fb".into(), backoff_ms: 0, deadline: Duration::from_secs(5), attempt_timeout: Duration::from_millis(30) };
+        let seen = Mutex::new(vec![]);
+        let out: Result<u32, AiError> = run(&ladder, |model| {
+            seen.lock().unwrap().push(model.clone());
+            async move {
+                if model.is_none() {
+                    tokio::time::sleep(Duration::from_secs(60)).await;
+                }
+                Ok(5)
+            }
+        })
+        .await;
+        assert_eq!(out.unwrap(), 5);
+        assert_eq!(seen.into_inner().unwrap(), [None, None, None, Some("fb".to_string())]);
+    }
+
+    #[test]
+    fn the_ladder_fits_its_deadline_and_a_person_waits_less() {
+        let config = Config::for_tests("sqlite://unused");
+        let automated = Ladder::from_config(&config);
+        let worst_case = automated.attempt_timeout * (RETRIES + 2) + Duration::from_secs(4);
+        assert!(worst_case <= automated.deadline, "{worst_case:?} must fit {:?}", automated.deadline);
+        let person = Ladder::for_person(&config);
+        assert_eq!(person.deadline, Duration::from_secs(15));
+        assert!(person.deadline < automated.deadline);
     }
 }

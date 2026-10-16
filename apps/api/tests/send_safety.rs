@@ -116,16 +116,22 @@ fn reviewing_judge() -> FixedJudge {
 }
 
 async fn harness(undo_seconds: i64) -> H {
+    harness_with(undo_seconds, |_| {}, |_| {}).await
+}
+
+async fn harness_with(undo_seconds: i64, tweak: impl FnOnce(&mut Config), tweak_state: impl FnOnce(&mut AppState)) -> H {
     let dir = tempfile::tempdir().unwrap();
     let mock: Shared = Arc::new(Mutex::new(Mock { mode: SendMode::Ok, sends: vec![], search_hit: None }));
     let mut config = Config::for_tests(&format!("sqlite://{}", dir.path().join("t.db").display()));
     config.nango_api_url = spawn_gmail(mock.clone()).await;
     config.nango_api_key = "k".into();
     config.send_undo_seconds = undo_seconds;
+    tweak(&mut config);
     let mut state = build_state(config).await.unwrap();
     db::migrate(&state.db).await.unwrap();
     let judge = Arc::new(reviewing_judge());
     state.judge = judge.clone();
+    tweak_state(&mut state);
     let app = router(state.clone());
     let mut h = H { state, app, mock, judge, ws: String::new(), msg: String::new(), _dir: dir };
 
@@ -1021,4 +1027,25 @@ async fn a_non_retryable_review_error_still_blocks_an_automatic_send() {
         other => panic!("{other:?}"),
     }
     assert_eq!(flaky.calls(), 1, "no retries for an error that will not change");
+}
+
+struct HangingJudge;
+
+#[async_trait::async_trait]
+impl email_ai_api::ai::judge::Judge for HangingJudge {
+    async fn judge(&self, _: &str, _: &[email_ai_api::ai::judge::Question]) -> Result<email_ai_api::ai::judge::Answers, email_ai_api::ai::AiError> {
+        tokio::time::sleep(std::time::Duration::from_secs(300)).await;
+        Err(email_ai_api::ai::AiError::Retryable("never answers".into()))
+    }
+}
+
+#[tokio::test]
+async fn a_person_waiting_on_the_check_gets_the_unavailable_warning_not_a_hang() {
+    let h = harness_with(0, |c| c.ai_person_check_secs = 1, |state| state.judge = Arc::new(HangingJudge)).await;
+    let d = h.draft(GOOD).await;
+    let started = std::time::Instant::now();
+    let r = h.check(&d, None).await;
+    assert!(started.elapsed() < std::time::Duration::from_secs(10), "the editor was not held up: {:?}", started.elapsed());
+    assert_eq!(codes(&r["warnings"]), ["ai_review_unavailable"], "{r}");
+    assert!(r["blocking"].as_array().unwrap().is_empty());
 }

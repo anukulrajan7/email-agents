@@ -607,7 +607,7 @@ pub async fn match_record(state: &AppState, job: &Job, payload: &Value) -> Resul
     if record_kind == "requirement" {
         crate::agents::triggers::after_requirement_matched(state, &ws, id).await?;
         let outcome = crate::hr::candidate_watch::notify_matches(state, &ws, id).await?;
-        crate::hr::candidate_watch::schedule_more(state, &ws, id, outcome).await?;
+        crate::hr::candidate_watch::schedule_more(state, &ws, id, outcome, 0).await?;
     }
     Ok(())
 }
