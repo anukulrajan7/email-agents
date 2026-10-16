@@ -80,8 +80,10 @@ pub async fn record_job(state: &AppState, payload: &Value) -> Result<(), JobErro
         if timesheet_records::record_message(state, &ws, message_id).await?.deferred {
             return Err(JobError::Retry("the timesheet could not be read by the model yet".into()));
         }
-        if crate::platform::flags::mode(&state.db, &state.config, &ws, crate::platform::flags::Key::Handoff).await?.compares() {
-            timesheet_records::desk::compare(state, &ws, message_id).await?;
+        match crate::platform::flags::mode(&state.db, &state.config, &ws, crate::platform::flags::Key::Handoff).await? {
+            m if m.compares() => timesheet_records::desk::compare(state, &ws, message_id).await?,
+            m if m.acts() => timesheet_records::desk::catch_up(state, &ws, message_id).await?,
+            _ => {}
         }
     }
     Ok(())

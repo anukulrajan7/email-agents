@@ -339,14 +339,20 @@ pub struct Routed {
 /// by a computed one). `None` when the message is not an inbound email of this workspace.
 pub async fn route_message(db: &SqlitePool, config: &Config, ws: &str, message_id: &str) -> sqlx::Result<Option<Routed>> {
     super::seed::ensure_workspace(db, ws).await?;
+    let Some(routed) = peek(db, config, ws, message_id).await? else { return Ok(None) };
+    let mut conn = db.acquire().await?;
+    record(&mut conn, ws, message_id, &routed.route, routed.primary.version).await?;
+    Ok(Some(routed))
+}
+
+/// The same decision as `route_message`, read-only: nothing is recorded and nothing is seeded. For compare modes.
+pub async fn peek(db: &SqlitePool, config: &Config, ws: &str, message_id: &str) -> sqlx::Result<Option<Routed>> {
     let Some((facts, thread_id)) = message_facts(db, ws, message_id).await? else { return Ok(None) };
     let agents = active_agents(db, config, ws).await?;
     let hints = hints(db, ws, message_id, &thread_id).await?;
     let Some(route) = route(&facts, &hints, &agents) else { return Ok(None) };
     let find = |id: &str| agents.iter().find(|a| a.row.id == id).cloned();
     let (Some(primary), Some(handler)) = (find(&route.agent_id), find(&route.handler_id)) else { return Ok(None) };
-    let mut conn = db.acquire().await?;
-    record(&mut conn, ws, message_id, &route, primary.version).await?;
     Ok(Some(Routed { route, primary, handler }))
 }
 

@@ -6,7 +6,7 @@
 
 use serde::Serialize;
 
-use super::{Entry, Issue, parse::MONTH_NAMES};
+use super::{CHECK, Entry, Issue, parse::MONTH_NAMES};
 use crate::hr::{
     staffing::policy::MONTHS,
     team::{
@@ -80,6 +80,9 @@ pub struct RuleIssue {
     pub for_sender: String,
     pub for_manager: String,
 }
+
+/// Reader checks with their own rule above (or, for `person_unmatched`, their own severity).
+const READER_CHECKS: [&str; 7] = ["unreadable", "no_hours", "total_mismatch", "impossible_hours", "model_days_dropped", "model_read", "person_unmatched"];
 
 fn has_issue<'a>(r: &'a RecordView, code: &str) -> Option<&'a Issue> {
     r.issues.iter().find(|i| i.code == code)
@@ -163,12 +166,13 @@ fn expected_label((from, to): (i64, i64), allowed: (i64, i64)) -> String {
     if allowed.0 < from { format!("{} or {}", label(allowed.0, from - 1), label(from, to)) } else { label(from, to) }
 }
 
+/// Hours per date. Rows without a date cannot be put on a day, so they are left out.
 fn per_day(entries: &[Entry]) -> Vec<(String, f64)> {
     let mut days: Vec<(String, f64)> = vec![];
-    for e in entries {
-        match e.date.as_deref().and_then(|d| days.iter().position(|(x, _)| x == d)) {
+    for (e, date) in entries.iter().filter_map(|e| e.date.as_deref().map(|d| (e, d))) {
+        match days.iter().position(|(x, _)| x == date) {
             Some(i) => days[i].1 += e.hours,
-            None => days.push((e.date.clone().unwrap_or_else(|| "a row".into()), e.hours)),
+            None => days.push((date.to_string(), e.hours)),
         }
     }
     days
@@ -208,9 +212,26 @@ pub fn check_against_rules(r: &RecordView, rules: &Rules, person: Option<&Person
             out.push(correction(code, format!("{} {tail}", i.message.trim()), i.message.clone()));
         }
     }
+    // Anything else the reader marked for a check is a problem with the sheet too: never an acknowledgement.
+    if let Some(i) = has_issue(r, "model_read") {
+        out.push(correction(
+            "model_read",
+            "We could not confirm that the days in your timesheet add up to its total. Please send it again with each date, its hours and the total clearly written.".into(),
+            i.message.clone(),
+        ));
+    }
+    for i in r.issues.iter().filter(|i| i.severity == CHECK && !READER_CHECKS.contains(&i.code.as_str())) {
+        out.push(correction(
+            "reader_check",
+            format!("Something in your timesheet needs another look: {} Please check it and send a corrected sheet.", i.message.trim()),
+            i.message.clone(),
+        ));
+    }
     if has_data && has_issue(r, "period_assumed").is_none() && !unreadable {
         let (cadence, day) = (rules.cadence, day_of(r.received_at, rules.tz_offset_minutes));
         let (expected, allowed) = windows(cadence, day, rules.grace_days);
+        // Policy choice: a sheet is fine when its period overlaps the accepted dates at all. A period that starts in the
+        // month before (4-4-5 calendars, a sheet from the 25th) is not called wrong; only a period wholly outside is.
         if let (Some(a), Some(b)) = (clock::parse_date(r.period.0), clock::parse_date(r.period.1))
             && (b < allowed.0 || a > allowed.1)
         {
@@ -599,6 +620,34 @@ mod tests {
         let issues = s.check(&rules(), None);
         assert_eq!(codes(&issues), ["total_mismatch", "impossible_hours", "model_days_dropped"]);
         assert!(issues.iter().all(|i| i.severity == Severity::Correction && !i.for_sender.is_empty()));
+    }
+
+    #[test]
+    fn a_model_read_sheet_is_a_correction_not_an_ack() {
+        let mut s = sept("2026-10-02");
+        s.issues.push(Issue { code: "model_read".into(), message: "The days were read by an AI model.".into(), severity: "check" });
+        let issues = s.check(&rules(), None);
+        assert_eq!(codes(&issues), ["model_read"]);
+        assert_eq!(issues[0].severity, Severity::Correction);
+        assert_eq!(decision(&checked(issues)).message.unwrap().kind, MessageKind::Correction);
+    }
+
+    #[test]
+    fn any_other_reader_check_is_a_correction_and_notes_are_not() {
+        let mut s = sept("2026-10-02");
+        s.issues.push(Issue { code: "something_new".into(), message: "Odd rows.".into(), severity: "check" });
+        s.issues.push(Issue { code: "weekend_hours".into(), message: "Weekend.".into(), severity: "note" });
+        let issues = s.check(&rules(), None);
+        assert_eq!(codes(&issues), ["reader_check"]);
+        assert!(issues[0].for_sender.contains("Odd rows."));
+    }
+
+    #[test]
+    fn rows_without_a_date_never_add_up_to_a_day() {
+        let mut s = sept("2026-10-02");
+        s.entries = (0..5).map(|_| Entry { date: None, hours: 4.0, project: None, note: None }).collect();
+        let limited = Rules { max_per_day: Some(10.0), ..rules() };
+        assert!(s.check(&limited, None).is_empty(), "five undated rows of 4 h are not one 20 h day");
     }
 
     #[test]

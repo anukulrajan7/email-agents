@@ -81,16 +81,19 @@ async fn desk_run(ctx: &ToolCtx<'_>, message_id: &str, run: crate::hr::staffing:
     }
     let db = &ctx.state.db;
     let review = desk::review(db, ctx.ws(), message_id).await?;
-    let statuses = desk::apply(db, ctx.ws(), &review).await?;
+    let mut review = review;
+    let statuses = desk::apply(db, ctx.ws(), &mut review).await?;
     let mut conn = db.acquire().await?;
     if review.signature_gap {
-        let why = "The owner asks for signed timesheets, but a signature cannot be read from a sheet yet.";
-        crate::agents::gaps::record(&mut conn, ctx.ws(), crate::agents::gaps::NewGap { tool: "read_signature", why, agent_id: ctx.case.agent_id.as_deref(), message_id: Some(message_id), source: "rule" }).await?;
+        desk::record_signature_gap(&mut conn, ctx.ws(), ctx.case.agent_id.as_deref(), message_id).await?;
     }
     desk::audit_decision(&mut conn, ctx.ws(), message_id, &ctx.case.id, &review).await?;
     drop(conn);
     let told = summary::summarize(ctx.state, ctx.ws(), ctx.case.agent_id.as_deref(), &review.rows, &review.decision).await?;
     let clean = !review.rows.is_empty() && statuses.iter().all(|s| s == "recorded") && review.all_matched();
+    // The manager's summary is the ask only when the manager is the one to decide (a portal question); a "recorded"
+    // summary never replaces the review item for a sheet that needs a look.
+    let manager_decides = told > 0 && review.decision.message.as_ref().is_some_and(|m| m.kind == MessageKind::Question);
     let verdict = match (&review.decision.outcome, review.decision.message.as_ref().map(|m| m.kind)) {
         (Outcome::NothingToDo, _) => "No timesheet data was found in this email".to_string(),
         (Outcome::NeedsPerson { .. }, _) => "Recorded. Someone needs to say who this sheet is for".to_string(),
@@ -101,7 +104,7 @@ async fn desk_run(ctx: &ToolCtx<'_>, message_id: &str, run: crate::hr::staffing:
     Ok(ToolOutput {
         summary: if told > 0 { format!("{verdict}. The manager was told") } else { verdict },
         value: json!({"records": run.records, "decision": review.decision}),
-        state: Some(json!({"decision": review.decision, "record_ids": review.record_ids(), "timesheet_clean": clean, "manager_notified": told > 0})),
+        state: Some(json!({"decision": review.decision, "record_ids": review.record_ids(), "timesheet_clean": clean, "manager_notified": told > 0, "manager_decides": manager_decides})),
         ..Default::default()
     })
 }

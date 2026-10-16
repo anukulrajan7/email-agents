@@ -269,7 +269,7 @@ pub async fn start_inbox_case(state: &AppState, ws: &str, message_id: &str, crea
 
 /// Starts (or finds) Rohan's case for a timesheet email, under the `handoff` flag. The timesheet desk owns the `main`
 /// job at every autonomy level, so the case is a real one even when Rohan is at level 0; it needs no planner and does not
-/// wait for the mail to "need a reply". One case per (message, job).
+/// wait for the mail to "need a reply". One case per (message, job); its own job key leaves `main` to a person's reply case.
 pub async fn start_timesheet_case(state: &AppState, ws: &str, message_id: &str) -> sqlx::Result<Started> {
     let Some(m) = message_facts(state, ws, message_id).await?.filter(|m| m.direction == "inbound") else { return Ok(Started::NotFound) };
     let owner = ownership::decide(state, ws, message_id).await?;
@@ -300,7 +300,7 @@ pub async fn start_timesheet_case(state: &AppState, ws: &str, message_id: &str) 
             agent_version: Some(agent.active_version.unwrap_or(0)),
             trigger: Some("email_received"),
             shadow: false,
-            job: ownership::MAIN,
+            job: ownership::DESK_JOB,
         },
     )
     .await?;
@@ -467,7 +467,10 @@ async fn bring_forward(conn: &mut SqliteConnection, now: i64, sleeping: Vec<(Str
 pub async fn wake_for_message(conn: &mut SqliteConnection, ws: &str, message_id: &str) -> sqlx::Result<()> {
     let now = now_ms();
     let sleeping: Vec<(String, i64)> =
-        sqlx::query_as("UPDATE cases SET next_wake_at = ?1 WHERE workspace_id = ?2 AND message_id = ?3 AND status = 'waiting_event' RETURNING id, step_count")
+        sqlx::query_as(
+            "UPDATE cases SET next_wake_at = ?1 WHERE workspace_id = ?2 AND message_id = ?3 AND status = 'waiting_event' AND json_extract(state_json, '$.desk') = 1
+             RETURNING id, step_count",
+        )
             .bind(now)
             .bind(ws)
             .bind(message_id)

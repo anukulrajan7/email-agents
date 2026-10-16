@@ -29,10 +29,11 @@ pub(super) async fn execute_workflow(state: &AppState, payload: &Value) -> Resul
     if category == crate::hr::staffing::timesheet_records::LABEL && crate::platform::packs::enabled(&state.db, &workspace_id, crate::platform::packs::STAFFING).await? {
         // Under the `handoff` flag Rohan's case owns the sheet: it records it and asks a person to look when it needs one.
         let desk_case: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM cases WHERE workspace_id = ?1 AND message_id = ?2 AND job = 'main' AND shadow = 0 AND json_extract(state_json, '$.desk') = 1)",
+            "SELECT EXISTS(SELECT 1 FROM cases WHERE workspace_id = ?1 AND message_id = ?2 AND job = ?3 AND shadow = 0 AND status NOT IN ('failed', 'cancelled') AND json_extract(state_json, '$.desk') = 1)",
         )
         .bind(&workspace_id)
         .bind(&message_id)
+        .bind(crate::agents::ownership::DESK_JOB)
         .fetch_one(&state.db)
         .await?;
         if desk_case && crate::platform::flags::mode(&state.db, &state.config, &workspace_id, crate::platform::flags::Key::Handoff).await?.acts() {

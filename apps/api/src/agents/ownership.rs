@@ -1,4 +1,4 @@
-//! Who owns which job of a message. This is the timesheet path only (slice S6): a timesheet email has one job, `main`,
+//! Who owns which job of a message. This is the timesheet path only (slice S6): a timesheet email has one desk job, `desk:timesheet`,
 //! and the timesheet desk (Rohan) owns it at every autonomy level. The other jobs and mail kinds come in later slices.
 //! `decide_pure` has no I/O; `decide` gathers its facts; every decision is written to the audit trail, as
 //! `ownership.decided` when it acts and `ownership.compare` when the flag is only comparing.
@@ -17,7 +17,8 @@ use crate::{
     },
 };
 
-pub const MAIN: &str = "main";
+/// The timesheet desk's own job key. It is not `main`, which stays free for a person-started reply case on the same email.
+pub const DESK_JOB: &str = "desk:timesheet";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -87,7 +88,7 @@ pub fn decide_pure(f: &Facts) -> Owner {
         _ => f.desk.as_ref(),
     };
     match owner {
-        Some(c) => Owner::Assigned(vec![Job { key: MAIN, agent_id: c.agent_id.clone(), agent_name: c.name.clone() }]),
+        Some(c) => Owner::Assigned(vec![Job { key: DESK_JOB, agent_id: c.agent_id.clone(), agent_name: c.name.clone() }]),
         None => Owner::Nobody(Why::NoDesk),
     }
 }
@@ -113,7 +114,7 @@ pub async fn decide(state: &AppState, ws: &str, message_id: &str) -> sqlx::Resul
     let staffing = packs::enabled(&state.db, ws, packs::STAFFING).await?;
     let candidate = |a: &routing::RoutingAgent| Candidate { agent_id: a.row.id.clone(), name: a.row.name.clone(), template_key: a.row.template_key.clone() };
     let routed = if m.category.as_deref() == Some(TIMESHEET_LABEL) && staffing {
-        routing::route_message(&state.db, &state.config, ws, message_id).await?.map(|r| (candidate(&r.primary), r.route.source == routing::Source::Manual))
+        routing::peek(&state.db, &state.config, ws, message_id).await?.map(|r| (candidate(&r.primary), r.route.source == routing::Source::Manual))
     } else {
         None
     };
@@ -167,14 +168,14 @@ mod tests {
     }
 
     #[test]
-    fn a_timesheet_goes_to_the_desk_as_the_main_job() {
-        assert_eq!(assigned(decide_pure(&facts())), [("main", "Rohan".to_string())]);
+    fn a_timesheet_goes_to_the_desk_as_its_own_job() {
+        assert_eq!(assigned(decide_pure(&facts())), [(DESK_JOB, "Rohan".to_string())]);
     }
 
     #[test]
     fn the_desk_keeps_the_job_when_routing_picked_someone_else_by_rule_not_by_hand() {
         let f = Facts { routed: Some((lead(), false)), ..facts() };
-        assert_eq!(assigned(decide_pure(&f)), [("main", "Rohan".to_string())]);
+        assert_eq!(assigned(decide_pure(&f)), [(DESK_JOB, "Rohan".to_string())]);
         let by_hand = Facts { routed: Some((lead(), true)), ..facts() };
         assert_eq!(decide_pure(&by_hand), Owner::Nobody(Why::RoutedElsewhere));
     }

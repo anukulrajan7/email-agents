@@ -5,9 +5,13 @@
 use serde_json::json;
 use sqlx::SqlitePool;
 
-use super::{RecordRow, rules::Decision};
+use super::{
+    RecordRow,
+    rules::{Decision, MessageKind},
+};
 use crate::{
     alerts::{self, messaging::inapp},
+    hr::staffing::policy::address_of,
     hr::team::escalation,
     http::AppState,
     platform::{
@@ -16,20 +20,22 @@ use crate::{
     },
 };
 
-/// Who hears about these records: each person's manager (else the final contacts), and the final contacts. Deduped.
+/// Who hears about these records: each person's manager (else the final contacts), and the final contacts. Deduped,
+/// and never the person who sent the sheet.
 pub async fn recipients(db: &SqlitePool, ws: &str, rows: &[RecordRow]) -> sqlx::Result<Vec<String>> {
-    let persons: Vec<&str> = rows.iter().filter_map(|r| r.person_id.as_deref()).collect();
-    recipients_of(db, ws, &persons).await
+    let rows: Vec<&RecordRow> = rows.iter().collect();
+    recipients_of(db, ws, &rows).await
 }
 
-async fn recipients_of(db: &SqlitePool, ws: &str, persons: &[&str]) -> sqlx::Result<Vec<String>> {
+async fn recipients_of(db: &SqlitePool, ws: &str, rows: &[&RecordRow]) -> sqlx::Result<Vec<String>> {
     let fallback = alerts::load_settings(db, ws).await?.recipients;
+    let senders: Vec<String> = rows.iter().filter_map(|r| r.sender_address.as_deref()).map(address_of).collect();
     let mut out: Vec<String> = vec![];
-    for person in persons.iter().copied() {
+    for person in rows.iter().filter_map(|r| r.person_id.as_deref()) {
         for level in [2, 3] {
             for email in escalation::recipients(db, ws, person, level, &fallback).await? {
                 let email = email.trim().to_lowercase();
-                if !out.contains(&email) {
+                if !out.contains(&email) && !senders.contains(&email) {
                     out.push(email);
                 }
             }
@@ -43,17 +49,30 @@ fn is_recent(state: &AppState, rows: &[&RecordRow]) -> bool {
     rows.iter().all(|r| r.email_received_at.is_some_and(|at| at >= cutoff))
 }
 
-/// Tells the manager once. Returns how many people were told (0 when there was nothing to say, the mail is old, nobody
-/// is to be told, or an earlier run already did).
+/// Tells the manager once. Returns how many notices and emails actually went out (0 when there was nothing to say, the
+/// mail is old, nobody can be told, or an earlier run already did). The summary is only claimed when someone can be
+/// told, and the claim is given back if every delivery failed.
 pub async fn summarize(state: &AppState, ws: &str, agent_id: Option<&str>, rows: &[RecordRow], decision: &Decision) -> sqlx::Result<usize> {
     let Some(summary) = &decision.manager_summary else { return Ok(0) };
     let rows: Vec<&RecordRow> = rows.iter().filter(|r| r.person_id.is_some() && r.status != "replaced").collect();
-    if rows.is_empty() || !is_recent(state, &rows) {
+    // A "recorded" summary is only true when every sheet is recorded; a question to the manager is about a sheet that needs a look.
+    let ack = decision.message.as_ref().is_some_and(|m| m.kind == MessageKind::Ack);
+    if rows.is_empty() || !is_recent(state, &rows) || (ack && rows.iter().any(|r| r.status != "recorded")) {
         return Ok(0);
     }
-    let persons: Vec<&str> = rows.iter().filter_map(|r| r.person_id.as_deref()).collect();
-    let recipients = recipients_of(&state.db, ws, &persons).await?;
-    if recipients.is_empty() {
+    let recipients = recipients_of(&state.db, ws, &rows).await?;
+    let mut members: Vec<String> = vec![];
+    for email in &recipients {
+        let user: Option<String> = sqlx::query_scalar(
+            "SELECT u.id FROM users u JOIN memberships m ON m.user_id = u.id WHERE m.workspace_id = ?1 AND lower(u.email) = ?2 LIMIT 1",
+        )
+        .bind(ws)
+        .bind(email)
+        .fetch_optional(&state.db)
+        .await?;
+        members.extend(user);
+    }
+    if recipients.is_empty() || (members.is_empty() && state.alert_mailer.is_none()) {
         return Ok(0);
     }
     let ids: Vec<&str> = rows.iter().map(|r| r.id.as_str()).collect();
@@ -74,24 +93,13 @@ pub async fn summarize(state: &AppState, ws: &str, agent_id: Option<&str>, rows:
     for note in &summary.notes {
         body.push_str(&format!("\n- {note}"));
     }
-    let link = json!({ "kind": "timesheet", "record_id": claimed[0] });
-    let mut members: Vec<(String, String)> = vec![];
-    for email in &recipients {
-        let user: Option<String> = sqlx::query_scalar(
-            "SELECT u.id FROM users u JOIN memberships m ON m.user_id = u.id WHERE m.workspace_id = ?1 AND lower(u.email) = ?2 LIMIT 1",
-        )
-        .bind(ws)
-        .bind(email)
-        .fetch_optional(&mut *tx)
-        .await?;
-        if let Some(user) = user {
-            members.push((email.clone(), user));
-        }
-    }
-    for (_, user) in &members {
+    let message_id = rows.iter().find_map(|r| r.message_id.clone());
+    let link = json!({ "kind": "timesheet", "record_id": claimed[0], "record_ids": claimed, "message_id": message_id });
+    for user in &members {
         inapp::notify_in(&mut tx, ws, user, agent_id, &crate::agents::sentence(&summary.headline, 190), &format!("{body}\nOpen Timesheets to review or approve."), link.clone(), false).await?;
     }
     tx.commit().await?;
+    let mut told = members.len();
     if let Some(mailer) = &state.alert_mailer {
         let url = format!("{}/w/{ws}/timesheets", state.config.app_base_url.trim_end_matches('/'));
         let subject = format!("[Post Room] {}", crate::agents::sentence(&summary.headline, 160));
@@ -99,10 +107,18 @@ pub async fn summarize(state: &AppState, ws: &str, agent_id: Option<&str>, rows:
         let html = format!("<p>{}</p><p><a href=\"{url}\">Review or approve it</a></p>", alerts::escape_html(&body).replace('\n', "<br>"));
         for to in &recipients {
             let email = OutgoingEmail { kind: mailer::kind::TIMESHEET_SUMMARY, to, subject: &subject, text: &text, html: &html };
-            if let Err(e) = mailer::deliver(&state.db, mailer.as_ref(), email).await {
-                tracing::warn!(error = %e, "timesheet summary email not sent");
+            match mailer::deliver(&state.db, mailer.as_ref(), email).await {
+                Ok(()) => told += 1,
+                Err(e) => tracing::warn!(error = %e, "timesheet summary email not sent"),
             }
         }
     }
-    Ok(recipients.len())
+    if told == 0 {
+        sqlx::query("UPDATE timesheet_records SET summarized_at = NULL WHERE workspace_id = ?1 AND id IN (SELECT value FROM json_each(?2))")
+            .bind(ws)
+            .bind(json!(claimed).to_string())
+            .execute(&state.db)
+            .await?;
+    }
+    Ok(told)
 }

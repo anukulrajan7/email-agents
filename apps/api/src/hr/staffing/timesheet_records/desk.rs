@@ -8,7 +8,10 @@ use super::{
     rules::{self, Checked, Decision, PersonRules, RecordView, Rules, RuleIssue, Severity},
     *,
 };
-use crate::platform::audit::{self, Actor, Entry};
+use crate::{
+    hr::team::settings::Cadence,
+    platform::audit::{self, Actor, Entry},
+};
 
 /// Codes the rules own on a record. Everything else in `issues_json` was found when the sheet was read.
 const RULE_CODES: [&str; 7] = ["wrong_period", "over_max_per_day", "portal_mismatch", "missing_signature", "below_target", "outside_client_domains", "replaces_earlier"];
@@ -57,10 +60,18 @@ async fn person_rules(db: &SqlitePool, ws: &str, person_id: Option<&str>) -> sql
     Ok(row.map(|(daily_target, weekly_target)| PersonRules { daily_target, weekly_target }))
 }
 
-/// Hours the portal has for this person when the sheet covers one calendar month.
-async fn portal_hours(db: &SqlitePool, ws: &str, person_id: Option<&str>, period: (&str, &str)) -> sqlx::Result<Option<f64>> {
-    let (Some(person), true) = (person_id, period.0.get(..7).is_some() && period.0.get(..7) == period.1.get(..7)) else { return Ok(None) };
-    sqlx::query_scalar("SELECT hours FROM portal_hours WHERE workspace_id = ?1 AND person_id = ?2 AND month = ?3").bind(ws).bind(person).bind(&period.0[..7]).fetch_optional(db).await
+/// `YYYY-MM` when the period is exactly one whole calendar month: the portal counts hours by month, so only then
+/// are the two figures about the same thing.
+fn whole_month<'a>(period: (&'a str, &str)) -> Option<&'a str> {
+    let month = period.0.get(..7)?;
+    let (from, to) = clock::month_bounds(month, 0)?;
+    (clock::parse_date(period.0)? == from / clock::DAY_MS && clock::parse_date(period.1)? == to / clock::DAY_MS - 1).then_some(month)
+}
+
+/// Hours the portal has for this person, when the owner expects monthly sheets and this one covers a whole month.
+async fn portal_hours(db: &SqlitePool, ws: &str, person_id: Option<&str>, period: (&str, &str), cadence: Cadence) -> sqlx::Result<Option<f64>> {
+    let (Some(person), Some(month), Cadence::Monthly) = (person_id, whole_month(period), cadence) else { return Ok(None) };
+    sqlx::query_scalar("SELECT hours FROM portal_hours WHERE workspace_id = ?1 AND person_id = ?2 AND month = ?3").bind(ws).bind(person).bind(month).fetch_optional(db).await
 }
 
 async fn replaced_received(db: &SqlitePool, ws: &str, row: &RecordRow) -> sqlx::Result<Option<i64>> {
@@ -79,7 +90,7 @@ pub async fn review(db: &SqlitePool, ws: &str, message_id: &str) -> sqlx::Result
     let (mut all, mut checked) = (vec![], vec![]);
     for row in &rows {
         let (entries, issues) = (row.entries(), reader_issues(row));
-        let (portal, person, replaced) = (portal_hours(db, ws, row.person_id.as_deref(), (&row.period_start, &row.period_end)).await?, person_rules(db, ws, row.person_id.as_deref()).await?, replaced_received(db, ws, row).await?);
+        let (portal, person, replaced) = (portal_hours(db, ws, row.person_id.as_deref(), (&row.period_start, &row.period_end), rules.cadence).await?, person_rules(db, ws, row.person_id.as_deref()).await?, replaced_received(db, ws, row).await?);
         let domain = domain_of(row.sender_address.as_deref());
         let view = RecordView {
             period: (&row.period_start, &row.period_end),
@@ -106,10 +117,10 @@ pub async fn review(db: &SqlitePool, ws: &str, message_id: &str) -> sqlx::Result
     Ok(Review { signature_gap: rules.require_signature && !rows.is_empty(), decision: rules::decision(&checked), issues: all, rows })
 }
 
-/// Writes the rule issues onto each record and sets its status from all its issues. Returns the statuses.
-pub async fn apply(db: &SqlitePool, ws: &str, review: &Review) -> sqlx::Result<Vec<String>> {
+/// Writes the rule issues onto each record and sets its status from all its issues (the rows in `review` follow). Returns the statuses.
+pub async fn apply(db: &SqlitePool, ws: &str, review: &mut Review) -> sqlx::Result<Vec<String>> {
     let mut statuses = vec![];
-    for (row, found) in review.rows.iter().zip(&review.issues) {
+    for (row, found) in review.rows.iter_mut().zip(&review.issues) {
         let mut issues: Vec<Value> = serde_json::from_str(&row.issues_json).unwrap_or_default();
         issues.retain(|i| !i["code"].as_str().is_some_and(|c| RULE_CODES.contains(&c)));
         for i in found.iter().filter(|i| RULE_CODES.contains(&i.code)) {
@@ -125,6 +136,7 @@ pub async fn apply(db: &SqlitePool, ws: &str, review: &Review) -> sqlx::Result<V
             .bind(ws)
             .execute(db)
             .await?;
+        row.status = status.to_string();
         statuses.push(status.to_string());
     }
     Ok(statuses)
@@ -191,18 +203,23 @@ pub async fn audit_decision(conn: &mut SqliteConnection, ws: &str, message_id: &
     .await
 }
 
-/// A manager (someone above the person in the directory) or an admin approves a sheet. The person never approves their
-/// own. Approving twice keeps the first approval.
+/// A manager (someone above the person in the directory) or an admin approves a sheet. Nobody approves their own, not
+/// even an admin, and a replaced sheet cannot be approved. Approving twice keeps the first approval.
 pub async fn approve(db: &SqlitePool, ws: &str, id: &str, a: &Access, user_id: &str) -> crate::platform::error::AppResult<RecordRow> {
     use crate::{hr::team::access::Level, platform::error::AppError};
     let row = get(db, ws, id).await?.ok_or(AppError::NotFound)?;
-    let allowed = match (&row.person_id, a.level) {
-        (_, Level::SuperAdmin | Level::Admin) => true,
-        (Some(p), Level::Operator) => a.can_see(p) && a.person_id.as_deref() != Some(p.as_str()),
-        (None, Level::Operator) => false,
-    };
+    let own = row.person_id.is_some() && row.person_id == a.person_id;
+    let allowed = !own
+        && match (&row.person_id, a.level) {
+            (_, Level::SuperAdmin | Level::Admin) => true,
+            (Some(p), Level::Operator) => a.can_see(p),
+            (None, Level::Operator) => false,
+        };
     if !allowed {
-        return Err(AppError::Denied("Only this person's manager or an admin can approve a timesheet".into()));
+        return Err(AppError::Denied("Only this person's manager or an admin can approve a timesheet, and nobody approves their own".into()));
+    }
+    if row.status == "replaced" {
+        return Err(AppError::Conflict("A newer timesheet replaced this one; approve the newer one".into()));
     }
     let mut tx = db.begin_with("BEGIN IMMEDIATE").await?;
     let changed = sqlx::query("UPDATE timesheet_records SET approved_by = ?1, approved_at = ?2 WHERE id = ?3 AND workspace_id = ?4 AND approved_at IS NULL")
@@ -219,4 +236,83 @@ pub async fn approve(db: &SqlitePool, ws: &str, id: &str, a: &Access, user_id: &
     }
     tx.commit().await?;
     get(db, ws, id).await?.ok_or(AppError::NotFound)
+}
+
+/// The owner wants signed sheets and the reader cannot see a signature yet: counted once per email, however many times
+/// the desk looks at it.
+pub async fn record_signature_gap(conn: &mut SqliteConnection, ws: &str, agent_id: Option<&str>, message_id: &str) -> sqlx::Result<()> {
+    let seen: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM tool_gaps WHERE workspace_id = ?1 AND tool = 'read_signature' AND message_id = ?2)")
+        .bind(ws)
+        .bind(message_id)
+        .fetch_one(&mut *conn)
+        .await?;
+    if seen {
+        return Ok(());
+    }
+    let why = "The owner asks for signed timesheets, but a signature cannot be read from a sheet yet.";
+    crate::agents::gaps::record(conn, ws, crate::agents::gaps::NewGap { tool: "read_signature", why, agent_id, message_id: Some(message_id), source: "rule" }).await
+}
+
+/// A recent sheet whose records appeared after the desk's case had finished or never started (the files took longer than
+/// the case waited, or the case could not start): check it, tell the manager once, and ask a person when it needs a look.
+/// Does nothing when a live case will do it, or when a case already checked records of this email.
+pub async fn catch_up(state: &AppState, ws: &str, message_id: &str) -> sqlx::Result<()> {
+    let handled: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM cases WHERE workspace_id = ?1 AND message_id = ?2 AND job = ?3 AND shadow = 0 AND json_extract(state_json, '$.desk') = 1
+           AND (status IN ('running', 'waiting_event', 'waiting_approval') OR json_array_length(COALESCE(json_extract(state_json, '$.record_ids'), '[]')) > 0))",
+    )
+    .bind(ws)
+    .bind(message_id)
+    .bind(crate::agents::ownership::DESK_JOB)
+    .fetch_one(&state.db)
+    .await?;
+    if handled {
+        return Ok(());
+    }
+    let owner = crate::agents::ownership::decide(state, ws, message_id).await?;
+    let crate::agents::ownership::Owner::Assigned(jobs) = &owner else { return Ok(()) };
+    let mut review = review(&state.db, ws, message_id).await?;
+    if review.rows.is_empty() {
+        return Ok(());
+    }
+    let statuses = apply(&state.db, ws, &mut review).await?;
+    let mut conn = state.db.acquire().await?;
+    if review.signature_gap {
+        record_signature_gap(&mut conn, ws, jobs.first().map(|j| j.agent_id.as_str()), message_id).await?;
+    }
+    audit::record(
+        &mut conn,
+        Entry { workspace_id: ws, actor: Actor::System, action: "handoff.caught_up", entity_type: "message", entity_id: message_id, message_id: Some(message_id), metadata: json!({ "decision": review.decision, "records": review.record_ids() }) },
+    )
+    .await?;
+    if statuses.iter().any(|s| s != "recorded") || !review.all_matched() {
+        sqlx::query(
+            "INSERT INTO review_items (id, workspace_id, message_id, workflow_run_id, kind, title, status, created_at)
+             SELECT ?1, ?2, ?3, NULL, 'agent_task', 'Check: Timesheet', 'open', ?4
+             WHERE NOT EXISTS (SELECT 1 FROM review_items WHERE message_id = ?3 AND kind = 'agent_task' AND title = 'Check: Timesheet' AND status = 'open')",
+        )
+        .bind(new_id("rev"))
+        .bind(ws)
+        .bind(message_id)
+        .bind(now_ms())
+        .execute(&mut *conn)
+        .await?;
+    }
+    drop(conn);
+    summary::summarize(state, ws, jobs.first().map(|j| j.agent_id.as_str()), &review.rows, &review.decision).await?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_a_whole_calendar_month_is_compared_with_the_portal() {
+        assert_eq!(whole_month(("2026-09-01", "2026-09-30")), Some("2026-09"));
+        assert_eq!(whole_month(("2026-02-01", "2026-02-28")), Some("2026-02"));
+        assert_eq!(whole_month(("2026-09-01", "2026-09-07")), None, "one week of September");
+        assert_eq!(whole_month(("2026-09-02", "2026-09-30")), None);
+        assert_eq!(whole_month(("2026-08-25", "2026-09-05")), None, "a period across two months");
+    }
 }
