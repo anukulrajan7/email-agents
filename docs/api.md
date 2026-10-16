@@ -656,7 +656,7 @@ Generate draft always drafts. `reply_instructions` and `signature` reach every d
 Each draft is written by a standard or a premium tier (internal, never shown in the UI). `ai::routing::draft_quality`
 picks premium when the classification priority is `high`, the label is `client_requirement` or `candidate_referral`,
 the insight has 3 or more asks or any missing info, or the request sent `{"quality":"premium"}`; otherwise standard.
-The chosen tier is stored in the `draft.generated` audit metadata as `"tier": "standard" | "premium"`.
+The chosen tier is stored in the audit metadata as `"tier": "standard" | "premium"`: on `draft.generated` for a new draft, and on `draft.regenerated` when a draft is rewritten in place (an email has at most one unsent draft; regenerating replaces it).
 
 Config: `OPENROUTER_DRAFT_MODEL_ID` (standard tier, default `deepseek/deepseek-v4-flash`) and
 `OPENROUTER_PREMIUM_MODEL_ID` (premium tier, default = `OPENROUTER_MODEL_ID`). If only one is set, both tiers use it.

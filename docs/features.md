@@ -107,6 +107,8 @@ memory, 12 Results, evals and earned freedom, 13 Team, 14 HRMS modules, 15 Autom
 
 ## 9. Agents (your team of helpers)
 
+How your helpers work together, step by step: [How agents work](how-agents-work.md).
+
 | | |
 |---|---|
 | **What it does** | An agent is a helper with a job: which mail it handles, which tools it may use, how far it may go. **Meera, one per member** (shown as "Your Meera"), works on that person's own mailbox, tone and memory, and handles everyday mail and anything no expert owns. Each enabled pack adds **one expert per field**: Support (**Ishaan**: tickets and escalations), Sales (**Kabir**: qualifies enquiries and follows up), Finance (**Vikram**: invoices and payments), Personal (**Nisha**: scheduling). General adds nobody; Meera handles general mail. **HR and recruiting keeps its team** (Ananya leave, Rohan timesheets, Sneha onboarding, Arjun client requirements and candidates, Aditya payroll). Routing stays in code and is not a visible agent (the coordinator row exists for the runtime, is stored under the workspace agent's name, Meera, and is hidden from the hub). Each card is compact (avatar, name and role, one autonomy line) and opens "How I work": what it does, when it acts, what it does alone, what it asks you, and an example. Names are editable by admins; the old Diya, Tara and Inbox Assistant desks are merged into the experts and archived (an admin-tuned one stays active as a custom agent). |

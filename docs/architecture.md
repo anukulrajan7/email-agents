@@ -129,6 +129,8 @@ The same thing in words, with where each step lives.
 
 ## 5. Agent runtime
 
+Customer-facing explanation: [How agents work](how-agents-work.md). The design decisions behind the next version are recorded privately and land here as each part ships.
+
 **Plain version.** An agent is a named helper with a job description (what mail it handles, what tools it may use,
 how far it may go). The platform ships a set of ready-made helpers per area (support, sales, finance, personal, HR),
 and each person also gets a personal helper, Meera, for their own mailbox. Each helper has an autonomy level that it
