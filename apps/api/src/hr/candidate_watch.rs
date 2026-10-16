@@ -561,18 +561,10 @@ async fn ask_a_person(state: &AppState, ws: &str, requirement_id: &str) -> Resul
         &format!("The safety check has been down for hours, so candidates watching for {role} were not emailed. Please email them yourself."),
         200,
     );
-    let open: Option<i64> = sqlx::query_scalar("SELECT 1 FROM review_items WHERE workspace_id = ?1 AND message_id = ?2 AND kind = 'agent_task' AND title = ?3 AND status = 'open'")
-        .bind(ws)
-        .bind(&message_id)
-        .bind(&title)
-        .fetch_optional(&state.db)
-        .await?;
-    if open.is_some() {
-        return Ok(());
-    }
-    sqlx::query(
+    let asked = sqlx::query(
         "INSERT INTO review_items (id, workspace_id, message_id, workflow_run_id, kind, title, status, assigned_user_id, created_at)
-         VALUES (?1, ?2, ?3, NULL, 'agent_task', ?4, 'open', NULL, ?5)",
+         SELECT ?1, ?2, ?3, NULL, 'agent_task', ?4, 'open', NULL, ?5
+         WHERE NOT EXISTS (SELECT 1 FROM review_items WHERE workspace_id = ?2 AND message_id = ?3 AND kind = 'agent_task' AND title = ?4 AND status = 'open')",
     )
     .bind(new_id("rev"))
     .bind(ws)
@@ -580,7 +572,12 @@ async fn ask_a_person(state: &AppState, ws: &str, requirement_id: &str) -> Resul
     .bind(&title)
     .bind(now_ms())
     .execute(&state.db)
-    .await?;
+    .await?
+    .rows_affected()
+        == 1;
+    if !asked {
+        return Ok(());
+    }
     tracing::warn!(requirement_id, "candidate watch gave up waiting for the safety check; a person was asked");
     Ok(())
 }

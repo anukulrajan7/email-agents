@@ -1049,3 +1049,26 @@ async fn a_person_waiting_on_the_check_gets_the_unavailable_warning_not_a_hang()
     assert_eq!(codes(&r["warnings"]), ["ai_review_unavailable"], "{r}");
     assert!(r["blocking"].as_array().unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn a_repair_marker_only_counts_for_the_body_it_repaired_and_never_after_a_hand_off() {
+    let mut h = harness(0).await;
+    h.judge.flag_unless_noted("Zeta Corp", "It promises a hiring company Zeta Corp and a fit that are not supported");
+    flaky_judge(&mut h, &[Hit::Ok, Hit::E429]);
+    let invented = "Hello Priya,\n\nThanks for your note.\n\nZeta Corp is hiring and your profile is a fit for Zeta Corp.\n\nIf you are interested, reply and we will take it forward.\n\nBest regards,\nHR";
+    let d = h.draft(invented).await;
+    let err = replies::send_draft(&h.state, &h.ws, &d, Actor::System).await.unwrap_err();
+    assert!(matches!(err, AppError::CheckDeferred(_)), "repaired, then the re-check hit the outage: {err:?}");
+    let (body, unanswered): (String, String) = sqlx::query_as("SELECT body_text, unanswered_json FROM drafts WHERE id = ?1").bind(&d).fetch_one(&h.state.db).await.unwrap();
+    let awaiting = |body: String, unanswered: String| {
+        let (state, ws, d) = (h.state.clone(), h.ws.clone(), d.clone());
+        async move { replies::repair::awaiting_recheck(&state, &ws, &d, &body, &unanswered).await.unwrap() }
+    };
+    assert!(awaiting(body.clone(), unanswered.clone()).await, "the repaired body awaits its re-check");
+
+    let regenerated = "Hello Priya,\n\nHere is a fresh reply.\n\nBest regards,\nHR".to_string();
+    assert!(!awaiting(regenerated, "[\"details\"]".into()).await, "a regenerated body is not the repaired one");
+
+    sqlx::query("INSERT INTO handoff_marks (draft_id, created_at) VALUES (?1, ?2)").bind(&d).bind(now_ms()).execute(&h.state.db).await.unwrap();
+    assert!(!awaiting(body, unanswered).await, "a draft already handed to a person is not sent on its own");
+}

@@ -425,6 +425,14 @@ async fn a_long_outage_stops_the_hourly_retries_and_asks_a_person() {
     assert_eq!(reviews().await, 1, "a person is asked instead");
     candidate_watch::notify_job(&env.state, &json!({"workspace_id": env.ws, "requirement_id": req, "check_retries": 6})).await.unwrap();
     assert_eq!(reviews().await, 1, "asked once");
+
+    sqlx::query("UPDATE review_items SET status = 'closed' WHERE workspace_id = ?1").bind(&env.ws).execute(&env.state.db).await.unwrap();
+    let payload = json!({"workspace_id": env.ws, "requirement_id": req, "check_retries": 6});
+    let (a, b) = tokio::join!(candidate_watch::notify_job(&env.state, &payload), candidate_watch::notify_job(&env.state, &payload));
+    a.unwrap();
+    b.unwrap();
+    let open = env.count("SELECT COUNT(*) FROM review_items WHERE workspace_id = ?1 AND kind = 'agent_task' AND status = 'open' AND title LIKE '%safety check%'").await;
+    assert_eq!(open, 1, "two runs at once still ask once");
 }
 
 #[tokio::test]

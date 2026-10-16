@@ -338,7 +338,7 @@ async fn send_reply(
     if !untouched {
         return Ok(skipped(K, "a person has edited or scheduled this draft; it is not sent automatically"));
     }
-    let open_topics = !matches!(unanswered.trim(), "" | "[]") && !replies::repair::awaiting_recheck(state, workspace_id, draft_id, &unanswered).await?;
+    let open_topics = !matches!(unanswered.trim(), "" | "[]") && !replies::repair::awaiting_recheck(state, workspace_id, draft_id, &body, &unanswered).await?;
     if replies::has_open_gaps(&body) || open_topics {
         return Ok(skipped(K, "draft has unanswered questions ([NEEDS: ...])"));
     }

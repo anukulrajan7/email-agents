@@ -338,6 +338,7 @@ async fn simulate_agent(state: &AppState, ws: &str, spec: &AgentSpec, message_id
                 break;
             }
             Decision::Call { tool, args } => {
+                let tool = tools::canonical_name(&tool);
                 let Some(t) = tools::registry().get(&tool).filter(|t| allowed.iter().any(|a| a == t.name())) else {
                     ex.step(format!("Would try {tool}, which this agent may not use"), "blocked");
                     history.push(format!("{tool}: not allowed for this agent"));

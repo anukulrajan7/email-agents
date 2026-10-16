@@ -30,6 +30,10 @@ fn refund_spec() -> Value {
     serde_json::to_value(&spec).unwrap()
 }
 
+async fn env_with_planner(designer: ScriptedDesigner, planner: email_ai_api::agents::planner::ScriptedPlanner) -> Env {
+    Env::new(Opts::packs(&["general", "support"]).designer(designer).planner(planner)).await
+}
+
 async fn env_with(designer: ScriptedDesigner) -> Env {
     Env::new(Opts::packs(&["general", "support"]).designer(designer)).await
 }
@@ -477,4 +481,23 @@ async fn unreadable_answers_try_the_fallback_then_fail_cleanly_and_can_be_retrie
 
     let s = env.ok("POST", &format!("/designer/sessions/{id}/messages"), ADMIN, Some(json!({"text": PLAIN_REQUESTS[0]}))).await;
     assert_eq!(s["status"], "ready", "{s}");
+}
+
+#[tokio::test]
+async fn the_preview_resolves_tool_names_the_way_the_runtime_does() {
+    use email_ai_api::agents::planner::{ScriptedPlanner, call, finish};
+    let mut spec = refund_spec();
+    spec["mode"] = json!("agent");
+    spec["steps"] = json!([]);
+    let planner = ScriptedPlanner::new().script("dry_run", vec![call("Draft-Email", json!({"message_id": "x", "instructions": "reply"})), finish(None, "Done.")]);
+    let env = env_with_planner(ScriptedDesigner::new().reply(spec), planner).await;
+    env.receive(&env.shared_src, "g1", "t1", CLIENT, "Refund for my order", "Please refund order #4411, it arrived broken.", "billing").await;
+    let s = open(&env, json!({"goal": "refunds"})).await;
+    assert_eq!(s["issues"], json!([]), "{s}");
+    let id = s["id"].as_str().unwrap().to_string();
+    dry_run_and_wait(&env, &id).await;
+    let dry = &env.ok("GET", &format!("/designer/sessions/{id}"), ADMIN, None).await["dry_run"];
+    let steps = dry["examples"].to_string();
+    assert!(steps.contains("Would use draft email"), "an alias of a tool the agent has is previewed as that tool: {steps}");
+    assert!(!steps.contains("may not use"), "{steps}");
 }

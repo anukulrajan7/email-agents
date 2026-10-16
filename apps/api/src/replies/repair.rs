@@ -143,7 +143,7 @@ pub async fn apply(state: &AppState, ws: &str, ctx: &ReplyContext, report: &Safe
                 entity_type: "draft",
                 entity_id: &ctx.draft_id,
                 message_id: Some(&ctx.message_id),
-                metadata: serde_json::json!({ "code": "unsupported_promise" }),
+                metadata: serde_json::json!({ "code": "unsupported_promise", "body_sha": body_sha(&body) }),
             },
         )
         .await?;
@@ -164,16 +164,29 @@ pub async fn apply(state: &AppState, ws: &str, ctx: &ReplyContext, report: &Safe
 
 /// True for a draft whose only open topic is the "details" the automatic repair added: it was repaired
 /// but not sent (the check could not run again), so the retry sends it once the check answers.
-pub async fn awaiting_recheck(state: &AppState, ws: &str, draft_id: &str, unanswered_json: &str) -> sqlx::Result<bool> {
+/// The repair is remembered by the hash of the body it wrote: a regenerated or edited body, or a draft
+/// already handed to a person, is not "awaiting" anything.
+pub async fn awaiting_recheck(state: &AppState, ws: &str, draft_id: &str, body: &str, unanswered_json: &str) -> sqlx::Result<bool> {
     if crate::replies::gap_resolver::parse_unanswered(unanswered_json) != ["details"] {
         return Ok(false);
     }
-    let repaired: Option<i64> = sqlx::query_scalar("SELECT 1 FROM audit_events WHERE workspace_id = ?1 AND action = 'draft.auto_repaired' AND entity_id = ?2 LIMIT 1")
-        .bind(ws)
-        .bind(draft_id)
-        .fetch_optional(&state.db)
-        .await?;
+    let repaired: Option<i64> = sqlx::query_scalar(
+        "SELECT 1 FROM audit_events WHERE workspace_id = ?1 AND action = 'draft.auto_repaired' AND entity_id = ?2
+           AND json_extract(metadata_json, '$.body_sha') = ?3
+           AND NOT EXISTS (SELECT 1 FROM handoff_marks WHERE draft_id = ?2)
+         LIMIT 1",
+    )
+    .bind(ws)
+    .bind(draft_id)
+    .bind(body_sha(body))
+    .fetch_optional(&state.db)
+    .await?;
     Ok(repaired.is_some())
+}
+
+fn body_sha(body: &str) -> String {
+    use sha2::{Digest, Sha256};
+    format!("{:x}", Sha256::digest(body.as_bytes()))
 }
 
 /// One open review task for an automatic send that could not be repaired. Idempotent per draft.

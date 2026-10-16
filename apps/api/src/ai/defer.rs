@@ -34,9 +34,6 @@ const BACKOFF_STEPS: [u64; RETRIES as usize] = [1, 3];
 const DEFER_MINUTES: [i64; 3] = [5, 10, 20];
 /// All in-call rungs together stop here; the job's lease heartbeat keeps a long turn from being claimed twice.
 const DEADLINE: Duration = Duration::from_secs(90);
-/// One call may take this long under the ladder, so the usual model's two retries and the fallback
-/// (4 x 20 s, plus 4 s of pauses) all fit inside `DEADLINE`.
-const ATTEMPT_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// What to do after attempt number `attempt` (counted from 0 across the whole ladder) failed with a
 /// retryable error. `base_ms` is the first pause (the second is 3x); 0 means no pauses.
@@ -78,7 +75,7 @@ impl Ladder {
             fallback_model: config.openrouter_safety_fallback_model_id.clone(),
             backoff_ms: config.ai_retry_backoff_ms,
             deadline: DEADLINE,
-            attempt_timeout: ATTEMPT_TIMEOUT,
+            attempt_timeout: Duration::from_secs(config.ai_attempt_timeout_secs),
         }
     }
 
@@ -282,6 +279,9 @@ mod tests {
     fn the_ladder_fits_its_deadline_and_a_person_waits_less() {
         let config = Config::for_tests("sqlite://unused");
         let automated = Ladder::from_config(&config);
+        assert_eq!(automated.attempt_timeout, Duration::from_secs(20), "the default");
+        let tuned = Config { ai_attempt_timeout_secs: 7, ..config.clone() };
+        assert_eq!(Ladder::from_config(&tuned).attempt_timeout, Duration::from_secs(7));
         let worst_case = automated.attempt_timeout * (RETRIES + 2) + Duration::from_secs(4);
         assert!(worst_case <= automated.deadline, "{worst_case:?} must fit {:?}", automated.deadline);
         let person = Ladder::for_person(&config);

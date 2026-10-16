@@ -4,7 +4,7 @@ use serde_json::json;
 use tokio::sync::{Semaphore, watch};
 use tracing::Instrument;
 
-use super::{Job, handlers, kind};
+use super::{Job, handlers::{self, JobError}, kind};
 use crate::{platform::db::now_ms, http::AppState, jobs};
 
 const IDLE_POLL: Duration = Duration::from_millis(1_000);
@@ -71,7 +71,13 @@ async fn process_inner(state: &AppState, worker_id: &str, job: Job) {
     let started = std::time::Instant::now();
     let ctx = crate::ai::ledger::AiContext::for_job(job.workspace_id.as_deref(), &job.payload(), job.attempts);
     let heartbeat = Heartbeat::start(state, worker_id, &job);
-    let outcome = crate::ai::ledger::with_context(ctx, handlers::handle(state, &job)).await;
+    let max_runtime = Duration::from_secs(state.config.job_max_runtime_secs);
+    let run = async {
+        tokio::time::timeout(max_runtime, handlers::handle(state, &job))
+            .await
+            .unwrap_or_else(|_| Err(JobError::Retry(format!("the job ran longer than its {} s time limit", max_runtime.as_secs()))))
+    };
+    let outcome = crate::ai::ledger::with_context(ctx, run).await;
     drop(heartbeat);
     match outcome {
         Ok(()) => {

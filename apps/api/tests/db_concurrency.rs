@@ -158,3 +158,39 @@ async fn a_1s_lease_with_a_3s_handler_runs_once() {
     let running: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM jobs WHERE status = 'running'").fetch_one(&state.db).await.unwrap();
     assert_eq!(running, 0);
 }
+
+struct HangingAnalyst;
+
+#[async_trait]
+impl Analyst for HangingAnalyst {
+    async fn analyze(&self, _: &str, _: &str, _: &str) -> Result<(Insight, String), AiError> {
+        tokio::time::sleep(std::time::Duration::from_secs(3_600)).await;
+        Err(AiError::Retryable("never".into()))
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_handler_that_never_returns_is_released_and_retried_after_the_max_runtime() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = Config::for_tests(&format!("sqlite://{}", dir.path().join("t.db").display()));
+    config.job_lease_ms = 1_000;
+    config.job_max_runtime_secs = 1;
+    let mut state = build_state(config).await.unwrap();
+    db::migrate(&state.db).await.unwrap();
+    state.analyst = Arc::new(HangingAnalyst);
+    let app = router(state.clone());
+    let (_, ws) = call(&app, "POST", "/api/v1/workspaces", Some(json!({"name":"Acme","template":"hr"}))).await;
+    let base = format!("/api/v1/workspaces/{}", ws["id"].as_str().unwrap());
+    let (_, src) = call(&app, "POST", &format!("{base}/sources/forwarding"), None).await;
+    let source = src["id"].as_str().unwrap();
+    let (s, _) = call(&app, "POST", &format!("{base}/sources/{source}/test-email"), Some(json!({"subject": "Stuck", "body_text": "Please confirm my timesheet."}))).await;
+    assert!(s.is_success());
+
+    tokio::time::timeout(std::time::Duration::from_secs(20), worker::drain(&state)).await.expect("the worker was not held by the hung job");
+    let (status, error): (String, Option<String>) =
+        sqlx::query_as("SELECT status, last_error FROM jobs WHERE last_error LIKE '%time limit%' LIMIT 1").fetch_one(&state.db).await.expect("the hung job was failed for a retry");
+    assert_eq!(status, "pending");
+    assert!(error.unwrap().contains("1 s time limit"));
+    let running: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM jobs WHERE status = 'running'").fetch_one(&state.db).await.unwrap();
+    assert_eq!(running, 0);
+}

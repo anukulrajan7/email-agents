@@ -264,8 +264,11 @@ pub fn validate(spec: &AgentSpec, ctx: &WsCtx) -> Vec<Issue> {
         if let Some(missing) = step.required_tools().iter().find(|t| !spec.has_tool(t)) {
             out.push(issue(&path, "step_needs_tool", format!("the step \"{}\" needs the {missing} tool in the tool list", step.describe())));
         } else if let Some(t) = step.required_tools().iter().find(|t| !spec.covers(t)) {
-            let scope = spec::scope_of_tool(t).map_or("right", spec::Scope::as_str);
-            out.push(issue(&path, "step_outside_scopes", format!("the step \"{}\" needs the {scope} scope", step.describe())));
+            let message = match spec::scope_of_tool(t) {
+                Some(scope) => format!("the step \"{}\" needs the {} scope", step.describe(), scope.as_str()),
+                None => format!("the step \"{}\" uses {t}, which is not a tool agents can use", step.describe()),
+            };
+            out.push(issue(&path, "step_outside_scopes", message));
         }
         match step {
             Step::DraftReply { .. } => {
