@@ -45,7 +45,8 @@ impl Tool for DraftEmail {
             None if ctx.case.shadow => None,
             None => sqlx::query_as(
                 "SELECT id, body_text FROM drafts
-                 WHERE message_id = ?1 AND workspace_id = ?2 AND status = 'suggested' AND origin_key IS NOT NULL AND send_at IS NULL
+                 WHERE message_id = ?1 AND workspace_id = ?2 AND status = 'suggested' AND origin_key IS NOT NULL
+                   AND substr(origin_key, 1, 6) != 'watch:' AND send_at IS NULL
                  ORDER BY created_at DESC, id DESC LIMIT 1",
             )
             .bind(&msg.id)
@@ -86,6 +87,10 @@ impl Tool for DraftEmail {
                         state: Some(json!({"last_draft_id": stand_in})),
                         ..Default::default()
                     });
+                }
+                let person_is_working = crate::replies::live_draft::live(&mut *ctx.state.db.acquire().await?, &msg.id).await?.is_some_and(|d| d.person_is_working());
+                if person_is_working {
+                    return failed("A person is already working on a reply.");
                 }
                 let origin = match instructions {
                     Some(text) => format!("agent:{}:{}:{}", ctx.case.id, msg.id, instruction_key(text)),

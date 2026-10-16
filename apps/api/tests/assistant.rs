@@ -328,6 +328,7 @@ async fn an_action_prepares_a_card_and_only_runs_after_confirm() {
     let manual_jobs = "SELECT COUNT(*) FROM jobs WHERE kind = 'generate_draft' AND dedupe_key LIKE ?1";
     assert_eq!(env.scalar(manual_jobs, "%:manual:%").await, 0, "nothing may run before the confirmation");
     let drafts_before = env.scalar("SELECT COUNT(*) FROM drafts WHERE message_id = ?1", &id).await;
+    assert_eq!(drafts_before, 1, "the automatic draft is already there");
     assert!(env.planner.prompts()[1].contains("nothing has been done yet"));
 
     let (status, done) = env.confirm(OPERATOR, &plan_id).await;
@@ -342,7 +343,8 @@ async fn an_action_prepares_a_card_and_only_runs_after_confirm() {
     assert_eq!((payload["message_id"].clone(), payload["instructions"].clone()), (json!(id), json!("Say we will send it on Friday")));
     assert_eq!(payload["owner_said"], "draft a reply to Priya saying Friday", "the person's own turn travels with the request");
     worker::drain(&env.state).await;
-    assert_eq!(env.scalar("SELECT COUNT(*) FROM drafts WHERE message_id = ?1", &id).await, drafts_before + 1);
+    assert_eq!(env.scalar("SELECT COUNT(*) FROM drafts WHERE message_id = ?1", &id).await, drafts_before, "the email keeps one live draft: the confirmed request rewrites it");
+    assert_eq!(env.scalar("SELECT COUNT(*) FROM audit_events WHERE action = 'draft.regenerated' AND message_id = ?1", &id).await, 1);
     let said: String = sqlx::query_scalar("SELECT group_concat(w.text, ' | ') FROM draft_owner_words w JOIN drafts d ON d.id = w.draft_id WHERE d.message_id = ?1").bind(&id).fetch_one(&env.state.db).await.unwrap();
     assert!(said.contains("draft a reply to Priya saying Friday") && said.contains("Say we will send it on Friday"), "{said}");
 

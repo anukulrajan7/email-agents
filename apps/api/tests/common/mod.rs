@@ -58,7 +58,7 @@ impl Drafter for BodyDrafter {
 }
 
 pub async fn spawn_gmail(calls: Calls) -> String {
-    let (c1, c2, c3, c4) = (calls.clone(), calls.clone(), calls.clone(), calls);
+    let (c1, c2, c3, c4, c5) = (calls.clone(), calls.clone(), calls.clone(), calls.clone(), calls);
     let threads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let app = Router::new()
         .route("/proxy/gmail/v1/users/me/profile", get(|| async { Json(json!({"emailAddress": "priya@acme.com"})) }))
@@ -69,6 +69,9 @@ pub async fn spawn_gmail(calls: Calls) -> String {
         .route("/proxy/gmail/v1/users/me/drafts/{id}", put(move |Path(id): Path<String>, Json(b): Json<Value>| async move {
             c2.lock().unwrap().push((format!("update_draft:{id}"), b));
             Json(json!({"id": id}))
+        }).delete(move |Path(id): Path<String>| async move {
+            c5.lock().unwrap().push((format!("delete_draft:{id}"), Value::Null));
+            Json(json!({}))
         }))
         .route("/proxy/gmail/v1/users/me/drafts/send", post(move |Json(b): Json<Value>| async move {
             c3.lock().unwrap().push(("send_draft".into(), b));
@@ -345,6 +348,18 @@ impl Env {
             .fetch_all(&self.state.db)
             .await
             .unwrap()
+    }
+
+    /// The message's live drafts: unsent reply drafts (watch follow-ups are outside the rule), as (id, status, body).
+    pub async fn live_drafts(&self, message_id: &str) -> Vec<(String, String, String)> {
+        sqlx::query_as(
+            "SELECT id, status, body_text FROM drafts WHERE message_id = ?1 AND status != 'sent'
+               AND (origin_key IS NULL OR substr(origin_key, 1, 6) != 'watch:') ORDER BY created_at, id",
+        )
+        .bind(message_id)
+        .fetch_all(&self.state.db)
+        .await
+        .unwrap()
     }
 
     pub async fn set_pref(&self, sql: &str, binds: &[&str]) {

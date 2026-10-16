@@ -245,8 +245,14 @@ async fn requirement_case_runs_to_an_interview() {
     worker::drain(&env.state).await;
     let sends = env.sends();
     assert_eq!(sends.len(), 1);
-    assert_eq!(sends[0]["threadId"], "t-req", "reply stays in the client's thread");
-    let raw = String::from_utf8(URL_SAFE_NO_PAD.decode(sends[0]["raw"].as_str().unwrap()).unwrap()).unwrap();
+    // The one live draft of the email is rewritten in place, so it may already sit in the mailbox's Drafts: then the
+    // message travels in the draft's last update and the send call only names the Gmail draft.
+    let sent = match sends[0].get("raw") {
+        Some(_) => sends[0].clone(),
+        None => env.calls.lock().unwrap().iter().rev().find(|(k, _)| k.starts_with("update_draft:")).map(|(_, b)| b["message"].clone()).expect("the draft update that carried the message"),
+    };
+    assert_eq!(sent["threadId"], "t-req", "reply stays in the client's thread");
+    let raw = String::from_utf8(URL_SAFE_NO_PAD.decode(sent["raw"].as_str().unwrap()).unwrap()).unwrap();
     assert!(raw.contains("To: hr@capgemini.com") && raw.contains("Rahul Verma, a strong match"), "{raw}");
     let matches = env.get(&format!("/matching/matches?requirement_id={}", case["requirement_id"].as_str().unwrap())).await;
     assert_eq!(matches["items"][0]["status"], "shortlisted");

@@ -98,7 +98,7 @@ impl Env {
     async fn tiers(&self, message_id: &str) -> Vec<String> {
         let rows: Vec<String> = sqlx::query_scalar(
             "SELECT json_extract(metadata_json, '$.tier') FROM audit_events
-             WHERE action = 'draft.generated' AND message_id = ?1 ORDER BY rowid",
+             WHERE action IN ('draft.generated', 'draft.regenerated') AND message_id = ?1 ORDER BY rowid",
         )
         .bind(message_id)
         .fetch_all(&self.state.db)

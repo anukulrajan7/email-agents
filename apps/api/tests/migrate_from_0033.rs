@@ -60,3 +60,64 @@ async fn a_database_at_0033_migrates_and_backfills() {
     registry::seed::backfill_all(&pool).await.unwrap();
     assert_eq!(count(&pool, "SELECT COUNT(*) FROM agents WHERE scope = 'personal'").await, 3, "the backfill is idempotent");
 }
+
+/// Production has messages with up to four unsent drafts. The one-live-draft migration keeps the right one per message
+/// (a scheduled or sending send first, then a person's edited or approved draft, then the newest), never touches sent
+/// drafts or candidate-watch follow-ups, and then the unique index holds.
+#[tokio::test]
+async fn the_one_live_draft_migration_keeps_the_right_draft_per_message() {
+    let dir = tempfile::tempdir().unwrap();
+    let pool = db::connect(&format!("sqlite://{}", dir.path().join("old.db").display())).await.unwrap();
+    migrator_up_to(57).await.run(&pool).await.unwrap();
+
+    exec(&pool, "INSERT INTO users (id, external_auth_subject, email, created_at) VALUES ('u1','s1','admin@acme.test',1)").await;
+    exec(&pool, "INSERT INTO workspaces (id, name, created_at) VALUES ('w1','Acme',1)").await;
+    exec(&pool, "INSERT INTO email_sources (id, workspace_id, kind, status, inbound_alias, created_at, connected_by_user_id) VALUES ('s1','w1','forwarding','connected','a1',1,'u1')").await;
+    exec(&pool, "INSERT INTO email_threads (id, workspace_id, source_id, subject, updated_at) VALUES ('t1','w1','s1','Hours',1)").await;
+    for m in 1..=7 {
+        exec(&pool, &format!("INSERT INTO email_messages (id, workspace_id, source_id, thread_id, source_message_id, sender_address, subject, body_text, received_at, created_at) VALUES ('m{m}','w1','s1','t1','g{m}','ravi@client.com','Hours','Hi',1,1)")).await;
+    }
+    // (id, message, status, origin_key, send_at, send_attempt_id, created_at)
+    let drafts: [(&str, &str, &str, &str, &str, &str, i64); 19] = [
+        ("a1", "m1", "suggested", "NULL", "NULL", "NULL", 1),
+        ("a2", "m1", "suggested", "NULL", "NULL", "NULL", 3),
+        ("a3", "m1", "edited", "NULL", "NULL", "NULL", 2),
+        ("b1", "m2", "approved", "NULL", "NULL", "NULL", 2),
+        ("b2", "m2", "suggested", "NULL", "NULL", "NULL", 5),
+        ("b3", "m2", "approved", "NULL", "99999999999999", "NULL", 1),
+        ("c1", "m3", "sent", "NULL", "NULL", "NULL", 1),
+        ("c2", "m3", "suggested", "NULL", "NULL", "NULL", 2),
+        ("c3", "m3", "suggested", "NULL", "NULL", "NULL", 3),
+        ("d1", "m4", "suggested", "'watch:w1:r1'", "NULL", "NULL", 1),
+        ("d2", "m4", "suggested", "'watch:w1:r2'", "NULL", "NULL", 1),
+        ("d3", "m4", "suggested", "'draft:m4:auto'", "NULL", "NULL", 1),
+        ("d4", "m4", "suggested", "'agent:c1:1'", "NULL", "NULL", 2),
+        ("e1", "m5", "edited", "NULL", "NULL", "NULL", 1),
+        ("e2", "m5", "approved", "NULL", "NULL", "NULL", 2),
+        ("e3", "m5", "suggested", "NULL", "NULL", "NULL", 3),
+        ("f1", "m6", "approved", "NULL", "NULL", "'attempt-1'", 1),
+        ("f2", "m6", "suggested", "NULL", "NULL", "NULL", 9),
+        ("g1", "m7", "suggested", "NULL", "NULL", "NULL", 1),
+    ];
+    for (id, msg, status, origin, send_at, attempt, at) in drafts {
+        exec(&pool, &format!("INSERT INTO drafts (id, workspace_id, message_id, body_text, status, origin_key, send_at, send_attempt_id, created_at, updated_at) VALUES ('{id}','w1','{msg}','body','{status}',{origin},{send_at},{attempt},{at},{at})")).await;
+    }
+    exec(&pool, "INSERT INTO draft_owner_words (workspace_id, draft_id, user_id, text, created_at) VALUES ('w1','a2','u1','Say Friday',1)").await;
+
+    db::migrate(&pool).await.unwrap();
+
+    let kept: Vec<String> = sqlx::query_scalar("SELECT id FROM drafts ORDER BY id").fetch_all(&pool).await.unwrap();
+    assert_eq!(
+        kept,
+        ["a3", "b3", "c1", "c3", "d1", "d2", "d4", "e2", "f1", "g1"],
+        "edited beats a newer suggestion; a scheduled send beats everything; sent and watch drafts stay; the newest wins a tie of equals"
+    );
+    assert_eq!(count(&pool, "SELECT COUNT(*) FROM draft_owner_words").await, 0, "a removed draft takes its owner words with it");
+
+    let live_per_message = "SELECT COALESCE(MAX(n), 0) FROM (SELECT COUNT(*) AS n FROM drafts WHERE status != 'sent' AND (origin_key IS NULL OR substr(origin_key,1,6) != 'watch:') GROUP BY message_id)";
+    assert_eq!(count(&pool, live_per_message).await, 1);
+    let second_live = sqlx::query("INSERT INTO drafts (id, workspace_id, message_id, body_text, status, created_at, updated_at) VALUES ('x1','w1','m1','again','suggested',9,9)").execute(&pool).await;
+    assert!(second_live.is_err(), "the unique index refuses a second live draft");
+    exec(&pool, "INSERT INTO drafts (id, workspace_id, message_id, body_text, status, origin_key, created_at, updated_at) VALUES ('x2','w1','m1','follow up','suggested','watch:w1:r9',9,9)").await;
+    exec(&pool, "INSERT INTO drafts (id, workspace_id, message_id, body_text, status, created_at, updated_at) VALUES ('x3','w1','m3','sent already','sent',9,9)").await;
+}

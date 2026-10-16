@@ -171,7 +171,29 @@ impl H {
         (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
     }
 
+    /// A message holds one live draft, but these tests need several side by side: earlier unsent drafts (the pipeline's
+    /// own included) move to copies of the email in the same thread, so the newest one always sits on `self.msg`.
     async fn draft(&self, body: &str) -> String {
+        let earlier: Vec<String> = sqlx::query_scalar(
+            "SELECT id FROM drafts WHERE message_id = ?1 AND status != 'sent' AND (origin_key IS NULL OR substr(origin_key, 1, 6) != 'watch:')",
+        )
+        .bind(&self.msg)
+        .fetch_all(&self.state.db)
+        .await
+        .unwrap();
+        for old in earlier {
+            let copy = format!("msg_{}", uuid_like());
+            sqlx::query(
+                "INSERT INTO email_messages (id, workspace_id, source_id, thread_id, source_message_id, rfc_message_id, sender_address, subject, body_text, received_at, created_at)
+                 SELECT ?2, workspace_id, source_id, thread_id, ?2, rfc_message_id, sender_address, subject, body_text, received_at, created_at FROM email_messages WHERE id = ?1",
+            )
+            .bind(&self.msg)
+            .bind(&copy)
+            .execute(&self.state.db)
+            .await
+            .unwrap();
+            sqlx::query("UPDATE drafts SET message_id = ?1 WHERE id = ?2").bind(&copy).bind(&old).execute(&self.state.db).await.unwrap();
+        }
         let id = format!("drf_{}", uuid_like());
         sqlx::query(
             "INSERT INTO drafts (id, workspace_id, message_id, body_text, status, created_at, updated_at)
@@ -818,6 +840,7 @@ async fn a_second_draft_of_the_same_request_keeps_the_provenance() {
     let me = admin_id(&h).await;
     let first = h.draft(UK).await;
     owner_said(&h, &first, "tell Priya a UK company is hiring", &me).await;
+    sqlx::query("UPDATE drafts SET status = 'sent' WHERE id = ?1").bind(&first).execute(&h.state.db).await.unwrap();
     let second = h.draft(UK).await;
     let mut conn = h.state.db.acquire().await.unwrap();
     email_ai_api::replies::owner_said::record(&mut conn, &h.ws, &second, &h.msg, None, None).await.unwrap();
