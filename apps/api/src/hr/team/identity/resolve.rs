@@ -27,13 +27,36 @@ use crate::{
     },
 };
 
-/// Where a sheet came from, as a grouping hint: the domain when it is a company's own (the roster's, or a client's the owner
-/// named), else the whole address. A domain many unrelated people share (gmail, an agency) says nothing about who.
+/// Providers that give mail addresses to anyone: the second-level name before the country part ("yahoo" in yahoo.co.in).
+const FREE_MAIL_NAMES: [&str; 25] = [
+    "gmail", "googlemail", "yahoo", "ymail", "outlook", "hotmail", "live", "msn", "icloud", "me", "mac", "proton", "protonmail", "pm", "aol", "zoho", "zohomail", "gmx", "mail", "rediffmail", "yandex",
+    "fastmail", "tutanota", "hey", "inbox",
+];
+
+/// Is this a domain anyone can get an address on? Such a domain says nothing about who a sender is, so it is never a company's
+/// own, whoever on the roster uses it.
+pub fn is_free_mail(domain: &str) -> bool {
+    let labels: Vec<&str> = domain.trim().trim_end_matches('.').split('.').collect();
+    let n = labels.len();
+    if n < 2 {
+        return false;
+    }
+    let second_level = if n >= 3 && matches!(labels[n - 2], "co" | "com" | "org" | "net" | "ac" | "gov" | "edu") { labels[n - 3] } else { labels[n - 2] };
+    FREE_MAIL_NAMES.iter().any(|f| f.eq_ignore_ascii_case(second_level))
+}
+
+/// Is `domain` a company's own: on the list of company domains (the roster's and the owner's client domains) and not a free-mail
+/// one? The one rule for grouping sheets and for deciding who gets a receipt.
+pub fn is_company_domain(domain: &str, company_domains: &[String]) -> bool {
+    !domain.is_empty() && !is_free_mail(domain) && company_domains.iter().any(|d| d.eq_ignore_ascii_case(domain))
+}
+
+/// Where a sheet came from, as a grouping hint: the domain when it is a company's own, else the whole address. A domain many
+/// unrelated people share (gmail, an agency) says nothing about who.
 pub fn sender_hint(sender: &str, company_domains: &[String]) -> (String, String) {
     let address = sender.trim().trim_matches(['<', '>']).to_lowercase();
     let domain = address.rsplit_once('@').map(|(_, d)| d.to_string()).unwrap_or_default();
-    let known = !domain.is_empty() && company_domains.iter().any(|d| d.eq_ignore_ascii_case(&domain));
-    let hint = if known { domain.clone() } else { address.clone() };
+    let hint = if is_company_domain(&domain, company_domains) { domain.clone() } else { address.clone() };
     (domain, hint)
 }
 
@@ -54,7 +77,7 @@ pub struct Suggestion {
     pub person_id: String,
     pub name: String,
     pub reason: String,
-    /// Only a first or last name in common: worth a second look before linking several sheets.
+    /// Only part of a name in common (a first or last name, or one name inside the other): worth a second look before linking.
     #[serde(default)]
     pub weak: bool,
 }
@@ -117,7 +140,7 @@ pub fn suggest(written: Option<&str>, roster: &[Candidate]) -> Vec<Suggestion> {
         .iter()
         .filter_map(|p| {
             let (strength, reason) = why(&written, &words(&p.name))?;
-            Some((strength, Suggestion { person_id: p.id.clone(), name: p.name.clone(), reason, weak: strength < 6 }))
+            Some((strength, Suggestion { person_id: p.id.clone(), name: p.name.clone(), reason, weak: strength < 8 }))
         })
         .collect();
     found.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.name.to_lowercase().cmp(&b.1.name.to_lowercase())));
@@ -125,6 +148,9 @@ pub fn suggest(written: Option<&str>, roster: &[Candidate]) -> Vec<Suggestion> {
 }
 
 // ---------------------------------------------------------------- the admin's actions
+
+/// The note of a parked request dropped because its person was set aside; undoing that brings it back.
+const SET_ASIDE_NOTE: &str = "the person was set aside";
 
 /// What a link or an add did.
 #[derive(Debug, Clone)]
@@ -290,6 +316,20 @@ async fn set_group(state: &AppState, ws: &str, actor: Actor<'_>, identity_id: &s
     let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     open_group(&mut tx, ws, identity_id).await?;
     sqlx::query("UPDATE unresolved_identities SET status = ?1, updated_at = ?2 WHERE id = ?3 AND workspace_id = ?4").bind(status).bind(now_ms()).bind(identity_id).bind(ws).execute(&mut *tx).await?;
+    // Nobody is waiting for this person any more: what was parked for them is dropped, unless another sheet of the same email
+    // still waits for someone (then the acknowledgement stays parked for that one).
+    sqlx::query(
+        "UPDATE message_requests SET status = 'dropped', status_note = ?3, updated_at = ?4
+         WHERE workspace_id = ?1 AND status = 'waiting' AND message_id IN (SELECT message_id FROM timesheet_records WHERE workspace_id = ?1 AND identity_id = ?2 AND message_id IS NOT NULL)
+           AND NOT EXISTS (SELECT 1 FROM timesheet_records t WHERE t.workspace_id = ?1 AND t.message_id = message_requests.message_id AND t.person_id IS NULL AND t.status != 'replaced'
+                             AND COALESCE((SELECT g.status FROM unresolved_identities g WHERE g.id = t.identity_id), 'open') NOT IN ('external', 'dismissed'))",
+    )
+    .bind(ws)
+    .bind(identity_id)
+    .bind(SET_ASIDE_NOTE)
+    .bind(now_ms())
+    .execute(&mut *tx)
+    .await?;
     let change = changes::record(
         &mut tx,
         NewChange { ws, kind, person_id: None, identity_id: Some(identity_id), record_ids: &[], before: json!({"status": "open"}), after: json!({"status": status}), actor, evidence: json!({}) },
@@ -361,9 +401,33 @@ pub async fn undo(state: &AppState, ws: &str, actor: Actor<'_>, change_id: &str)
             )
             .await?
         }
+        "unlink" => {
+            let person_id = change.before()["relink"]["person_id"].as_str().map(str::to_string).ok_or(IdentityError::NotFound)?;
+            let ids = change.record_ids();
+            let Some(record_id) = ids.first() else { return Err(IdentityError::NotFound) };
+            if !records::relink_sheet(&mut tx, ws, record_id, &person_id).await? {
+                return Err(IdentityError::Conflict("That sheet or that person is no longer available to link again.".into()));
+            }
+            settle_groups(&mut tx, ws, &person_id, &ids).await?;
+            changes::record(
+                &mut tx,
+                NewChange { ws, kind: "link", person_id: Some(&person_id), identity_id: change.identity_id.as_deref(), record_ids: &ids, before: json!({"undoes": change.id}), after: json!({}), actor, evidence: json!({}) },
+            )
+            .await?
+        }
         _ => {
             let identity_id = change.identity_id.clone().ok_or(IdentityError::NotFound)?;
             sqlx::query("UPDATE unresolved_identities SET status = 'open', updated_at = ?1 WHERE id = ?2 AND workspace_id = ?3 AND status IN ('external', 'dismissed')").bind(now_ms()).bind(&identity_id).bind(ws).execute(&mut *tx).await?;
+            sqlx::query(
+                "UPDATE message_requests SET status = 'waiting', status_note = 'waiting for the person to be linked', updated_at = ?4
+                 WHERE workspace_id = ?1 AND status = 'dropped' AND status_note = ?3 AND message_id IN (SELECT message_id FROM timesheet_records WHERE workspace_id = ?1 AND identity_id = ?2 AND message_id IS NOT NULL)",
+            )
+            .bind(ws)
+            .bind(&identity_id)
+            .bind(SET_ASIDE_NOTE)
+            .bind(now_ms())
+            .execute(&mut *tx)
+            .await?;
             changes::record(
                 &mut tx,
                 NewChange { ws, kind: "reopen", person_id: None, identity_id: Some(&identity_id), record_ids: &[], before: json!({"undoes": change.id}), after: json!({"status": "open"}), actor, evidence: json!({}) },
@@ -375,6 +439,59 @@ pub async fn undo(state: &AppState, ws: &str, actor: Actor<'_>, change_id: &str)
     audit_change(&mut tx, ws, actor, "identity.undone", &undone, json!({"undoes": change.id, "kind": change.kind})).await?;
     tx.commit().await?;
     Ok(undone)
+}
+
+/// The owner says a sheet is not that person's: it goes back to "who is this" and `needs_check`, under its card (or a new one when
+/// the feature is on). Logged, and undoable while the sheet is still unmatched.
+pub async fn unlink_record(state: &AppState, ws: &str, actor: Actor<'_>, record_id: &str) -> Result<String, IdentityError> {
+    let acts = crate::platform::flags::mode(&state.db, &state.config, ws, crate::platform::flags::Key::Handoff).await?.acts();
+    let roster = unresolved::roster(&state.db, ws).await?;
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
+    let Some((snapshot, identity_id)) = records::unlink_sheet(&mut tx, ws, record_id).await? else {
+        return Err(IdentityError::Conflict("This sheet is not linked to anyone.".into()));
+    };
+    let mut card = identity_id;
+    if card.is_none() && acts {
+        let (identity_json, sender): (String, Option<String>) = sqlx::query_as("SELECT identity_json, sender_address FROM timesheet_records WHERE id = ?1 AND workspace_id = ?2").bind(record_id).bind(ws).fetch_one(&mut *tx).await?;
+        let identity: crate::hr::staffing::timesheet_parse::Identity = serde_json::from_str(&identity_json).unwrap_or_default();
+        let company = unresolved::company_domains(&mut tx, ws).await?;
+        card = unresolved::attach(&mut tx, ws, &identity, sender.as_deref().unwrap_or_default(), &roster, &company).await?;
+        sqlx::query("UPDATE timesheet_records SET identity_id = ?1 WHERE id = ?2 AND workspace_id = ?3").bind(&card).bind(record_id).bind(ws).execute(&mut *tx).await?;
+    }
+    if let Some(g) = &card {
+        unresolved::recount(&mut tx, ws, g).await?;
+        sqlx::query("UPDATE unresolved_identities SET status = 'open', person_id = NULL WHERE id = ?1 AND workspace_id = ?2 AND status = 'linked'").bind(g).bind(ws).execute(&mut *tx).await?;
+    }
+    let person_id = snapshot["person_id"].as_str().map(str::to_string);
+    let change = changes::record(
+        &mut tx,
+        NewChange {
+            ws,
+            kind: "unlink",
+            person_id: person_id.as_deref(),
+            identity_id: card.as_deref(),
+            record_ids: &[record_id.to_string()],
+            before: json!({"relink": snapshot}),
+            after: json!({"status": "needs_check"}),
+            actor,
+            evidence: json!({"by": "the owner"}),
+        },
+    )
+    .await?;
+    audit_change(&mut tx, ws, actor, "identity.sheet_unlinked", &change, json!({"record_id": record_id})).await?;
+    tx.commit().await?;
+    Ok(change)
+}
+
+/// The owner checked a sheet the system had linked by a partial name and says it is right.
+pub async fn confirm_record(state: &AppState, ws: &str, actor: Actor<'_>, record_id: &str) -> Result<(), IdentityError> {
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
+    if !records::confirm_sheet(&mut tx, ws, record_id).await? {
+        return Err(IdentityError::Conflict("This sheet is not linked to a person, or the link was already chosen by a person.".into()));
+    }
+    audit::record(&mut tx, Entry { workspace_id: ws, actor, action: "timesheet.link_confirmed", entity_type: "timesheet_record", entity_id: record_id, message_id: None, metadata: json!({}) }).await?;
+    tx.commit().await?;
+    Ok(())
 }
 
 /// The workspace owner forgets a remembered employee ID (`code`) or name (`name`), so a wrong link can be fixed. Logged as an
@@ -416,6 +533,16 @@ mod tests {
     }
 
     #[test]
+    fn only_a_part_of_a_name_in_common_is_a_weak_suggestion() {
+        let weak = |written: &str, name: &str| suggest(Some(written), &roster()).into_iter().find(|s| s.name == name).unwrap_or_else(|| panic!("{written} -> {name}")).weak;
+        assert!(weak("Ravi Kumar", "Ravi Kumar Singh"), "one name inside the other");
+        assert!(weak("Rahul", "Rahul Verma"));
+        assert!(weak("Rahul Sharma", "Rahul Verma"), "same first name only");
+        assert!(!weak("Rahul Sharma", "Rahul Sharna"), "spelled almost the same");
+        assert!(!weak("Priya S.", "Priya Singh"), "an initial that fits");
+    }
+
+    #[test]
     fn an_initial_could_be_a_surname() {
         let found = suggest(Some("Priya S."), &roster());
         assert_eq!(found.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), ["Priya Singh"]);
@@ -427,6 +554,21 @@ mod tests {
         assert!(names("Dinesh Rao").is_empty());
         assert!(suggest(None, &roster()).is_empty());
         assert!(suggest(Some("  "), &roster()).is_empty());
+    }
+
+    #[test]
+    fn free_mail_is_never_a_companys_own_domain() {
+        for free in ["gmail.com", "Gmail.com", "yahoo.co.in", "yahoo.com", "outlook.com", "hotmail.co.uk", "live.com", "icloud.com", "me.com", "protonmail.com", "proton.me", "aol.com", "zoho.in", "gmx.de", "rediffmail.com", "yandex.ru", "fastmail.com"] {
+            assert!(is_free_mail(free), "{free}");
+            assert!(!is_company_domain(free, &[free.to_string()]), "{free} stays free even when the roster lists it");
+        }
+        for own in ["acme.com", "client.test", "mail.acme.com", "live.acme.com", "agency.co.in"] {
+            assert!(!is_free_mail(own), "{own}");
+            assert!(is_company_domain(own, &[own.to_string()]));
+        }
+        assert!(!is_company_domain("acme.com", &[]) && !is_company_domain("", &["".to_string()]));
+        let company = vec!["gmail.com".to_string()];
+        assert_ne!(group_key(None, Some("Amit Kumar"), "x@gmail.com", &company), group_key(None, Some("Amit Kumar"), "y@gmail.com", &company));
     }
 
     #[test]

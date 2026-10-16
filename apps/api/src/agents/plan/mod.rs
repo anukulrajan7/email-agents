@@ -77,7 +77,7 @@ pub async fn remind_waiting(state: &AppState, ws: &str) -> sqlx::Result<usize> {
     let n = due.len();
     let url = format!("{}/w/{ws}/timesheets", state.config.app_base_url.trim_end_matches('/'));
     let subject = format!("[Post Room] {n} timesheet {} waiting for someone to say who it is from", if n == 1 { "is" } else { "sheets are" });
-    let text = format!("{n} timesheet {} still waiting: the person is not on your people list, so the sender has had a receipt but not yet a confirmation.\n\nOpen People we don't know yet: {url}\n", if n == 1 { "is" } else { "sheets are" });
+    let text = format!("{n} timesheet {} still waiting: the person is not on your people list yet, so the sender has not had a confirmation.\n\nOpen People we don't know yet: {url}\n", if n == 1 { "is" } else { "sheets are" });
     let html = format!("<p>{n} timesheet {} still waiting for someone to say who it is from.</p><p><a href=\"{url}\">People we don't know yet</a></p>", if n == 1 { "is" } else { "sheets are" });
     let mut sent = 0;
     for to in &recipients {

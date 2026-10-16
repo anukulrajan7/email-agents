@@ -74,9 +74,19 @@ impl Change {
         serde_json::from_str(&self.after_json).unwrap_or(Value::Null)
     }
 
-    /// Links, "external" and "not a person" can be undone, once. Creating a person is undone by archiving them on the People page.
+    /// Links, unlinks the owner made, "external" and "not a person" can be undone, once. Creating a person is undone by archiving them on the People page.
     pub fn undoable(&self) -> bool {
-        self.undone_by.is_none() && matches!(self.kind.as_str(), "link" | "mark_external" | "dismiss")
+        if self.undone_by.is_some() {
+            return false;
+        }
+        let before = self.before();
+        match self.kind.as_str() {
+            // A link or an unlink that itself undid another change carries no snapshot of its own.
+            "link" => before.get("records").is_some(),
+            "unlink" => before.get("relink").is_some(),
+            "mark_external" | "dismiss" => true,
+            _ => false,
+        }
     }
 }
 

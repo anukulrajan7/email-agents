@@ -17,7 +17,8 @@ pub async fn roster(db: &SqlitePool, ws: &str) -> sqlx::Result<Vec<Candidate>> {
     Ok(rows.into_iter().map(|(id, name)| Candidate { id, name, code: None, emails: vec![] }).collect())
 }
 
-/// The domains that are a company's own: the roster's email domains and the client domains the owner named.
+/// The domains that are a company's own: the roster's email domains and the client domains the owner named, never a free-mail
+/// one (a person on gmail is trusted by their exact address, not their domain).
 pub async fn company_domains(conn: &mut SqliteConnection, ws: &str) -> sqlx::Result<Vec<String>> {
     let mut out: Vec<String> = sqlx::query_scalar("SELECT DISTINCT lower(substr(email, instr(email, '@') + 1)) FROM person_emails WHERE workspace_id = ?1 AND instr(email, '@') > 0")
         .bind(ws)
@@ -25,6 +26,9 @@ pub async fn company_domains(conn: &mut SqliteConnection, ws: &str) -> sqlx::Res
         .await?;
     let clients: Option<String> = sqlx::query_scalar("SELECT client_domains_json FROM team_settings WHERE workspace_id = ?1").bind(ws).fetch_optional(conn).await?;
     out.extend(serde_json::from_str::<Vec<String>>(&clients.unwrap_or_default()).unwrap_or_default().into_iter().map(|d| d.to_lowercase()));
+    out.retain(|d| !resolve::is_free_mail(d));
+    out.sort();
+    out.dedup();
     Ok(out)
 }
 

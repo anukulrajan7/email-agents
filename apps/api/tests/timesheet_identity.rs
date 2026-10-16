@@ -648,6 +648,7 @@ async fn a_parked_ack_older_than_manager_after_hours_reminds_the_final_contacts_
     assert_eq!(sent.len(), 1, "{sent:?}");
     assert_eq!(sent[0].0, "boss@acme.test");
     assert!(!sent[0].2.contains("Dinesh"), "no name in the note: {}", sent[0].2);
+    assert!(sent[0].2.contains("has not had a confirmation") && !sent[0].2.contains("receipt"), "claims nothing about a receipt: {}", sent[0].2);
     assert_eq!(plan::remind_waiting(&w.env.state, &w.env.ws).await.unwrap(), 0, "once");
 }
 
@@ -749,4 +750,182 @@ async fn withdrawing_an_unsent_reply_also_removes_its_gmail_draft() {
     email_ai_api::agents::handoff::store::withdraw(&w.env.state, &w.env.ws, &asker, &id).await.unwrap();
     assert!(w.env.live_drafts(&id).await.is_empty());
     assert!(w.env.calls.lock().unwrap().iter().any(|(k, _)| k == "delete_draft:gd9"), "{:?}", w.env.calls.lock().unwrap());
+}
+
+// ---------------------------------------------------------------- round 3
+
+impl World {
+    async fn receive_in(&self, gmail_id: &str, thread: &str, subject: &str, body: &str, from: &str) -> String {
+        let id = self.env.receive(&self.env.op_src, gmail_id, thread, from, subject, body, "timesheet").await;
+        self.env.set_understanding(&id, "timesheet", false, json!([])).await;
+        worker::drain(&self.env.state).await;
+        id
+    }
+}
+
+fn holdings(requests: &[(String, String, String)]) -> usize {
+    requests.iter().filter(|r| r.1 == "holding").count()
+}
+
+#[tokio::test]
+async fn a_roster_person_on_gmail_does_not_make_gmail_a_company() {
+    let w = world(3).await;
+    w.env.person("Gopal Rao", None, "gopal@gmail.com", None).await;
+    let stranger = w.receive("gm-1", "Dinesh Rao", Some("X-9"), "stranger@gmail.com").await;
+    assert_eq!(holdings(&w.env.requests(&stranger).await), 0, "no receipt to a stranger on gmail");
+    let gopal = w.receive("gm-2", "Mohan Das", Some("X-10"), "gopal@gmail.com").await;
+    assert_eq!(holdings(&w.env.requests(&gopal).await), 1, "the roster person's own address is trusted, by its exact address");
+    // Two different Amit Kumars on gmail are two cards, not one.
+    let env = on().await;
+    env.person("Gopal Rao", None, "gopal@gmail.com", None).await;
+    env.sheet_mail("1", "amit.one@gmail.com", "Amit Kumar", None).await;
+    env.sheet_mail("2", "amit.two@gmail.com", "Amit Kumar", None).await;
+    assert_eq!(env.identities().await.len(), 2);
+}
+
+#[tokio::test]
+async fn an_earlier_mail_or_a_claimed_thread_earns_no_receipt_but_an_address_we_wrote_to_does() {
+    let w = world(3).await;
+    let from = "stranger@nowhere-we-know.test";
+    w.env.receive(&w.env.op_src, "gm-0", "th-x", from, "hello", "hi there", "other").await;
+    let id = w.receive_in("gm-1", "th-x", "September timesheet", &sheet("Dinesh Rao", Some("X-9")), from).await;
+    assert_eq!(holdings(&w.env.requests(&id).await), 0, "writing first, or into a thread, proves nothing: any From can be forged");
+
+    let email = email_ai_api::platform::domain::NormalizedEmail {
+        source_message_id: "out-1".into(),
+        sender_address: "priya@acme.com".into(),
+        recipients: vec![format!("Stranger <{from}>")],
+        subject: "Welcome".into(),
+        body_text: "Hello".into(),
+        received_at: now_ms() - 7_200_000,
+        outbound: true,
+        ..Default::default()
+    };
+    let mut tx = w.env.state.db.begin().await.unwrap();
+    email_ai_api::mail::ingest::persist_message(&mut tx, &w.env.op_src, &w.env.ws, &email, Some("th-out"), json!({})).await.unwrap();
+    tx.commit().await.unwrap();
+    let again = w.receive_in("gm-2", "th-y", "October timesheet", &sheet("Mohan Das", Some("X-10")), from).await;
+    assert_eq!(holdings(&w.env.requests(&again).await), 1, "an address we have written to is known");
+}
+
+#[tokio::test]
+async fn a_workspace_sends_at_most_twenty_receipts_an_hour() {
+    let w = world(3).await;
+    let mut total = 0;
+    for n in 0..22 {
+        let id = w.receive(&format!("gm-w{n}"), &format!("Person {}", char::from(b'a' + (n % 26) as u8).to_string().repeat(3)), Some(&format!("W-{n}")), &format!("u{n}@client.test")).await;
+        total += holdings(&w.env.requests(&id).await);
+    }
+    assert_eq!(total as i64, email_ai_api::hr::staffing::timesheet_records::desk::RECEIPTS_PER_WORKSPACE_PER_HOUR);
+}
+
+#[tokio::test]
+async fn a_failure_between_releasing_and_filing_is_finished_by_the_retry() {
+    let w = world(3).await;
+    let id = w.receive("gm-1", "Dinesh Rao", Some("X-9"), "dinesh@client.test").await;
+    w.release_hold(&id).await;
+    w.age_replies(&id).await;
+    let dinesh = w.env.person("Dinesh Rao", Some("X-9"), "dinesh@client.test", None).await;
+    // Filing the acknowledgement fails once (the release itself, which only blanks the digest, still commits).
+    sqlx::query("CREATE TRIGGER fail_filing BEFORE UPDATE ON message_requests WHEN NEW.digest != '' AND NEW.kind = 'ack' AND OLD.digest = '' BEGIN SELECT RAISE(ABORT, 'disk full'); END").execute(&w.env.state.db).await.unwrap();
+    w.env.ok("POST", &identities_path(&w.card("Dinesh Rao").await, "link"), ADMIN, Some(json!({"person_id": dinesh}))).await;
+    worker::drain(&w.env.state).await;
+    let after_failure = w.env.requests(&id).await;
+    assert_eq!(after_failure[1], ("rohan".to_string(), "ack".to_string(), "pending".to_string()), "released but not written: {after_failure:?}");
+    assert!(w.env.live_drafts(&id).await.is_empty());
+    sqlx::query("DROP TRIGGER fail_filing").execute(&w.env.state.db).await.unwrap();
+    w.env.run_due_after(3_600_000).await;
+    assert_eq!(w.env.live_drafts(&id).await.len(), 1, "the retry found the released request and filed the ack");
+    w.release_hold(&id).await;
+    assert_eq!(w.sent_texts().len(), 2);
+}
+
+#[tokio::test]
+async fn setting_a_card_aside_drops_what_was_parked_for_it_and_undo_brings_it_back() {
+    let w = world(3).await;
+    let id = w.receive("gm-1", "Dinesh Rao", Some("X-9"), "dinesh@client.test").await;
+    assert_eq!(w.env.requests(&id).await[1].2, "waiting");
+    let set = w.env.ok("POST", &identities_path(&w.card("Dinesh Rao").await, "external"), ADMIN, None).await;
+    assert_eq!(w.env.requests(&id).await[1].2, "dropped", "nobody is waiting for outside staff");
+    let mut settings = w.env.ok("GET", "/team/settings", ADMIN, None).await;
+    settings.as_object_mut().unwrap().remove("sources");
+    settings["manager_after_hours"] = json!(1);
+    settings["final_emails"] = json!(["boss@acme.test"]);
+    w.env.ok("PUT", "/team/settings", ADMIN, Some(settings)).await;
+    sqlx::query("UPDATE message_requests SET created_at = created_at - 5 * 3600000").execute(&w.env.state.db).await.unwrap();
+    w.mail.take();
+    assert_eq!(plan::remind_waiting(&w.env.state, &w.env.ws).await.unwrap(), 0, "no reminder about a set-aside card");
+    w.env.ok("POST", &format!("/staffing/identity-changes/{}/undo", set["change_id"].as_str().unwrap()), ADMIN, None).await;
+    assert_eq!(w.env.requests(&id).await[1].2, "waiting", "reopened, so the acknowledgement waits again");
+    // One email, two unknown people: setting one aside keeps the ack parked for the other.
+    let two = w.receive_two("gm-2", "dinesh@client.test").await;
+    let c = w.card("Mohan Das").await;
+    w.env.ok("POST", &identities_path(&c, "dismiss"), ADMIN, None).await;
+    assert_eq!(w.env.requests(&two).await[1].2, "waiting", "Dinesh is still unknown in that email");
+}
+
+#[tokio::test]
+async fn a_forwarded_nameless_sheet_is_nobodys_even_without_an_original_sender() {
+    let env = env().await;
+    env.person("Ravi Kumar", Some("E1024"), "ravi@client.test", None).await;
+    let nameless = sheet("Ravi Kumar", None).replace("Employee Name: Ravi Kumar\n", "");
+    let (month_name, _) = last_month();
+    let plain = env.receive(&env.shared_src, "gm-1", "th-1", "ravi@client.test", &format!("{month_name} timesheet"), &nameless, "timesheet").await;
+    assert!(records::record_message(&env.state, &env.ws, &plain).await.unwrap().records[0].person_id.is_some(), "from his own mailbox it is his");
+    for (n, subject) in ["Fwd: September timesheet", "FW: hours"].iter().enumerate() {
+        let id = env.receive(&env.shared_src, &format!("gm-f{n}"), &format!("th-f{n}"), "ravi@client.test", subject, &nameless, "timesheet").await;
+        let saved = records::record_message(&env.state, &env.ws, &id).await.unwrap();
+        assert_eq!(saved.records[0].person_id, None, "{subject}");
+    }
+}
+
+#[tokio::test]
+async fn the_owner_can_unlink_confirm_and_page_through_sheets_linked_by_a_partial_name() {
+    let env = on().await;
+    let ravi = env.person("Ravi Kumar", Some("E1024"), "ravi@client.test", None).await;
+    let mut ids = vec![];
+    for (n, name) in ["Dinesh Rao", "Mohan Das", "Hema Rao"].iter().enumerate() {
+        let (_, saved) = env.sheet_mail(&n.to_string(), HR, name, None).await;
+        sqlx::query("UPDATE timesheet_records SET person_id = ?1, match_method = 'name', match_confidence = 0.7, status = 'recorded', created_at = created_at + ?3 WHERE id = ?2").bind(&ravi).bind(&saved[0].id).bind(n as i64).execute(&env.state.db).await.unwrap();
+        ids.push(saved[0].id.clone());
+    }
+    let first = env.ok("GET", "/staffing/timesheet-records/weak-links?limit=2", ADMIN, None).await;
+    assert_eq!(first["items"].as_array().unwrap().len(), 2);
+    let next = first["next"].as_str().expect("a next page").to_string();
+    let second = env.ok("GET", &format!("/staffing/timesheet-records/weak-links?limit=2&after={}", next.replace('|', "%7C")), ADMIN, None).await;
+    assert_eq!(second["items"].as_array().unwrap().len(), 1);
+    assert!(second["next"].is_null());
+    let seen: Vec<&str> = first["items"].as_array().unwrap().iter().chain(second["items"].as_array().unwrap()).map(|i| i["id"].as_str().unwrap()).collect();
+    assert_eq!(seen.len(), 3, "every sheet once");
+
+    let (s, _) = env.req("POST", &format!("/staffing/timesheet-records/{}/unlink", ids[0]), OPERATOR, None).await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    let (s, _) = env.req("POST", &format!("/staffing/timesheet-records/{}/confirm", ids[0]), OPERATOR, None).await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    let unlinked = env.ok("POST", &format!("/staffing/timesheet-records/{}/unlink", ids[0]), ADMIN, None).await;
+    let row: (Option<String>, String, String) = sqlx::query_as("SELECT person_id, status, issues_json FROM timesheet_records WHERE id = ?1").bind(&ids[0]).fetch_one(&env.state.db).await.unwrap();
+    assert_eq!((row.0, row.1.as_str()), (None, "needs_check"));
+    assert!(row.2.contains("Who is this?"));
+    let card: (String, i64) = sqlx::query_as("SELECT g.status, g.record_count FROM unresolved_identities g JOIN timesheet_records r ON r.identity_id = g.id WHERE r.id = ?1").bind(&ids[0]).fetch_one(&env.state.db).await.unwrap();
+    assert_eq!(card, ("open".to_string(), 1), "it is a card to sort out again");
+    let (s, _) = env.req("POST", &format!("/staffing/timesheet-records/{}/unlink", ids[0]), ADMIN, None).await;
+    assert_eq!(s, StatusCode::CONFLICT, "not linked any more");
+    env.ok("POST", &format!("/staffing/identity-changes/{}/undo", unlinked["change_id"].as_str().unwrap()), ADMIN, None).await;
+    let back: Option<String> = sqlx::query_scalar("SELECT person_id FROM timesheet_records WHERE id = ?1").bind(&ids[0]).fetch_one(&env.state.db).await.unwrap();
+    assert_eq!(back.as_deref(), Some(ravi.as_str()), "undo puts it back");
+
+    let confirmed = env.ok("POST", &format!("/staffing/timesheet-records/{}/confirm", ids[1]), ADMIN, None).await;
+    assert_eq!((confirmed["match_method"].as_str(), confirmed["match_confidence"].as_f64()), (Some("manual"), Some(1.0)));
+    let (s, _) = env.req("POST", &format!("/staffing/timesheet-records/{}/confirm", ids[1]), ADMIN, None).await;
+    assert_eq!(s, StatusCode::CONFLICT);
+    assert_eq!(env.count("SELECT COUNT(*) FROM audit_events WHERE action = 'timesheet.link_confirmed'").await, 1);
+    let left = env.ok("GET", "/staffing/timesheet-records/weak-links", ADMIN, None).await;
+    assert_eq!(left["items"].as_array().unwrap().len(), 1, "the one put back by hand and the confirmed one left the list");
+}
+
+#[tokio::test]
+async fn the_scans_that_group_and_list_have_indexes() {
+    let env = env().await;
+    let names: Vec<String> = sqlx::query_scalar("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'timesheet_records'").fetch_all(&env.state.db).await.unwrap();
+    assert!(names.contains(&"idx_timesheet_records_ungrouped".to_string()) && names.contains(&"idx_timesheet_records_weak_link".to_string()), "{names:?}");
 }

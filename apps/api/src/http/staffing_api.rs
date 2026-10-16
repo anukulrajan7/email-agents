@@ -34,6 +34,8 @@ pub fn routes() -> Router<AppState> {
         .route("/workspaces/{ws}/staffing/timesheet-records/{id}/approve", post(approve_timesheet_record))
         .route("/workspaces/{ws}/staffing/identity-links/forget", post(forget_identity_link))
         .route("/workspaces/{ws}/staffing/timesheet-records/weak-links", get(weak_links))
+        .route("/workspaces/{ws}/staffing/timesheet-records/{id}/unlink", post(unlink_timesheet_record))
+        .route("/workspaces/{ws}/staffing/timesheet-records/{id}/confirm", post(confirm_timesheet_record))
         .route("/workspaces/{ws}/staffing/portal/hours", post(import_hours))
         .route("/workspaces/{ws}/staffing/portal/submissions", post(import_submissions))
         .route("/workspaces/{ws}/staffing/portal/reconcile", post(reconcile))
@@ -302,10 +304,33 @@ pub async fn forget_identity_link(State(state): State<AppState>, user: AuthUser,
     Ok(Json(json!({ "change_id": change })))
 }
 
-/// Sheets that were linked by a partial name (confidence 0.7) before that was stopped: the owner looks at each once.
-pub async fn weak_links(State(state): State<AppState>, user: AuthUser, Path(ws): Path<String>) -> AppResult<Json<Value>> {
+#[derive(Deserialize)]
+pub struct WeakQuery {
+    after: Option<String>,
+    limit: Option<i64>,
+}
+
+/// Sheets that were linked by a partial name (confidence 0.7) before that was stopped: the owner looks at each once, in pages
+/// (`next` is the `after` of the following page).
+pub async fn weak_links(State(state): State<AppState>, user: AuthUser, Path(ws): Path<String>, Query(q): Query<WeakQuery>) -> AppResult<Json<Value>> {
     gate(&state, &ws, &user).await?.require_owner()?;
-    Ok(Json(json!({ "items": records::weakly_linked(&state.db, &ws).await? })))
+    let page = records::weakly_linked(&state.db, &ws, q.after.as_deref().filter(|a| !a.is_empty()), q.limit).await?;
+    Ok(Json(json!({ "items": page.items, "next": page.next })))
+}
+
+/// "This sheet is not theirs": back to "who is this" and `needs_check`, logged in `identity_changes` and undoable.
+pub async fn unlink_timesheet_record(State(state): State<AppState>, user: AuthUser, Path((ws, id)): Path<(String, String)>) -> AppResult<Json<Value>> {
+    gate(&state, &ws, &user).await?.require_owner()?;
+    let change = resolve::unlink_record(&state, &ws, Actor::User(&user.id), &id).await?;
+    Ok(Json(json!({ "change_id": change })))
+}
+
+/// "This link is right": the sheet becomes a manual link at full confidence (audited as `timesheet.link_confirmed`).
+pub async fn confirm_timesheet_record(State(state): State<AppState>, user: AuthUser, Path((ws, id)): Path<(String, String)>) -> AppResult<Json<Value>> {
+    gate(&state, &ws, &user).await?.require_owner()?;
+    resolve::confirm_record(&state, &ws, Actor::User(&user.id), &id).await?;
+    let row = records::get(&state.db, &ws, &id).await?.ok_or(AppError::NotFound)?;
+    Ok(Json(row.json(true)))
 }
 
 /// "This sheet is right." The person's manager or an admin approves it; the first approval stays.

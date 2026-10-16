@@ -41,6 +41,13 @@ impl Match {
     }
 }
 
+/// Does the subject say the mail was forwarded ("Fwd:", "Fw:", "Fwd :")?
+pub fn is_forward(subject: &str) -> bool {
+    let s = subject.trim_start().to_lowercase();
+    let s = s.trim_start_matches("re:").trim_start();
+    ["fwd:", "fw:", "fwd :", "fw :"].iter().any(|p| s.starts_with(p))
+}
+
 fn tokens(name: &str) -> Vec<String> {
     name_key(name).split(' ').filter(|t| !t.is_empty()).map(str::to_string).collect()
 }
@@ -177,6 +184,16 @@ mod tests {
         assert_eq!(singh.person_id, None, "a longer name is someone else, even from Ravi Kumar's mailbox");
         let exact = match_person(&roster, &none, &who(Some("Kumar, Ravi"), None, None), "ravi.k@acme.test", None);
         assert_eq!(exact.person_id.as_deref(), Some("p_ravi_k"));
+    }
+
+    #[test]
+    fn a_forward_is_told_by_its_subject() {
+        for yes in ["Fwd: timesheet", "FW: Sept hours", "  fwd : x", "Re: Fwd: sheet"] {
+            assert!(is_forward(yes), "{yes}");
+        }
+        for no in ["September timesheet", "Re: timesheet", "Forward looking plan", "Fwdx"] {
+            assert!(!is_forward(no), "{no}");
+        }
     }
 
     #[test]

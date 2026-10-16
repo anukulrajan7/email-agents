@@ -216,43 +216,54 @@ fn fingerprint(s: &str) -> u64 {
 
 /// Most receipts one address gets in a day: a receipt is a free answer to anyone who mails a sheet, so it is capped.
 pub const RECEIPTS_PER_SENDER_PER_DAY: i64 = 3;
+/// Most receipts one workspace sends in an hour, whoever the senders are.
+pub const RECEIPTS_PER_WORKSPACE_PER_HOUR: i64 = 20;
 
-/// May this sender get a receipt? Only someone we know: on the roster, from a company's own domain, or someone who already
-/// wrote on this thread or earlier; and at most `RECEIPTS_PER_SENDER_PER_DAY` a day. The request already filed for this
-/// email never counts against it.
+/// May this sender get a receipt? Only someone we can tell is real by something a stranger cannot make up: an address on the
+/// roster, an address at a company's own domain (never a free-mail one), or an address we have already written to. Mail a sender
+/// merely sent before, or a thread they claim to be in, proves nothing (any From: can be forged). And at most
+/// `RECEIPTS_PER_SENDER_PER_DAY` to one address and `RECEIPTS_PER_WORKSPACE_PER_HOUR` in all. The request already filed for this
+/// email never counts against the caps.
 async fn receipt_allowed(state: &AppState, ws: &str, message_id: &str) -> sqlx::Result<bool> {
-    let Some((sender, thread, received_at)): Option<(String, String, i64)> =
-        sqlx::query_as("SELECT sender_address, thread_id, received_at FROM email_messages WHERE id = ?1 AND workspace_id = ?2").bind(message_id).bind(ws).fetch_optional(&state.db).await?
-    else {
+    let Some(sender): Option<String> = sqlx::query_scalar("SELECT sender_address FROM email_messages WHERE id = ?1 AND workspace_id = ?2").bind(message_id).bind(ws).fetch_optional(&state.db).await? else {
         return Ok(false);
     };
     let address = crate::replies::send_safety::bare_address(&sender).to_lowercase();
-    let today: i64 = sqlx::query_scalar(
+    let now = now_ms();
+    let day: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM message_requests r JOIN email_messages m ON m.id = r.message_id
-         WHERE r.workspace_id = ?1 AND r.job LIKE '%:receipt' AND r.status != 'dropped' AND r.message_id != ?2 AND lower(m.sender_address) = ?3 AND r.created_at > ?4",
+         WHERE r.workspace_id = ?1 AND r.job LIKE '%:receipt' AND r.status != 'dropped' AND r.message_id != ?2 AND r.created_at > ?3 AND lower(m.sender_address) = ?4",
     )
     .bind(ws)
     .bind(message_id)
+    .bind(now - clock::DAY_MS)
     .bind(&address)
-    .bind(now_ms() - clock::DAY_MS)
     .fetch_one(&state.db)
     .await?;
-    if today >= RECEIPTS_PER_SENDER_PER_DAY {
+    let hour: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM message_requests WHERE workspace_id = ?1 AND job LIKE '%:receipt' AND status != 'dropped' AND message_id != ?2 AND created_at > ?3")
+        .bind(ws)
+        .bind(message_id)
+        .bind(now - 3_600_000)
+        .fetch_one(&state.db)
+        .await?;
+    if day >= RECEIPTS_PER_SENDER_PER_DAY || hour >= RECEIPTS_PER_WORKSPACE_PER_HOUR {
         return Ok(false);
+    }
+    let on_roster: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM person_emails WHERE workspace_id = ?1 AND lower(email) = ?2)").bind(ws).bind(&address).fetch_one(&state.db).await?;
+    if on_roster {
+        return Ok(true);
     }
     let mut conn = state.db.acquire().await?;
     let domain = address.rsplit_once('@').map(|(_, d)| d.to_string()).unwrap_or_default();
     let company = crate::hr::team::identity::unresolved::company_domains(&mut conn, ws).await?;
-    if !domain.is_empty() && company.contains(&domain) {
+    if crate::hr::team::identity::resolve::is_company_domain(&domain, &company) {
         return Ok(true);
     }
     sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM email_messages WHERE workspace_id = ?1 AND id != ?2 AND received_at < ?3 AND (thread_id = ?4 OR lower(sender_address) = ?5))",
+        "SELECT EXISTS(SELECT 1 FROM email_messages o, json_each(o.recipients_json) j
+                       WHERE o.workspace_id = ?1 AND o.direction = 'outbound' AND (lower(j.value) = ?2 OR lower(j.value) LIKE '%<' || ?2 || '>'))",
     )
     .bind(ws)
-    .bind(message_id)
-    .bind(received_at)
-    .bind(thread)
     .bind(address)
     .fetch_one(&mut *conn)
     .await
@@ -295,14 +306,15 @@ pub async fn resume(state: &AppState, ws: &str, message_id: &str) -> sqlx::Resul
     if review.rows.is_empty() {
         return Ok(());
     }
-    let parked_by: Option<String> = sqlx::query_scalar("SELECT from_agent_id FROM message_requests WHERE workspace_id = ?1 AND message_id = ?2 AND job = ?3 AND status = 'waiting' LIMIT 1")
+    let parked_by: Option<String> = sqlx::query_scalar("SELECT from_agent_id FROM message_requests WHERE workspace_id = ?1 AND message_id = ?2 AND job = ?3 AND (status = 'waiting' OR (status = 'pending' AND draft_id IS NULL AND digest = '')) LIMIT 1")
         .bind(ws)
         .bind(message_id)
         .bind(crate::agents::ownership::DESK_JOB)
         .fetch_optional(&state.db)
         .await?;
     let statuses = apply(&state.db, ws, &mut review).await?;
-    // Only an email the desk itself parked an acknowledgement for is looked at again. Sheets recorded before the desk acted on
+    // Only an email the desk itself parked an acknowledgement for is looked at again (still waiting, or released but not yet written:
+    // a retry after a failure between the two finds it). Sheets recorded before the desk acted on
     // them (the flag was off, or an old card) get their person and nothing more: no mail, no summary, no surprise.
     let Some(agent) = parked_by else { return Ok(()) };
     let mut conn = state.db.acquire().await?;

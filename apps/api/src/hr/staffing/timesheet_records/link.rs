@@ -340,3 +340,84 @@ async fn attach_person(conn: &mut SqliteConnection, ws: &str, id: &str, person_i
     .await?;
     Ok(())
 }
+
+/// A person says "this sheet is not theirs": the sheet goes back to "who is this" (`needs_check`), and a sheet of the person it had
+/// replaced comes back when no other sheet stands for those days. Returns what it was (ids and statuses only, for undo) and the
+/// card it belongs to, `None` when the sheet is not linked to anyone.
+pub(crate) async fn unlink_sheet(conn: &mut SqliteConnection, ws: &str, id: &str) -> sqlx::Result<Option<(Value, Option<String>)>> {
+    type Row = (String, String, Option<f64>, String, Option<String>, String, Option<String>, Option<String>, Option<String>);
+    let row: Option<Row> = sqlx::query_as(
+        "SELECT person_id, match_method, match_confidence, status, replaces_id, issues_json, person_name, employee_code, identity_id FROM timesheet_records WHERE id = ?1 AND workspace_id = ?2 AND person_id IS NOT NULL",
+    )
+    .bind(id)
+    .bind(ws)
+    .fetch_optional(&mut *conn)
+    .await?;
+    let Some((person_id, method, confidence, status, replaces_id, issues_json, written, code, identity_id)) = row else { return Ok(None) };
+    let now = now_ms();
+    let mut issues: Vec<Value> = serde_json::from_str(&issues_json).unwrap_or_default();
+    let who = match (written.as_deref(), code.as_deref()) {
+        (Some(n), Some(c)) => format!("{n}, ID {c}"),
+        (Some(n), None) => n.to_string(),
+        (None, Some(c)) => format!("ID {c}"),
+        (None, None) => "no name or ID in the sheet".to_string(),
+    };
+    issues.retain(|i| i["code"] != "person_unmatched");
+    issues.push(json!(check("person_unmatched", format!("Who is this? ({who})"))));
+    sqlx::query(
+        "UPDATE timesheet_records SET person_id = NULL, match_method = 'none', match_confidence = NULL, status = 'needs_check', issues_json = ?1, replaces_id = NULL, updated_at = ?2 WHERE id = ?3 AND workspace_id = ?4",
+    )
+    .bind(Value::Array(issues).to_string())
+    .bind(now)
+    .bind(id)
+    .bind(ws)
+    .execute(&mut *conn)
+    .await?;
+    if let Some(old) = &replaces_id {
+        sqlx::query(
+            "UPDATE timesheet_records SET status = CASE WHEN issues_json LIKE '%\"severity\":\"check\"%' THEN 'needs_check' ELSE 'recorded' END, updated_at = ?3
+             WHERE id = ?1 AND workspace_id = ?2 AND status = 'replaced'
+               AND NOT EXISTS (SELECT 1 FROM timesheet_records n WHERE n.workspace_id = ?2 AND n.person_id = timesheet_records.person_id AND n.id != timesheet_records.id AND n.status != 'replaced'
+                                 AND n.period_start <= timesheet_records.period_end AND n.period_end >= timesheet_records.period_start)",
+        )
+        .bind(old)
+        .bind(ws)
+        .bind(now)
+        .execute(&mut *conn)
+        .await?;
+    }
+    Ok(Some((json!({"id": id, "person_id": person_id, "match_method": method, "match_confidence": confidence, "status": status}), identity_id)))
+}
+
+/// Puts a sheet that was just unlinked back with its person (the undo of `unlink_sheet`). `false` when it is no longer unmatched
+/// or the person is gone or archived.
+pub(crate) async fn relink_sheet(conn: &mut SqliteConnection, ws: &str, id: &str, person_id: &str) -> sqlx::Result<bool> {
+    let ok: Option<i64> = sqlx::query_scalar(
+        "SELECT 1 FROM timesheet_records r JOIN people p ON p.id = ?3 AND p.workspace_id = ?2 AND p.active = 1 WHERE r.id = ?1 AND r.workspace_id = ?2 AND r.person_id IS NULL",
+    )
+    .bind(id)
+    .bind(ws)
+    .bind(person_id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    if ok.is_none() {
+        return Ok(false);
+    }
+    attach_person(conn, ws, id, person_id, now_ms()).await?;
+    Ok(true)
+}
+
+/// The owner looked at a sheet the system had linked by a partial name and says it is right: it becomes a manual link at full
+/// confidence. `false` when the sheet is not linked or already a person's own choice.
+pub async fn confirm_sheet(conn: &mut SqliteConnection, ws: &str, id: &str) -> sqlx::Result<bool> {
+    Ok(sqlx::query(
+        "UPDATE timesheet_records SET match_method = 'manual', match_confidence = 1, updated_at = ?3 WHERE id = ?1 AND workspace_id = ?2 AND person_id IS NOT NULL AND match_method != 'manual'",
+    )
+    .bind(id)
+    .bind(ws)
+    .bind(now_ms())
+    .execute(conn)
+    .await?
+    .rows_affected()
+        == 1)
+}

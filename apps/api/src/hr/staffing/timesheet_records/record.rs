@@ -66,7 +66,10 @@ pub async fn record_message(state: &AppState, ws: &str, message_id: &str) -> sql
             if !force && unit.source == "attachment" && empty && !unit.unreadable && !NAME_CUE.is_match(unit.filename.as_deref().unwrap_or_default()) {
                 continue;
             }
-            let m = parse::match_person(&people, &aliases, &sheet.identity, &address_of(&msg.sender_address), msg.original_sender_address.as_deref().map(address_of).as_deref());
+            // A subject that says "Fwd:" or "Fw:" marks a forward even when the mail carries no original sender: whoever it came from, a sheet
+            // that names nobody is not theirs.
+            let original = msg.original_sender_address.as_deref().map(address_of).or_else(|| parse::is_forward(&msg.subject).then(|| address_of(&msg.sender_address)));
+            let m = parse::match_person(&people, &aliases, &sheet.identity, &address_of(&msg.sender_address), original.as_deref());
             let (period, assumed) = match sheet.period.clone() {
                 Some(p) => (p, false),
                 None => {

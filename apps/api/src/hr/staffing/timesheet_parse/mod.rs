@@ -527,7 +527,7 @@ fn place_period(entries: &[Entry], text: &str, subject: &str, hint_year: i64) ->
 
 mod matching;
 
-pub use matching::{Aliases, Candidate, Match, match_person, names_agree};
+pub use matching::{Aliases, Candidate, Match, is_forward, match_person, names_agree};
 
 #[cfg(test)]
 mod tests {

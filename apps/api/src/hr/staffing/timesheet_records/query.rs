@@ -148,14 +148,37 @@ pub async fn suppresses_auto_reply(db: &SqlitePool, ws: &str, message_id: &str) 
     .await
 }
 
-/// Records matched by a partial name (`name` at 0.7), a link the system used to make by itself. A person confirms each (link
-/// it again by hand) or unlinks it; newest period first.
-pub async fn weakly_linked(db: &SqlitePool, ws: &str) -> sqlx::Result<Vec<Value>> {
+/// One page of the sheets linked by a partial name, and where the next page starts (`None` at the end).
+pub struct WeakLinks {
+    pub items: Vec<Value>,
+    pub next: Option<String>,
+}
+
+pub const WEAK_PAGE: i64 = 50;
+pub const WEAK_PAGE_MAX: i64 = 200;
+
+/// Records matched by a partial name (`name` at 0.7), a link the system used to make by itself. A person confirms each or unlinks it.
+/// Newest period first, in pages: `after` is the `next` of the page before.
+pub async fn weakly_linked(db: &SqlitePool, ws: &str, after: Option<&str>, limit: Option<i64>) -> sqlx::Result<WeakLinks> {
+    let limit = limit.unwrap_or(WEAK_PAGE).clamp(1, WEAK_PAGE_MAX);
+    let cursor: Option<(String, i64, String)> = after.and_then(|a| {
+        let mut parts = a.splitn(3, '|');
+        Some((parts.next()?.to_string(), parts.next()?.parse().ok()?, parts.next()?.to_string()))
+    });
     let rows: Vec<RecordRow> = sqlx::query_as(&format!(
-        "{SELECT} WHERE r.workspace_id = ?1 AND r.match_method = 'name' AND r.match_confidence = 0.7 AND r.status != 'replaced' ORDER BY r.period_start DESC, r.created_at DESC LIMIT 500"
+        "{SELECT} WHERE r.workspace_id = ?1 AND r.match_method = 'name' AND r.match_confidence = 0.7 AND r.status != 'replaced'
+           AND (?2 IS NULL OR (r.period_start, r.created_at, r.id) < (?2, ?3, ?4))
+         ORDER BY r.period_start DESC, r.created_at DESC, r.id DESC LIMIT ?5"
     ))
     .bind(ws)
+    .bind(cursor.as_ref().map(|c| c.0.clone()))
+    .bind(cursor.as_ref().map(|c| c.1))
+    .bind(cursor.as_ref().map(|c| c.2.clone()))
+    .bind(limit + 1)
     .fetch_all(db)
     .await?;
-    Ok(rows.iter().map(|r| r.json(false)).collect())
+    let more = rows.len() as i64 > limit;
+    let page: Vec<&RecordRow> = rows.iter().take(limit as usize).collect();
+    let next = if more { page.last().map(|r| format!("{}|{}|{}", r.period_start, r.created_at, r.id)) } else { None };
+    Ok(WeakLinks { items: page.iter().map(|r| r.json(false)).collect(), next })
 }
