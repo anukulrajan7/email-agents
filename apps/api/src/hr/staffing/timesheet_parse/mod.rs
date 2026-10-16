@@ -5,12 +5,12 @@
 //!
 //! The second half matches the identity to a person in the directory: employee id, then email, then name.
 
-use std::{collections::HashMap, sync::LazyLock};
+use std::sync::LazyLock;
 
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
-use super::{name_key, policy::MONTHS};
+use super::policy::MONTHS;
 use crate::hr::team::clock;
 
 pub const MAX_ENTRIES: usize = 400;
@@ -525,106 +525,9 @@ fn place_period(entries: &[Entry], text: &str, subject: &str, hint_year: i64) ->
     span()
 }
 
-// ---------------------------------------------------------------- matching people
+mod matching;
 
-/// A person of the directory, as far as matching needs.
-#[derive(Debug, Clone)]
-pub struct Candidate {
-    pub id: String,
-    pub name: String,
-    pub code: Option<String>,
-    pub emails: Vec<String>,
-}
-
-/// Links a person chose by hand: employee code (lower-case) or name key to person id.
-#[derive(Debug, Clone, Default)]
-pub struct Aliases {
-    pub codes: HashMap<String, String>,
-    pub names: HashMap<String, String>,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct Match {
-    pub person_id: Option<String>,
-    /// code | alias | email | name | none
-    pub method: &'static str,
-    pub confidence: f64,
-    pub ambiguous: bool,
-}
-
-impl Match {
-    fn found(id: &str, method: &'static str, confidence: f64) -> Self {
-        Self { person_id: Some(id.to_string()), method, confidence, ambiguous: false }
-    }
-
-    fn none(ambiguous: bool) -> Self {
-        Self { person_id: None, method: "none", confidence: 0.0, ambiguous }
-    }
-}
-
-fn tokens(name: &str) -> Vec<String> {
-    name_key(name).split(' ').filter(|t| !t.is_empty()).map(str::to_string).collect()
-}
-
-/// One name contains the other's words ("Ravi Kumar" and "Ravi Kumar Singh", "Kumar, Ravi").
-pub fn names_agree(a: &str, b: &str) -> bool {
-    let (ta, tb) = (tokens(a), tokens(b));
-    !ta.is_empty() && !tb.is_empty() && (ta.iter().all(|t| tb.contains(t)) || tb.iter().all(|t| ta.contains(t)))
-}
-
-/// Who a timesheet is for. What the sheet says about the employee wins over who sent the mail, so a manager or the
-/// HR mailbox forwarding a sheet never becomes its owner: the sender counts only when it agrees with the name written.
-pub fn match_person(people: &[Candidate], aliases: &Aliases, id: &Identity, sender: &str, original_sender: Option<&str>) -> Match {
-    let by_email = |addr: &str| people.iter().find(|p| p.emails.iter().any(|e| e.eq_ignore_ascii_case(addr)));
-    if let Some(code) = id.code.as_deref().map(str::to_lowercase) {
-        if let Some(p) = people.iter().find(|p| p.code.as_deref().is_some_and(|c| c.eq_ignore_ascii_case(&code))) {
-            return Match::found(&p.id, "code", 0.99);
-        }
-        if let Some(p) = aliases.codes.get(&code).and_then(|pid| people.iter().find(|p| &p.id == pid)) {
-            return Match::found(&p.id, "alias", 0.95);
-        }
-        // An ID is written but nobody has it: the sender or forwarder is not that person, so a person is asked.
-        return match id.email.as_deref().and_then(by_email) {
-            Some(p) if p.code.is_none() => Match::found(&p.id, "email", 0.95),
-            _ => Match::none(false),
-        };
-    }
-    if let Some(p) = id.email.as_deref().and_then(by_email) {
-        return Match::found(&p.id, "email", 0.95);
-    }
-    let written = id.name.as_deref().filter(|n| !tokens(n).is_empty());
-    for (addr, confidence) in original_sender.map(|a| (a, 0.9)).into_iter().chain(std::iter::once((sender, 0.88))) {
-        if let Some(p) = by_email(addr)
-            && written.is_none_or(|w| names_agree(&p.name, w))
-        {
-            return Match::found(&p.id, "email", confidence);
-        }
-    }
-    let Some(written) = written else { return Match::none(false) };
-    if let Some(p) = aliases.names.get(&name_key(written)).and_then(|pid| people.iter().find(|p| &p.id == pid)) {
-        return Match::found(&p.id, "alias", 0.95);
-    }
-    let key = name_key(written);
-    let exact: Vec<&Candidate> = people.iter().filter(|p| name_key(&p.name) == key).collect();
-    match exact.as_slice() {
-        [p] => return Match::found(&p.id, "name", 0.85),
-        [] => {}
-        _ => return Match::none(true),
-    }
-    let wt = tokens(written);
-    let partial: Vec<&Candidate> = people
-        .iter()
-        .filter(|p| {
-            let pt = tokens(&p.name);
-            (wt.len() >= 2 && wt.iter().all(|t| pt.contains(t))) || (pt.len() >= 2 && pt.iter().all(|t| wt.contains(t)))
-        })
-        .collect();
-    match partial.as_slice() {
-        [p] => Match::found(&p.id, "name", 0.7),
-        [] => Match::none(false),
-        _ => Match::none(true),
-    }
-}
+pub use matching::{Aliases, Candidate, Match, match_person, names_agree};
 
 #[cfg(test)]
 mod tests {
@@ -732,68 +635,5 @@ mod tests {
     fn nothing_readable_gives_nothing() {
         let s = parse_sheet("Hi, please see the attached file. Thanks!", "", 2026);
         assert!(!s.has_data() && s.period.is_none() && s.identity.is_empty());
-    }
-
-    fn people() -> Vec<Candidate> {
-        let c = |id: &str, name: &str, code: Option<&str>, email: &str| Candidate { id: id.into(), name: name.into(), code: code.map(str::to_string), emails: vec![email.into()] };
-        vec![
-            c("p_ravi", "Ravi Kumar", Some("E1024"), "ravi@acme.test"),
-            c("p_priya", "Priya Shah", Some("E2000"), "priya@acme.test"),
-            c("p_dev", "Dev Patel", None, "dev@acme.test"),
-            c("p_dev2", "Dev Patil", None, "devp@acme.test"),
-        ]
-    }
-
-    fn who(name: Option<&str>, code: Option<&str>, email: Option<&str>) -> Identity {
-        Identity { name: name.map(str::to_string), code: code.map(str::to_string), email: email.map(str::to_string), ..Default::default() }
-    }
-
-    #[test]
-    fn matches_by_employee_code_first() {
-        let m = match_person(&people(), &Aliases::default(), &who(Some("Someone Else"), Some("e1024"), None), "dev@acme.test", None);
-        assert_eq!((m.person_id.as_deref(), m.method), (Some("p_ravi"), "code"));
-    }
-
-    #[test]
-    fn matches_by_email_in_the_sheet_then_sender() {
-        let m = match_person(&people(), &Aliases::default(), &who(None, None, Some("priya@acme.test")), "hr@acme.test", None);
-        assert_eq!((m.person_id.as_deref(), m.method), (Some("p_priya"), "email"));
-        let m = match_person(&people(), &Aliases::default(), &who(Some("Ravi Kumar"), None, None), "ravi@acme.test", None);
-        assert_eq!((m.person_id.as_deref(), m.method), (Some("p_ravi"), "email"));
-        let m = match_person(&people(), &Aliases::default(), &Identity::default(), "ravi@acme.test", None);
-        assert_eq!(m.person_id.as_deref(), Some("p_ravi"));
-    }
-
-    #[test]
-    fn matches_by_unique_name_only() {
-        let m = match_person(&people(), &Aliases::default(), &who(Some("Kumar, Ravi"), None, None), "hr@acme.test", None);
-        assert_eq!((m.person_id.as_deref(), m.method), (Some("p_ravi"), "name"));
-        let m = match_person(&people(), &Aliases::default(), &who(Some("Ravi"), None, None), "hr@acme.test", None);
-        assert_eq!(m.person_id, None, "one word is not enough");
-        let m = match_person(&people(), &Aliases::default(), &who(Some("Dev Pat"), None, None), "hr@acme.test", None);
-        assert_eq!(m.person_id, None);
-        let m = match_person(&people(), &Aliases::default(), &who(Some("Nobody Known"), None, None), "hr@acme.test", None);
-        assert_eq!((m.person_id, m.method), (None, "none"));
-    }
-
-    #[test]
-    fn a_forwarded_sheet_belongs_to_the_employee_not_the_forwarder() {
-        let m = match_person(&people(), &Aliases::default(), &who(Some("Ravi Kumar"), None, None), "priya@acme.test", None);
-        assert_eq!((m.person_id.as_deref(), m.method), (Some("p_ravi"), "name"));
-        let m = match_person(&people(), &Aliases::default(), &who(Some("Ravi Kumar"), Some("E1024"), None), "priya@acme.test", Some("hr@acme.test"));
-        assert_eq!((m.person_id.as_deref(), m.method), (Some("p_ravi"), "code"));
-        let m = match_person(&people(), &Aliases::default(), &who(Some("Unknown Person"), None, None), "priya@acme.test", None);
-        assert_eq!(m.person_id, None, "the forwarder is not the owner of someone else's sheet");
-    }
-
-    #[test]
-    fn a_remembered_link_matches_automatically() {
-        let mut a = Aliases::default();
-        a.codes.insert("x77".into(), "p_dev".into());
-        a.names.insert(name_key("D. Pat"), "p_dev2".into());
-        let m = match_person(&people(), &a, &who(None, Some("X77"), None), "hr@acme.test", None);
-        assert_eq!((m.person_id.as_deref(), m.method), (Some("p_dev"), "alias"));
-        let m = match_person(&people(), &a, &who(Some("D. Pat"), None, None), "hr@acme.test", None);
-        assert_eq!((m.person_id.as_deref(), m.method), (Some("p_dev2"), "alias"));
     }
 }

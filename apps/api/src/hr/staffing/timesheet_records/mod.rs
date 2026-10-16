@@ -62,7 +62,7 @@ pub use query::can_see_record;
 pub use query::for_message;
 pub use query::attention;
 pub use query::suppresses_auto_reply;
-pub use link::link_person;
+pub use link::{Linked, link_person};
 pub use grid::grid;
 pub use backfill::backfill;
 pub use backfill::erase_sender;

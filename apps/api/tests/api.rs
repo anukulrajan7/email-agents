@@ -133,6 +133,8 @@ mod tenant_isolation;
 mod timesheet_desk;
 #[path = "timesheet_handoff.rs"]
 mod timesheet_handoff;
+#[path = "timesheet_identity.rs"]
+mod timesheet_identity;
 #[path = "timesheet_records.rs"]
 mod timesheet_records;
 #[path = "understanding_v2.rs"]

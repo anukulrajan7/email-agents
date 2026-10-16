@@ -249,10 +249,14 @@ pub async fn timesheet_record(State(state): State<AppState>, user: AuthUser, Pat
 #[derive(Deserialize)]
 pub struct LinkBody {
     person_id: String,
+    /// Also remember the name written in the sheet, so the same name matches next time. Off unless a person says so.
+    #[serde(default)]
+    remember_name: bool,
 }
 
-/// "This sheet is that person." The link is remembered for the employee ID and the name written in the sheet, and
-/// applies to the other unmatched records that carry them.
+/// "This sheet is that person." The link is remembered for the employee ID written in the sheet (and for the name, when
+/// the person asks), and applies to the other unmatched records that carry them. An ID or name that already belongs to
+/// someone else is a conflict, never re-pointed.
 pub async fn link_timesheet_record(State(state): State<AppState>, user: AuthUser, Path((ws, id)): Path<(String, String)>, Json(body): Json<LinkBody>) -> AppResult<Json<Value>> {
     let a = gate(&state, &ws, &user).await?;
     a.require_owner()?;
@@ -260,8 +264,10 @@ pub async fn link_timesheet_record(State(state): State<AppState>, user: AuthUser
     if known.is_none() {
         return Err(AppError::BadRequest("person_id: unknown person".into()));
     }
-    if !records::link_person(&state.db, &ws, &id, &body.person_id).await? {
-        return Err(AppError::NotFound);
+    match records::link_person(&state.db, &ws, &id, &body.person_id, body.remember_name).await? {
+        records::Linked::Done => {}
+        records::Linked::NotFound => return Err(AppError::NotFound),
+        records::Linked::Conflict(why) => return Err(AppError::Conflict(why)),
     }
     let row = records::get(&state.db, &ws, &id).await?.ok_or(AppError::NotFound)?;
     Ok(Json(row.json(true)))
