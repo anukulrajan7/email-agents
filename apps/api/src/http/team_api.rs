@@ -105,6 +105,9 @@ fn settings_json(s: &settings::TeamSettings, staffing: bool, owner: bool, source
         v["client_domains"] = json!(s.client_domains);
         v["timesheet_grace_days"] = json!(s.timesheet_grace_days);
         v["hours_tolerance"] = json!(s.hours_tolerance);
+        v["timesheet_cadence"] = json!(s.timesheet_cadence);
+        v["max_hours_per_day"] = json!(s.max_hours_per_day);
+        v["require_signature"] = json!(s.require_signature);
         v["sources"] = json!(sources);
     }
     v

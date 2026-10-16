@@ -40,6 +40,7 @@ mod query;
 mod link;
 mod grid;
 mod backfill;
+pub mod rules;
 
 use source::load_people;
 use source::load_units;
