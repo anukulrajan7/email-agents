@@ -105,7 +105,7 @@ export type TimesheetRecord = {
 
 export type RecordFilters = { q?: string; month?: string; status?: string; person_id?: string };
 
-export type IdentitySuggestion = { person_id: string; name: string; reason: string };
+export type IdentitySuggestion = { person_id: string; name: string; reason: string; weak?: boolean };
 
 export type UnknownSheet = {
   id: string;
@@ -139,6 +139,7 @@ export type IdentityChange = {
   person_name: string | null;
   name: string | null;
   record_count: number;
+  added_person?: boolean;
   by: string;
   undone: boolean;
   can_undo: boolean;

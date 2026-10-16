@@ -53,11 +53,15 @@ const unknown: IdentityList = {
         { id: 'r1', period_start: '2026-09-01', period_end: '2026-09-30', total_hours: 23.5, file: 'rahul.xlsx', subject: 'Timesheets', received_at: null, message_id: 'm1', possible_duplicate: false },
         { id: 'r2', period_start: '2026-09-01', period_end: '2026-09-30', total_hours: 23.5, file: 'rahul-again.xlsx', subject: 'Timesheets', received_at: null, message_id: 'm2', possible_duplicate: true },
       ],
-      suggestions: [{ person_id: 'p1', name: 'Rahul Verma', reason: 'Same first name' }],
+      suggestions: [{ person_id: 'p1', name: 'Rahul Verma', reason: 'Same first name', weak: true }],
       updated_at: '2026-10-02T09:00:00Z',
     },
   ],
-  recent: [{ id: 'idc1', kind: 'link', person_id: 'p1', person_name: 'Rahul Verma', name: 'Rahul Sharma', record_count: 1, by: 'user', undone: false, can_undo: true, at: '2026-10-02T09:00:00Z' }],
+  recent: [
+    { id: 'idc1', kind: 'link', person_id: 'p1', person_name: 'Rahul Verma', name: 'Rahul Sharma', record_count: 1, by: 'user', undone: false, can_undo: true, at: '2026-10-02T09:00:00Z' },
+    { id: 'idc2', kind: 'link', person_id: 'p2', person_name: 'Dinesh Rao', name: 'Dinesh Rao', record_count: 2, added_person: true, by: 'user', undone: false, can_undo: true, at: '2026-10-02T09:01:00Z' },
+    { id: 'idc3', kind: 'mark_external', person_id: null, person_name: null, name: 'Client Staff', record_count: 0, by: 'user', undone: false, can_undo: true, at: '2026-10-02T09:02:00Z' },
+  ],
 };
 
 const base = { '/team/access': access('super_admin'), '/team/settings': settings, '/team/people': people, '/staffing/timesheet-grid': grid };
@@ -84,14 +88,32 @@ describe('People we don\'t know yet', () => {
     expect(posts(fetchMock)).toHaveLength(0);
   });
 
-  it('links on one click of a suggestion, without remembering the name unless asked', async () => {
+  it('asks before linking several sheets from a weak suggestion, then links without remembering the name', async () => {
     const fetchMock = mockApi({ '/staffing/identities/idn1/link': {}, '/staffing/identities': unknown, ...base });
     renderPage();
-    await userEvent.click(await screen.findByRole('button', { name: 'Link Rahul Sharma to Rahul Verma' }));
+    const suggestion = await screen.findByRole('button', { name: "This is Rahul Verma: link Rahul Sharma's 2 sheets" });
+    expect(suggestion).toHaveTextContent('This is Rahul Verma');
+    await userEvent.click(suggestion);
+    expect(posts(fetchMock)).toHaveLength(0);
+    const confirm = await screen.findByRole('dialog', { name: 'Link 2 sheets to Rahul Verma?' });
+    expect(within(confirm).getByText(/All 2 sheets written as Rahul Sharma will become Rahul Verma's/)).toBeInTheDocument();
+    await userEvent.click(within(confirm).getByRole('button', { name: 'Link 2 sheets' }));
     await waitFor(() => expect(posts(fetchMock)).toHaveLength(1));
     expect(String(posts(fetchMock)[0]?.[0])).toContain('/staffing/identities/idn1/link');
     expect(bodyOf(posts(fetchMock)[0])).toEqual({ person_id: 'p1', remember_name: false });
     expect(await screen.findByText('Rahul Sharma is now Rahul Verma.')).toBeInTheDocument();
+  });
+
+  it('links a single sheet from a strong suggestion at once', async () => {
+    const one: IdentityList = {
+      ...unknown,
+      items: [{ ...unknown.items[0]!, record_count: 1, records: unknown.items[0]!.records.slice(0, 1), suggestions: [{ person_id: 'p1', name: 'Rahul Verma', reason: 'Spelled almost the same', weak: false }] }],
+    };
+    const fetchMock = mockApi({ '/staffing/identities/idn1/link': {}, '/staffing/identities': one, ...base });
+    renderPage();
+    await userEvent.click(await screen.findByRole('button', { name: "This is Rahul Verma: link Rahul Sharma's 1 sheet" }));
+    await waitFor(() => expect(posts(fetchMock)).toHaveLength(1));
+    expect(screen.queryByRole('dialog')).toBeNull();
   });
 
   it('links to someone else in People and can remember the name when the admin ticks the box', async () => {
@@ -134,9 +156,13 @@ describe('People we don\'t know yet', () => {
     const recent = await screen.findByRole('list', { name: 'Recent decisions' });
     expect(within(recent).getByText('Linked Rahul Sharma to Rahul Verma (1 sheet)')).toBeInTheDocument();
     expect(screen.getByText(/A reply that already went out is not taken back/)).toBeInTheDocument();
+    expect(within(recent).getByText('Linked Dinesh Rao to Dinesh Rao (2 sheets); Dinesh Rao stays on People if you undo')).toBeInTheDocument();
     await userEvent.click(within(recent).getByRole('button', { name: 'Undo: Linked Rahul Sharma to Rahul Verma (1 sheet)' }));
     await waitFor(() => expect(posts(fetchMock)).toHaveLength(1));
     expect(String(posts(fetchMock)[0]?.[0])).toContain('/staffing/identity-changes/idc1/undo');
+    expect(await screen.findByText(/^Undone. The sheets are back/)).toBeInTheDocument();
+    await userEvent.click(within(recent).getByRole('button', { name: 'Undo: Marked Client Staff as outside staff' }));
+    expect(await screen.findByText('Undone. Client Staff is back under "People we don\'t know yet".')).toBeInTheDocument();
   });
 
   it('shows nothing when the feature is off', async () => {

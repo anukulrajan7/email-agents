@@ -1,10 +1,10 @@
 import { useId, useState, type FormEvent } from 'react';
-import { Badge, Button, Card, Dialog, Input, Label, Select, useToast } from '../../components/ui';
+import { Badge, Button, Card, ConfirmDialog, Dialog, Input, Label, Select, useToast } from '../../components/ui';
 import { ErrorNote } from '../../components/ErrorNote';
 import { usePeople } from '../team/hooks';
 import { useAddIdentityAsPerson, useIdentities, useLinkIdentity, useSetIdentityStatus, useUndoIdentityChange } from './hooks';
 import { hoursLabel, periodLabel } from './timesheetFormat';
-import type { IdentityChange, UnknownPerson } from './types';
+import type { IdentityChange, IdentitySuggestion, UnknownPerson } from './types';
 
 const sheets = (n: number) => `${n} ${n === 1 ? 'sheet' : 'sheets'}`;
 
@@ -12,7 +12,7 @@ function changeText(c: IdentityChange): string {
   const who = c.name ?? 'A name';
   switch (c.kind) {
     case 'link':
-      return `Linked ${who} to ${c.person_name ?? 'a person'} (${sheets(c.record_count)})`;
+      return `Linked ${who} to ${c.person_name ?? 'a person'} (${sheets(c.record_count)})${c.added_person ? `; ${c.person_name ?? 'they'} stays on People if you undo` : ''}`;
     case 'mark_external':
       return `Marked ${who} as outside staff`;
     case 'dismiss':
@@ -20,6 +20,11 @@ function changeText(c: IdentityChange): string {
     default:
       return `${who}: ${c.kind.replace('_', ' ')}`;
   }
+}
+
+function undoToast(c: IdentityChange): string {
+  if (c.kind === 'link') return 'Undone. The sheets are back under "People we don\'t know yet" and marked for a check.';
+  return `Undone. ${c.name ?? 'The name'} is back under "People we don't know yet".`;
 }
 
 function AddPersonDialog({ ws, person, onClose }: { ws: string; person: UnknownPerson; onClose: () => void }) {
@@ -84,10 +89,32 @@ function PersonCard({ ws, person }: { ws: string; person: UnknownPerson }) {
   const [chosen, setChosen] = useState('');
   const [rememberName, setRememberName] = useState(false);
   const [adding, setAdding] = useState(false);
+  const [confirming, setConfirming] = useState<IdentitySuggestion>();
+  const [acting, setActing] = useState<string>();
   const label = person.name ?? 'No name written';
-  const linkTo = (personId: string, personName: string) =>
-    link.mutate({ id: person.id, person_id: personId, remember_name: rememberName }, { onSuccess: () => notify('success', `${label} is now ${personName}.`) });
-  const mark = (action: 'external' | 'dismiss', text: string) => status.mutate({ id: person.id, action }, { onSuccess: () => notify('success', text) });
+  const done = () => setActing(undefined);
+  const linkTo = (key: string, personId: string, personName: string) => {
+    setActing(key);
+    link.mutate(
+      { id: person.id, person_id: personId, remember_name: rememberName },
+      {
+        onSuccess: () => {
+          setConfirming(undefined);
+          notify('success', `${label} is now ${personName}.`);
+        },
+        onSettled: done,
+      },
+    );
+  };
+  const mark = (action: 'external' | 'dismiss', text: string) => {
+    setActing(action);
+    status.mutate({ id: person.id, action }, { onSuccess: () => notify('success', text), onSettled: done });
+  };
+  const suggest = (s: IdentitySuggestion) => {
+    if (s.weak || person.record_count > 1) setConfirming(s);
+    else linkTo(`suggest:${s.person_id}`, s.person_id, s.name);
+  };
+  const busy = acting !== undefined;
 
   return (
     <li className="flex flex-col gap-3 rounded-sm border border-rule p-3" aria-label={label}>
@@ -119,7 +146,14 @@ function PersonCard({ ws, person }: { ws: string; person: UnknownPerson }) {
           <ul className="flex flex-col gap-2">
             {person.suggestions.map((s) => (
               <li key={s.person_id} className="flex flex-wrap items-center gap-2 text-sm">
-                <Button size="sm" variant="secondary" disabled={link.isPending} aria-label={`Link ${label} to ${s.name}`} onClick={() => linkTo(s.person_id, s.name)}>
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  disabled={busy}
+                  loading={acting === `suggest:${s.person_id}`}
+                  aria-label={`This is ${s.name}: link ${label}'s ${sheets(person.record_count)}`}
+                  onClick={() => suggest(s)}
+                >
                   This is {s.name}
                 </Button>
                 <span className="text-ink-muted">{s.reason}</span>
@@ -139,10 +173,10 @@ function PersonCard({ ws, person }: { ws: string; person: UnknownPerson }) {
         </Select>
         <Button
           size="sm"
-          disabled={!chosen}
-          loading={link.isPending}
+          disabled={!chosen || busy}
+          loading={acting === 'chosen'}
           aria-label={`Link ${label} to the chosen person`}
-          onClick={() => linkTo(chosen, (people.data?.items ?? []).find((p) => p.id === chosen)?.name ?? 'that person')}
+          onClick={() => linkTo('chosen', chosen, (people.data?.items ?? []).find((p) => p.id === chosen)?.name ?? 'that person')}
         >
           Link
         </Button>
@@ -152,18 +186,31 @@ function PersonCard({ ws, person }: { ws: string; person: UnknownPerson }) {
         </label>
       </div>
       <div className="flex flex-wrap gap-2">
-        <Button size="sm" variant="secondary" onClick={() => setAdding(true)}>
+        <Button size="sm" variant="secondary" disabled={busy} onClick={() => setAdding(true)}>
           Add as a person
         </Button>
-        <Button size="sm" variant="ghost" loading={status.isPending} onClick={() => mark('external', `${label} is kept as outside staff.`)}>
+        <Button size="sm" variant="ghost" disabled={busy} loading={acting === 'external'} onClick={() => mark('external', `${label} is kept as outside staff.`)}>
           They work for a client
         </Button>
-        <Button size="sm" variant="ghost" loading={status.isPending} onClick={() => mark('dismiss', `${label} is kept as not a person.`)}>
+        <Button size="sm" variant="ghost" disabled={busy} loading={acting === 'dismiss'} onClick={() => mark('dismiss', `${label} is kept as not a person.`)}>
           Not a person
         </Button>
       </div>
       <ErrorNote error={link.error ?? status.error} />
       {adding && <AddPersonDialog ws={ws} person={person} onClose={() => setAdding(false)} />}
+      {confirming && (
+        <ConfirmDialog
+          title={`Link ${sheets(person.record_count)} to ${confirming.name}?`}
+          tone="primary"
+          confirmLabel={`Link ${sheets(person.record_count)}`}
+          busy={link.isPending}
+          error={link.error}
+          onConfirm={() => linkTo(`suggest:${confirming.person_id}`, confirming.person_id, confirming.name)}
+          onCancel={() => setConfirming(undefined)}
+        >
+          All {sheets(person.record_count)} written as {label} will become {confirming.name}'s. {confirming.reason}. You can undo this afterwards.
+        </ConfirmDialog>
+      )}
     </li>
   );
 }
@@ -204,7 +251,14 @@ export function UnknownPeople({ ws }: { ws: string }) {
               {recent.map((c) => (
                 <li key={c.id} className="flex flex-wrap items-center gap-2 text-sm text-ink-muted">
                   <span>{changeText(c)}</span>
-                  <Button size="sm" variant="ghost" loading={undo.isPending} aria-label={`Undo: ${changeText(c)}`} onClick={() => undo.mutate(c.id, { onSuccess: () => notify('success', 'Undone. The sheets are back under "People we don\'t know yet" and marked for a check.') })}>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    disabled={undo.isPending}
+                    loading={undo.isPending && undo.variables === c.id}
+                    aria-label={`Undo: ${changeText(c)}`}
+                    onClick={() => undo.mutate(c.id, { onSuccess: () => notify('success', undoToast(c)) })}
+                  >
                     Undo
                   </Button>
                 </li>
