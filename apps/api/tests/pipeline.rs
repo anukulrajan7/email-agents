@@ -60,7 +60,7 @@ async fn spawn_mock_resend() -> String {
                     "subject": "Quick question",
                     "text": "When is the holiday party?",
                     "message_id": "<plain@acme.com>",
-                    "created_at": "2026-10-13T11:30:00.000Z",
+                    "created_at": an_hour_ago(),
                 }));
             }
             axum::Json(json!({
@@ -71,7 +71,7 @@ async fn spawn_mock_resend() -> String {
                 "text": "FYI\n\n---------- Forwarded message ---------\nFrom: Priya <priya@acme.com>\nSubject: September timesheet\n\nPlease review my timesheet.",
                 "html": "<p>ignored when text exists</p>",
                 "message_id": "<abc@acme.com>",
-                "created_at": "2026-10-13T11:30:00.000Z",
+                "created_at": an_hour_ago(),
                 "attachments": [{"id":"a1","filename":"timesheet.pdf","content_type":"application/pdf","size":1234}]
             }))
         }),
@@ -133,8 +133,16 @@ impl Harness {
     }
 }
 
+/// Mail must look recent: anything older than `ai_auto_hours` is treated as backfill and never acted on.
+/// A fixed date here made the timesheet test fail once the calendar moved on.
+fn an_hour_ago() -> String {
+    (time::OffsetDateTime::now_utc() - time::Duration::hours(1))
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap()
+}
+
 fn received(email_id: &str) -> Value {
-    json!({"type":"email.received","created_at":"2026-10-13T11:30:00Z","data":{"email_id": email_id}})
+    json!({"type":"email.received","created_at": an_hour_ago(),"data":{"email_id": email_id}})
 }
 
 const ADMIN: &str = "dev:admin@acme.test";
