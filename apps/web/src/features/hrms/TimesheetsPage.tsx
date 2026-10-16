@@ -108,8 +108,8 @@ export function TimesheetsPage() {
           <RecordById ws={ws} id={recordParam} canLink={owner} />
         </Dialog>
       )}
-      {owner && settings.data && <PolicyForm key={JSON.stringify(settings.data)} ws={ws} settings={settings.data} />}
-      {owner && settings.data && <TimesheetRulesForm key={JSON.stringify(settings.data)} ws={ws} settings={settings.data} />}
+      {owner && settings.data && <PolicyForm key={JSON.stringify([settings.data.hr_source_id, settings.data.timesheet_grace_days, settings.data.restrict_mail_to_team])} ws={ws} settings={settings.data} />}
+      {owner && settings.data && <TimesheetRulesForm key={JSON.stringify([settings.data.timesheet_cadence, settings.data.max_hours_per_day, settings.data.hours_tolerance, settings.data.require_signature])} ws={ws} settings={settings.data} />}
     </Page>
   );
 }

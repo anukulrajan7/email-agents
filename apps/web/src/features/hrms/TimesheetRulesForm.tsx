@@ -16,17 +16,24 @@ export function TimesheetRulesForm({ ws, settings }: { ws: string; settings: Tea
   const notify = useToast();
   const [cadence, setCadence] = useState<TimesheetCadence>(settings.timesheet_cadence ?? 'monthly');
   const [maxHours, setMaxHours] = useState(settings.max_hours_per_day == null ? '' : String(settings.max_hours_per_day));
-  const [tolerance, setTolerance] = useState(settings.hours_tolerance ?? 0.5);
+  const [tolerance, setTolerance] = useState(String(settings.hours_tolerance ?? 0.5));
+  const [problem, setProblem] = useState<string>();
   const [signature, setSignature] = useState(settings.require_signature ?? false);
 
   const submit = (e: FormEvent) => {
     e.preventDefault();
+    const tol = Number(tolerance);
+    if (tolerance.trim() === '' || !Number.isFinite(tol) || tol < 0 || tol > 100) {
+      setProblem('Enter how many hours a sheet may differ from the portal, from 0 to 100.');
+      return;
+    }
+    setProblem(undefined);
     save.mutate(
       {
         ...settings,
         timesheet_cadence: cadence,
         max_hours_per_day: maxHours.trim() === '' ? null : Number(maxHours),
-        hours_tolerance: tolerance,
+        hours_tolerance: tol,
         require_signature: signature,
       },
       { onSuccess: () => notify('success', 'Timesheet rules saved.') },
@@ -55,17 +62,18 @@ export function TimesheetRulesForm({ ws, settings }: { ws: string; settings: Tea
           </div>
           <div className="flex flex-col gap-1">
             <Label htmlFor={`${uid}-max`}>Most hours in one day</Label>
-            <Input id={`${uid}-max`} type="number" min={1} max={24} step={0.5} className="w-28" placeholder="No limit" value={maxHours} onChange={(e) => setMaxHours(e.target.value)} />
+            <Input id={`${uid}-max`} type="number" min={0.5} max={24} step={0.5} className="w-28" placeholder="No limit" value={maxHours} onChange={(e) => setMaxHours(e.target.value)} />
           </div>
           <div className="flex flex-col gap-1">
             <Label htmlFor={`${uid}-tol`}>Hours a sheet may differ from the portal</Label>
-            <Input id={`${uid}-tol`} type="number" min={0} max={100} step={0.5} className="w-28" value={tolerance} onChange={(e) => setTolerance(Number(e.target.value))} />
+            <Input id={`${uid}-tol`} type="number" min={0} max={100} step={0.5} className="w-28" value={tolerance} onChange={(e) => setTolerance(e.target.value)} />
           </div>
         </div>
         <div className="flex items-center gap-3 text-sm text-ink">
           <Switch checked={signature} label="Timesheets need an approver's signature" onChange={setSignature} />
-          <span>Timesheets need an approver's signature</span>
+          <span aria-hidden="true">Timesheets need an approver's signature (coming soon: we can't detect signatures yet, so this is not enforced)</span>
         </div>
+        {problem && <p role="alert" className="text-sm text-danger">{problem}</p>}
         <ErrorNote error={save.error} />
         <div>
           <Button type="submit" loading={save.isPending}>

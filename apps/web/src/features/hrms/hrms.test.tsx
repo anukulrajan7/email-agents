@@ -234,6 +234,33 @@ describe('TimesheetsPage', () => {
     expect(screen.getByRole('switch', { name: "Timesheets need an approver's signature" })).toHaveAttribute('aria-checked', 'false');
   });
 
+  it('refuses a blank tolerance instead of saving 0, and says the signature rule is not enforced yet', async () => {
+    const fetchMock = mockApi({ '/team/access': access('super_admin'), '/team/settings': settings, '/staffing/timesheet-grid': { ...grid, rows: [], days: [], summary: { recorded: 0, needs_check: 0, missing: 0 } } });
+    renderAt('/w/w1/timesheets', '/w/:ws/timesheets', <TimesheetsPage />);
+    const tol = await screen.findByLabelText('Hours a sheet may differ from the portal');
+    expect(screen.getByText(/coming soon/)).toBeInTheDocument();
+    await userEvent.clear(tol);
+    await userEvent.click(screen.getByRole('button', { name: 'Save rules' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('from 0 to 100');
+    expect(fetchMock.mock.calls.some(([, init]) => init?.method === 'PUT')).toBe(false);
+  });
+
+  it('saving the rules does not reset the half-edited policy form', async () => {
+    mockApi({
+      '/team/access': access('super_admin'),
+      '/team/settings': (init?: RequestInit) => (init?.body ? { ...settings, ...JSON.parse(init.body as string) } : settings),
+      '/staffing/timesheet-grid': { ...grid, rows: [], days: [], summary: { recorded: 0, needs_check: 0, missing: 0 } },
+    });
+    renderAt('/w/w1/timesheets', '/w/:ws/timesheets', <TimesheetsPage />);
+    const grace = await screen.findByLabelText('Days after month end before a missing timesheet is flagged');
+    await userEvent.clear(grace);
+    await userEvent.type(grace, '6');
+    await userEvent.selectOptions(screen.getByLabelText('How often a timesheet is expected'), 'weekly');
+    await userEvent.click(screen.getByRole('button', { name: 'Save rules' }));
+    await waitFor(() => expect(screen.getByLabelText('How often a timesheet is expected')).toHaveValue('weekly'));
+    expect(screen.getByLabelText('Days after month end before a missing timesheet is flagged')).toHaveValue(6);
+  });
+
   it('hides the rules from people who cannot edit them', async () => {
     mockApi({ '/team/access': access('operator'), '/team/settings': settings, '/staffing/timesheet-grid': grid });
     renderAt('/w/w1/timesheets', '/w/:ws/timesheets', <TimesheetsPage />);
