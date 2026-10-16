@@ -9,6 +9,7 @@ import { RecordById } from './RecordDetail';
 import { TimesheetGridView } from './TimesheetGridView';
 import { TimesheetRulesForm } from './TimesheetRulesForm';
 import { TimesheetRecordsView } from './TimesheetRecordsView';
+import { UnknownPeople } from './UnknownPeople';
 import type { GridRow } from './types';
 
 function PolicyForm({ ws, settings }: { ws: string; settings: TeamSettings }) {
@@ -83,6 +84,7 @@ export function TimesheetsPage() {
         description="Timesheets that arrive, pasted in an email or attached, are read and kept here by person and day. If one has not arrived three days after month end, the person is told and then their manager and HR."
       />
       <ErrorNote error={settings.error} />
+      {owner && <UnknownPeople ws={ws} />}
       <Tabs
         label="Timesheet views"
         value={view}

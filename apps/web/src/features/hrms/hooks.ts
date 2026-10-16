@@ -1,7 +1,7 @@
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '../../api/client';
 import type { ImportReport } from '../team/types';
-import type { MismatchList, RecordFilters, Submission, SubmissionList, TimesheetGrid, TimesheetRecord, TimesheetsView } from './types';
+import type { IdentityList, MismatchList, NewPersonBody, RecordFilters, Submission, SubmissionList, TimesheetGrid, TimesheetRecord, TimesheetsView } from './types';
 
 const hrmsKey = (ws: string) => ['ws', ws, 'hrms'] as const;
 
@@ -82,4 +82,36 @@ export function useLinkTimesheetRecord(ws: string) {
       api<TimesheetRecord>(`/workspaces/${ws}/staffing/timesheet-records/${id}/link`, { method: 'POST', body: { person_id } }),
     onSuccess: () => qc.invalidateQueries({ queryKey: hrmsKey(ws) }),
   });
+}
+
+export function useIdentities(ws: string, enabled: boolean) {
+  return useQuery({
+    queryKey: [...hrmsKey(ws), 'identities'],
+    queryFn: () => api<IdentityList>(`/workspaces/${ws}/staffing/identities`),
+    enabled,
+  });
+}
+
+/** Every identity action changes records, the grid and the cards, so all of HRMS is refreshed. */
+function useIdentityAction<V>(ws: string, run: (vars: V) => Promise<unknown>) {
+  const qc = useQueryClient();
+  return useMutation({ mutationFn: run, onSuccess: () => qc.invalidateQueries({ queryKey: hrmsKey(ws) }) });
+}
+
+export function useLinkIdentity(ws: string) {
+  return useIdentityAction(ws, ({ id, person_id, remember_name }: { id: string; person_id: string; remember_name: boolean }) =>
+    api(`/workspaces/${ws}/staffing/identities/${id}/link`, { method: 'POST', body: { person_id, remember_name } }),
+  );
+}
+
+export function useAddIdentityAsPerson(ws: string) {
+  return useIdentityAction(ws, ({ id, body }: { id: string; body: NewPersonBody }) => api(`/workspaces/${ws}/staffing/identities/${id}/add-person`, { method: 'POST', body }));
+}
+
+export function useSetIdentityStatus(ws: string) {
+  return useIdentityAction(ws, ({ id, action }: { id: string; action: 'external' | 'dismiss' }) => api(`/workspaces/${ws}/staffing/identities/${id}/${action}`, { method: 'POST' }));
+}
+
+export function useUndoIdentityChange(ws: string) {
+  return useIdentityAction(ws, (id: string) => api(`/workspaces/${ws}/staffing/identity-changes/${id}/undo`, { method: 'POST' }));
 }

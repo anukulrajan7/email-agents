@@ -58,6 +58,8 @@ export type GridRow = {
   total: number;
   status: GridStatus;
   record_ids: string[];
+  /** A name nobody on the roster owns: kept and shown, never counted for a person. */
+  unresolved?: boolean;
 };
 
 export type TimesheetGrid = {
@@ -65,7 +67,8 @@ export type TimesheetGrid = {
   days: GridDay[];
   rows: GridRow[];
   due_at: string;
-  summary: { recorded: number; needs_check: number; missing: number };
+  summary: { recorded: number; needs_check: number; missing: number; unresolved?: number };
+  roster_empty?: boolean;
 };
 
 export type RecordStatus = 'recorded' | 'replaced' | 'needs_check';
@@ -101,3 +104,47 @@ export type TimesheetRecord = {
 };
 
 export type RecordFilters = { q?: string; month?: string; status?: string; person_id?: string };
+
+export type IdentitySuggestion = { person_id: string; name: string; reason: string };
+
+export type UnknownSheet = {
+  id: string;
+  period_start: string;
+  period_end: string;
+  total_hours: number | null;
+  file: string | null;
+  subject: string | null;
+  received_at: string | null;
+  message_id: string | null;
+  possible_duplicate: boolean;
+};
+
+/** A name that came on timesheets and is not on the roster, with the sheets that wait for it. */
+export type UnknownPerson = {
+  id: string;
+  name: string | null;
+  employee_code: string | null;
+  sender: string | null;
+  sender_domain: string | null;
+  record_count: number;
+  records: UnknownSheet[];
+  suggestions: IdentitySuggestion[];
+  updated_at: string;
+};
+
+export type IdentityChange = {
+  id: string;
+  kind: 'link' | 'unlink' | 'create_person' | 'mark_external' | 'dismiss' | 'reopen' | 'alias' | 'fill_field' | 'add_email';
+  person_id: string | null;
+  person_name: string | null;
+  name: string | null;
+  record_count: number;
+  by: string;
+  undone: boolean;
+  can_undo: boolean;
+  at: string;
+};
+
+export type IdentityList = { enabled: boolean; items: UnknownPerson[]; recent: IdentityChange[] };
+
+export type NewPersonBody = { name?: string; email?: string; employee_code?: string };

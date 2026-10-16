@@ -75,6 +75,7 @@ export function TimesheetGridView({ ws, onOpen }: { ws: string; onOpen: (row: Gr
       {data && (
         <p className="text-sm text-ink-muted">
           {data.summary.recorded} recorded · {data.summary.needs_check} need a check · {data.summary.missing} missing
+          {data.summary.unresolved ? ` · ${data.summary.unresolved} unknown ${data.summary.unresolved === 1 ? 'name' : 'names'} (kept, not counted for anyone)` : ''}
         </p>
       )}
       <ErrorNote error={grid.error} />

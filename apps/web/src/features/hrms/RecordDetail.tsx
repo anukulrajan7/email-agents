@@ -18,7 +18,7 @@ function LinkToPerson({ ws, record }: { ws: string; record: TimesheetRecord }) {
     <div className="flex flex-col gap-2 rounded-sm border border-review/50 bg-review-tint p-3">
       <p className="text-sm text-ink">
         Who is this? {record.name_as_written ?? 'No name'}
-        {record.employee_code ? ` (ID ${record.employee_code})` : ''} is not matched to anyone in People. Link it once and the next sheet with the same name or ID is matched on its own.
+        {record.employee_code ? ` (ID ${record.employee_code})` : ''} is not matched to anyone in People, and nothing is matched by a similar name. Link it once and the next sheet with the same ID is matched on its own.
       </p>
       <div className="flex flex-wrap items-center gap-2">
         <Select aria-label="Person to link" className="max-w-64" value={person} onChange={(e) => setPerson(e.target.value)}>
