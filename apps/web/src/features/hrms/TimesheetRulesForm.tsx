@@ -70,8 +70,11 @@ export function TimesheetRulesForm({ ws, settings }: { ws: string; settings: Tea
           </div>
         </div>
         <div className="flex items-center gap-3 text-sm text-ink">
-          <Switch checked={signature} label="Timesheets need an approver's signature" onChange={setSignature} />
-          <span aria-hidden="true">Timesheets need an approver's signature (coming soon: we can't detect signatures yet, so this is not enforced)</span>
+          <Switch checked={signature} label="Timesheets need an approver's signature" describedBy={`${uid}-signature-note`} onChange={setSignature} />
+          <span aria-hidden="true">Timesheets need an approver's signature</span>
+          <span id={`${uid}-signature-note`} className="text-ink-muted">
+            (coming soon: we can't detect signatures yet, so this is not enforced)
+          </span>
         </div>
         {problem && <p role="alert" className="text-sm text-danger">{problem}</p>}
         <ErrorNote error={save.error} />

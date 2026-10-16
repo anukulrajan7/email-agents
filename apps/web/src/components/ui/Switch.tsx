@@ -4,11 +4,14 @@ export function Switch({
   checked,
   label,
   disabled,
+  describedBy,
   onChange,
 }: {
   checked: boolean;
   label: string;
   disabled?: boolean;
+  /** Id of the element with extra words about this switch, read after its name. */
+  describedBy?: string;
   onChange: (value: boolean) => void;
 }) {
   return (
@@ -17,6 +20,7 @@ export function Switch({
       role="switch"
       aria-checked={checked}
       aria-label={label}
+      aria-describedby={describedBy}
       disabled={disabled}
       onClick={() => onChange(!checked)}
       className={cn(

@@ -239,6 +239,7 @@ describe('TimesheetsPage', () => {
     renderAt('/w/w1/timesheets', '/w/:ws/timesheets', <TimesheetsPage />);
     const tol = await screen.findByLabelText('Hours a sheet may differ from the portal');
     expect(screen.getByText(/coming soon/)).toBeInTheDocument();
+    expect(screen.getByRole('switch', { name: "Timesheets need an approver's signature" })).toHaveAccessibleDescription(/not enforced/);
     await userEvent.clear(tol);
     await userEvent.click(screen.getByRole('button', { name: 'Save rules' }));
     expect(await screen.findByRole('alert')).toHaveTextContent('from 0 to 100');

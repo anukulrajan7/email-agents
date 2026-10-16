@@ -152,6 +152,16 @@ describe('AgentsPage approvals', () => {
     expect(await screen.findByRole('note')).toHaveTextContent("Couldn't confirm: invoice amount");
   });
 
+  it('says who asked Meera to write a reply the team asked for', async () => {
+    mockFetch((url) =>
+      url.includes('/approvals')
+        ? json({ items: [approval({ action: 'send_email', handoff: { line: 'Rohan asked Meera to tell the sender the timesheet is recorded', from: [{ agent_id: 'a1', name: 'Rohan', kind: 'ack', job: 'desk:timesheet' }] } })], pending_count: 1 })
+        : undefined,
+    );
+    renderAgents();
+    expect(await screen.findByText('Rohan asked Meera to tell the sender the timesheet is recorded')).toBeInTheDocument();
+  });
+
   it('shows the approval with recipient, subject, and candidate scores', async () => {
     pending();
     renderAgents();

@@ -35,6 +35,7 @@ function DecidedApproval({ approval }: { approval: Approval }) {
   const approved = approval.status === 'approved';
   return (
     <p className="text-sm text-ink-muted">
+      {approval.handoff?.line && <span className="block">{approval.handoff.line}</span>}
       <span className="font-semibold text-ink">{approved ? 'Approved' : 'Declined'}</span>
       {approval.decided_by ? ` by ${approval.decided_by}` : ''}
       {approval.decided_at && (
