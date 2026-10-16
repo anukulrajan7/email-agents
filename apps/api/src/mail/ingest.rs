@@ -99,8 +99,8 @@ pub async fn persist_message(
         "INSERT INTO email_messages
            (id, workspace_id, source_id, thread_id, source_message_id, rfc_message_id, sender_address,
             original_sender_address, recipients_json, subject, body_text, body_html, received_at, created_at, processing_status,
-            content_complete, sender_name, cc_json, direction, bulk_signals)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?18, ?15, ?16, ?17, ?19, ?20)",
+            content_complete, sender_name, cc_json, direction, bulk_signals, in_reply_to, references_json, auth_json, auto_kind)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?18, ?15, ?16, ?17, ?19, ?20, ?21, ?22, ?23, ?24)",
     )
     .bind(&message_id)
     .bind(workspace_id)
@@ -122,6 +122,10 @@ pub async fn persist_message(
     .bind(if outbound { "processed" } else { "normalized" })
     .bind(if outbound { "outbound" } else { "inbound" })
     .bind(json!(email.bulk_signals).to_string())
+    .bind(&email.in_reply_to)
+    .bind(json!(email.references).to_string())
+    .bind(email.auth.clone().unwrap_or_else(|| json!({})).to_string())
+    .bind((!outbound).then(|| crate::mail::bots::auto_kind(&email.sender_address, &email.subject, &email.bulk_signals)).flatten().map(|k| k.as_str()))
     .execute(&mut *conn)
     .await?;
 
@@ -229,6 +233,9 @@ pub async fn refresh_content(
         "UPDATE email_messages SET body_text = ?1, body_html = COALESCE(?2, body_html), content_complete = 1, text_clean_v = 1,
                 sender_name = COALESCE(?5, sender_name), cc_json = ?6,
                 bulk_signals = CASE WHEN ?8 != '[]' THEN ?8 ELSE bulk_signals END,
+                in_reply_to = COALESCE(?9, in_reply_to),
+                references_json = CASE WHEN ?10 != '[]' THEN ?10 ELSE references_json END,
+                auth_json = CASE WHEN ?11 != '{}' THEN ?11 ELSE auth_json END,
                 direction = CASE WHEN ?7 THEN 'outbound' ELSE direction END,
                 processing_status = CASE WHEN ?7 THEN 'processed' ELSE processing_status END
          WHERE source_id = ?3 AND source_message_id = ?4 AND content_complete = 0 AND suppressed = 0
@@ -242,6 +249,9 @@ pub async fn refresh_content(
     .bind(json!(email.cc).to_string())
     .bind(outbound)
     .bind(json!(email.bulk_signals).to_string())
+    .bind(&email.in_reply_to)
+    .bind(json!(email.references).to_string())
+    .bind(email.auth.clone().unwrap_or_else(|| json!({})).to_string())
     .fetch_optional(&mut *conn)
     .await?;
     let Some((message_id, workspace_id, direction)) = updated else { return Ok(None) };

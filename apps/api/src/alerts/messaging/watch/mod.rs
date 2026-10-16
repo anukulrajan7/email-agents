@@ -3,9 +3,7 @@
 //! Meera conversation, with the email it came from. If nobody answers within the nudge time she nudges once and
 //! tells the person; a later answer still gets through.
 
-use std::sync::LazyLock;
 
-use regex::Regex;
 use serde_json::{Value, json};
 use sqlx::SqliteConnection;
 

@@ -24,24 +24,15 @@ pub enum Automatic {
     AutoReply,
 }
 
-static BOUNCE_SUBJECT: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)^\s*(?:undeliverable|undelivered mail|delivery status notification|mail delivery (?:failed|failure|subsystem)|returned mail|delivery has failed|failure notice|message not delivered)")
-        .expect("valid regex")
-});
-static AUTO_SUBJECT: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)^\s*(?:(?:automatic|auto)[ -]?(?:reply|response|answer)|autoreply|out of (?:the )?office|away from (?:the )?office|on (?:annual )?leave|vacation (?:reply|response))")
-        .expect("valid regex")
-});
-
 /// Is this mail a machine talking: a bounce, or an automatic answer? Neither is the answer someone is waiting for.
 pub fn automatic(sender: &str, subject: &str, signals_json: &str) -> Option<Automatic> {
     let signals: Vec<String> = serde_json::from_str(signals_json).unwrap_or_default();
     let has = |s: &str| signals.iter().any(|x| x == s);
     let local = sender.split('@').next().unwrap_or_default().to_lowercase();
-    if matches!(local.as_str(), "mailer-daemon" | "postmaster") || has(crate::mail::bulk::DELIVERY_STATUS) || BOUNCE_SUBJECT.is_match(subject) {
+    if matches!(local.as_str(), "mailer-daemon" | "postmaster") || has(crate::mail::bulk::DELIVERY_STATUS) || crate::mail::bots::is_bounce_subject(subject) {
         return Some(Automatic::Bounce);
     }
-    if is_automated_address(sender) || has(crate::mail::bulk::AUTO_SUBMITTED) || has(crate::mail::bulk::AUTO_REPLY) || AUTO_SUBJECT.is_match(subject) {
+    if is_automated_address(sender) || has(crate::mail::bulk::AUTO_SUBMITTED) || has(crate::mail::bulk::AUTO_REPLY) || crate::mail::bots::is_auto_reply_subject(subject) {
         return Some(Automatic::AutoReply);
     }
     None

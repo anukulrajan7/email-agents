@@ -145,6 +145,11 @@ pub struct NormalizedEmail {
     pub preview_only: bool,
     /// Header evidence of bulk or automated mail (`bulk::header_signals`).
     pub bulk_signals: Vec<String>,
+    /// The Message-ID this mail answers (`In-Reply-To`), and every earlier one in its chain (`References`).
+    pub in_reply_to: Option<String>,
+    pub references: Vec<String>,
+    /// What the receiving server concluded about the sender: `{"dmarc": "pass", "spf": "fail"}` (`mail::headers::auth_results`).
+    pub auth: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Default)]

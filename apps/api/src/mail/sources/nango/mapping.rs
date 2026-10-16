@@ -97,6 +97,9 @@ pub fn map_gmail_record(rec: &Value, max_body_chars: usize) -> Option<MappedReco
         // Only a snippet unless an explicit body field was present.
         preview_only: str_of(rec, &["body", "text", "bodyText"]).is_none(),
         bulk_signals: crate::mail::bulk::header_signals(&header, &label_ids(rec)),
+        in_reply_to: header("In-Reply-To").as_deref().and_then(crate::mail::headers::in_reply_to),
+        references: header("References").map(|r| crate::mail::headers::message_ids(&r)).unwrap_or_default(),
+        auth: header("Authentication-Results").map(|a| crate::mail::headers::auth_results(&a)),
     };
     let mut mapped = MappedRecord { email, thread_id: str_of(rec, &["threadId", "thread_id"]), deleted, cursor };
     // If the record already carries MIME parts (full format), use them directly.
@@ -185,6 +188,15 @@ pub fn apply_gmail_payload(email: &mut NormalizedEmail, payload: &Value, max_bod
         email.attachments = content.attachments;
     }
     crate::mail::bulk::merge(&mut email.bulk_signals, crate::mail::bulk::header_signals(&|n| gmail_header(Some(payload), n), &[]));
+    if email.in_reply_to.is_none() {
+        email.in_reply_to = gmail_header(Some(payload), "In-Reply-To").as_deref().and_then(crate::mail::headers::in_reply_to);
+    }
+    if email.references.is_empty() {
+        email.references = gmail_header(Some(payload), "References").map(|r| crate::mail::headers::message_ids(&r)).unwrap_or_default();
+    }
+    if email.auth.is_none() {
+        email.auth = gmail_header(Some(payload), "Authentication-Results").map(|a| crate::mail::headers::auth_results(&a));
+    }
     if email.sender_address.is_empty()
         && let Some(from) = gmail_header(Some(payload), "From")
     {
@@ -232,6 +244,26 @@ mod tests {
         assert_eq!(email.body_html.as_deref(), Some("<p>Hi HR</p>"));
         assert_eq!(email.attachments.len(), 1);
         assert_eq!((email.attachments[0].filename.as_str(), email.attachments[0].size_bytes), ("timesheet.pdf", Some(4821)));
+    }
+
+    #[test]
+    fn threading_headers_and_what_the_server_concluded_about_the_sender_are_read() {
+        let rec = json!({
+            "id": "18c3", "threadId": "t2", "snippet": "my id is EMP-1088",
+            "payload": {"headers": [
+                {"name": "From", "value": "Ravi <ravi@client.test>"}, {"name": "Subject", "value": "Re: timesheet"},
+                {"name": "In-Reply-To", "value": "<snd_1@postroom.mail>"},
+                {"name": "References", "value": "<gm-1@mail.example> <snd_1@postroom.mail>"},
+                {"name": "Authentication-Results", "value": "mx.google.com; dkim=pass; spf=pass; dmarc=fail (p=REJECT)"}
+            ]},
+            "_nango_metadata": {"deleted_at": null, "last_action": "ADDED", "cursor": "c2"}
+        });
+        let m = map_gmail_record(&rec, 10_000).unwrap();
+        assert_eq!(m.email.in_reply_to.as_deref(), Some("<snd_1@postroom.mail>"));
+        assert_eq!(m.email.references, ["<gm-1@mail.example>", "<snd_1@postroom.mail>"]);
+        assert!(crate::mail::headers::failed(m.email.auth.as_ref().unwrap()), "dmarc failed");
+        let plain = map_gmail_record(&json!({"id": "x", "snippet": "hi", "payload": {"headers": []}}), 10_000).unwrap();
+        assert_eq!((plain.email.in_reply_to, plain.email.references, plain.email.auth), (None, vec![], None));
     }
 
     #[test]

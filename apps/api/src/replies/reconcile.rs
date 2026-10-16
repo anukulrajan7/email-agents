@@ -1,8 +1,11 @@
 use super::*;
 
+/// What follows the attempt id in our Message-ID.
+const MESSAGE_ID_SUFFIX: &str = "@postroom.mail>";
+
 /// Our Message-ID for one send attempt.
 pub fn attempt_message_id(attempt_id: &str) -> String {
-    format!("<{attempt_id}@postroom.mail>")
+    format!("<{attempt_id}{MESSAGE_ID_SUFFIX}")
 }
 
 /// An open attempt younger than this may not be visible in Gmail yet: never call it "not sent".
@@ -85,12 +88,14 @@ pub(super) async fn clear_attempt(state: &AppState, draft_id: &str, attempt: &st
 pub(super) async fn finalize_sent(state: &AppState, ws: &str, ctx: &ReplyContext, provider_message_id: &str, actor: Actor<'_>) -> AppResult<()> {
     let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     let changed = sqlx::query(
-        "UPDATE drafts SET status = 'sent', provider_message_id = ?1, send_at = NULL, send_error = NULL, updated_at = ?2
+        "UPDATE drafts SET status = 'sent', provider_message_id = ?1, send_at = NULL, send_error = NULL, updated_at = ?2,
+                rfc_message_id = CASE WHEN send_attempt_id IS NOT NULL THEN '<' || send_attempt_id || ?4 ELSE rfc_message_id END
          WHERE id = ?3 AND status != 'sent'",
     )
     .bind(provider_message_id)
     .bind(now_ms())
     .bind(&ctx.draft_id)
+    .bind(MESSAGE_ID_SUFFIX)
     .execute(&mut *tx)
     .await?
     .rows_affected()

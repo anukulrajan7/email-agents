@@ -72,10 +72,6 @@ impl SafetyReport {
 
 static EMAIL: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)+$").expect("valid regex"));
-static NO_REPLY: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)^(?:.*(?:no-?reply|do-?not-?reply|donotreply)|mailer-daemon|postmaster|bounces?|notifications?|notify|newsletters?|alerts?|updates|marketing|news)(?:[.+-].*)?@")
-        .expect("valid regex")
-});
 static PLACEHOLDER: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)\{\{[^}]*\}?\}?|\{[a-z_][a-z0-9_ ]{0,30}\}|<[a-z_][a-z0-9_ ]{0,30}>|\[[a-z][a-z0-9_ ]{0,30}\]|\bx{3,}\b|\btbd\b")
         .expect("valid regex")
@@ -102,9 +98,7 @@ pub fn valid_address(addr: &str) -> bool {
     addr.len() <= 254 && EMAIL.is_match(addr)
 }
 
-pub fn is_automated_address(addr: &str) -> bool {
-    NO_REPLY.is_match(addr)
-}
+pub use crate::mail::bots::is_automated_address;
 
 /// Everything the deterministic checks need, gathered once.
 #[derive(Debug, Clone, Default)]

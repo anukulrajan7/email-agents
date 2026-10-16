@@ -75,6 +75,8 @@ mod matching_semantic;
 mod memory;
 #[path = "memory_learning.rs"]
 mod memory_learning;
+#[path = "mail_threading.rs"]
+mod mail_threading;
 #[path = "messaging.rs"]
 mod messaging;
 #[path = "metrics_evals.rs"]

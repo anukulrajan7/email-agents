@@ -136,6 +136,7 @@ impl ReceivedEmail {
             _ => String::new(),
         };
         let body_text = normalize::truncate_chars(&body_text, max_body_chars);
+        let header = |name: &str| self.headers.as_ref().and_then(|h| crate::mail::bulk::header_lookup(h)(name));
         NormalizedEmail {
             source_message_id: self.id.clone(),
             rfc_message_id: self.message_id.clone(),
@@ -169,6 +170,9 @@ impl ReceivedEmail {
                 .as_ref()
                 .map(|h| crate::mail::bulk::header_signals(&crate::mail::bulk::header_lookup(h), &[]))
                 .unwrap_or_default(),
+            in_reply_to: header("In-Reply-To").as_deref().and_then(crate::mail::headers::in_reply_to),
+            references: header("References").map(|r| crate::mail::headers::message_ids(&r)).unwrap_or_default(),
+            auth: header("Authentication-Results").map(|a| crate::mail::headers::auth_results(&a)),
         }
     }
 }
