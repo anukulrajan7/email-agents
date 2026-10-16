@@ -1,32 +1,34 @@
 //! One planner turn: load the case → plan → check → run a tool or ask for approval → record the
 //! step (summary, tokens, cost) → schedule the next turn, sleep, wait or finish.
 
+mod evaluate;
+mod park;
+mod prompt;
+
+pub use prompt::{render_prompt, rule_context};
+
 use serde_json::{Value, json};
 
+use self::{evaluate::evaluate, park::{end_observation, park_while_inactive}};
 use super::{
     MAX_ERROR_STREAK,
     autonomy,
-    case::{self, Case, NewStep, StepRow},
-    critic::{self, CriticInput, RuleContext},
+    case::{self, Case, NewStep},
     planner::{self, Decision, PlanOutput, PlanRequest, Usage},
     workflow,
     sentence,
-    tools::{self, Preview, Risk, ToolCtx, ToolError, ToolOutput},
+    tools::{self, Preview, ToolOutput},
 };
 use crate::{
-    agents::profiles::{self, AgentContext},
+    agents::profiles,
     agents::registry::spec::scope_of_tool,
-    agents::registry::runtime::{self, CaseAgent},
+    agents::registry::runtime,
     ai::AiError,
     platform::audit::{self, Actor, Entry},
     platform::db::{new_id, now_ms},
     http::AppState,
     jobs::handlers::JobError,
 };
-
-/// Steps whose full input/output is shown to the planner; older ones appear as their summary only.
-const DETAILED_STEPS: usize = 8;
-const OUTPUT_CHARS: usize = 900;
 
 /// Why a case must stop before planning another turn, if it must.
 pub fn limit_reached(step_count: i64, max_steps: i64, spent_usd: f64, budget_usd: f64) -> Option<String> {
@@ -45,71 +47,6 @@ enum TurnResult {
     Blocked { tool: String, input: Value, reason: String },
     Approval { tool: String, input: Value, preview: Preview },
     Finish { outcome: Option<String>, summary: String },
-}
-
-fn clip(v: &str, max: usize) -> String {
-    crate::mail::sources::normalize::truncate_chars(v, max)
-}
-
-/// The planner's view of the case, ordered for prompt caching: what never changes first (the
-/// case header), then the append-only step list, then what changes every turn (the latest
-/// detailed results, the case facts) and the turn and budget line last.
-pub fn render_prompt(case: &Case, steps: &[StepRow], turn: i64) -> String {
-    let mut out = format!(
-        "Case: {}\nKind: {}\nGoal: {}\nRequirement id: {}\nCase email id: {}\n\nSteps so far (oldest first):\n",
-        case.title,
-        case.kind,
-        case.goal,
-        case.requirement_id.as_deref().unwrap_or("none"),
-        case.message_id.as_deref().unwrap_or("none"),
-    );
-    if steps.is_empty() {
-        out.push_str("(none yet)\n");
-    }
-    for s in steps {
-        let tool = s.tool.as_deref().map(|t| format!(" {t}")).unwrap_or_default();
-        out.push_str(&format!("#{} [{}{tool}] {}: {}\n", s.seq, s.kind, s.status, s.summary));
-    }
-    let detailed_from = steps.len().saturating_sub(DETAILED_STEPS);
-    let mut latest = String::new();
-    for s in &steps[detailed_from..] {
-        if s.input_json != "null" {
-            latest.push_str(&format!("#{} input: {}\n", s.seq, clip(&s.input_json, 400)));
-        }
-        if s.output_json != "null" {
-            latest.push_str(&format!("#{} result: {}\n", s.seq, clip(&s.output_json, OUTPUT_CHARS)));
-        }
-    }
-    if !latest.is_empty() {
-        out.push_str("\nLatest details:\n");
-        out.push_str(&latest);
-    }
-    out.push_str(&format!("\nCase facts: {}\n", clip(&case.state_json, 2_000)));
-    out.push_str(&format!(
-        "\nThis is turn {turn} of at most {}. Budget left: ${:.3}.\nCall the single best next tool, or finish.",
-        case.max_steps,
-        (case.budget_usd - case.spent_usd).max(0.0)
-    ));
-    out
-}
-
-pub async fn rule_context(state: &AppState, case: &Case) -> sqlx::Result<RuleContext> {
-    let allowed_recipients: Vec<String> = sqlx::query_scalar(
-        "SELECT DISTINCT lower(sender_address) FROM email_messages
-         WHERE workspace_id = ?1 AND direction = 'inbound'
-           AND (thread_id = ?2 OR (?2 IS NULL AND id = ?3))",
-    )
-    .bind(&case.workspace_id)
-    .bind(&case.thread_id)
-    .bind(&case.message_id)
-    .fetch_all(&state.db)
-    .await?;
-    let declined_draft_ids: Vec<String> =
-        sqlx::query_scalar("SELECT draft_id FROM agent_approvals WHERE case_id = ?1 AND status = 'declined' AND draft_id IS NOT NULL")
-            .bind(&case.id)
-            .fetch_all(&state.db)
-            .await?;
-    Ok(RuleContext { case_thread_id: case.thread_id.clone(), allowed_recipients, declined_draft_ids })
 }
 
 /// Audit action written for every tool call an agent makes (reads included).
@@ -138,8 +75,6 @@ fn call_refs(input: &Value) -> Value {
     })
 }
 
-/// How long a case waits while its agent is paused before looking again.
-const PAUSED_RECHECK_MS: i64 = 15 * 60 * 1000;
 
 /// Runs planner turn `turn` of a case. Idempotent: a turn already taken, or a case that is
 /// waiting for a person or has ended, is left alone. The case must belong to `ws`.
@@ -272,243 +207,6 @@ pub async fn run_step(state: &AppState, ws: &str, case_id: &str, turn: i64) -> R
         };
     }
     commit(state, &case, turn, &usage, result, handover).await
-}
-
-/// Why the workspace's permissions stop this tool, if they do.
-fn permission_block(agent: &AgentContext, tool: &str) -> Option<String> {
-    let name = &agent.agent.name;
-    match tool {
-        "draft_email" | "save_to_gmail_drafts" if !agent.agent.permissions.draft => {
-            Some(format!("Writing drafts is switched off for {name}; create a task for a person instead."))
-        }
-        "send_email" | "submit_candidate" | "send_message" if agent.agent.permissions.send == "never" => {
-            Some(format!("Sending is switched off for {name}; create a task for a person instead."))
-        }
-        _ => None,
-    }
-}
-
-/// An observing case ends quietly at its step limit: it was only ever a trial run.
-async fn end_observation(conn: &mut sqlx::SqliteConnection, case: &Case, reason: &str) -> sqlx::Result<()> {
-    if case::set_status(&mut *conn, &case.workspace_id, &case.id, "done").await? {
-        sqlx::query("UPDATE cases SET status_note = ?1, next_wake_at = NULL WHERE id = ?2 AND workspace_id = ?3")
-            .bind(sentence(&format!("Observation ended: {reason}"), 240))
-            .bind(&case.id)
-            .bind(&case.workspace_id)
-            .execute(conn)
-            .await?;
-    }
-    Ok(())
-}
-
-/// A paused agent does no work: its cases wait and pick up again when it is switched back on.
-/// An agent that was archived or never activated ends its case instead.
-async fn park_while_inactive(state: &AppState, case: &Case, agent: &CaseAgent, turn: i64) -> Result<(), JobError> {
-    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
-    if agent.row.status != "paused" {
-        let reason = format!("{} is not active", agent.row.name);
-        if case.shadow {
-            end_observation(&mut tx, case, &reason).await?;
-        } else {
-            case::fail(&mut tx, case, &reason).await?;
-        }
-        tx.commit().await?;
-        return Ok(());
-    }
-    let resume_at = crate::platform::db::now_ms() + PAUSED_RECHECK_MS;
-    sqlx::query("UPDATE cases SET status = 'waiting_event', next_wake_at = ?1, updated_at = ?2 WHERE id = ?3 AND workspace_id = ?4 AND status = 'running'")
-        .bind(resume_at)
-        .bind(crate::platform::db::now_ms())
-        .bind(&case.id)
-        .bind(&case.workspace_id)
-        .execute(&mut *tx)
-        .await?;
-    crate::jobs::enqueue_at(
-        &mut tx,
-        crate::jobs::kind::AGENT_STEP,
-        &format!("{}:paused:{}", case::step_key(&case.id, turn), resume_at / PAUSED_RECHECK_MS),
-        Some(&case.workspace_id),
-        &serde_json::json!({ "case_id": case.id, "turn": turn, "workspace_id": case.workspace_id }),
-        crate::jobs::DEFAULT_MAX_ATTEMPTS,
-        resume_at,
-    )
-    .await?;
-    tx.commit().await?;
-    tracing::info!(case_id = %case.id, "agent paused; case waits");
-    Ok(())
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn evaluate(
-    state: &AppState,
-    case: &Case,
-    agent: &AgentContext,
-    case_agent: &CaseAgent,
-    allowed: &[String],
-    turn: i64,
-    name: &str,
-    args: Value,
-    workflow: bool,
-    usage: &mut Usage,
-) -> Result<TurnResult, JobError> {
-    let Some(tool) = tools::registry().get(name) else {
-        return Ok(TurnResult::Error {
-            tool: None,
-            input: json!({"tool": sentence(name, 60), "args": args}),
-            summary: "The assistant asked for an action that does not exist and will try again".into(),
-            error: format!("unknown tool {}", sentence(name, 60)),
-        });
-    };
-    let tool_name = tool.name().to_string();
-    if let Err(e) = tools::validate_args(&tool.schema(), &args) {
-        return Ok(TurnResult::Error {
-            tool: Some(tool_name),
-            input: args,
-            summary: format!("The assistant gave incomplete details for {} and will try again", tool.name()),
-            error: e,
-        });
-    }
-    if !allowed.iter().any(|a| a == &tool_name) {
-        let reason = format!("{} does not use {tool_name}; create a task for a person instead.", agent.agent.name);
-        return Ok(TurnResult::Blocked { tool: tool_name, input: args, reason });
-    }
-    if let Some(reason) = permission_block(agent, &tool_name) {
-        return Ok(TurnResult::Blocked { tool: tool_name, input: args, reason });
-    }
-    if case.shadow && (tool.risk() == Risk::High || tool_name == "create_task") {
-        let summary = format!("Observe mode: would have used {tool_name}; nothing was done");
-        let out = ToolOutput { summary, value: json!({"simulated": true, "tool": tool_name}), ..Default::default() };
-        return Ok(TurnResult::Ran { tool: tool_name, input: args, out, auto_sent: false });
-    }
-    let mut ctx = ToolCtx { state, case, turn, actor: Actor::System, hold_secs: 0 };
-    let mut preview = None;
-    let mut critic_down = false;
-    if tool.risk() != Risk::Read {
-        if tool.risk() == Risk::High {
-            preview = match tool.preview(&ctx, &args).await {
-                Ok(p) => p,
-                Err(ToolError::Failed(m)) => {
-                    return Ok(TurnResult::Error { tool: Some(tool_name), input: args, summary: format!("Could not prepare {}: {m}", tool.name()), error: m });
-                }
-                Err(ToolError::Db(e)) => return Err(e.into()),
-            };
-            if let Some(reason) = critic::hard_rules(tool.name(), preview.as_ref(), &rule_context(state, case).await?) {
-                return Ok(TurnResult::Blocked { tool: tool_name, input: args, reason });
-            }
-        }
-        if !workflow {
-            match critic_objection(state, case, tool, &args, preview.as_ref(), usage).await {
-                Critique::Fine => {}
-                Critique::Objection(reason) => return Ok(TurnResult::Blocked { tool: tool_name, input: args, reason }),
-                Critique::Unavailable => {
-                    tracing::warn!(case_id = %case.id, tool = %tool_name, "critic unavailable; low-risk step proceeds, sends go to a person");
-                    critic_down = true;
-                }
-            }
-        }
-    }
-    let mut auto_sent = false;
-    if tool.risk() == Risk::High {
-        let preview = preview.unwrap_or_default();
-        let on_its_own = match tool.name() {
-            "send_email" => autonomy::may_send_on_its_own(state, case, agent, case_agent, &preview).await?,
-            "send_message" => crate::alerts::messaging::rules::may_send_on_its_own(state, case, agent, case_agent, &args).await?,
-            _ => false,
-        };
-        if critic_down {
-            let mut preview = preview;
-            preview.summary = format!("{} (the safety check couldn't run; please read it before sending)", preview.summary);
-            return Ok(TurnResult::Approval { tool: tool_name, input: args, preview });
-        }
-        if !on_its_own {
-            return Ok(TurnResult::Approval { tool: tool_name, input: args, preview });
-        }
-        // A fixed workflow only asks the critic when a send would go out without a person.
-        if workflow && !matches!(critic_objection(state, case, tool, &args, Some(&preview), usage).await, Critique::Fine) {
-            return Ok(TurnResult::Approval { tool: tool_name, input: args, preview });
-        }
-        auto_sent = true;
-        ctx.hold_secs = state.config.agent_auto_send_delay_secs;
-    }
-    Ok(match tool.run(&ctx, &args).await {
-        Ok(mut out) => {
-            if auto_sent {
-                out.summary = format!("Sent automatically (your profile allows routine replies). {}", out.summary);
-                out.value["sent_without_approval"] = json!(true);
-                if ctx.hold_secs > 0
-                    && let (Some(draft_id), Some(at)) = (out.value.get("draft_id").and_then(Value::as_str), out.value.get("send_at_ms").and_then(Value::as_i64))
-                {
-                    if let Err(e) = autonomy::record_hold(state, &case.workspace_id, draft_id, at, ctx.hold_secs).await {
-                        tracing::warn!(case_id = %case.id, draft_id, error = %e, "could not note the send hold in the audit trail; the send stays scheduled");
-                    }
-                    out.value["held_until"] = json!(crate::platform::db::iso(at));
-                    out.summary = format!("{} Held until {} so you can stop it.", out.summary, crate::platform::db::iso(at));
-                }
-            }
-            if critic_down {
-                out.summary = format!("{} (the safety check was unavailable; this step only writes a draft, so it went ahead)", out.summary);
-            }
-            TurnResult::Ran { tool: tool_name, input: args, out, auto_sent }
-        }
-        // A send check stopped the automatic send: a person decides instead.
-        Err(ToolError::Failed(m)) if auto_sent => {
-            tracing::info!(case_id = %case.id, reason = %m, "automatic send stopped; asking a person");
-            let mut preview = preview_again(&ctx, tool, &args).await?;
-            preview.summary = format!("{} (sending on its own was stopped: {})", preview.summary, sentence(&m, 120));
-            TurnResult::Approval { tool: tool_name, input: args, preview }
-        }
-        Err(ToolError::Failed(m)) => TurnResult::Error {
-            tool: Some(tool_name.clone()),
-            input: args,
-            summary: format!("{} failed: {m}", tool_name),
-            error: m,
-        },
-        Err(ToolError::Db(e)) => return Err(e.into()),
-    })
-}
-
-/// What the critic made of a proposal.
-///
-/// When the critic is down, a step that only writes a draft (low risk) still runs: nothing leaves the
-/// mailbox, and the timeline says so. A send always goes to a person instead, once, never as a retry loop.
-enum Critique {
-    Fine,
-    Objection(String),
-    /// The check could not run at all (provider down).
-    Unavailable,
-}
-
-async fn critic_objection(state: &AppState, case: &Case, tool: &dyn tools::Tool, args: &Value, preview: Option<&Preview>, usage: &mut Usage) -> Critique {
-    let input = CriticInput {
-        goal: case.goal.clone(),
-        facts: case.state(),
-        tool: tool.name().to_string(),
-        risk: tool.risk().as_str(),
-        args: args.clone(),
-        preview: preview.cloned(),
-    };
-    match state.critic.review(&input).await {
-        Ok(v) => {
-            usage.add(&v.usage);
-            if v.ok {
-                Critique::Fine
-            } else {
-                Critique::Objection(if v.reason.is_empty() { "The check did not approve this action.".into() } else { v.reason })
-            }
-        }
-        Err(e) => {
-            tracing::warn!(case_id = %case.id, error = %e, "critic unavailable");
-            Critique::Unavailable
-        }
-    }
-}
-
-async fn preview_again(ctx: &ToolCtx<'_>, tool: &dyn tools::Tool, args: &Value) -> Result<Preview, JobError> {
-    match tool.preview(ctx, args).await {
-        Ok(p) => Ok(p.unwrap_or_default()),
-        Err(ToolError::Failed(m)) => Ok(Preview { summary: m, ..Default::default() }),
-        Err(ToolError::Db(e)) => Err(e.into()),
-    }
 }
 
 async fn commit(state: &AppState, case: &Case, turn: i64, usage: &Usage, result: TurnResult, state_patch: Option<Value>) -> Result<(), JobError> {
@@ -710,75 +408,11 @@ async fn commit(state: &AppState, case: &Case, turn: i64, usage: &Usage, result:
 mod tests {
     use super::*;
 
-    fn case() -> Case {
-        Case {
-            id: "case_1".into(),
-            workspace_id: "ws".into(),
-            kind: "requirement".into(),
-            title: "Java Developer at Capgemini".into(),
-            goal: "Shortlist up to 3 candidates".into(),
-            status: "running".into(),
-            outcome: None,
-            status_note: None,
-            failure_reason: None,
-            state_json: r#"{"client":"Capgemini"}"#.into(),
-            priority: "normal".into(),
-            step_count: 2,
-            max_steps: 15,
-            spent_usd: 0.01,
-            budget_usd: 0.10,
-            error_streak: 0,
-            message_id: Some("msg_1".into()),
-            requirement_id: Some("req_1".into()),
-            thread_id: Some("thr_1".into()),
-            next_wake_at: None,
-            agent_user_id: None,
-            agent_id: None,
-            agent_version: None,
-            trigger: None,
-            outcome_detail: None,
-            shadow: false,
-            created_at: 0,
-            updated_at: 0,
-        }
-    }
-
     #[test]
     fn limits_stop_a_case() {
         assert_eq!(limit_reached(3, 15, 0.02, 0.10), None);
         assert!(limit_reached(15, 15, 0.02, 0.10).unwrap().contains("15 steps"));
         assert!(limit_reached(3, 15, 0.10, 0.10).unwrap().contains("budget of $0.10"));
         assert!(limit_reached(3, 15, 0.25, 0.10).is_some());
-    }
-
-    fn steps_row(i: i64) -> StepRow {
-        StepRow {
-            seq: i,
-            turn: i,
-            kind: "tool".into(),
-            tool: Some("search_mail".into()),
-            summary: format!("step {i}"),
-            input_json: r#"{"query":"java"}"#.into(),
-            output_json: format!(r#"{{"marker":"out{i}"}}"#),
-            status: "ok".into(),
-            cost_usd: 0.0,
-            created_at: 0,
-        }
-    }
-
-    #[test]
-    fn prompt_shows_goal_facts_and_recent_detail() {
-        let steps: Vec<StepRow> = (1..=10).map(steps_row).collect();
-        let p = render_prompt(&case(), &steps, 11);
-        assert!(p.contains("Goal: Shortlist up to 3 candidates") && p.contains("Requirement id: req_1") && p.contains("Capgemini"));
-        assert!(p.contains("#1 [tool search_mail] ok: step 1"));
-        assert!(!p.contains("out1\"") && !p.contains("out2\""), "old steps are summarised only");
-        assert!(p.contains("out3") && p.contains("out10"));
-        assert!(p.contains("turn 11 of at most 15") && p.contains("Budget left: $0.090"));
-        let (header, steps_at, facts_at, turn_at) = (p.find("Case: Java").unwrap(), p.find("Steps so far").unwrap(), p.find("Case facts").unwrap(), p.find("This is turn").unwrap());
-        assert!(header < steps_at && steps_at < facts_at && facts_at < turn_at, "stable parts first, volatile last");
-        let later = render_prompt(&case(), &(1..=11).map(|i| StepRow { seq: i, ..steps_row(i) }).collect::<Vec<_>>(), 12);
-        let prefix = &p[..p.find("\nLatest details").unwrap()];
-        assert!(later.starts_with(prefix), "the header and earlier steps do not change when a step is added");
     }
 }
