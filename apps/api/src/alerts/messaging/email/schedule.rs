@@ -37,7 +37,7 @@ pub async fn schedule(state: &AppState, ws: &str, id: &str, actor: Actor<'_>, ho
     .fetch_one(&state.db)
     .await?;
     if duplicate {
-        return Err(SafetyReport { blocking: vec![issue("duplicate", "The same email just went to this address.", "Wait a few minutes.")], warnings: vec![] }.into_error());
+        return Err(SafetyReport { blocking: vec![issue("duplicate", "The same email just went to this address.", "Wait a few minutes.")], ..Default::default() }.into_error());
     }
     let now = now_ms();
     let send_at = now + state.config.send_undo_seconds.max(hold_secs).max(0) * 1_000;

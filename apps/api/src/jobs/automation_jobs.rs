@@ -391,7 +391,7 @@ async fn send_reply(
             .await?;
             Ok(done(K, "reply checked and scheduled to send"))
         }
-        Err(AppError::DraftIncomplete(m)) | Err(AppError::SendBlocked(m, _)) => Ok(skipped(K, m)),
+        Err(AppError::DraftIncomplete(m)) | Err(AppError::SendBlocked(m, _)) | Err(AppError::CheckDeferred(m)) => Ok(skipped(K, m)),
         Err(e) => Ok(failed(K, app_error_detail(&e))),
     }
 }

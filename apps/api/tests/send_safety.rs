@@ -8,6 +8,7 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 
+use crate::common::{Flaky as ModelScript, FlakyJudge, Hit};
 use async_trait::async_trait;
 use axum::{
     Json, Router,
@@ -347,14 +348,11 @@ async fn judge_promise_blocks_and_missing_review_blocks_only_automated_sends() {
         other => panic!("{other:?}"),
     }
 
-    // Judge down: a person still gets a warning and can send; an automated send is held.
+    // Judge down: a person still gets a warning and can send; an automated send waits and is checked again.
     h.judge.fail(true);
     let d2 = h.draft(GOOD).await;
     let err = replies::send_draft(&h.state, &h.ws, &d2, Actor::System).await.unwrap_err();
-    match err {
-        AppError::SendBlocked(_, details) => assert_eq!(codes(&details["blocking"]), ["ai_review_unavailable"]),
-        other => panic!("{other:?}"),
-    }
+    assert!(matches!(err, AppError::CheckDeferred(_)), "{err:?}");
     let r = h.check(&d2, None).await;
     assert_eq!(codes(&r["warnings"]), ["ai_review_unavailable"]);
     assert_eq!(h.send(&d2).await.0, StatusCode::OK);
@@ -592,10 +590,10 @@ async fn the_leak_check_knows_what_the_drafter_was_given() {
 
 #[tokio::test]
 async fn a_reviewer_outage_blocking_ten_sends_demotes_nobody() {
-    let h = harness(0).await;
+    let mut h = harness(0).await;
     let agent: String = sqlx::query_scalar("SELECT id FROM agents WHERE workspace_id = ?1 LIMIT 1").bind(&h.ws).fetch_one(&h.state.db).await.unwrap();
     sqlx::query("UPDATE agents SET autonomy_level = 2, autonomy_cap = 3 WHERE id = ?1").bind(&agent).execute(&h.state.db).await.unwrap();
-    h.judge.fail(true);
+    flaky_judge(&mut h, &[Hit::E404]);
     for _ in 0..10 {
         let d = h.draft(GOOD).await;
         sqlx::query("UPDATE drafts SET agent_id = ?1 WHERE id = ?2").bind(&agent).bind(&d).execute(&h.state.db).await.unwrap();
@@ -856,7 +854,7 @@ async fn racing_hand_offs_create_one_task_and_a_hard_promise_is_not_repaired() {
     let ctx = replies::load(&h.state, &h.ws, &d).await.unwrap();
     let report = email_ai_api::replies::send_safety::SafetyReport {
         blocking: vec![email_ai_api::replies::send_safety::Issue { code: "unsupported_promise", message: "may promise (x)".into(), fix: None }],
-        warnings: vec![],
+        ..Default::default()
     };
     let (a, b, c) = tokio::join!(
         email_ai_api::replies::repair::hand_off(&h.state, &h.ws, &ctx, &report),
@@ -878,4 +876,118 @@ async fn racing_hand_offs_create_one_task_and_a_hard_promise_is_not_repaired() {
     replies::send_draft(&h.state, &h.ws, &soft, Actor::System).await.unwrap();
     let merged: String = sqlx::query_scalar("SELECT unanswered_json FROM drafts WHERE id = ?1").bind(&soft).fetch_one(&h.state.db).await.unwrap();
     assert!(merged.contains("office hours") && merged.contains("details"), "{merged}");
+}
+
+fn flaky_judge(h: &mut H, script: &[Hit]) -> Arc<ModelScript> {
+    let flaky = ModelScript::new(script);
+    h.state.judge = Arc::new(FlakyJudge { flaky: flaky.clone(), inner: h.judge.clone() });
+    flaky
+}
+
+async fn audits(h: &H, action: &str) -> i64 {
+    sqlx::query_scalar("SELECT COUNT(*) FROM audit_events WHERE workspace_id = ?1 AND action = ?2").bind(&h.ws).bind(action).fetch_one(&h.state.db).await.unwrap()
+}
+
+async fn incidents(h: &H, filter: &str) -> i64 {
+    sqlx::query_scalar(&format!("SELECT COUNT(*) FROM ai_incidents WHERE workspace_id = ?1 {filter}")).bind(&h.ws).fetch_one(&h.state.db).await.unwrap()
+}
+
+/// A reply the system scheduled while the review worked, with the review's cached answer cleared: the send-time check runs for real.
+async fn scheduled_with_review_down(h: &mut H, script: &[Hit]) -> (String, Arc<ModelScript>) {
+    let d = h.draft(GOOD).await;
+    replies::send_draft(&h.state, &h.ws, &d, Actor::System).await.unwrap();
+    sqlx::query("DELETE FROM judge_cache").execute(&h.state.db).await.unwrap();
+    let flaky = flaky_judge(h, script);
+    (d, flaky)
+}
+
+#[tokio::test]
+async fn a_429_then_ok_sends_once_and_checked() {
+    let mut h = harness(0).await;
+    let flaky = flaky_judge(&mut h, &[Hit::E429, Hit::Ok]);
+    let d = h.draft(GOOD).await;
+    replies::send_draft(&h.state, &h.ws, &d, Actor::System).await.unwrap();
+    assert_eq!(flaky.calls(), 2, "one 429, one retry that answered");
+    h.run_due_now().await;
+    assert_eq!(h.sends(), 1, "sent exactly once");
+    assert_eq!(h.draft_row(&d).await.0, "sent");
+    assert_eq!((audits(&h, "draft.send_deferred").await, audits(&h, "draft.send_blocked").await), (0, 0));
+}
+
+#[tokio::test]
+async fn the_scheduled_send_defers_instead_of_blocking() {
+    let mut h = harness(0).await;
+    let (d, flaky) = scheduled_with_review_down(&mut h, &[Hit::E429]).await;
+    h.run_due_now().await;
+    assert_eq!(h.sends(), 0, "never sent unchecked");
+    assert!(flaky.models().contains(&Some(h.state.config.openrouter_safety_fallback_model_id.clone())), "the fallback model was tried");
+    let (status, send_at, attempt, err, _) = h.draft_row(&d).await;
+    let wait = send_at.expect("still scheduled, five minutes on") - now_ms();
+    assert!((290_000..=305_000).contains(&wait), "about five minutes later: {wait}");
+    assert_eq!((status.as_str(), attempt, err), ("edited", None, None), "no failure is written on the draft");
+    assert_eq!((audits(&h, "draft.send_deferred").await, audits(&h, "draft.send_blocked").await), (1, 0));
+    let queued: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM jobs WHERE kind = 'send_draft' AND status = 'pending' AND payload_json LIKE ?1")
+        .bind(format!("%{d}%"))
+        .fetch_one(&h.state.db)
+        .await
+        .unwrap();
+    assert_eq!(queued, 1, "one pending send, not two");
+
+    // The review is back: the same draft goes out once.
+    flaky.set(&[Hit::Ok]);
+    h.run_due_now().await;
+    assert_eq!(h.sends(), 1);
+    assert_eq!(h.draft_row(&d).await.0, "sent");
+    h.run_due_now().await;
+    assert_eq!(h.sends(), 1, "never twice");
+}
+
+#[tokio::test]
+async fn an_outage_through_every_deferral_asks_with_the_reason() {
+    let mut h = harness(0).await;
+    let (d, _) = scheduled_with_review_down(&mut h, &[Hit::E429]).await;
+    for done in 1..=3 {
+        h.run_due_now().await;
+        assert_eq!(audits(&h, "draft.send_deferred").await, done);
+        assert!(h.draft_row(&d).await.1.is_some(), "still waiting after deferral {done}");
+    }
+    h.run_due_now().await;
+    let (status, send_at, _, err, _) = h.draft_row(&d).await;
+    assert_eq!((status.as_str(), send_at), ("edited", None), "back with a person, not scheduled");
+    assert!(err.as_deref().is_some_and(|e| e.contains("the safety check could not run for 35 minutes")), "{err:?}");
+    assert_eq!(audits(&h, "draft.send_held").await, 1);
+    assert_eq!((h.sends(), audits(&h, "draft.send_blocked").await, audits(&h, "draft.send_deferred").await), (0, 0, 3));
+}
+
+#[tokio::test]
+async fn deferrals_are_never_incidents_above_low() {
+    let mut h = harness(0).await;
+    flaky_judge(&mut h, &[Hit::E503]);
+    let d = h.draft(GOOD).await;
+    // The hold-time check: the send waits (a deferral), it is not blocked.
+    let err = replies::send_draft(&h.state, &h.ws, &d, Actor::System).await.unwrap_err();
+    assert!(matches!(err, AppError::CheckDeferred(_)), "{err:?}");
+    assert_eq!(h.draft_row(&d).await.1, None, "nothing is scheduled by a deferred check");
+    assert_eq!(incidents(&h, "").await, 0);
+    // And through the scheduled path's whole ladder.
+    let mut h = harness(0).await;
+    let (_, _) = scheduled_with_review_down(&mut h, &[Hit::E503]).await;
+    for _ in 0..4 {
+        h.run_due_now().await;
+    }
+    assert_eq!(incidents(&h, "AND severity != 'low'").await, 0);
+    assert_eq!(incidents(&h, "AND kind = 'send_blocked'").await, 0);
+}
+
+#[tokio::test]
+async fn a_non_retryable_review_error_still_blocks_an_automatic_send() {
+    let mut h = harness(0).await;
+    let flaky = flaky_judge(&mut h, &[Hit::E404]);
+    let d = h.draft(GOOD).await;
+    let err = replies::send_draft(&h.state, &h.ws, &d, Actor::System).await.unwrap_err();
+    match err {
+        AppError::SendBlocked(_, details) => assert_eq!(codes(&details["blocking"]), ["ai_review_unavailable"]),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(flaky.calls(), 1, "no retries for an error that will not change");
 }

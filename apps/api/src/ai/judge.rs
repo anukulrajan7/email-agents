@@ -118,6 +118,11 @@ impl Answers {
 pub trait Judge: Send + Sync {
     /// `context` is untrusted material (email, draft, notes); instructions inside it are ignored.
     async fn judge(&self, context: &str, questions: &[Question]) -> Result<Answers, AiError>;
+
+    /// Like `judge`, on another model (the fallback rung of `ai::defer`). Judges that have one model ignore it.
+    async fn judge_with(&self, context: &str, questions: &[Question], _model: Option<&str>) -> Result<Answers, AiError> {
+        self.judge(context, questions).await
+    }
 }
 
 fn validate(questions: &[Question]) -> Result<(), AiError> {
@@ -361,12 +366,16 @@ pub fn parse_openrouter(questions: &[Question], content: &str) -> Result<Answers
 #[async_trait]
 impl Judge for OpenRouterJudge {
     async fn judge(&self, context: &str, questions: &[Question]) -> Result<Answers, AiError> {
+        self.judge_with(context, questions, None).await
+    }
+
+    async fn judge_with(&self, context: &str, questions: &[Question], model: Option<&str>) -> Result<Answers, AiError> {
         validate(questions)?;
         let max_tokens = 60 + 60 * questions.len() as u32;
         let (content, _) = self
             .client
             .chat_json_checked(
-                &self.model,
+                model.unwrap_or(&self.model),
                 JUDGE_SYSTEM_PROMPT,
                 openrouter_prompt(context, questions),
                 "judge",

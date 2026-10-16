@@ -83,6 +83,9 @@ pub enum ToolError {
     /// A plain sentence the planner (and a recruiter) can read.
     #[error("{0}")]
     Failed(String),
+    /// The safety check could not run (provider down); the runner waits and tries the same step again.
+    #[error("{0}")]
+    Deferred(String),
     #[error("database: {0}")]
     Db(#[from] sqlx::Error),
 }
@@ -102,6 +105,7 @@ impl From<AppError> for ToolError {
     fn from(e: AppError) -> Self {
         match e {
             AppError::DraftIncomplete(m) | AppError::Conflict(m) | AppError::BadRequest(m) => ToolError::Failed(m),
+            AppError::CheckDeferred(m) => ToolError::Deferred(m),
             AppError::NotFound => ToolError::Failed("That item was not found.".into()),
             AppError::Unavailable => ToolError::Failed("The mailbox could not be reached; try again later.".into()),
             _ => ToolError::Failed("The action could not be completed.".into()),

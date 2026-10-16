@@ -4,7 +4,10 @@
 
 #![allow(dead_code)]
 
-use std::sync::{Arc, Mutex};
+use std::{
+    collections::VecDeque,
+    sync::{Arc, Mutex},
+};
 
 use async_trait::async_trait;
 use axum::{
@@ -15,8 +18,14 @@ use axum::{
     routing::{get, post, put},
 };
 use email_ai_api::{
-    agents::planner::ScriptedPlanner,
-    ai::{AiError, DraftInput, DraftOutput, Drafter, judge::{FixedJudge, Verdict}},
+    agents::{
+        critic::{Critic, CriticInput, Verdict as CriticVerdict},
+        planner::ScriptedPlanner,
+    },
+    ai::{
+        AiError, DraftInput, DraftOutput, Drafter,
+        judge::{Answers, FixedJudge, Judge, Question, Verdict},
+    },
     build_state,
     platform::config::Config,
     platform::db,
@@ -98,6 +107,89 @@ pub async fn call(app: &Router, method: &str, path: &str, token: &str, body: Opt
     let status = res.status();
     let bytes = res.into_body().collect().await.unwrap().to_bytes();
     (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+}
+
+/// One scripted result of a flaky model call.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Hit {
+    Ok,
+    /// Retryable, like an HTTP 429.
+    E429,
+    /// Retryable, like an HTTP 503.
+    E503,
+    /// Not retryable, like an HTTP 404.
+    E404,
+}
+
+/// A model that answers from a script, one result per call; the last result repeats. Records the model each call asked for
+/// (`None` = the usual one, `Some(id)` = the fallback).
+pub struct Flaky {
+    script: Mutex<(VecDeque<Hit>, Hit)>,
+    models: Mutex<Vec<Option<String>>>,
+}
+
+impl Flaky {
+    pub fn new(script: &[Hit]) -> Arc<Flaky> {
+        Arc::new(Flaky { script: Mutex::new((script.iter().copied().collect(), *script.last().expect("a script"))), models: Mutex::default() })
+    }
+
+    /// Replaces the script (the call record is kept).
+    pub fn set(&self, script: &[Hit]) {
+        *self.script.lock().unwrap() = (script.iter().copied().collect(), *script.last().expect("a script"));
+    }
+
+    pub fn calls(&self) -> usize {
+        self.models.lock().unwrap().len()
+    }
+
+    pub fn models(&self) -> Vec<Option<String>> {
+        self.models.lock().unwrap().clone()
+    }
+
+    fn hit(&self, model: Option<&str>) -> Result<(), AiError> {
+        self.models.lock().unwrap().push(model.map(str::to_string));
+        let mut script = self.script.lock().unwrap();
+        let hit = script.0.pop_front().unwrap_or(script.1);
+        match hit {
+            Hit::Ok => Ok(()),
+            Hit::E429 => Err(AiError::Retryable("OpenRouter returned 429 Too Many Requests".into())),
+            Hit::E503 => Err(AiError::Retryable("OpenRouter returned 503 Service Unavailable".into())),
+            Hit::E404 => Err(AiError::Permanent("OpenRouter returned 404 Not Found".into())),
+        }
+    }
+}
+
+/// The agent critic, failing and recovering on a script. Set it as `state.critic`.
+pub struct FlakyCritic(pub Arc<Flaky>);
+
+#[async_trait]
+impl Critic for FlakyCritic {
+    async fn review(&self, input: &CriticInput) -> Result<CriticVerdict, AiError> {
+        self.review_with(input, None).await
+    }
+
+    async fn review_with(&self, _: &CriticInput, model: Option<&str>) -> Result<CriticVerdict, AiError> {
+        self.0.hit(model)?;
+        Ok(CriticVerdict::pass())
+    }
+}
+
+/// The send-review judge, failing and recovering on a script, then answering like the default reviewing judge. Set it as `state.judge`.
+pub struct FlakyJudge {
+    pub flaky: Arc<Flaky>,
+    pub inner: Arc<FixedJudge>,
+}
+
+#[async_trait]
+impl Judge for FlakyJudge {
+    async fn judge(&self, context: &str, questions: &[Question]) -> Result<Answers, AiError> {
+        self.judge_with(context, questions, None).await
+    }
+
+    async fn judge_with(&self, context: &str, questions: &[Question], model: Option<&str>) -> Result<Answers, AiError> {
+        self.flaky.hit(model)?;
+        self.inner.judge(context, questions).await
+    }
 }
 
 pub struct Opts {
@@ -360,6 +452,26 @@ impl Env {
         .fetch_all(&self.state.db)
         .await
         .unwrap()
+    }
+
+    /// Makes every pending job that is due within `ms` due now, then runs the queue: "`ms` later".
+    pub async fn run_due_after(&self, ms: i64) {
+        sqlx::query("UPDATE jobs SET run_at = run_at - ?1 WHERE status = 'pending'").bind(ms).execute(&self.state.db).await.unwrap();
+        worker::drain(&self.state).await;
+    }
+
+    /// Replaces the agent critic with one that follows `script`.
+    pub fn flaky_critic(&mut self, script: &[Hit]) -> Arc<Flaky> {
+        let flaky = Flaky::new(script);
+        self.state.critic = Arc::new(FlakyCritic(flaky.clone()));
+        flaky
+    }
+
+    /// Replaces the send-review judge with one that follows `script`.
+    pub fn flaky_judge(&mut self, script: &[Hit]) -> Arc<Flaky> {
+        let flaky = Flaky::new(script);
+        self.state.judge = Arc::new(FlakyJudge { flaky: flaky.clone(), inner: self.judge.clone() });
+        flaky
     }
 
     pub async fn set_pref(&self, sql: &str, binds: &[&str]) {

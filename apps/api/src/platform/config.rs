@@ -86,6 +86,10 @@ pub struct Config {
     pub openrouter_audio_model_id: String,
     /// Agent planner (tool calling). Premium cases use `openrouter_premium_model_id`.
     pub openrouter_planner_model_id: String,
+    /// Tried once when the safety check's own model keeps failing (429, 5xx, timeout). Empty = no fallback rung.
+    pub openrouter_safety_fallback_model_id: String,
+    /// First pause before the safety check retries (the second is three times as long). 0 = retry at once.
+    pub ai_retry_backoff_ms: u64,
     /// Speech to text for the assistant's voice input. Empty: voice input is off.
     /// Planner turns per agent case before it fails.
     pub agent_max_steps: i64,
@@ -199,6 +203,8 @@ impl Config {
             openrouter_vision_model_id: var("OPENROUTER_VISION_MODEL_ID", "qwen/qwen3-vl-30b-a3b-instruct"),
             openrouter_audio_model_id: var("OPENROUTER_AUDIO_MODEL_ID", "qwen/qwen3-asr-1.7b"),
             openrouter_planner_model_id: var("OPENROUTER_PLANNER_MODEL_ID", "deepseek/deepseek-v4-pro"),
+            openrouter_safety_fallback_model_id: var("OPENROUTER_SAFETY_FALLBACK_MODEL_ID", "deepseek/deepseek-v4-flash"),
+            ai_retry_backoff_ms: var("AI_RETRY_BACKOFF_MS", "1000").parse().context("AI_RETRY_BACKOFF_MS")?,
             agent_max_steps: var("AGENT_MAX_STEPS", "15").parse().context("AGENT_MAX_STEPS")?,
             agent_budget_usd: var("AGENT_BUDGET_USD", "0.10").parse().context("AGENT_BUDGET_USD")?,
             agent_fast_model_id: var("AGENT_FAST_MODEL_ID", "qwen/qwen3.8-flash"),
@@ -289,6 +295,8 @@ impl Config {
             openrouter_vision_model_id: "qwen/qwen3-vl-30b-a3b-instruct".into(),
             openrouter_audio_model_id: String::new(),
             openrouter_planner_model_id: String::new(),
+            openrouter_safety_fallback_model_id: "test-safety-fallback".into(),
+            ai_retry_backoff_ms: 0,
             agent_max_steps: 15,
             agent_budget_usd: 0.10,
             agent_fast_model_id: String::new(),

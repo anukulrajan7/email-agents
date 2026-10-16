@@ -728,3 +728,145 @@ async fn an_outdated_untuned_template_agent_is_brought_up_to_date() {
     let version: Option<i64> = sqlx::query_scalar("SELECT template_version FROM agents WHERE id = ?1").bind(&inbox).fetch_one(&env.state.db).await.unwrap();
     assert!(version.unwrap_or(0) >= 1);
 }
+
+/// draft, then the same send as often as the case may be re-planned, then finish.
+fn resend_script(sends: usize) -> Vec<Scripted> {
+    let mut script = vec![tool("draft_email", json!({"message_id": "$message_id"}))];
+    script.extend((0..sends).map(|_| tool("send_email", json!({"draft_id": "$draft_id"}))));
+    script.push(finish(None, "Replied."));
+    script
+}
+
+async fn outage_env(script: &[Hit], sends: usize) -> (Env, std::sync::Arc<Flaky>, String, String) {
+    let mut env = auto_env(resend_script(sends), 0).await;
+    let flaky = env.flaky_critic(script);
+    let msg = env.receive(&env.op_src, "m1", "t1", CLIENT, "Status update", "Hi Priya, the interview went well. Will update you.", "general").await;
+    to_lead(&env, &msg).await;
+    let case_id = env.start(&msg).await;
+    (env, flaky, msg, case_id)
+}
+
+async fn pending_approvals(env: &Env) -> Vec<Value> {
+    env.ok("GET", "/approvals?status=pending", ADMIN, None).await["items"].as_array().unwrap().clone()
+}
+
+async fn deferrals(env: &Env) -> i64 {
+    env.count("SELECT COUNT(*) FROM audit_events WHERE workspace_id = ?1 AND action = 'agent.check_deferred'").await
+}
+
+fn step_statuses(case: &Value) -> Vec<String> {
+    case["steps"].as_array().unwrap().iter().map(|s| format!("{}:{}", s["kind"].as_str().unwrap(), s["status"].as_str().unwrap())).collect()
+}
+
+#[tokio::test]
+async fn critic_429_then_ok_sends_once_checked() {
+    // The draft's check passes; the send's check gets a 429, is retried, and passes.
+    let (env, flaky, _, case_id) = outage_env(&[Hit::Ok, Hit::E429, Hit::Ok], 1).await;
+    let case = env.case(ADMIN, &case_id).await;
+    assert_eq!(case["status"], "done", "{case}");
+    assert_eq!(env.sends().len(), 1, "sent exactly once");
+    assert_eq!(flaky.calls(), 3, "one check for the draft, the send's check twice: {:?}", flaky.models());
+    assert!(flaky.models().iter().all(Option::is_none), "no fallback needed after one retry");
+    assert_eq!(deferrals(&env).await, 0);
+    assert!(pending_approvals(&env).await.is_empty());
+}
+
+#[tokio::test]
+async fn fallback_model_is_used_after_retries() {
+    // The send's check fails on the usual model three times (the call and two retries), then the fallback answers.
+    let (env, flaky, _, case_id) = outage_env(&[Hit::Ok, Hit::E429, Hit::E503, Hit::E429, Hit::Ok], 1).await;
+    assert_eq!(env.case(ADMIN, &case_id).await["status"], "done");
+    assert_eq!(env.sends().len(), 1);
+    let fallback = Some(env.state.config.openrouter_safety_fallback_model_id.clone());
+    assert!(fallback.as_deref().is_some_and(|m| !m.is_empty()));
+    assert_eq!(flaky.models(), [None, None, None, None, fallback], "the fallback is the last rung and is used once");
+    assert_eq!(deferrals(&env).await, 0);
+}
+
+#[tokio::test]
+async fn critic_down_defers_not_stops() {
+    let (env, flaky, msg, case_id) = outage_env(&[Hit::E429], 5).await;
+    let case = env.case(ADMIN, &case_id).await;
+    assert_eq!(case["status"], "waiting_event", "the case waits, it is not failed or stopped: {case}");
+    assert!(env.sends().is_empty(), "never sent unchecked");
+    assert!(pending_approvals(&env).await.is_empty(), "not yet a person's job");
+    let statuses = step_statuses(&case);
+    assert!(statuses.iter().all(|s| !s.contains("blocked") && !s.contains("error")), "nothing is recorded as a failure: {statuses:?}");
+    assert_eq!(deferrals(&env).await, 1);
+    assert!(flaky.models().contains(&Some(env.state.config.openrouter_safety_fallback_model_id.clone())), "the fallback was tried first");
+    let (run_at, turn): (i64, i64) = sqlx::query_as(
+        "SELECT run_at, json_extract(payload_json, '$.turn') FROM jobs WHERE kind = 'agent_step' AND status = 'pending' AND payload_json LIKE ?1",
+    )
+    .bind(format!("%{case_id}%"))
+    .fetch_one(&env.state.db)
+    .await
+    .expect("the same turn is queued again");
+    let wait = run_at - db::now_ms();
+    assert!((290_000..=305_000).contains(&wait), "about five minutes later: {wait}");
+    assert_eq!(turn, case["steps"].as_array().unwrap().len() as i64 + 1, "the same turn, not a new one");
+    assert_eq!(env.count("SELECT COUNT(*) FROM drafts WHERE workspace_id = ?1 AND status = 'sent'").await, 1, "only the earlier fixture reply");
+    let _ = msg;
+
+    // The check is back: the same turn runs again and the reply goes out once.
+    flaky.set(&[Hit::Ok]);
+    env.run_due_after(301_000).await;
+    let case = env.case(ADMIN, &case_id).await;
+    assert_eq!(case["status"], "done", "{case}");
+    assert_eq!(env.sends().len(), 1, "sent once after the wait");
+    assert_eq!(deferrals(&env).await, 1);
+}
+
+#[tokio::test]
+async fn three_deferrals_become_an_approval() {
+    let (env, _, _, case_id) = outage_env(&[Hit::E429], 8).await;
+    assert_eq!(deferrals(&env).await, 1);
+    env.run_due_after(301_000).await;
+    assert_eq!(deferrals(&env).await, 2);
+    assert!(pending_approvals(&env).await.is_empty());
+    env.run_due_after(601_000).await;
+    assert_eq!(deferrals(&env).await, 3);
+    assert!(pending_approvals(&env).await.is_empty(), "three waits first");
+    assert_eq!(env.case(ADMIN, &case_id).await["status"], "waiting_event");
+    env.run_due_after(1_201_000).await;
+    let approvals = pending_approvals(&env).await;
+    assert_eq!(approvals.len(), 1, "then a person reads it: {approvals:?}");
+    assert!(approvals[0]["summary"].as_str().unwrap().contains("the safety check could not run for 35 minutes; please read it"), "{approvals:?}");
+    assert_eq!(env.case(ADMIN, &case_id).await["status"], "waiting_approval");
+    assert!(env.sends().is_empty(), "never sent unchecked");
+    assert_eq!(deferrals(&env).await, 3, "no fourth wait");
+    // A deferral is not an incident and not a bad outcome for the agent.
+    assert_eq!(env.count("SELECT COUNT(*) FROM ai_incidents WHERE workspace_id = ?1").await, 0);
+    assert_eq!(env.count("SELECT COUNT(*) FROM autonomy_changes WHERE workspace_id = ?1 AND reason LIKE 'AI incident%'").await, 0);
+    assert_eq!(env.count("SELECT COUNT(*) FROM audit_events WHERE workspace_id = ?1 AND action LIKE '%blocked%'").await, 0);
+}
+
+#[tokio::test]
+async fn a_non_retryable_error_still_blocks() {
+    let (env, flaky, _, case_id) = outage_env(&[Hit::E404], 2).await;
+    assert_eq!(flaky.calls(), 2, "no retries and no fallback: one call for the draft, one for the send");
+    assert_eq!(deferrals(&env).await, 0, "today's behaviour: no waiting");
+    assert!(env.sends().is_empty());
+    let approvals = pending_approvals(&env).await;
+    assert_eq!(approvals.len(), 1);
+    assert!(approvals[0]["summary"].as_str().unwrap().contains("safety check couldn't run"), "{approvals:?}");
+    assert_eq!(env.case(ADMIN, &case_id).await["status"], "waiting_approval");
+}
+
+#[tokio::test]
+async fn a_judge_outage_at_send_time_defers_the_step_too() {
+    let mut env = auto_env(resend_script(2), 0).await;
+    let flaky = env.flaky_judge(&[Hit::E429]);
+    let msg = env.receive(&env.op_src, "m1", "t1", CLIENT, "Status update", "Hi Priya, the interview went well. Will update you.", "general").await;
+    to_lead(&env, &msg).await;
+    let case_id = env.start(&msg).await;
+    let case = env.case(ADMIN, &case_id).await;
+    assert_eq!(case["status"], "waiting_event", "{case}");
+    assert!(env.sends().is_empty());
+    assert_eq!(deferrals(&env).await, 1);
+    assert_eq!(env.count("SELECT COUNT(*) FROM ai_incidents WHERE workspace_id = ?1").await, 0, "a deferral is not a blocked send");
+    assert!(flaky.models().contains(&Some(env.state.config.openrouter_safety_fallback_model_id.clone())));
+    flaky.set(&[Hit::Ok]);
+    env.run_due_after(301_000).await;
+    assert_eq!(env.case(ADMIN, &case_id).await["status"], "done");
+    assert_eq!(env.sends().len(), 1);
+}

@@ -2,6 +2,7 @@
 //! workflow engine decide what actually happens.
 
 pub mod body;
+pub mod defer;
 pub mod embeddings;
 pub mod fallback;
 pub mod fence;

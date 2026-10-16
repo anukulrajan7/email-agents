@@ -45,11 +45,19 @@ fn issue(code: &'static str, message: impl Into<String>, fix: &str) -> Issue {
 pub struct SafetyReport {
     pub blocking: Vec<Issue>,
     pub warnings: Vec<Issue>,
+    /// The review failed with a retryable provider error (429, 5xx, timeout), not a bad answer.
+    #[serde(skip)]
+    pub outage: bool,
 }
 
 impl SafetyReport {
     pub fn is_blocked(&self) -> bool {
         !self.blocking.is_empty()
+    }
+
+    /// The only thing stopping this send is a review that could not run: wait and check again.
+    pub fn check_outage(&self) -> bool {
+        self.outage && !self.blocking.is_empty() && self.blocking.iter().all(|i| i.code == "ai_review_unavailable")
     }
 
     /// 409 `send_blocked` with the report attached.
@@ -589,11 +597,14 @@ pub async fn check(state: &AppState, input: &CheckInput<'_>) -> AppResult<Safety
     if !text_broken {
         let context = review_context(input.reply, &notes, input.body);
         let scope = format!("send_review:v1:{}", input.workspace_id);
-        let answers = judge::ask_cached(&state.db, state.judge.as_ref(), &scope, &context, &review_questions(notes.contains("\nThe owner said"))).await;
+        let ladder = crate::ai::defer::Ladder::from_config(&state.config);
+        let judge = crate::ai::defer::LadderJudge { inner: state.judge.as_ref(), ladder: &ladder };
+        let answers = judge::ask_cached(&state.db, &judge, &scope, &context, &review_questions(notes.contains("\nThe owner said"))).await;
         let review = match &answers {
             Ok(a) => review_issues(Ok(a), input.automated),
             Err(e) => {
                 tracing::warn!(error = %e, "send review by the judge failed");
+                report.outage = matches!(e, crate::ai::AiError::Retryable(_));
                 review_issues(Err("the AI service didn't answer"), input.automated)
             }
         };
@@ -753,7 +764,7 @@ mod tests {
 
     #[test]
     fn blocked_report_becomes_409_with_issues() {
-        let r = SafetyReport { blocking: vec![issue("placeholder", "has {name}", "fix")], warnings: vec![] };
+        let r = SafetyReport { blocking: vec![issue("placeholder", "has {name}", "fix")], ..Default::default() };
         match r.into_error() {
             AppError::SendBlocked(msg, details) => {
                 assert!(msg.contains("has {name}"));

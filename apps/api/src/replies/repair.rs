@@ -197,7 +197,7 @@ mod tests {
     fn report(reason: &str) -> SafetyReport {
         SafetyReport {
             blocking: vec![Issue { code: "unsupported_promise", message: format!("The reply may promise something unsupported ({reason})."), fix: None }],
-            warnings: vec![],
+            ..Default::default()
         }
     }
 

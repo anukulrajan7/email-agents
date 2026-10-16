@@ -130,7 +130,7 @@ pub async fn send_draft_held(state: &AppState, ws: &str, draft_id: &str, actor: 
     }
     // Text that can never go out is refused first, whatever the source.
     if let Some(gaps) = send_safety::check_gaps(&ctx.body_text) {
-        return Err(send_safety::SafetyReport { blocking: vec![gaps], warnings: vec![] }.into_error());
+        return Err(send_safety::SafetyReport { blocking: vec![gaps], ..Default::default() }.into_error());
     }
     if !policy::can_send(&capabilities(&ctx)) {
         return Err(AppError::Conflict("this source can't send; copy the draft into your mail client".into()));
@@ -156,6 +156,10 @@ pub async fn send_draft_held(state: &AppState, ws: &str, draft_id: &str, actor: 
     }
     let automated = matches!(actor, Actor::System);
     let mut report = send_safety::check(state, &CheckInput { actor_user: requested_by(actor), workspace_id: ws, reply: &ctx, body: &ctx.body_text, automated }).await?;
+    // The review could not run (provider down): an automatic send waits and is checked again, never sent unchecked.
+    if automated && report.check_outage() {
+        return Err(AppError::CheckDeferred("the safety check could not run; this reply waits and is checked again".into()));
+    }
     // An automatic send gets one repair of an unsupported claim; a person's send never needs it (warning only).
     if report.is_blocked() && automated && crate::replies::repair::apply(state, ws, &ctx, &report).await? {
         ctx = load(state, ws, draft_id).await?;

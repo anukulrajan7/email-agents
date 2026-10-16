@@ -67,6 +67,9 @@ pub enum AppError {
     /// The send safety check found blocking issues. `details` = `{ blocking: Issue[], warnings: Issue[] }`.
     #[error("{0}")]
     SendBlocked(String, serde_json::Value),
+    /// An automatic send waits because the safety check's provider is down; it is retried later, never sent unchecked.
+    #[error("{0}")]
+    CheckDeferred(String),
     #[error("we couldn't send the email to {0}; check the address and try again in a minute")]
     EmailNotSent(String),
     #[error(transparent)]
@@ -101,6 +104,7 @@ impl IntoResponse for AppError {
             AppError::LimitReached(_) => (StatusCode::TOO_MANY_REQUESTS, "limit_reached"),
             AppError::EmailNotVerified => (StatusCode::FORBIDDEN, "email_not_verified"),
             AppError::SendBlocked(..) => (StatusCode::CONFLICT, "send_blocked"),
+            AppError::CheckDeferred(_) => (StatusCode::SERVICE_UNAVAILABLE, "safety_check_deferred"),
             AppError::EmailNotSent(_) => (StatusCode::SERVICE_UNAVAILABLE, "email_not_sent"),
             AppError::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal"),
         };

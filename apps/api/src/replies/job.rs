@@ -49,6 +49,60 @@ async fn hold(state: &AppState, ws: &str, ctx: &ReplyContext, action: &str, reas
     Ok(())
 }
 
+/// The safety check could not run at send time: the send moves 5, 10, then 20 minutes later (the same draft,
+/// the same attempt rules, nothing sent unchecked), then goes back to a person. It is never a block.
+async fn defer_send(state: &AppState, ws: &str, ctx: &ReplyContext, send_at: i64, deferrals: u32) -> Result<(), JobError> {
+    let crate::ai::defer::Step::Defer(minutes) = crate::ai::defer::after_deferrals(deferrals) else {
+        let reason = format!("Not sent: the safety check could not run for {} minutes; please read it and send it yourself.", crate::ai::defer::outage_minutes());
+        return hold(state, ws, ctx, "draft.send_held", &reason, json!({ "deferrals": deferrals })).await;
+    };
+    let now = now_ms();
+    let again_at = now + minutes * 60_000;
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
+    let moved = sqlx::query(
+        "UPDATE drafts SET send_at = ?1, updated_at = ?2
+         WHERE id = ?3 AND workspace_id = ?4 AND status != 'sent' AND send_at = ?5 AND send_attempt_id IS NULL",
+    )
+    .bind(again_at)
+    .bind(now)
+    .bind(&ctx.draft_id)
+    .bind(ws)
+    .bind(send_at)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected()
+        == 1;
+    if !moved {
+        return Ok(());
+    }
+    jobs::enqueue_at(
+        &mut tx,
+        kind::SEND_DRAFT,
+        &format!("send_draft:{}:{again_at}", ctx.draft_id),
+        Some(ws),
+        &json!({ "workspace_id": ws, "draft_id": ctx.draft_id, "send_at": again_at, "check_deferrals": deferrals + 1 }),
+        jobs::PROVIDER_MAX_ATTEMPTS,
+        again_at,
+    )
+    .await?;
+    audit::record(
+        &mut tx,
+        Entry {
+            workspace_id: ws,
+            actor: Actor::System,
+            action: "draft.send_deferred",
+            entity_type: "draft",
+            entity_id: &ctx.draft_id,
+            message_id: Some(&ctx.message_id),
+            metadata: json!({ "deferrals": deferrals + 1, "minutes": minutes }),
+        },
+    )
+    .await?;
+    tx.commit().await?;
+    tracing::info!(draft_id = %ctx.draft_id, deferrals = deferrals + 1, minutes, "safety check could not run; the scheduled send waits");
+    Ok(())
+}
+
 /// `SEND_DRAFT`: at `send_at`, reconcile any open attempt, re-run the safety check, then send.
 pub async fn send_scheduled(state: &AppState, payload: &Value) -> Result<(), JobError> {
     let field = |k: &str| payload.get(k).and_then(Value::as_str).map(str::to_string);
@@ -103,6 +157,10 @@ pub async fn send_scheduled(state: &AppState, payload: &Value) -> Result<(), Job
     }
     let input = CheckInput { actor_user: requester.as_deref(), workspace_id: &ws, reply: &ctx, body: &ctx.body_text, automated: requester.is_none() };
     let report = send_safety::check(state, &input).await.map_err(job_err)?;
+    if requester.is_none() && report.check_outage() {
+        let done = payload.get("check_deferrals").and_then(Value::as_u64).unwrap_or(0) as u32;
+        return defer_send(state, &ws, &ctx, send_at, done).await;
+    }
     if report.is_blocked() {
         let reasons: Vec<&str> = report.blocking.iter().map(|i| i.message.as_str()).collect();
         let codes: Vec<&str> = report.blocking.iter().map(|i| i.code).collect();

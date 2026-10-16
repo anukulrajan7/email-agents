@@ -22,7 +22,7 @@ pub fn check(to: &str, subject: &str, body: &str, own: &[String]) -> SafetyRepor
     blocking.extend(send_safety::check_gaps(body));
     blocking.extend(send_safety::check_placeholders(body));
     blocking.extend(send_safety::check_length(body));
-    SafetyReport { blocking, warnings: vec![] }
+    SafetyReport { blocking, ..Default::default() }
 }
 
 pub struct NewEmail<'a> {

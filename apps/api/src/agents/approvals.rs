@@ -284,7 +284,7 @@ pub async fn decide(state: &AppState, ws: &str, approval_id: &str, user_id: &str
         let ran = tool.run(&ctx, &args).await;
         match ran {
             Ok(out) => (format!("Approved by a person. {}", out.summary), out.value, "ok", out.state),
-            Err(ToolError::Failed(m)) => {
+            Err(ToolError::Failed(m) | ToolError::Deferred(m)) => {
                 (format!("Approved, but it could not be sent: {m}"), json!({"error": m}), "error", None)
             }
             Err(ToolError::Db(e)) => return Err(e.into()),

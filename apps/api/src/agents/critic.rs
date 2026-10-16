@@ -37,6 +37,17 @@ pub struct CriticInput {
 #[async_trait]
 pub trait Critic: Send + Sync {
     async fn review(&self, input: &CriticInput) -> Result<Verdict, AiError>;
+
+    /// Like `review`, on another model (the fallback rung of `ai::defer`). Critics with one model ignore it.
+    async fn review_with(&self, input: &CriticInput, _model: Option<&str>) -> Result<Verdict, AiError> {
+        self.review(input).await
+    }
+}
+
+/// The critic's verdict, riding the retry and fallback rungs of `ai::defer`. An `Err(Retryable)` means the
+/// check could not run: the caller defers, it never sends unchecked.
+pub async fn review_laddered(critic: &dyn Critic, ladder: &crate::ai::defer::Ladder, input: &CriticInput) -> Result<Verdict, AiError> {
+    crate::ai::defer::run(ladder, |model| async move { critic.review_with(input, model.as_deref()).await }).await
 }
 
 /// Test double and no-model fallback: the fixed rules still apply.
@@ -154,6 +165,10 @@ impl OpenRouterCritic {
 #[async_trait]
 impl Critic for OpenRouterCritic {
     async fn review(&self, input: &CriticInput) -> Result<Verdict, AiError> {
+        self.review_with(input, None).await
+    }
+
+    async fn review_with(&self, input: &CriticInput, model: Option<&str>) -> Result<Verdict, AiError> {
         let preview = input.preview.as_ref().map(|p| {
             json!({"to": p.to, "subject": p.subject, "body": prepare_text(&p.body), "candidates": p.candidates})
         });
@@ -170,7 +185,7 @@ impl Critic for OpenRouterCritic {
             .client
             // "auto", not a forced tool: Qwen's providers refuse a forced tool_choice under
             // `require_parameters` (OpenRouter 404). No verdict call still blocks (fail safe).
-            .chat_tools(&self.model, CRITIC_PROMPT, user, verdict_tool(), json!("auto"), 150)
+            .chat_tools(model.unwrap_or(&self.model), CRITIC_PROMPT, user, verdict_tool(), json!("auto"), 150)
             .await?;
         let (ok, reason) = parse_verdict(&reply.message);
         Ok(Verdict { ok, reason, usage: Usage::from_chat(&reply.usage, &reply.model_id) })

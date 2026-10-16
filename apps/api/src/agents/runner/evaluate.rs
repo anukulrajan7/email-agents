@@ -14,6 +14,10 @@ use super::{
 use crate::{
     agents::profiles::AgentContext,
     agents::registry::runtime::CaseAgent,
+    ai::{
+        AiError,
+        defer::{self, Ladder, Step},
+    },
     http::AppState,
     jobs::handlers::JobError,
     platform::audit::Actor,
@@ -78,11 +82,12 @@ pub(super) async fn evaluate(
     let mut ctx = ToolCtx { state, case, turn, actor: Actor::System, hold_secs: 0 };
     let mut preview = None;
     let mut critic_down = false;
+    let mut critic_outage = false;
     if tool.risk() != Risk::Read {
         if tool.risk() == Risk::High {
             preview = match tool.preview(&ctx, &args).await {
                 Ok(p) => p,
-                Err(ToolError::Failed(m)) => {
+                Err(ToolError::Failed(m) | ToolError::Deferred(m)) => {
                     return Ok(TurnResult::Error { tool: Some(tool_name), input: args, summary: format!("Could not prepare {}: {m}", tool.name()), error: m });
                 }
                 Err(ToolError::Db(e)) => return Err(e.into()),
@@ -95,9 +100,10 @@ pub(super) async fn evaluate(
             match critic_objection(state, case, tool, &args, preview.as_ref(), usage).await {
                 Critique::Fine => {}
                 Critique::Objection(reason) => return Ok(TurnResult::Blocked { tool: tool_name, input: args, reason }),
-                Critique::Unavailable => {
-                    tracing::warn!(case_id = %case.id, tool = %tool_name, "critic unavailable; low-risk step proceeds, sends go to a person");
+                Critique::Unavailable { outage } => {
+                    tracing::warn!(case_id = %case.id, tool = %tool_name, outage, "critic unavailable; low-risk step proceeds, sends wait or go to a person");
                     critic_down = true;
+                    critic_outage = outage;
                 }
             }
         }
@@ -110,6 +116,9 @@ pub(super) async fn evaluate(
             "send_message" => crate::alerts::messaging::rules::may_send_on_its_own(state, case, agent, case_agent, &args).await?,
             _ => false,
         };
+        if critic_down && critic_outage && on_its_own {
+            return Ok(check_outage(case, turn, tool_name, args, preview));
+        }
         if critic_down {
             let mut preview = preview;
             preview.summary = format!("{} (the safety check couldn't run; please read it before sending)", preview.summary);
@@ -119,8 +128,12 @@ pub(super) async fn evaluate(
             return Ok(TurnResult::Approval { tool: tool_name, input: args, preview });
         }
         // A fixed workflow only asks the critic when a send would go out without a person.
-        if workflow && !matches!(critic_objection(state, case, tool, &args, Some(&preview), usage).await, Critique::Fine) {
-            return Ok(TurnResult::Approval { tool: tool_name, input: args, preview });
+        if workflow {
+            match critic_objection(state, case, tool, &args, Some(&preview), usage).await {
+                Critique::Fine => {}
+                Critique::Unavailable { outage: true } => return Ok(check_outage(case, turn, tool_name, args, preview)),
+                Critique::Objection(_) | Critique::Unavailable { .. } => return Ok(TurnResult::Approval { tool: tool_name, input: args, preview }),
+            }
         }
         auto_sent = true;
         ctx.hold_secs = state.config.agent_auto_send_delay_secs;
@@ -152,7 +165,12 @@ pub(super) async fn evaluate(
             preview.summary = format!("{} (sending on its own was stopped: {})", preview.summary, sentence(&m, 120));
             TurnResult::Approval { tool: tool_name, input: args, preview }
         }
-        Err(ToolError::Failed(m)) => TurnResult::Error {
+        // The send review could not run: wait and check again, never send unchecked.
+        Err(ToolError::Deferred(_)) if auto_sent => {
+            let preview = preview_again(&ctx, tool, &args).await?;
+            check_outage(case, turn, tool_name, args, preview)
+        }
+        Err(ToolError::Failed(m) | ToolError::Deferred(m)) => TurnResult::Error {
             tool: Some(tool_name.clone()),
             input: args,
             summary: format!("{} failed: {m}", tool_name),
@@ -169,8 +187,28 @@ pub(super) async fn evaluate(
 enum Critique {
     Fine,
     Objection(String),
-    /// The check could not run at all (provider down).
-    Unavailable,
+    /// The check could not run at all. `outage`: a provider error worth retrying later (429, 5xx, timeout).
+    Unavailable { outage: bool },
+}
+
+/// How many times this turn's safety check has already been deferred.
+fn deferrals_so_far(case: &Case, turn: i64) -> u32 {
+    let seen = case.state();
+    let seen = &seen["check_deferrals"];
+    if seen["turn"].as_i64() == Some(turn) { seen["n"].as_u64().unwrap_or(0) as u32 } else { 0 }
+}
+
+/// A send whose safety check could not run: wait and take the same turn again (5, 10, then 20 minutes),
+/// then hand it to a person. Nothing is sent unchecked and nothing counts against the agent.
+fn check_outage(case: &Case, turn: i64, tool: String, input: Value, mut preview: Preview) -> TurnResult {
+    let done = deferrals_so_far(case, turn);
+    match defer::after_deferrals(done) {
+        Step::Defer(minutes) => TurnResult::Defer { minutes, count: done + 1 },
+        _ => {
+            preview.summary = format!("{} (the safety check could not run for {} minutes; please read it)", preview.summary, defer::outage_minutes());
+            TurnResult::Approval { tool, input, preview }
+        }
+    }
 }
 
 async fn critic_objection(state: &AppState, case: &Case, tool: &dyn tools::Tool, args: &Value, preview: Option<&Preview>, usage: &mut Usage) -> Critique {
@@ -182,7 +220,7 @@ async fn critic_objection(state: &AppState, case: &Case, tool: &dyn tools::Tool,
         args: args.clone(),
         preview: preview.cloned(),
     };
-    match state.critic.review(&input).await {
+    match critic::review_laddered(state.critic.as_ref(), &Ladder::from_config(&state.config), &input).await {
         Ok(v) => {
             usage.add(&v.usage);
             if v.ok {
@@ -193,7 +231,7 @@ async fn critic_objection(state: &AppState, case: &Case, tool: &dyn tools::Tool,
         }
         Err(e) => {
             tracing::warn!(case_id = %case.id, error = %e, "critic unavailable");
-            Critique::Unavailable
+            Critique::Unavailable { outage: matches!(e, AiError::Retryable(_)) }
         }
     }
 }
@@ -201,7 +239,7 @@ async fn critic_objection(state: &AppState, case: &Case, tool: &dyn tools::Tool,
 async fn preview_again(ctx: &ToolCtx<'_>, tool: &dyn tools::Tool, args: &Value) -> Result<Preview, JobError> {
     match tool.preview(ctx, args).await {
         Ok(p) => Ok(p.unwrap_or_default()),
-        Err(ToolError::Failed(m)) => Ok(Preview { summary: m, ..Default::default() }),
+        Err(ToolError::Failed(m) | ToolError::Deferred(m)) => Ok(Preview { summary: m, ..Default::default() }),
         Err(ToolError::Db(e)) => Err(e.into()),
     }
 }

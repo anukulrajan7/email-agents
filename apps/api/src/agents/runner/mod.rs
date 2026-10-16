@@ -47,6 +47,8 @@ enum TurnResult {
     Blocked { tool: String, input: Value, reason: String },
     Approval { tool: String, input: Value, preview: Preview },
     Finish { outcome: Option<String>, summary: String },
+    /// The safety check could not run: the same turn is taken again in `minutes` (`count` = deferrals used).
+    Defer { minutes: i64, count: u32 },
 }
 
 /// Audit action written for every tool call an agent makes (reads included).
@@ -62,7 +64,7 @@ fn audited_call(result: &TurnResult) -> Option<(&str, &'static str, &Value)> {
         TurnResult::Error { tool: Some(tool), input, .. } => Some((tool, "error", input)),
         TurnResult::Blocked { tool, input, .. } => Some((tool, "blocked", input)),
         TurnResult::Approval { tool, input, .. } => Some((tool, "waiting_approval", input)),
-        TurnResult::Error { tool: None, .. } | TurnResult::Finish { .. } => None,
+        TurnResult::Error { tool: None, .. } | TurnResult::Finish { .. } | TurnResult::Defer { .. } => None,
     }
 }
 
@@ -196,7 +198,7 @@ pub async fn run_step(state: &AppState, ws: &str, case_id: &str, turn: i64) -> R
             TurnResult::Error { .. } | TurnResult::Blocked { .. } => {
                 Some(json!({workflow::MODE_KEY: "planner", workflow::WHY_KEY: "a step failed or was stopped"}))
             }
-            TurnResult::Finish { .. } => None,
+            TurnResult::Finish { .. } | TurnResult::Defer { .. } => None,
         };
         handover = match (handover, progress) {
             (Some(mut a), Some(b)) => {
@@ -210,6 +212,9 @@ pub async fn run_step(state: &AppState, ws: &str, case_id: &str, turn: i64) -> R
 }
 
 async fn commit(state: &AppState, case: &Case, turn: i64, usage: &Usage, result: TurnResult, state_patch: Option<Value>) -> Result<(), JobError> {
+    if let TurnResult::Defer { minutes, count } = result {
+        return park::defer_check(state, case, turn, minutes, count, usage).await;
+    }
     let now = now_ms();
     let tool_cost = match &result {
         TurnResult::Ran { out, .. } => out.cost_usd,
@@ -219,13 +224,15 @@ async fn commit(state: &AppState, case: &Case, turn: i64, usage: &Usage, result:
     // Fence: only one run of this turn may record it, and never after a cancel.
     let taken = sqlx::query(
         "UPDATE cases SET step_count = ?1, spent_usd = spent_usd + ?2, updated_at = ?3, next_wake_at = NULL,
-           status = CASE WHEN status = 'waiting_event' THEN 'running' ELSE status END
+           status = CASE WHEN status = 'waiting_event' THEN 'running' ELSE status END,
+           status_note = CASE WHEN status_note LIKE ?5 THEN NULL ELSE status_note END
          WHERE id = ?4 AND step_count = ?1 - 1 AND status IN ('running', 'waiting_event')",
     )
     .bind(turn)
     .bind(usage.cost_usd + tool_cost)
     .bind(now)
     .bind(&case.id)
+    .bind(park::CHECK_WAIT_NOTE_LIKE)
     .execute(&mut *tx)
     .await?
     .rows_affected()
@@ -359,6 +366,7 @@ async fn commit(state: &AppState, case: &Case, turn: i64, usage: &Usage, result:
             .await?;
             next_at = None;
         }
+        TurnResult::Defer { .. } => {}
         TurnResult::Finish { outcome, summary } => {
             let summary = sentence(&summary, 240);
             case::insert_step(&mut tx, case, step("finish", None, summary.clone(), json!({"outcome": outcome}), Value::Null, "ok")).await?;
