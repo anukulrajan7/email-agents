@@ -8,6 +8,7 @@ pub mod case;
 pub mod critic;
 pub mod gaps;
 pub mod injection;
+pub mod ownership;
 pub mod persona;
 pub mod planner;
 pub mod runner;

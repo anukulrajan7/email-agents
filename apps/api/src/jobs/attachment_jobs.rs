@@ -146,6 +146,10 @@ async fn enqueue_timesheet_record(state: &AppState, job: &Job, workspace_id: &st
     }
     let mut conn = state.db.acquire().await?;
     jobs::enqueue(&mut conn, kind::RECORD_TIMESHEET, &format!("timesheet:{message_id}:files:{}", job.id), Some(workspace_id), &json!({ "message_id": message_id })).await?;
+    // The desk's case may be waiting for these files: it looks again now instead of at its next check.
+    if crate::platform::flags::mode(&state.db, &state.config, workspace_id, crate::platform::flags::Key::Handoff).await?.acts() {
+        crate::agents::triggers::wake_for_message(&mut conn, workspace_id, message_id).await?;
+    }
     state.jobs_notify.notify_one();
     Ok(())
 }

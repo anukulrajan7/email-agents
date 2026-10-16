@@ -40,7 +40,9 @@ mod query;
 mod link;
 mod grid;
 mod backfill;
+pub mod desk;
 pub mod rules;
+pub mod summary;
 
 use source::load_people;
 use source::load_units;
@@ -245,6 +247,8 @@ pub struct RecordRow {
     status: String,
     replaces_id: Option<String>,
     issues_json: String,
+    approved_by: Option<String>,
+    approved_at: Option<i64>,
     created_at: i64,
     updated_at: i64,
 }

@@ -106,6 +106,7 @@ pub mod kind {
     pub const ALERT_DIGEST: &str = "alert_digest";
     pub const ALERT_TEST: &str = "alert_test";
     pub const MATCH_DIGEST: &str = "match_digest";
+    pub const TIMESHEET_SUMMARY: &str = "timesheet_summary";
 }
 
 pub const MAX_ATTEMPTS: u32 = 3;

@@ -453,6 +453,19 @@ impl Env {
             .unwrap()
     }
 
+    /// (job, lower-case agent name) of every real case of one message.
+    pub async fn cases_by_job(&self, message_id: &str) -> Vec<(String, String)> {
+        sqlx::query_as(
+            "SELECT c.job, lower(a.name) FROM cases c LEFT JOIN agents a ON a.id = c.agent_id
+             WHERE c.workspace_id = ?1 AND c.message_id = ?2 AND c.shadow = 0 ORDER BY c.created_at, c.id",
+        )
+        .bind(&self.ws)
+        .bind(message_id)
+        .fetch_all(&self.state.db)
+        .await
+        .unwrap()
+    }
+
     /// The message's live drafts: unsent reply drafts (watch follow-ups are outside the rule), as (id, status, body).
     pub async fn live_drafts(&self, message_id: &str) -> Vec<(String, String, String)> {
         sqlx::query_as(

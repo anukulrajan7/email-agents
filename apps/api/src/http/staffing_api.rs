@@ -30,6 +30,7 @@ pub fn routes() -> Router<AppState> {
         .route("/workspaces/{ws}/staffing/timesheet-records", get(timesheet_records))
         .route("/workspaces/{ws}/staffing/timesheet-records/{id}", get(timesheet_record))
         .route("/workspaces/{ws}/staffing/timesheet-records/{id}/link", post(link_timesheet_record))
+        .route("/workspaces/{ws}/staffing/timesheet-records/{id}/approve", post(approve_timesheet_record))
         .route("/workspaces/{ws}/staffing/portal/hours", post(import_hours))
         .route("/workspaces/{ws}/staffing/portal/submissions", post(import_submissions))
         .route("/workspaces/{ws}/staffing/portal/reconcile", post(reconcile))
@@ -263,6 +264,13 @@ pub async fn link_timesheet_record(State(state): State<AppState>, user: AuthUser
         return Err(AppError::NotFound);
     }
     let row = records::get(&state.db, &ws, &id).await?.ok_or(AppError::NotFound)?;
+    Ok(Json(row.json(true)))
+}
+
+/// "This sheet is right." The person's manager or an admin approves it; the first approval stays.
+pub async fn approve_timesheet_record(State(state): State<AppState>, user: AuthUser, Path((ws, id)): Path<(String, String)>) -> AppResult<Json<Value>> {
+    let a = gate(&state, &ws, &user).await?;
+    let row = records::desk::approve(&state.db, &ws, &id, &a, &user.id).await?;
     Ok(Json(row.json(true)))
 }
 

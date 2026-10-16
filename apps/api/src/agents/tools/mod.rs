@@ -144,6 +144,8 @@ pub struct ToolOutput {
     pub sleep_until: Option<i64>,
     /// What the tool itself spent on models (reading an email, say); added to the case's spend.
     pub cost_usd: f64,
+    /// The step is not done: the workflow stays on it and the next turn calls the tool again (after `sleep_until`).
+    pub repeat: bool,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]

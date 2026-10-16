@@ -129,6 +129,8 @@ mod summaries;
 mod system_mail;
 #[path = "tenant_isolation.rs"]
 mod tenant_isolation;
+#[path = "timesheet_desk.rs"]
+mod timesheet_desk;
 #[path = "timesheet_records.rs"]
 mod timesheet_records;
 #[path = "understanding_v2.rs"]

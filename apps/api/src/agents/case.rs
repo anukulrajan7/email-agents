@@ -220,6 +220,8 @@ pub struct NewCase<'a> {
     pub trigger: Option<&'a str>,
     /// An observing agent's case: few steps, no side effects.
     pub shadow: bool,
+    /// Which job of the message this case does. A message has at most one real case per job; `main` is the first.
+    pub job: &'a str,
 }
 
 /// Creates the case and schedules its first turn, unless an equivalent case exists
@@ -230,8 +232,8 @@ pub async fn create(conn: &mut SqliteConnection, config: &Config, new: NewCase<'
     let created = sqlx::query(
         "INSERT OR IGNORE INTO cases (id, workspace_id, kind, title, goal, status, state_json, priority, max_steps, budget_usd,
                                       message_id, requirement_id, thread_id, created_by, created_at, updated_at, agent_user_id,
-                                      agent_id, agent_version, \"trigger\", shadow)
-         VALUES (?1, ?2, ?3, ?4, ?5, 'running', ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?14, ?15, ?16, ?17, ?18, ?19)",
+                                      agent_id, agent_version, \"trigger\", shadow, job)
+         VALUES (?1, ?2, ?3, ?4, ?5, 'running', ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
     )
     .bind(&id)
     .bind(new.workspace_id)
@@ -252,6 +254,7 @@ pub async fn create(conn: &mut SqliteConnection, config: &Config, new: NewCase<'
     .bind(new.agent_version)
     .bind(new.trigger)
     .bind(new.shadow)
+    .bind(new.job)
     .execute(&mut *conn)
     .await?
     .rows_affected()
@@ -259,7 +262,7 @@ pub async fn create(conn: &mut SqliteConnection, config: &Config, new: NewCase<'
     if !created {
         let existing: String = sqlx::query_scalar(
             "SELECT id FROM cases WHERE workspace_id = ?1 AND kind = ?2 AND shadow = ?5
-               AND ((?3 IS NOT NULL AND requirement_id = ?3) OR (?4 IS NOT NULL AND message_id = ?4))
+               AND ((?3 IS NOT NULL AND requirement_id = ?3) OR (?4 IS NOT NULL AND message_id = ?4 AND job = ?6))
              ORDER BY created_at LIMIT 1",
         )
         .bind(new.workspace_id)
@@ -267,6 +270,7 @@ pub async fn create(conn: &mut SqliteConnection, config: &Config, new: NewCase<'
         .bind(new.requirement_id)
         .bind(new.message_id)
         .bind(new.shadow)
+        .bind(new.job)
         .fetch_one(&mut *conn)
         .await?;
         return Ok((existing, false));

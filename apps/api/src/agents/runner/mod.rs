@@ -197,6 +197,7 @@ pub async fn run_step(state: &AppState, ws: &str, case_id: &str, turn: i64) -> R
     };
     if fixed.is_some() {
         let progress = match &result {
+            TurnResult::Ran { out, .. } if out.repeat => None,
             TurnResult::Ran { .. } | TurnResult::Approval { .. } => Some(json!({workflow::POS_KEY: workflow::position(&case) + 1})),
             TurnResult::Error { .. } | TurnResult::Blocked { .. } | TurnResult::Gap { .. } => {
                 Some(json!({workflow::MODE_KEY: "planner", workflow::WHY_KEY: "a step failed or was stopped"}))

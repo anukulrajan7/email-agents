@@ -4,7 +4,10 @@
 use serde_json::{Value, json};
 use sqlx::SqliteConnection;
 
-use super::case::{self, NewCase};
+use super::{
+    case::{self, NewCase},
+    ownership,
+};
 use crate::{
     agents::profiles::{self, TASK_REPLY, TASK_REQUIREMENTS},
     agents::registry::{
@@ -132,6 +135,7 @@ pub async fn start_requirement_case(state: &AppState, ws: &str, requirement_id: 
             agent_version: desk.as_ref().map(|d| d.1),
             trigger: Some("requirement"),
             shadow: false,
+            job: "main",
         },
     )
     .await?;
@@ -251,11 +255,57 @@ pub async fn start_inbox_case(state: &AppState, ws: &str, message_id: &str, crea
             agent_version: handler.as_ref().map(|h| h.1),
             trigger: Some(if created_by.is_some() { "manual" } else { "email_received" }),
             shadow: false,
+            job: "main",
         },
     )
     .await?;
     if let Some(r) = routed.as_ref().filter(|r| r.route.shadow && created_by.is_none()) {
         start_shadow_case(state, &mut conn, ws, &r.primary, &m, message_id, owner.as_deref()).await?;
+    }
+    drop(conn);
+    state.jobs_notify.notify_one();
+    Ok(Started::Case(created.0, created.1))
+}
+
+/// Starts (or finds) Rohan's case for a timesheet email, under the `handoff` flag. The timesheet desk owns the `main`
+/// job at every autonomy level, so the case is a real one even when Rohan is at level 0; it needs no planner and does not
+/// wait for the mail to "need a reply". One case per (message, job).
+pub async fn start_timesheet_case(state: &AppState, ws: &str, message_id: &str) -> sqlx::Result<Started> {
+    let Some(m) = message_facts(state, ws, message_id).await?.filter(|m| m.direction == "inbound") else { return Ok(Started::NotFound) };
+    let owner = ownership::decide(state, ws, message_id).await?;
+    let ownership::Owner::Assigned(jobs) = &owner else {
+        return Ok(Started::NotAllowed("The timesheet desk does not take this email.".into()));
+    };
+    let Some(job) = jobs.first() else { return Ok(Started::NotFound) };
+    let Some(agent) = store::get_in(&state.db, ws, &job.agent_id).await? else { return Ok(Started::NotFound) };
+    let user = profiles::context_for_message(&state.db, &state.config, ws, message_id).await?.owner.map(|o| o.user_id);
+    let title = if m.subject.trim().is_empty() { "(no subject)".to_string() } else { m.subject.clone() };
+    let mut conn = state.db.acquire().await?;
+    let created = case::create(
+        &mut conn,
+        &state.config,
+        NewCase {
+            workspace_id: ws,
+            kind: "inbox",
+            title,
+            goal: format!("Record this timesheet from {}, check it against the owner's rules and tell the manager", m.sender_address),
+            priority: m.priority.clone().unwrap_or_else(|| "normal".into()),
+            message_id: Some(message_id),
+            requirement_id: None,
+            thread_id: Some(&m.thread_id),
+            state: json!({"from": m.sender_address, "subject": m.subject, "label": m.category, "desk": true}),
+            created_by: None,
+            agent_user_id: user.as_deref(),
+            agent_id: Some(&agent.id),
+            agent_version: Some(agent.active_version.unwrap_or(0)),
+            trigger: Some("email_received"),
+            shadow: false,
+            job: ownership::MAIN,
+        },
+    )
+    .await?;
+    if created.1 {
+        ownership::audit_owner(&mut conn, ws, message_id, "ownership.decided", &owner, json!({"case_id": created.0})).await?;
     }
     drop(conn);
     state.jobs_notify.notify_one();
@@ -321,6 +371,7 @@ async fn start_shadow_case(
             agent_version: Some(agent.version),
             trigger: Some("email_received"),
             shadow: true,
+            job: "main",
         },
     )
     .await?;
@@ -348,8 +399,15 @@ pub async fn after_analysis(state: &AppState, job: &Job, message_id: &str, insig
         && m.category.as_deref() == Some(crate::hr::staffing::timesheet_records::LABEL)
         && crate::platform::packs::enabled(&state.db, ws, crate::platform::packs::STAFFING).await?
     {
+        let mode = crate::platform::flags::mode(&state.db, &state.config, ws, crate::platform::flags::Key::Handoff).await?;
+        if mode.acts() && matches!(start_timesheet_case(state, ws, message_id).await?, Started::Case(..)) {
+            return Ok(());
+        }
         // The desk records the timesheet and nothing is drafted; a record that needs a look gets the workflow's review item.
         crate::hr::staffing::timesheet_records::record_message(state, ws, message_id).await?;
+        if mode.compares() {
+            crate::hr::staffing::timesheet_records::desk::compare(state, ws, message_id).await?;
+        }
         return Ok(());
     }
     if !insight.needs_reply || !state.planner.enabled() {
@@ -390,6 +448,11 @@ pub async fn wake_for_thread(conn: &mut SqliteConnection, ws: &str, thread_id: &
     .bind(thread_id)
     .fetch_all(&mut *conn)
     .await?;
+    bring_forward(conn, now, sleeping).await
+}
+
+/// A sleeping case's next step runs now instead of at its scheduled time.
+async fn bring_forward(conn: &mut SqliteConnection, now: i64, sleeping: Vec<(String, i64)>) -> sqlx::Result<()> {
     for (case_id, step_count) in sleeping {
         sqlx::query("UPDATE jobs SET run_at = ?1, updated_at = ?1 WHERE dedupe_key = ?2 AND status = 'pending' AND run_at > ?1")
             .bind(now)
@@ -398,6 +461,19 @@ pub async fn wake_for_thread(conn: &mut SqliteConnection, ws: &str, thread_id: &
             .await?;
     }
     Ok(())
+}
+
+/// The files of an email were read: the case waiting on that email looks again now.
+pub async fn wake_for_message(conn: &mut SqliteConnection, ws: &str, message_id: &str) -> sqlx::Result<()> {
+    let now = now_ms();
+    let sleeping: Vec<(String, i64)> =
+        sqlx::query_as("UPDATE cases SET next_wake_at = ?1 WHERE workspace_id = ?2 AND message_id = ?3 AND status = 'waiting_event' RETURNING id, step_count")
+            .bind(now)
+            .bind(ws)
+            .bind(message_id)
+            .fetch_all(&mut *conn)
+            .await?;
+    bring_forward(conn, now, sleeping).await
 }
 
 // ---------------------------------------------------------------- schedule triggers
@@ -490,6 +566,7 @@ pub async fn run_schedule_tick(state: &AppState, ws: &str, now: i64) -> sqlx::Re
                 agent_version: Some(agent.version),
                 trigger: Some("schedule"),
                 shadow,
+                job: "main",
             },
         )
         .await?;

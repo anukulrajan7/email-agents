@@ -131,7 +131,7 @@ pub fn decide(spec: &AgentSpec, case: &Case) -> Option<Decision> {
         }
         Some(WfStep::RecordTimesheet) => Decision::Call { tool: "record_timesheet".into(), args: json!({"message_id": message_id}) },
         // The timesheet desk asks a person only when the record needs a look; a clean record ends the workflow here.
-        Some(WfStep::Task(_)) if state.get("timesheet_clean").and_then(Value::as_bool) == Some(true) => {
+        Some(WfStep::Task(_)) if [state.get("timesheet_clean"), state.get("manager_notified")].iter().any(|v| v.and_then(|v| v.as_bool()) == Some(true)) => {
             Decision::Finish { outcome: None, summary: format!("{} recorded the timesheet; nothing needs a look.", spec.name) }
         }
         Some(WfStep::Task(title)) => Decision::Call { tool: "create_task".into(), args: json!({"title": title}) },
@@ -296,5 +296,9 @@ mod tests {
         assert_eq!(call(&case(json!({}))), "record_timesheet");
         assert_eq!(call(&case(json!({"wf_pos": 1, "timesheet_clean": false}))), "create_task");
         assert!(matches!(decide(&spec, &case(json!({"wf_pos": 1, "timesheet_clean": true}))), Some(Decision::Finish { .. })));
+        assert!(
+            matches!(decide(&spec, &case(json!({"wf_pos": 1, "timesheet_clean": false, "manager_notified": true}))), Some(Decision::Finish { .. })),
+            "a manager who was told is the ask; no second task"
+        );
     }
 }

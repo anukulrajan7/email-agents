@@ -27,6 +27,17 @@ pub(super) async fn execute_workflow(state: &AppState, payload: &Value) -> Resul
         return Ok(());
     }
     if category == crate::hr::staffing::timesheet_records::LABEL && crate::platform::packs::enabled(&state.db, &workspace_id, crate::platform::packs::STAFFING).await? {
+        // Under the `handoff` flag Rohan's case owns the sheet: it records it and asks a person to look when it needs one.
+        let desk_case: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM cases WHERE workspace_id = ?1 AND message_id = ?2 AND job = 'main' AND shadow = 0 AND json_extract(state_json, '$.desk') = 1)",
+        )
+        .bind(&workspace_id)
+        .bind(&message_id)
+        .fetch_one(&state.db)
+        .await?;
+        if desk_case && crate::platform::flags::mode(&state.db, &state.config, &workspace_id, crate::platform::flags::Key::Handoff).await?.acts() {
+            return mark_processed_if_classified(state, &message_id).await;
+        }
         // A timesheet that was recorded cleanly needs no review item; one that needs a look gets the usual one below.
         let run = crate::hr::staffing::timesheet_records::record_message(state, &workspace_id, &message_id).await?;
         if run.deferred {
