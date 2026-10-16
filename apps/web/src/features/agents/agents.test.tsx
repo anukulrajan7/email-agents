@@ -162,6 +162,16 @@ describe('AgentsPage approvals', () => {
     expect(await screen.findByText('Rohan asked Meera to tell the sender the timesheet is recorded')).toBeInTheDocument();
   });
 
+  it('warns when the expert has a newer request that is not in the reply', async () => {
+    mockFetch((url) =>
+      url.includes('/approvals')
+        ? json({ items: [approval({ action: 'send_email', handoff: { line: 'Rohan asked Meera to tell the sender the timesheet is recorded', newer: 'Rohan has a newer request that is not in this reply', from: [] } })], pending_count: 1 })
+        : undefined,
+    );
+    renderAgents();
+    expect(await screen.findByRole('note')).toHaveTextContent('Rohan has a newer request that is not in this reply.');
+  });
+
   it('shows the approval with recipient, subject, and candidate scores', async () => {
     pending();
     renderAgents();

@@ -71,6 +71,11 @@ export function ApprovalCard({ ws, approval }: { ws: string; approval: Approval 
             </AgentByline>
           )}
           {approval.handoff?.line && <p className="text-sm text-ink-muted">{approval.handoff.line}</p>}
+          {approval.handoff?.newer && (
+            <p role="note" className="text-sm text-review-ink">
+              {approval.handoff.newer}.
+            </p>
+          )}
           <h3 className="type-display text-xl tracking-[-0.01em] break-words">{approval.summary}</h3>
           <p className="text-sm text-ink-muted">
             <Link to={`/w/${ws}/agents/${approval.case_id}`} className="underline decoration-current/40 underline-offset-[3px] hover:text-ink">

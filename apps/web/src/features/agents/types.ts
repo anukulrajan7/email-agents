@@ -55,7 +55,7 @@ export interface Approval {
   /** What the draft could not confirm (it says it will confirm later). */
   unanswered?: string[];
   /** Who asked Meera to write this reply, in one line ('Rohan asked Meera to ...'). */
-  handoff?: { line: string; from: { agent_id: string; name: string; kind: string; job: string }[] } | null;
+  handoff?: { line: string; newer?: string; from: { agent_id: string; name: string; kind: string; job: string }[] } | null;
 }
 
 export type AgentColor = 'slate' | 'sage' | 'plum' | 'ochre' | 'teal' | 'postmark' | 'ink';
